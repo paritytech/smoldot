@@ -37,10 +37,9 @@ use smoldot::{
     header,
     informant::HashDisplay,
     libp2p::{
-        async_rw_with_buffers, connection,
+        async_std_connection, connection,
         multiaddr::{Multiaddr, Protocol},
         peer_id::{self, PeerId},
-        read_write::ReadWrite,
     },
     network::{protocol, service},
 };
@@ -729,115 +728,59 @@ async fn connection_task(
     network_service: Arc<Inner>,
     id: service::ConnectionId,
 ) {
-    // The Nagle algorithm, implemented in the kernel, consists in buffering the data to be sent
-    // out and waiting a bit before actually sending it out, in order to potentially merge
-    // multiple writes in a row into one packet. In the implementation below, it is guaranteed
-    // that the buffer in `WithBuffers` is filled with as much data as possible before the
-    // operating system gets involved. As such, we disable the Nagle algorithm, in order to avoid
-    // adding an artificial delay to all sends.
-    let _ = tcp_socket.set_nodelay(true);
-
-    // The socket is wrapped around a `WithBuffers` object containing a read buffer and a write
-    // buffer. These are the buffers whose pointer is passed to `read(2)` and `write(2)` when
-    // reading/writing the socket.
-    let tcp_socket = async_rw_with_buffers::WithBuffers::new(tcp_socket);
-    futures::pin_mut!(tcp_socket);
+    let mut task = async_std_connection::RunOutcome::Ready(
+        async_std_connection::ConnectionTask::new(tcp_socket),
+    );
 
     loop {
-        let (read_buffer, write_buffer) = match tcp_socket.buffers() {
-            Ok(b) => b,
-            Err(error) => {
+        match task {
+            async_std_connection::RunOutcome::Ready(mut ready) => {
+                {
+                    let mut read_write = ready.read_write(Instant::now());
+
+                    match network_service
+                        .network
+                        .read_write(id, &mut read_write)
+                        .await
+                    {
+                        Ok(()) => (),
+                        Err(error) => {
+                            tracing::debug!(%error, "task-finished");
+                            return;
+                        }
+                    };
+
+                    if read_write.read_bytes != 0
+                        || read_write.written_bytes != 0
+                        || read_write.outgoing_buffer.is_none()
+                    {
+                        tracing::event!(
+                            tracing::Level::TRACE,
+                            read = read_write.read_bytes,
+                            written = read_write.written_bytes,
+                            "wake-up" = ?read_write.wake_up_after,  // TODO: ugly display
+                            "write-close" = read_write.outgoing_buffer.is_none(),
+                        );
+                    }
+                }
+
+                task = ready.resume().await;
+            }
+            async_std_connection::RunOutcome::IoError(error) => {
                 tracing::debug!(%error, "task-finished");
                 // TODO: report disconnect to service
                 return;
             }
-        };
-
-        let now = Instant::now();
-
-        let mut read_write = ReadWrite {
-            now,
-            incoming_buffer: read_buffer.map(|b| b.0),
-            outgoing_buffer: write_buffer,
-            read_bytes: 0,
-            written_bytes: 0,
-            wake_up_after: None,
-            wake_up_future: None,
-        };
-
-        match network_service
-            .network
-            .read_write(id, &mut read_write)
-            .await
-        {
-            Ok(rw) => rw,
-            Err(error) => {
-                // Make sure to finish closing the TCP socket.
-                tcp_socket
-                    .flush_close()
-                    .instrument(tracing::trace_span!("flush-close"))
+            async_std_connection::RunOutcome::TimerNeeded(timer) => {
+                let now = Instant::now();
+                let when = *timer.when();
+                task = timer
+                    .resume(if when <= now {
+                        future::Either::Left(future::ready(()))
+                    } else {
+                        future::Either::Right(futures_timer::Delay::new(when - now))
+                    })
                     .await;
-                tracing::debug!(%error, "task-finished");
-                return;
-            }
-        };
-
-        if read_write.read_bytes != 0
-            || read_write.written_bytes != 0
-            || read_write.outgoing_buffer.is_none()
-        {
-            tracing::event!(
-                tracing::Level::TRACE,
-                read = read_write.read_bytes,
-                written = read_write.written_bytes,
-                "wake-up" = ?read_write.wake_up_after,  // TODO: ugly display
-                "write-close" = read_write.outgoing_buffer.is_none(),
-            );
-        }
-
-        let read_bytes = read_write.read_bytes;
-        let written_bytes = read_write.written_bytes;
-        let write_closed = read_write.outgoing_buffer.is_none();
-        let wake_up_after = read_write.wake_up_after;
-        let wake_up_future = if let Some(wake_up_future) = read_write.wake_up_future {
-            future::Either::Left(wake_up_future)
-        } else {
-            future::Either::Right(future::pending())
-        };
-
-        if write_closed && !tcp_socket.is_closed() {
-            tcp_socket.close();
-            tracing::debug!("write-closed");
-        }
-
-        tcp_socket.advance(read_bytes, written_bytes);
-
-        let mut poll_after = if let Some(wake_up) = wake_up_after {
-            if wake_up > now {
-                let dur = wake_up - now;
-                future::Either::Left(futures_timer::Delay::new(dur))
-            } else {
-                continue;
-            }
-        } else {
-            future::Either::Right(future::pending())
-        }
-        .fuse();
-
-        futures::select! {
-            _ = tcp_socket.as_mut().process().fuse() => {
-                tracing::event!(
-                    tracing::Level::TRACE,
-                    "socket-ready"
-                );
-            },
-            _ = wake_up_future.fuse() => {},
-            () = poll_after => {
-                // Nothing to do, but guarantees that we loop again.
-                tracing::event!(
-                    tracing::Level::TRACE,
-                    "timer-ready"
-                );
             }
         }
     }
