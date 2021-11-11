@@ -19,11 +19,12 @@
 #![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
 use super::{async_rw_with_buffers, collection::ReadWrite};
-use core::{ops, pin::Pin};
+use core::{fmt, ops, pin::Pin};
 use futures::prelude::*;
 use std::io;
 
 /// Outcome of processing the connection task.
+#[derive(Debug)]
 pub enum RunOutcome<TNow> {
     /// Data is ready on the socket.
     Ready(ConnectionTask<TNow>),
@@ -36,6 +37,9 @@ pub enum RunOutcome<TNow> {
     IoError(io::Error),
 }
 
+/// Access to a [`ReadWrite`] within a [`ConnectionTask`].
+///
+/// This struct derefs to [`ReadWrite`].
 pub struct ReadWriteLock<'a, TNow> {
     inner: ReadWrite<'a, TNow>,
     latest_read_outcome: &'a mut ReadWriteOutcome<TNow>,
@@ -55,6 +59,15 @@ impl<'a, TNow> ops::DerefMut for ReadWriteLock<'a, TNow> {
     }
 }
 
+impl<'a, TNow> fmt::Debug for ReadWriteLock<'a, TNow>
+where
+    ReadWrite<'a, TNow>: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(ops::Deref::deref(self), f)
+    }
+}
+
 impl<'a, TNow> Drop for ReadWriteLock<'a, TNow> {
     fn drop(&mut self) {
         self.latest_read_outcome.read_bytes = self.inner.read_bytes;
@@ -65,12 +78,16 @@ impl<'a, TNow> Drop for ReadWriteLock<'a, TNow> {
     }
 }
 
+/// Active connection task with data potentially ready.
 pub struct ConnectionTask<TNow> {
     tcp_socket: async_rw_with_buffers::WithBuffers<async_std::net::TcpStream>,
     latest_read_outcome: ReadWriteOutcome<TNow>,
 }
 
 impl<TNow> ConnectionTask<TNow> {
+    /// Initializes a new [`ConnectionTask`] encapsulating the given socket.
+    ///
+    /// The socket must have its writing side still open.
     pub fn new(tcp_socket: async_std::net::TcpStream) -> Self {
         // The Nagle algorithm, implemented in the kernel, consists in buffering the data to be
         // sent out and waiting a bit before actually sending it out, in order to potentially merge
@@ -180,6 +197,12 @@ impl<TNow> ConnectionTask<TNow> {
     }
 }
 
+impl<TNow> fmt::Debug for ConnectionTask<TNow> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("ConnectionTask").finish()
+    }
+}
+
 struct ReadWriteOutcome<TNow> {
     read_bytes: usize,
     written_bytes: usize,
@@ -207,5 +230,11 @@ impl<TNow> TimerNeeded<TNow> {
         self.inner
             .continue_with_timer(self.wake_up_future, delay)
             .await
+    }
+}
+
+impl<TNow> fmt::Debug for TimerNeeded<TNow> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("TimerNeeded").finish()
     }
 }
