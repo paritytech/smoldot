@@ -18,10 +18,14 @@
 #![cfg(feature = "std")]
 #![cfg_attr(docsrs, doc(cfg(feature = "std")))]
 
-use super::{async_rw_with_buffers, collection::ReadWrite};
+// TODO: usage and example
+
+use super::collection::ReadWrite;
 use core::{fmt, ops, pin::Pin};
 use futures::prelude::*;
 use std::io;
+
+pub mod with_buffers;
 
 /// Outcome of processing the connection task.
 #[derive(Debug)]
@@ -80,7 +84,7 @@ impl<'a, TNow> Drop for ReadWriteLock<'a, TNow> {
 
 /// Active connection task with data potentially ready.
 pub struct ConnectionTask<TNow> {
-    tcp_socket: async_rw_with_buffers::WithBuffers<async_std::net::TcpStream>,
+    tcp_socket: with_buffers::WithBuffers<async_std::net::TcpStream>,
     latest_read_outcome: ReadWriteOutcome<TNow>,
 }
 
@@ -100,7 +104,7 @@ impl<TNow> ConnectionTask<TNow> {
         // The socket is wrapped around a `WithBuffers` object containing a read buffer and a write
         // buffer. These are the buffers whose pointer is passed to `read(2)` and `write(2)` when
         // reading/writing the socket.
-        let tcp_socket = async_rw_with_buffers::WithBuffers::new(tcp_socket);
+        let tcp_socket = with_buffers::WithBuffers::new(tcp_socket);
 
         ConnectionTask {
             tcp_socket,
