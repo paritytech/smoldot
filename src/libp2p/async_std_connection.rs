@@ -224,6 +224,8 @@ pub struct TimerNeeded<TNow> {
 
 impl<TNow> TimerNeeded<TNow> {
     /// Returns the moment when the timer to pass to [`TimerNeeded::resume`] must become ready.
+    ///
+    /// > **Note**: Be aware that this might be in the past.
     pub fn when(&self) -> &TNow {
         &self.when_wake_up
     }
