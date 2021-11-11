@@ -6,6 +6,7 @@ queue_rules:
       - label=automerge
       - base=main
       - "#changes-requested-reviews-by=0"
+      - "#approved-reviews-by>=1"
       
 pull_request_rules:
   - name: automatic merge when CI passes on main
@@ -15,7 +16,25 @@ pull_request_rules:
       - label=automerge
       - base=main
       - "#changes-requested-reviews-by=0"
+      - "#approved-reviews-by>=1"
     actions:
       queue:
         name: default
         method: squash
+
+  - name: automatic approval for Dependabot pull requests
+    conditions:
+      - author~=^dependabot(|-preview)\[bot\]$
+    actions:
+      review:
+        type: APPROVE
+        message: Automatically approving dependabot
+
+  # At the moment, tomaka is the only active maintainer of the Rust code, and nobody is reviewing his code. This rule is meant to be removed if that situation changes.
+  - name: automatic approval for tomaka pull requests
+    conditions:
+      - author~=^tomaka$
+    actions:
+      review:
+        type: APPROVE
+        message: Automatically approving tomaka's pull requests

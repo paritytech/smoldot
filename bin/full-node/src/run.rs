@@ -22,15 +22,21 @@ use smoldot::{
     chain, chain_spec,
     database::full_sqlite,
     header,
+    identity::keystore,
     informant::HashDisplay,
-    libp2p::{connection, multiaddr, peer_id::PeerId},
+    libp2p::{
+        connection, multiaddr,
+        peer_id::{self, PeerId},
+    },
 };
 use std::{borrow::Cow, fs, io, iter, path::PathBuf, sync::Arc, thread, time::Duration};
 use tracing::Instrument as _;
 
+mod consensus_service;
+mod database_thread;
+mod jaeger_service;
 mod json_rpc_service;
 mod network_service;
-mod sync_service;
 
 /// Runs the node using the given configuration. Catches SIGINT signals and stops if one is
 /// detected.
@@ -51,7 +57,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     if !matches!(cli_output, cli::Output::None) {
         let mut env_filter = tracing_subscriber::filter::EnvFilter::new("DEBUG");
         if matches!(cli_output, cli::Output::Informant) {
-            env_filter = env_filter.add_directive(tracing::Level::WARN.into()); // TODO: display warnings in a nicer way ; in particular, immediately put the informant on top of warnings
+            env_filter = env_filter.add_directive(tracing::Level::INFO.into()); // TODO: display infos/warnings in a nicer way ; in particular, immediately put the informant on top of warnings
         } else {
             for filter in cli_options.log {
                 env_filter = env_filter.add_directive(filter);
@@ -141,19 +147,44 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         .create()
         .unwrap();
 
-    let database = open_database(&chain_spec, &genesis_chain_information, cli_options.tmp).await;
+    let (database, database_existed) = open_database(
+        &chain_spec,
+        &genesis_chain_information,
+        cli_options.tmp,
+        matches!(cli_output, cli::Output::Informant),
+    )
+    .await;
+    let database = Arc::new(database_thread::DatabaseThread::from(database));
+
     let relay_chain_database = if let Some(relay_chain_spec) = &relay_chain_spec {
-        Some(
+        Some(Arc::new(database_thread::DatabaseThread::from(
             open_database(
                 &relay_chain_spec,
                 relay_genesis_chain_information.as_ref().unwrap(),
                 cli_options.tmp,
+                matches!(cli_output, cli::Output::Informant),
             )
-            .await,
-        )
+            .await
+            .0,
+        )))
     } else {
         None
     };
+
+    let database_finalized_block_hash = database
+        .with_database(|db| db.finalized_block_hash().unwrap())
+        .await;
+    let database_finalized_block_number = header::decode(
+        &database
+            .with_database(move |db| {
+                db.block_scale_encoded_header(&database_finalized_block_hash)
+                    .unwrap()
+                    .unwrap()
+            })
+            .await,
+    )
+    .unwrap()
+    .number;
 
     // TODO: remove; just for testing
     /*let metadata = smoldot::metadata::metadata_from_runtime_code(
@@ -170,26 +201,54 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         smoldot::metadata::decode(&metadata).unwrap()
     );*/
 
+    let noise_key = if let Some(node_key) = cli_options.libp2p_key {
+        connection::NoiseKey::new(&node_key)
+    } else {
+        // TODO: load from disk or something instead
+        connection::NoiseKey::new(&rand::random())
+    };
+
+    let local_peer_id =
+        peer_id::PublicKey::Ed25519(*noise_key.libp2p_public_ed25519_key()).into_peer_id();
+
+    let jaeger_service = jaeger_service::JaegerService::new(jaeger_service::Config {
+        tasks_executor: {
+            let threads_pool = threads_pool.clone();
+            Box::new(move |task| threads_pool.spawn_ok(task))
+        },
+        service_name: local_peer_id.to_string(),
+        jaeger_agent: cli_options.jaeger,
+    })
+    .await
+    .unwrap();
+
     let (network_service, network_events_receivers) =
         network_service::NetworkService::new(network_service::Config {
-            listen_addresses: Vec::new(),
+            listen_addresses: cli_options.listen_addr,
             num_events_receivers: 2 + if relay_chain_database.is_some() { 1 } else { 0 },
             chains: iter::once(network_service::ChainConfig {
                 protocol_id: chain_spec.protocol_id().to_owned(),
+                database: database.clone(),
                 has_grandpa_protocol: matches!(
                     genesis_chain_information.finality,
                     chain::chain_information::ChainInformationFinality::Grandpa { .. }
                 ),
                 genesis_block_hash: genesis_chain_information.finalized_block_header.hash(),
-                best_block: {
-                    let hash = database.finalized_block_hash().unwrap();
-                    let header = database.block_scale_encoded_header(&hash).unwrap().unwrap();
-                    let number = header::decode(&header).unwrap().number;
-                    (number, hash)
-                },
+                best_block: database
+                    .with_database(|database| {
+                        let hash = database.finalized_block_hash().unwrap();
+                        let header = database.block_scale_encoded_header(&hash).unwrap().unwrap();
+                        let number = header::decode(&header).unwrap().number;
+                        (number, hash)
+                    })
+                    .await,
                 bootstrap_nodes: {
                     let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
-                    for node in chain_spec.boot_nodes().iter() {
+                    for node in chain_spec
+                        .boot_nodes()
+                        .iter()
+                        .chain(cli_options.additional_bootnode.iter())
+                    {
                         let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
                         if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
                             let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
@@ -202,56 +261,56 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 },
             })
             .chain(
-                relay_chain_spec
-                    .as_ref()
-                    .map(|relay_chains_specs| {
-                        network_service::ChainConfig {
-                            protocol_id: relay_chains_specs.protocol_id().to_owned(),
-                            has_grandpa_protocol: matches!(
-                                relay_genesis_chain_information.as_ref().unwrap().finality,
-                                chain::chain_information::ChainInformationFinality::Grandpa { .. }
-                            ),
-                            genesis_block_hash: relay_genesis_chain_information
-                                .as_ref()
-                                .unwrap()
-                                .finalized_block_header
-                                .hash(),
-                            best_block: {
-                                let db = relay_chain_database.as_ref().unwrap();
+                if let Some(relay_chains_specs) = &relay_chain_spec {
+                    Some(network_service::ChainConfig {
+                        protocol_id: relay_chains_specs.protocol_id().to_owned(),
+                        database: relay_chain_database.clone().unwrap(),
+                        has_grandpa_protocol: matches!(
+                            relay_genesis_chain_information.as_ref().unwrap().finality,
+                            chain::chain_information::ChainInformationFinality::Grandpa { .. }
+                        ),
+                        genesis_block_hash: relay_genesis_chain_information
+                            .as_ref()
+                            .unwrap()
+                            .finalized_block_header
+                            .hash(),
+                        best_block: relay_chain_database
+                            .as_ref()
+                            .unwrap()
+                            .with_database(|db| {
                                 let hash = db.finalized_block_hash().unwrap();
                                 let header = db.block_scale_encoded_header(&hash).unwrap().unwrap();
                                 let number = header::decode(&header).unwrap().number;
                                 (number, hash)
-                            },
-                            bootstrap_nodes: {
-                                let mut list =
-                                    Vec::with_capacity(relay_chains_specs.boot_nodes().len());
-                                for node in relay_chains_specs.boot_nodes().iter() {
-                                    let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
-                                    if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
-                                        let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
-                                        list.push((peer_id, address));
-                                    } else {
-                                        panic!() // TODO:
-                                    }
+                            })
+                            .await,
+                        bootstrap_nodes: {
+                            let mut list =
+                                Vec::with_capacity(relay_chains_specs.boot_nodes().len());
+                            for node in relay_chains_specs.boot_nodes().iter() {
+                                let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
+                                if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
+                                    let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
+                                    list.push((peer_id, address));
+                                } else {
+                                    panic!() // TODO:
                                 }
-                                list
-                            },
-                        }
+                            }
+                            list
+                        },
                     })
-                    .into_iter(),
+                } else {
+                    None
+                }
+                .into_iter(),
             )
             .collect(),
-            noise_key: if let Some(node_key) = cli_options.node_key {
-                connection::NoiseKey::new(node_key.as_ref())
-            } else {
-                // TODO: load from disk or something instead
-                connection::NoiseKey::new(&rand::random())
-            },
+            noise_key,
             tasks_executor: {
                 let threads_pool = threads_pool.clone();
                 Box::new(move |task| threads_pool.spawn_ok(task))
             },
+            jaeger_service: jaeger_service.clone(),
         })
         .instrument(tracing::debug_span!("network-service-init"))
         .await
@@ -259,7 +318,15 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     let mut network_events_receivers = network_events_receivers.into_iter();
 
-    let sync_service = sync_service::SyncService::new(sync_service::Config {
+    let keystore = Arc::new({
+        let mut keystore = keystore::Keystore::new(rand::random());
+        for private_key in cli_options.keystore_memory {
+            keystore.insert_sr25519_memory(keystore::KeyNamespace::all(), &private_key);
+        }
+        keystore
+    });
+
+    let consensus_service = consensus_service::ConsensusService::new(consensus_service::Config {
         tasks_executor: {
             let threads_pool = threads_pool.clone();
             Box::new(move |task| threads_pool.spawn_ok(task))
@@ -267,13 +334,15 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         network_events_receiver: network_events_receivers.next().unwrap(),
         network_service: (network_service.clone(), 0),
         database,
+        keystore,
+        jaeger_service: jaeger_service.clone(),
     })
-    .instrument(tracing::debug_span!("sync-service-init"))
+    .instrument(tracing::debug_span!("consensus-service-init"))
     .await;
 
-    let relay_chain_sync_service = if let Some(relay_chain_database) = relay_chain_database {
+    let relay_chain_consensus_service = if let Some(relay_chain_database) = relay_chain_database {
         Some(
-            sync_service::SyncService::new(sync_service::Config {
+            consensus_service::ConsensusService::new(consensus_service::Config {
                 tasks_executor: {
                     let threads_pool = threads_pool.clone();
                     Box::new(move |task| threads_pool.spawn_ok(task))
@@ -281,8 +350,10 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 network_events_receiver: network_events_receivers.next().unwrap(),
                 network_service: (network_service.clone(), 1),
                 database: relay_chain_database,
+                keystore: Arc::new(keystore::Keystore::new(rand::random())),
+                jaeger_service, // TODO: consider passing a different jaeger service with a different service name
             })
-            .instrument(tracing::debug_span!("relay-chain-sync-service-init"))
+            .instrument(tracing::debug_span!("relay-chain-consensus-service-init"))
             .await,
         )
     } else {
@@ -328,6 +399,13 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         })
     };*/
 
+    tracing::info!(
+        %local_peer_id, database_is_new = %!database_existed,
+        finalized_block_hash = %HashDisplay(&database_finalized_block_hash),
+        finalized_block_number = %database_finalized_block_number,
+        "successful-initialization"
+    );
+
     // Starting from here, a SIGINT (or equivalent) handler is setup. If the user does Ctrl+C,
     // a message will be sent on `ctrlc_rx`.
     // This should be performed after all the expensive initialization is done, as otherwise the
@@ -371,7 +449,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                     // We end the informant line with a `\r` so that it overwrites itself every time.
                     // If any other line gets printed, it will overwrite the informant, and the
                     // informant will then print itself below, which is a fine behaviour.
-                    let sync_state = sync_service.sync_state().await;
+                    let sync_state = consensus_service.sync_state().await;
                     eprint!("{}\r", smoldot::informant::InformantLine {
                         enable_colors: match cli_options.color {
                             cli::ColorChoice::Always => true,
@@ -379,7 +457,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                         },
                         chain_name: chain_spec.name(),
                         relay_chain: if let Some(relay_chain_spec) = &relay_chain_spec {
-                            let relay_sync_state = relay_chain_sync_service.as_ref().unwrap().sync_state().await;
+                            let relay_sync_state = relay_chain_consensus_service.as_ref().unwrap().sync_state().await;
                             Some(smoldot::informant::RelayChain {
                                 chain_name: relay_chain_spec.name(),
                                 best_number: relay_sync_state.best_block_number,
@@ -401,8 +479,11 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 }
             },
 
-            network_message = main_network_events_receiver.next() => {
-                if let network_service::Event::BlockAnnounce { chain_index: 0, announce, .. } = network_message.unwrap() {
+            network_event = main_network_events_receiver.next().fuse() => {
+                // We expect the network events channel to never shut down.
+                let network_event = network_event.unwrap();
+
+                if let network_service::Event::BlockAnnounce { chain_index: 0, announce, .. } = network_event {
                     let decoded = announce.decode();
                     match network_known_best {
                         Some(n) if n >= decoded.header.number => {},
@@ -450,9 +531,12 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             },
 
             _ = ctrlc_rx => {
-                // Adding a new line after the informant so that the user's shell doesn't
-                // overwrite it.
-                eprintln!("");
+                if matches!(cli_output, cli::Output::Informant) {
+                    // Adding a new line after the informant so that the user's shell doesn't
+                    // overwrite it.
+                    eprintln!("");
+                }
+
                 return
             },
         }
@@ -463,83 +547,77 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 ///
 /// If `tmp` is `true`, open the database in memory instead.
 ///
+/// The returned boolean is `true` if the database existed before.
+///
 /// # Panic
 ///
 /// Panics if the database can't be open. This function is expected to be called from the `main`
 /// function.
 ///
-#[tracing::instrument(level = "trace", skip(chain_spec))]
+#[tracing::instrument(level = "trace", skip(chain_spec, show_progress))]
 async fn open_database(
     chain_spec: &chain_spec::ChainSpec,
     genesis_chain_information: &chain::chain_information::ChainInformation,
     tmp: bool,
-) -> Arc<full_sqlite::SqliteFullDatabase> {
-    Arc::new({
-        // Directory supposed to contain the database.
-        let db_path = if !tmp {
-            if let Some(base) = directories::ProjectDirs::from("io", "paritytech", "smoldot") {
-                Some(base.data_dir().join(chain_spec.id()).join("database"))
-            } else {
-                tracing::warn!(
-                    "Failed to fetch $HOME directory. Falling back to a temporary database. \
+    show_progress: bool,
+) -> (full_sqlite::SqliteFullDatabase, bool) {
+    // Directory supposed to contain the database.
+    let db_path = if !tmp {
+        if let Some(base) = directories::ProjectDirs::from("io", "paritytech", "smoldot") {
+            Some(base.data_dir().join(chain_spec.id()).join("database"))
+        } else {
+            tracing::warn!(
+                "Failed to fetch $HOME directory. Falling back to a temporary database. \
                     If this is intended, please make this explicit by passing the `--tmp` flag \
                     instead."
-                );
-                None
-            }
-        } else {
+            );
             None
-        };
-
-        // The `unwrap()` here can panic for example in case of access denied.
-        match background_open_database(db_path.clone()).await.unwrap() {
-            // Database already exists and contains data.
-            full_sqlite::DatabaseOpen::Open(database) => {
-                if database.block_hash_by_number(0).unwrap().next().unwrap()
-                    != genesis_chain_information.finalized_block_header.hash()
-                {
-                    panic!(
-                        "Mismatch between database and chain specification. Shutting down node."
-                    );
-                }
-
-                let finalized_block_hash = database.finalized_block_hash().unwrap();
-                let finalized_block = database
-                    .block_scale_encoded_header(&finalized_block_hash)
-                    .unwrap()
-                    .unwrap();
-                eprintln!(
-                    "Loaded existing database (finalized: #{}, {})",
-                    header::decode(&finalized_block).unwrap().number,
-                    HashDisplay(&finalized_block_hash)
-                );
-                database
-            }
-
-            // The database doesn't exist or is empty.
-            full_sqlite::DatabaseOpen::Empty(empty) => {
-                // The finalized block is the genesis block. As such, it has an empty body and
-                // no justification.
-                empty
-                    .initialize(
-                        genesis_chain_information,
-                        iter::empty(),
-                        None,
-                        chain_spec.genesis_storage(),
-                    )
-                    .unwrap()
-            }
         }
-    })
+    } else {
+        None
+    };
+
+    // The `unwrap()` here can panic for example in case of access denied.
+    match background_open_database(db_path.clone(), show_progress)
+        .await
+        .unwrap()
+    {
+        // Database already exists and contains data.
+        full_sqlite::DatabaseOpen::Open(database) => {
+            if database.block_hash_by_number(0).unwrap().next().unwrap()
+                != genesis_chain_information.finalized_block_header.hash()
+            {
+                panic!("Mismatch between database and chain specification. Shutting down node.");
+            }
+
+            (database, true)
+        }
+
+        // The database doesn't exist or is empty.
+        full_sqlite::DatabaseOpen::Empty(empty) => {
+            // The finalized block is the genesis block. As such, it has an empty body and
+            // no justification.
+            let database = empty
+                .initialize(
+                    genesis_chain_information,
+                    iter::empty(),
+                    None,
+                    chain_spec.genesis_storage(),
+                )
+                .unwrap();
+            (database, false)
+        }
+    }
 }
 
 /// Since opening the database can take a long time, this utility function performs this operation
 /// in the background while showing a small progress bar to the user.
 ///
 /// If `path` is `None`, the database is opened in memory.
-#[tracing::instrument(level = "trace")]
+#[tracing::instrument(level = "trace", skip(show_progress))]
 async fn background_open_database(
     path: Option<PathBuf>,
+    show_progress: bool,
 ) -> Result<full_sqlite::DatabaseOpen, full_sqlite::InternalError> {
     let (tx, rx) = oneshot::channel();
     let mut rx = rx.fuse();
@@ -580,7 +658,9 @@ async fn background_open_database(
         futures::select! {
             res = rx => return res.unwrap(),
             _ = progress_timer.next() => {
-                eprint!("    Opening database... {}\r", next_progress_icon.next().unwrap());
+                if show_progress {
+                    eprint!("    Opening database... {}\r", next_progress_icon.next().unwrap());
+                }
             }
         }
     }

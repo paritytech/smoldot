@@ -30,6 +30,7 @@
 //!
 // TODO: I believe this example isn't tested ^ which kills the point of having it
 
+use smoldot::{identity::seed_phrase, network::Multiaddr};
 use std::{net::SocketAddr, path::PathBuf};
 
 // Note: the doc-comments applied to this struct and its field are visible when the binary is
@@ -67,12 +68,25 @@ pub struct CliOptionsRun {
     /// Coloring: auto, always, never
     #[structopt(long, default_value = "auto")]
     pub color: ColorChoice,
-    /// Ed25519 private key of network identity (32 bytes hexadecimal).
+    /// Ed25519 private key of network identity (as a seed phrase).
+    #[structopt(long, parse(try_from_str = seed_phrase::decode_ed25519_private_key))]
+    pub libp2p_key: Option<[u8; 32]>,
+    /// Multiaddr to listen on.
     #[structopt(long)]
-    pub node_key: Option<NodeKey>,
+    pub listen_addr: Vec<Multiaddr>,
+    /// Multiaddr of an additional node to try to connect to on startup.
+    #[structopt(long)]
+    pub additional_bootnode: Vec<String>, // TODO: parse the value here
     /// Bind point of the JSON-RPC server ("none" or <ip>:<port>).
     #[structopt(long, default_value = "127.0.0.1:9944", parse(try_from_str = parse_json_rpc_address))]
     pub json_rpc_address: JsonRpcAddress,
+    /// List of secret phrases to insert in the keystore of the node. Used to author blocks.
+    #[structopt(long, parse(try_from_str = seed_phrase::decode_sr25519_private_key))]
+    // TODO: also automatically add the same keys through ed25519?
+    pub keystore_memory: Vec<[u8; 64]>,
+    /// Address of a Jaeger agent to send traces to (hint: port is typically 6831).
+    #[structopt(long)]
+    pub jaeger: Option<SocketAddr>,
     /// Do not load or store anything on disk.
     #[structopt(long)]
     pub tmp: bool,
@@ -164,51 +178,6 @@ impl core::str::FromStr for Output {
 #[derive(Debug, derive_more::Display)]
 #[display(fmt = "Output must be one of: auto, none, informant, logs, logs-json")]
 pub struct OutputParseError;
-
-// Note: while it is tempting to zero-ize the content of `NodeKey` on Drop, since the node key is
-// passed through the CLI, it is going to be present at several other locations in memory, plus on
-// the system. Any zero-ing here would be completely superfluous.
-#[derive(Debug)]
-pub struct NodeKey([u8; 32]);
-
-impl core::str::FromStr for NodeKey {
-    type Err = NodeKeyParseError;
-
-    fn from_str(mut s: &str) -> Result<Self, Self::Err> {
-        if s.starts_with("0x") {
-            s = &s[2..];
-        }
-
-        if s.len() != 64 {
-            return Err(NodeKeyParseError::BadLength);
-        }
-
-        let bytes = hex::decode(s).map_err(NodeKeyParseError::FromHex)?;
-
-        let mut out = [0; 32];
-        out.copy_from_slice(&bytes);
-
-        ed25519_zebra::SigningKey::try_from(out).map_err(|_| NodeKeyParseError::BadKey)?;
-
-        Ok(NodeKey(out))
-    }
-}
-
-impl AsRef<[u8; 32]> for NodeKey {
-    fn as_ref(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
-
-#[derive(Debug, derive_more::Display)]
-pub enum NodeKeyParseError {
-    #[display(fmt = "Expected 64 hexadecimal digits")]
-    BadLength,
-    #[display(fmt = "{}", _0)]
-    FromHex(hex::FromHexError),
-    #[display(fmt = "Invalid ed25519 private key")]
-    BadKey,
-}
 
 #[derive(Debug)]
 pub struct JsonRpcAddress(pub Option<SocketAddr>);

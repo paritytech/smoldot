@@ -308,6 +308,22 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         self.chain.best_block_hash()
     }
 
+    /// Returns consensus information about the current best block of the chain.
+    pub fn best_block_consensus(&self) -> chain_information::ChainInformationConsensusRef {
+        self.chain.best_block_consensus()
+    }
+
+    /// Returns access to the storage of the best block.
+    ///
+    /// Returns `None` if [`Config::full`] was `None`.
+    pub fn best_block_storage(&self) -> Option<BlockStorage<TRq, TSrc, TBl>> {
+        if self.inner.finalized_runtime.is_some() {
+            Some(BlockStorage { inner: self })
+        } else {
+            None
+        }
+    }
+
     /// Returns the header of all known non-finalized blocks in the chain without any specific
     /// order.
     pub fn non_finalized_blocks_unordered(
@@ -472,17 +488,14 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             .desired_requests(self.inner.download_ahead_blocks)
             .flat_map(move |e| sources.iter().map(move |s| (e, s)))
             .filter_map(|((block_height, num_blocks), (source_id, source))| {
-                if source.num_ongoing_requests != 0 {
-                    return None;
-                }
-                let source_avail_blocks =
-                    source.best_block_number.checked_sub(block_height.get())?;
+                let source_avail_blocks = NonZeroU32::new(
+                    u32::try_from(source.best_block_number.checked_sub(block_height.get())? + 1)
+                        .unwrap(),
+                )
+                .unwrap();
                 Some(RequestDetail {
                     block_height,
-                    num_blocks: cmp::min(
-                        NonZeroU32::new(u32::try_from(source_avail_blocks).unwrap()).unwrap(),
-                        num_blocks,
-                    ),
+                    num_blocks: cmp::min(source_avail_blocks, num_blocks),
                     source_id: *source_id,
                 })
             })
@@ -638,6 +651,75 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
     VerifyBlock(BlockVerify<TRq, TSrc, TBl>),
 
     VerifyJustification(JustificationVerify<TRq, TSrc, TBl>),
+}
+
+/// See [`OptimisticSync::best_block_storage`].
+pub struct BlockStorage<'a, TRq, TSrc, TBl> {
+    inner: &'a OptimisticSync<TRq, TSrc, TBl>,
+}
+
+impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
+    /// Returns the runtime built against this block.
+    pub fn runtime(&self) -> &host::HostVmPrototype {
+        self.inner
+            .inner
+            .best_runtime
+            .as_ref()
+            .unwrap_or(self.inner.inner.finalized_runtime.as_ref().unwrap())
+    }
+
+    /// Returns the storage value at the given key. `None` if this key doesn't have any value.
+    pub fn get<'val: 'a>(
+        &'val self, // TODO: unclear lifetime
+        key: &[u8],
+        or_finalized: impl FnOnce() -> Option<&'val [u8]>,
+    ) -> Option<&'val [u8]> {
+        self.inner
+            .inner
+            .best_to_finalized_storage_diff
+            .get(key)
+            .map(|opt| opt.as_ref().map(|v| &v[..]))
+            .unwrap_or_else(or_finalized)
+    }
+
+    pub fn prefix_keys_ordered<'k: 'a>(
+        &'k self, // TODO: unclear lifetime
+        prefix: &'k [u8],
+        in_finalized_ordered: impl Iterator<Item = &'k [u8]> + 'k,
+    ) -> impl Iterator<Item = &'k [u8]> + 'k {
+        let mut in_finalized_filtered = in_finalized_ordered
+            .filter(|k| {
+                !self
+                    .inner
+                    .inner
+                    .best_to_finalized_storage_diff
+                    .contains_key(*k)
+            })
+            .peekable();
+
+        let mut diff_inserted = self
+            .inner
+            .inner
+            .best_to_finalized_storage_diff
+            .range(prefix.to_owned()..)
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .filter(|(_, v)| v.is_some())
+            .map(|(k, _)| &k[..])
+            .peekable();
+
+        iter::from_fn(
+            move || match (in_finalized_filtered.peek(), diff_inserted.peek()) {
+                (Some(_), None) => in_finalized_filtered.next(),
+                (Some(a), Some(b)) if a < b => in_finalized_filtered.next(),
+                (Some(a), Some(b)) => {
+                    debug_assert_ne!(a, b);
+                    diff_inserted.next()
+                }
+                (None, Some(_)) => diff_inserted.next(),
+                (None, None) => None,
+            },
+        )
+    }
 }
 
 /// Start the processing of a block verification.

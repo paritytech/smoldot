@@ -34,13 +34,11 @@ use core::{
     fmt, iter, mem,
     num::NonZeroUsize,
     ops::{Add, Sub},
-    task::Poll,
     time::Duration,
 };
 use futures::{
     lock::{Mutex, MutexGuard},
     prelude::*,
-    task::AtomicWaker,
 };
 use rand::{Rng as _, RngCore as _, SeedableRng as _};
 
@@ -131,6 +129,9 @@ pub struct ChainConfig {
     /// If `Some`, the chain uses the GrandPa networking protocol.
     pub grandpa_protocol_config: Option<GrandpaState>,
 
+    /// `true` if incoming block requests are allowed.
+    pub allow_inbound_block_requests: bool,
+
     pub in_slots: u32,
 
     pub out_slots: u32,
@@ -185,9 +186,9 @@ pub struct ChainNetwork<TNow> {
     /// Generator for randomness.
     randomness: Mutex<rand_chacha::ChaCha20Rng>,
 
-    /// Waker to wake up when [`ChainNetwork::next_start_connect`] should be called again by the
+    /// Event notified when [`ChainNetwork::next_start_connect`] should be called again by the
     /// user.
-    next_start_connect_waker: AtomicWaker,
+    start_connect_needed: event_listener::Event,
 }
 
 /// See [`ChainNetwork::next_event_guarded`].
@@ -307,8 +308,7 @@ where
                 name: format!("/{}/sync/2", chain.protocol_id),
                 inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
                 max_response_size: 16 * 1024 * 1024,
-                // TODO: make this configurable
-                inbound_allowed: false,
+                inbound_allowed: chain.allow_inbound_block_requests,
                 // The timeout needs to be long enough to potentially download the maximum
                 // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
                 // TODO: 128 seconds is way too long, so we put 16 seconds instead for now
@@ -482,7 +482,7 @@ where
             max_addresses_per_peer: config.max_addresses_per_peer,
             num_chains,
             randomness: Mutex::new(randomness),
-            next_start_connect_waker: AtomicWaker::new(),
+            start_connect_needed: event_listener::Event::new(),
         }
     }
 
@@ -507,6 +507,11 @@ where
     /// Returns the number of chains. Always equal to the length of [`Config::chains`].
     pub fn num_chains(&self) -> usize {
         self.num_chains
+    }
+
+    /// Returns the Noise key originalled passed as [`Config::noise_key`].
+    pub fn noise_key(&self) -> &connection::NoiseKey {
+        self.inner.noise_key()
     }
 
     /// Adds an incoming connection to the state machine.
@@ -673,7 +678,7 @@ where
             match (&block.header, &block.body) {
                 (Some(header), Some(body)) => {
                     let decoded_header = header::decode(header).unwrap();
-                    let expected = header::extrinsics_root(body.iter());
+                    let expected = header::extrinsics_root(&body[..]);
                     if expected != *decoded_header.extrinsics_root {
                         return Err(BlocksRequestError::Entry {
                             index: block_index,
@@ -967,7 +972,7 @@ where
             }
         };
 
-        self.next_start_connect_waker.wake();
+        self.start_connect_needed.notify_additional(1);
     }
 
     /// Returns the next event produced by the service.
@@ -1028,7 +1033,7 @@ where
                     user_data: address,
                 } if *num_peer_connections == 0 => {
                     if *peer_is_desired {
-                        self.next_start_connect_waker.wake();
+                        self.start_connect_needed.notify_additional(1);
                     }
 
                     // TODO: O(n)
@@ -1052,21 +1057,16 @@ where
                     let _was_in = ephemeral_guarded.connections.remove(peer_id);
                     debug_assert!(_was_in);
 
-                    for idx in &chain_indices {
-                        // Update the k-buckets.
-                        if let Some(mut entry) = ephemeral_guarded.chains[*idx]
-                            .kbuckets
-                            .entry(peer_id)
-                            .into_occupied()
-                        {
+                    // Update the k-buckets.
+                    // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
+                    for chain in &mut ephemeral_guarded.chains {
+                        if let Some(mut entry) = chain.kbuckets.entry(peer_id).into_occupied() {
                             entry.set_state(kademlia::kbuckets::PeerState::Disconnected);
                             entry.get_mut().set_disconnected(address);
                         }
+                    }
 
-                        // Insert the address back in `discovered_peers` so that we potentially try
-                        // to connect again to it.
-                        // TODO: insert `address` back in the k-buckets
-
+                    for idx in &chain_indices {
                         guarded.open_chains.remove(&(peer_id.clone(), *idx)); // TODO: cloning :-/
                     }
 
@@ -1078,7 +1078,22 @@ where
                         _ => unreachable!(),
                     };
                 }
-                peers::Event::Disconnected { .. } => {
+                peers::Event::Disconnected {
+                    peer_id,
+                    user_data: address,
+                    ..
+                } => {
+                    let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
+
+                    // Update the k-buckets.
+                    // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
+                    for chain in &mut ephemeral_guarded.chains {
+                        if let Some(mut entry) = chain.kbuckets.entry(peer_id).into_occupied() {
+                            entry.set_state(kademlia::kbuckets::PeerState::Disconnected);
+                            entry.get_mut().set_disconnected(address);
+                        }
+                    }
+
                     guarded.to_process_pre_event = None;
                 }
 
@@ -1097,25 +1112,78 @@ where
 
                 // Incoming requests of the "identify" protocol.
                 peers::Event::RequestIn {
-                    protocol_index: 0, ..
+                    protocol_index: 0,
+                    request_payload,
+                    request_id,
+                    ..
                 } => {
-                    // TODO: check that request_payload is empty
-                    return match guarded.to_process_pre_event.take().unwrap() {
-                        peers::Event::RequestIn {
-                            peer_id,
-                            request_id,
-                            connection_user_data: observed_addr,
-                            ..
-                        } => Event::IdentifyRequestIn {
-                            peer_id,
-                            request: IdentifyRequestIn {
-                                service: self,
+                    if request_payload.is_empty() {
+                        return match guarded.to_process_pre_event.take().unwrap() {
+                            peers::Event::RequestIn {
+                                peer_id,
                                 request_id,
-                                observed_addr,
+                                connection_user_data: observed_addr,
+                                ..
+                            } => Event::IdentifyRequestIn {
+                                peer_id,
+                                request: IdentifyRequestIn {
+                                    service: self,
+                                    request_id,
+                                    observed_addr,
+                                },
                             },
-                        },
-                        _ => unreachable!(),
-                    };
+                            _ => unreachable!(),
+                        };
+                    } else {
+                        let _ = self.inner.respond(*request_id, Err(())).await;
+                        return match guarded.to_process_pre_event.take().unwrap() {
+                            peers::Event::RequestIn { peer_id, .. } => Event::ProtocolError {
+                                peer_id,
+                                error: ProtocolError::BadIdentifyRequest,
+                            },
+                            _ => unreachable!(),
+                        };
+                    }
+                }
+                // Incoming requests of the "sync" protocol.
+                peers::Event::RequestIn {
+                    request_id,
+                    protocol_index,
+                    request_payload,
+                    ..
+                } if ((*protocol_index - 1) % REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN) == 0 => {
+                    let chain_index = (*protocol_index - 1) / REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN;
+
+                    match protocol::decode_block_request(&request_payload) {
+                        Ok(config) => {
+                            return match guarded.to_process_pre_event.take().unwrap() {
+                                peers::Event::RequestIn {
+                                    peer_id,
+                                    request_id,
+                                    ..
+                                } => Event::BlocksRequestIn {
+                                    peer_id,
+                                    chain_index,
+                                    config,
+                                    request: BlocksRequestIn {
+                                        service: self,
+                                        request_id,
+                                    },
+                                },
+                                _ => unreachable!(),
+                            };
+                        }
+                        Err(error) => {
+                            let _ = self.inner.respond(*request_id, Err(())).await;
+                            return match guarded.to_process_pre_event.take().unwrap() {
+                                peers::Event::RequestIn { peer_id, .. } => Event::ProtocolError {
+                                    peer_id,
+                                    error: ProtocolError::BadBlocksRequest(error),
+                                },
+                                _ => unreachable!(),
+                            };
+                        }
+                    }
                 }
                 // Only protocol 0 (identify) can receive requests at the moment.
                 peers::Event::RequestIn { .. } => unreachable!(),
@@ -1353,7 +1421,7 @@ where
                     // it to be filled.
                     // TODO: correct?
                     // TODO: if necessary, mark another peer+substream tuple as desired to fill a slot
-                    self.next_start_connect_waker.wake();
+                    self.start_connect_needed.notify_additional(1);
 
                     match guarded.to_process_pre_event.take().unwrap() {
                         peers::Event::NotificationsOutResult {
@@ -1431,7 +1499,7 @@ where
                     // it to be filled.
                     // TODO: correct?
                     // TODO: if necessary, mark another peer+substream tuple as desired to fill a slot
-                    self.next_start_connect_waker.wake();
+                    self.start_connect_needed.notify_additional(1);
 
                     return Event::ChainDisconnected {
                         chain_index,
@@ -1873,7 +1941,7 @@ where
 
                 // TODO: O(n)
                 for chain in &mut pending.chains {
-                    if let Some(addrs) = chain.kbuckets.get_mut(entry.key()) {
+                    if let Some(_) = chain.kbuckets.get_mut(entry.key()) {
                         // TODO: mark address as pending
                     }
                 }
@@ -1897,21 +1965,14 @@ where
             }
 
             // No valid desired peer has been found.
-            // We register a waker, unlock the mutex, and wait until the waker is invoked.
-            // The rest of the code of this state machine makes sure to invoke the waker when
+            // We start listening for an event, unlock the mutex, and wait until the event is
+            // notified. This needs to be done in this order, in particular the mutex needs to be
+            // unlocked after we start listening for events, to avoid race conditions.
+            // The rest of the code of this state machine makes sure to notify the event when
             // there is a potential new desired peer or known address.
-            // TODO: if `next_start_connect` is called multiple times simultaneously, all but the first will deadlock
-            let mut pending_lock: Option<MutexGuard<_>> = Some(pending_lock);
-            future::poll_fn(move |cx| {
-                if let Some(_lock) = pending_lock.take() {
-                    self.next_start_connect_waker.register(cx.waker());
-                    drop(_lock);
-                    Poll::Pending
-                } else {
-                    Poll::Ready(())
-                }
-            })
-            .await;
+            let event_listener = self.start_connect_needed.listen();
+            drop::<MutexGuard<_>>(pending_lock);
+            event_listener.await;
         }
     }
 
@@ -1919,11 +1980,13 @@ where
     /// destined to the connection through the [`ReadWrite`].
     ///
     /// If an error is returned, the connection should be destroyed altogether and the
-    /// [`ConnectionId`] is no longer valid.
+    /// [`ConnectionId`] is no longer valid. You should continue calling this function until
+    /// an error is returned, even if the [`ReadWrite`] indicates a full shutdown.
     ///
     /// # Panic
     ///
-    /// Panics if `connection_id` isn't a valid connection.
+    /// Panics if the [`ConnectionId`] isn't a valid connection. Once this function returns an
+    /// error, is no longer valid to call this function with this [`ConnectionId`].
     ///
     pub async fn read_write(
         &self,
@@ -1982,7 +2045,7 @@ where
                 .await;
             chain.out_peers.insert(peer_id.clone());
 
-            self.next_start_connect_waker.wake();
+            self.start_connect_needed.notify_additional(1);
             return Some(peer_id.clone());
         }
 
@@ -2108,6 +2171,21 @@ pub enum Event<'a, TNow> {
         peer_id: PeerId,
         /// Object allowing sending back the answer.
         request: IdentifyRequestIn<'a, TNow>,
+    },
+    /// A remote has sent a request for blocks.
+    ///
+    /// Can only happen for chains where [`ChainConfig::allow_inbound_block_requests`] is `true`.
+    ///
+    /// You are strongly encouraged to call [`BlocksRequestIn::respond`].
+    BlocksRequestIn {
+        /// Remote that has sent the request.
+        peer_id: PeerId,
+        /// Index of the chain concerned by the request.
+        chain_index: usize,
+        /// Information about the request.
+        config: protocol::BlocksRequestConfig,
+        /// Object allowing sending back the answer.
+        request: BlocksRequestIn<'a, TNow>,
     },
     /*Transactions {
         peer_id: peer_id::PeerId,
@@ -2298,6 +2376,45 @@ impl<'a, TNow> fmt::Debug for IdentifyRequestIn<'a, TNow> {
     }
 }
 
+/// See [`Event::BlocksRequestIn`].
+#[must_use]
+pub struct BlocksRequestIn<'a, TNow> {
+    service: &'a ChainNetwork<TNow>,
+    request_id: peers::RequestId,
+}
+
+impl<'a, TNow> BlocksRequestIn<'a, TNow>
+where
+    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
+{
+    /// Queue the response to send back. The future provided by [`ChainNetwork::read_write`] will
+    /// automatically be woken up.
+    ///
+    /// Pass `None` in order to deny the request. Do this if blocks aren't available locally.
+    ///
+    /// Has no effect if the connection that sends the request no longer exists.
+    pub async fn respond(self, response: Option<Vec<protocol::BlockData>>) {
+        let response = if let Some(response) = response {
+            Ok(
+                protocol::build_block_response(response).fold(Vec::new(), |mut a, b| {
+                    a.extend_from_slice(b.as_ref());
+                    a
+                }),
+            )
+        } else {
+            Err(())
+        };
+
+        let _ = self.service.inner.respond(self.request_id, response).await;
+    }
+}
+
+impl<'a, TNow> fmt::Debug for BlocksRequestIn<'a, TNow> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("BlocksRequestIn").finish()
+    }
+}
+
 /// Error during [`ChainNetwork::kademlia_discovery_round`].
 #[derive(Debug, derive_more::Display)]
 pub enum DiscoveryError {
@@ -2398,4 +2515,8 @@ pub enum ProtocolError {
     BadBlockAnnounce(protocol::DecodeBlockAnnounceError),
     /// Error while decoding a received Grandpa notification.
     BadGrandpaNotification(protocol::DecodeGrandpaNotificationError),
+    /// Received an invalid identify request.
+    BadIdentifyRequest,
+    /// Error while decoding a received blocks request.
+    BadBlocksRequest(protocol::DecodeBlockRequestError),
 }

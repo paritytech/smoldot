@@ -205,6 +205,8 @@ pub struct NotificationProtocolConfig {
 }
 
 /// Identifier of a connection spawned by the [`Network`].
+//
+// Identifiers are never reused.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConnectionId(u64);
 
@@ -369,6 +371,7 @@ where
                 timeout: when_connected + self.handshake_timeout,
             },
             id: connection_id,
+            shutting_down: false,
             pending_event: None,
             waker: None,
             user_data,
@@ -404,7 +407,7 @@ where
 
         {
             let mut connection = connection.lock().await;
-            connection.connection = ConnectionInner::ForcedShutdown;
+            connection.shutting_down = true;
         }
 
         // TODO: return something?
@@ -577,9 +580,7 @@ where
             ConnectionInner::Handshake { .. } => {
                 return Err(OpenNotificationsSubstreamError::NotEstablished)
             }
-            ConnectionInner::Errored(_)
-            | ConnectionInner::Dead
-            | ConnectionInner::ForcedShutdown => {
+            ConnectionInner::PendingErrorReport { .. } | ConnectionInner::Dead => {
                 return Err(OpenNotificationsSubstreamError::BadConnection)
             }
             ConnectionInner::Poisoned => unreachable!(),
@@ -671,19 +672,19 @@ where
         // Update the state of the inner connection state machine.
         match &mut connection_lock.connection {
             ConnectionInner::Established(established) => {
-                established.close_notifications_substream(substream_id)
-            }
-            ConnectionInner::Handshake { .. }
-            | ConnectionInner::Errored(_)
-            | ConnectionInner::Dead
-            | ConnectionInner::ForcedShutdown
-            | ConnectionInner::Poisoned => unreachable!(),
-        };
+                established.close_notifications_substream(substream_id);
 
-        // Wake up the task dedicated to this connection in order for the substream to be
-        // effectively closed.
-        if let Some(waker) = connection_lock.waker.take() {
-            let _ = waker.send(());
+                // Wake up the task dedicated to this connection in order for the substream to be
+                // effectively closed.
+                if let Some(waker) = connection_lock.waker.take() {
+                    let _ = waker.send(());
+                }
+            }
+            ConnectionInner::PendingErrorReport { .. } | ConnectionInner::Dead => {
+                // It is possible that the connection has encountered an error or has been shut
+                // down but is still in the state of `Guarded`.
+            }
+            ConnectionInner::Handshake { .. } | ConnectionInner::Poisoned => unreachable!(),
         }
     }
 
@@ -979,23 +980,28 @@ where
     /// destined to the connection through the [`ReadWrite`].
     ///
     /// If an error is returned, the connection should be destroyed altogether and the
-    /// [`ConnectionId`] is no longer valid.
+    /// [`ConnectionId`] is no longer valid. You should continue calling this function until
+    /// an error is returned, even if the [`ReadWrite`] indicates a full shutdown.
     ///
     /// # Panic
     ///
-    /// Panics if `connection_id` isn't a valid connection.
+    /// Panics if the [`ConnectionId`] isn't a valid connection. Once this function returns an
+    /// error, is no longer valid to call this function with this [`ConnectionId`].
     ///
     pub async fn read_write(
         &self,
         connection_id: ConnectionId,
         read_write: &'_ mut ReadWrite<'_, TNow>,
     ) -> Result<(), ConnectionError> {
-        let connection_arc: Arc<Mutex<Connection<_, _>>> = {
+        let (connection_index, connection_arc): (_, Arc<Mutex<Connection<_, _>>>) = {
             // TODO: ideally we wouldn't need to lock `guarded`, to reduce the possibility of lock contention
             let guarded = self.guarded.lock().await;
 
-            let connection_index = *guarded.connections_by_id.get(&connection_id).unwrap(); // TODO: don't unwrap?
-            guarded.connections[connection_index].clone()
+            let connection_index = *guarded.connections_by_id.get(&connection_id).unwrap();
+            (
+                connection_index,
+                guarded.connections[connection_index].clone(),
+            )
         };
 
         let mut connection_lock = connection_arc.lock().await;
@@ -1005,31 +1011,106 @@ where
         read_write.wake_up_when(ConnectionReadyFuture(rx));
         connection_lock.waker = Some(tx);
 
-        // TODO: not great to have this exact block of code twice; also, should be a loop normally, but it's complicated because of having to advance buffers
-        if connection_lock.pending_event.is_some() {
-            let mut guarded = self.guarded.lock().await;
-            connection_lock.propagate_pending_event(&mut guarded).await;
-            debug_assert!(connection_lock.pending_event.is_none());
-        }
-
-        match connection_lock.read_write(self, read_write) {
-            Ok(()) => {}
-            Err(err) => {
-                debug_assert!(connection_lock.pending_event.is_none());
-
+        // The code below consists in checking the connection state, calling `read_write`, and
+        // checking the connection state again.
+        // Since the connection state check is the same twice, this is implemented using a `for`
+        // loop that loops twice and only calls `read_write` the first time.
+        for is_first in [true, false] {
+            // Check whether any event remains to be propagated to the API user.
+            if connection_lock.pending_event.is_some() {
                 let mut guarded = self.guarded.lock().await;
-                // TODO: really remove? race with remove()
-                let connection_index = *guarded.connections_by_id.get(&connection_id).unwrap(); // TODO: don't unwrap?
-                guarded.connections.remove(connection_index);
-
-                return Err(err);
+                connection_lock.propagate_pending_event(&mut guarded).await;
+                debug_assert!(connection_lock.pending_event.is_none());
             }
-        };
 
-        if connection_lock.pending_event.is_some() {
-            let mut guarded = self.guarded.lock().await;
-            connection_lock.propagate_pending_event(&mut guarded).await;
-            debug_assert!(connection_lock.pending_event.is_none());
+            // If the connection contains an error, remove it from the state of `guarded` and
+            // propagating this error.
+            // This is done as a separate step for future-cancellation-related reasons.
+            if matches!(
+                connection_lock.connection,
+                ConnectionInner::PendingErrorReport { .. }
+            ) {
+                let mut guarded = self.guarded.lock().await;
+                future::poll_fn(|cx| guarded.events_tx.poll_ready(cx))
+                    .await
+                    .unwrap();
+
+                let substreams = guarded
+                    .connection_overlays
+                    .range(
+                        (
+                            connection_index,
+                            SubstreamDirection::min_value(),
+                            SubstreamId::min_value(),
+                        )
+                            ..=(
+                                connection_index,
+                                SubstreamDirection::max_value(),
+                                SubstreamId::max_value(),
+                            ),
+                    )
+                    .map(|(key, _)| *key)
+                    .collect::<Vec<_>>();
+
+                let out_notification_protocols_indices = Vec::with_capacity(substreams.len());
+                let in_notification_protocols_indices = Vec::with_capacity(substreams.len());
+
+                for (_, direction, substream_id) in substreams {
+                    let state = guarded
+                        .connection_overlays
+                        .remove(&(connection_index, direction, substream_id))
+                        .unwrap();
+
+                    match state {
+                        SubstreamState::Pending(_) => continue,
+                        SubstreamState::Open => {}
+                    };
+
+                    // TODO: this isn't working; find a solution
+                    /*if let Some(established) = established.as_mut() {
+                        let overlay_network_index = *established
+                            .notifications_substream_user_data_mut(substream_id)
+                            .unwrap();
+
+                        match direction {
+                            SubstreamDirection::In => {
+                                in_notification_protocols_indices
+                                    .push(overlay_network_index);
+                            }
+                            SubstreamDirection::Out => {
+                                out_notification_protocols_indices
+                                    .push(overlay_network_index);
+                            }
+                        }
+                    }*/
+                }
+
+                guarded
+                    .events_tx
+                    .try_send(Event::Shutdown {
+                        id: connection_lock.id,
+                        in_notification_protocols_indices,
+                        out_notification_protocols_indices,
+                        user_data: connection_lock.user_data.clone(),
+                    })
+                    .unwrap();
+
+                let _index = guarded.connections_by_id.remove(&connection_id);
+                debug_assert_eq!(_index, Some(connection_index));
+
+                guarded.connections.remove(connection_index);
+                match mem::replace(&mut connection_lock.connection, ConnectionInner::Dead) {
+                    ConnectionInner::PendingErrorReport { error } => {
+                        return Err(error);
+                    }
+                    _ => unreachable!(),
+                };
+            }
+
+            // As explained, we only call `read_write` the first time.
+            if is_first {
+                connection_lock.read_write(self, read_write);
+            }
         }
 
         Ok(())
@@ -1268,6 +1349,9 @@ pub enum ConnectionError {
     /// Connection was shut down by calling [`Network::start_shutdown`].
     // TODO: that seems hacky
     LocalShutdown,
+    /// Connection was gracefully terminated. Can only happen if the connection was established,
+    /// as an EOF during the handshake is an error.
+    Eof,
 }
 
 /// Protocol error within the context of a connection. See [`Network::read_write`].
@@ -1306,6 +1390,9 @@ struct Connection<TConn, TNow> {
     /// Copy of the id of the connection.
     id: ConnectionId,
 
+    /// `true` is [`Network::start_shutdown`] has been called.
+    shutting_down: bool,
+
     /// Event that has just happened on the connection, but that the [`Guarded`] isn't yet aware
     /// of. See the implementations note at the top of the file for more information.
     pending_event: Option<PendingEvent>,
@@ -1324,25 +1411,41 @@ where
     TConn: Clone,
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
-    fn read_write(
-        &mut self,
-        parent: &Network<TConn, TNow>,
-        read_write: &mut ReadWrite<TNow>,
-    ) -> Result<(), ConnectionError> {
+    fn read_write(&mut self, parent: &Network<TConn, TNow>, read_write: &mut ReadWrite<TNow>) {
         debug_assert!(self.pending_event.is_none());
 
         match mem::replace(&mut self.connection, ConnectionInner::Poisoned) {
+            ConnectionInner::Established(_) if self.shutting_down => {
+                // TODO: shut down should be graceful instead of an error
+                debug_assert!(self.pending_event.is_none());
+                self.connection = ConnectionInner::PendingErrorReport {
+                    error: ConnectionError::LocalShutdown,
+                };
+            }
+
+            ConnectionInner::Handshake { .. } if self.shutting_down => {
+                // TODO: shut down should be graceful instead of an error
+                debug_assert!(self.pending_event.is_none());
+                self.connection = ConnectionInner::PendingErrorReport {
+                    error: ConnectionError::LocalShutdown,
+                };
+            }
+
             ConnectionInner::Established(connection) => {
                 let rw_before = (read_write.read_bytes, read_write.written_bytes);
 
                 match connection.read_write(read_write) {
                     Ok((connection, event)) => {
                         if read_write.is_dead() && event.is_none() {
-                            self.connection = ConnectionInner::Dead;
+                            self.connection = ConnectionInner::PendingErrorReport {
+                                error: ConnectionError::Eof,
+                            };
                         } else {
                             self.connection = ConnectionInner::Established(connection);
                         }
 
+                        // If the inner `read_write` has processed some bytes or generated an
+                        // event, we ask the user to call `read_write` again.
                         if rw_before != (read_write.read_bytes, read_write.written_bytes)
                             || event.is_some()
                         {
@@ -1357,17 +1460,12 @@ where
                         }
                     }
                     Err(err) => {
-                        if let Some(waker) = self.waker.take() {
-                            let _ = waker.send(());
-                        }
-
-                        self.connection =
-                            ConnectionInner::Errored(ConnectionError::Established(err));
-                        self.pending_event = Some(PendingEvent::Disconnect);
+                        debug_assert!(self.pending_event.is_none());
+                        self.connection = ConnectionInner::PendingErrorReport {
+                            error: ConnectionError::Established(err),
+                        };
                     }
-                };
-
-                Ok(())
+                }
             }
 
             ConnectionInner::Handshake {
@@ -1377,7 +1475,10 @@ where
             } => {
                 // Check that the handshake isn't taking too long.
                 if timeout < read_write.now {
-                    return Err(ConnectionError::Handshake(HandshakeError::Timeout));
+                    self.connection = ConnectionInner::PendingErrorReport {
+                        error: ConnectionError::Handshake(HandshakeError::Timeout),
+                    };
+                    return;
                 }
                 read_write.wake_up_after(&timeout);
 
@@ -1388,7 +1489,10 @@ where
                     let result = match handshake.read_write(read_write) {
                         Ok(rw) => rw,
                         Err(err) => {
-                            return Err(ConnectionError::Handshake(HandshakeError::Protocol(err)));
+                            self.connection = ConnectionInner::PendingErrorReport {
+                                error: ConnectionError::Handshake(HandshakeError::Protocol(err)),
+                            };
+                            return;
                         }
                     };
 
@@ -1427,18 +1531,12 @@ where
                         }
                     }
                 }
-
-                Ok(())
             }
 
-            ConnectionInner::Errored(err) => Err(err),
-            ConnectionInner::ForcedShutdown => {
-                self.connection = ConnectionInner::Errored(ConnectionError::LocalShutdown);
-                self.pending_event = Some(PendingEvent::Disconnect);
-                Ok(())
-            }
-            ConnectionInner::Dead => panic!(),
-            ConnectionInner::Poisoned => unreachable!(),
+            // The `read_write` function shouldn't have been called when in this state.
+            ConnectionInner::Dead
+            | ConnectionInner::PendingErrorReport { .. }
+            | ConnectionInner::Poisoned => unreachable!(),
         }
     }
 
@@ -1450,14 +1548,7 @@ where
             return;
         }
 
-        let connection_index = match guarded.connections_by_id.get(&self.id) {
-            Some(idx) => *idx,
-            None => {
-                // TODO: correct?
-                self.pending_event = None;
-                return;
-            }
-        };
+        let connection_index = *guarded.connections_by_id.get(&self.id).unwrap();
 
         // The body of this function consists in two operations: extracting the event from
         // `pending_event`, then sending a corresponding event on `events_tx`. Because sending an
@@ -1711,65 +1802,6 @@ where
                     })
                     .unwrap();
             }
-            PendingEvent::Disconnect => {
-                let substreams = guarded
-                    .connection_overlays
-                    .range(
-                        (
-                            connection_index,
-                            SubstreamDirection::min_value(),
-                            SubstreamId::min_value(),
-                        )
-                            ..=(
-                                connection_index,
-                                SubstreamDirection::max_value(),
-                                SubstreamId::max_value(),
-                            ),
-                    )
-                    .map(|(key, _)| *key)
-                    .collect::<Vec<_>>();
-
-                let mut out_notification_protocols_indices = Vec::with_capacity(substreams.len());
-                let mut in_notification_protocols_indices = Vec::with_capacity(substreams.len());
-
-                for (_, direction, substream_id) in substreams {
-                    let state = guarded
-                        .connection_overlays
-                        .remove(&(connection_index, direction, substream_id))
-                        .unwrap();
-
-                    match state {
-                        SubstreamState::Pending(_) => continue,
-                        SubstreamState::Open => {}
-                    };
-
-                    // TODO: doesn't work properly because the connection has been switched to a non-established state beforehand
-                    if let Some(established) = self.connection.as_established() {
-                        let overlay_network_index = *established
-                            .notifications_substream_user_data_mut(substream_id)
-                            .unwrap();
-
-                        match direction {
-                            SubstreamDirection::In => {
-                                in_notification_protocols_indices.push(overlay_network_index);
-                            }
-                            SubstreamDirection::Out => {
-                                out_notification_protocols_indices.push(overlay_network_index);
-                            }
-                        }
-                    }
-                }
-
-                guarded
-                    .events_tx
-                    .try_send(Event::Shutdown {
-                        id: self.id,
-                        in_notification_protocols_indices,
-                        out_notification_protocols_indices,
-                        user_data: self.user_data.clone(),
-                    })
-                    .unwrap();
-            }
         }
     }
 }
@@ -1793,10 +1825,23 @@ enum ConnectionInner<TNow> {
     Established(
         established::Established<TNow, oneshot::Sender<Result<Vec<u8>, RequestError>>, usize>,
     ),
-    Errored(ConnectionError),
-    /// [`Network::start_shutdown`] has been called.
-    ForcedShutdown,
+
+    /// The connection has generated an error, but this error hasn't been reported to the API
+    /// user yet. The connection is still considered as valid for API purposes. After the error
+    /// has been reported to the user, the connection switches to the [`ConnectionInner::Dead`]
+    /// state.
+    PendingErrorReport { error: ConnectionError },
+
+    /// Connection is no longer valid because an error has happened in the connection
+    /// or because it has been gracefully shut down. It is invalid for the user to call
+    /// `read_write` with this connection again.
+    ///
+    /// This is the state the connection is in after it has been removed from the [`Guarded`] but
+    /// before it is destroyed.
     Dead,
+
+    /// Temporary state. For borrow checking purposes, the state can be transitioned to this state
+    /// then back.
     Poisoned,
 }
 
@@ -1817,7 +1862,6 @@ impl<TNow> ConnectionInner<TNow> {
 enum PendingEvent {
     HandshakeFinished(PeerId),
     Inner(established::Event<oneshot::Sender<Result<Vec<u8>, RequestError>>, usize>),
-    Disconnect,
 }
 
 /// Error potentially returned by [`Network::request`].

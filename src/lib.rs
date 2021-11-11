@@ -203,6 +203,7 @@ pub mod database;
 pub mod executor;
 pub mod finality;
 pub mod header;
+pub mod identity;
 pub mod informant;
 pub mod json_rpc;
 pub mod libp2p;
