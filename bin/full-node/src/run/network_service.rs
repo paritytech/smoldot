@@ -37,7 +37,7 @@ use smoldot::{
     header,
     informant::HashDisplay,
     libp2p::{
-        async_rw_with_buffers, connection,
+        async_rw_with_buffers, async_std_connection, connection,
         multiaddr::{Multiaddr, Protocol},
         peer_id::{self, PeerId},
         read_write::ReadWrite,
@@ -725,6 +725,71 @@ pub enum InitError {
 /// Asynchronous task managing a specific TCP connection.
 #[tracing::instrument(level = "trace", skip(tcp_socket, network_service))]
 async fn connection_task(
+    tcp_socket: async_std::net::TcpStream,
+    network_service: Arc<Inner>,
+    id: service::ConnectionId,
+) {
+    let mut task = async_std_connection::RunOutcome::Ready(
+        async_std_connection::ConnectionTask::new(tcp_socket),
+    );
+
+    loop {
+        match task {
+            async_std_connection::RunOutcome::Ready(mut ready) => {
+                {
+                    let mut read_write = ready.read_write(Instant::now());
+
+                    match network_service
+                        .network
+                        .read_write(id, &mut read_write)
+                        .await
+                    {
+                        Ok(()) => (),
+                        Err(error) => {
+                            tracing::debug!(%error, "task-finished");
+                            return;
+                        }
+                    };
+
+                    if read_write.read_bytes != 0
+                        || read_write.written_bytes != 0
+                        || read_write.outgoing_buffer.is_none()
+                    {
+                        tracing::event!(
+                            tracing::Level::TRACE,
+                            read = read_write.read_bytes,
+                            written = read_write.written_bytes,
+                            "wake-up" = ?read_write.wake_up_after,  // TODO: ugly display
+                            "write-close" = read_write.outgoing_buffer.is_none(),
+                        );
+                    }
+                }
+
+                task = ready.resume().await;
+            }
+            async_std_connection::RunOutcome::IoError(error) => {
+                tracing::debug!(%error, "task-finished");
+                // TODO: report disconnect to service
+                return;
+            }
+            async_std_connection::RunOutcome::TimerNeeded(timer) => {
+                let now = Instant::now();
+                let when = *timer.when();
+                task = timer
+                    .resume(if when <= now {
+                        future::Either::Left(future::ready(()))
+                    } else {
+                        future::Either::Right(futures_timer::Delay::new(when - now))
+                    })
+                    .await;
+            }
+        }
+    }
+}
+
+/// Asynchronous task managing a specific TCP connection.
+#[tracing::instrument(level = "trace", skip(tcp_socket, network_service))]
+async fn connection_task_old(
     tcp_socket: async_std::net::TcpStream,
     network_service: Arc<Inner>,
     id: service::ConnectionId,

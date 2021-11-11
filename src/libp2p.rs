@@ -86,6 +86,7 @@
 //!
 
 pub mod async_rw_with_buffers;
+pub mod async_std_connection;
 pub mod collection;
 pub mod connection;
 pub mod peer_id;
