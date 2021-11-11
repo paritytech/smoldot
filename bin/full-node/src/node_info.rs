@@ -21,10 +21,10 @@ use async_std::net::TcpStream;
 use futures::prelude::*;
 use smoldot::{
     libp2p::{
-        async_rw_with_buffers,
-        connection::{handshake, NoiseKey},
+        async_std_connection,
+        connection::{established, handshake, NoiseKey},
     },
-    network::service::ReadWrite,
+    network::protocol,
 };
 use std::time::{Duration, Instant};
 
@@ -35,8 +35,9 @@ pub async fn run(cli_options: cli::CliOptionsNodeInfo) {
         result = TcpStream::connect(&cli_options.address).fuse() => {
             match result {
                 Ok(s) => {
-                    let _ = s.set_nodelay(true);
-                    async_rw_with_buffers::WithBuffers::new(s)
+                    async_std_connection::RunOutcome::Ready(
+                        async_std_connection::ConnectionTask::new(s),
+                    )
                 },
                 Err(err) => {
                     panic!("Failed to reach {}: {}", cli_options.address, err);
@@ -48,54 +49,127 @@ pub async fn run(cli_options: cli::CliOptionsNodeInfo) {
         }
     };
 
-    // Generate a new random noise key.
-    let noise_key = if let Some(node_key) = cli_options.node_key {
-        NoiseKey::new(node_key.as_ref())
+    // Generate the noise key.
+    let noise_key = if let Some(node_key) = cli_options.libp2p_key {
+        NoiseKey::new(&node_key)
     } else {
         NoiseKey::new(&rand::random())
     };
 
     let mut handshake = handshake::Handshake::new(true);
-    let (remote_peer_id, connection_prototype) = loop {
-        match handshake {
-            handshake::Handshake::Healthy(healthy) => {
-                let (read_buffer, write_buffer) = match tcp_socket.buffers() {
-                    Ok(b) => b,
-                    Err(error) => {
-                        panic!("Disconnected by remote during handshake: {}", error);
-                    }
-                };
-
-                let read_write = ReadWrite {
-                    now: Instant::now(),
-                    incoming_buffer: read_buffer.map(|b| b.0),
-                    outgoing_buffer: write_buffer,
-                    read_bytes: 0,
-                    written_bytes: 0,
-                    wake_up_after: None,
-                    wake_up_future: None,
-                };
-
-                match healthy.read_write(&mut read_write) {
-                    Ok(handshake_update) => {
-                        handshake = handshake_update;
-                    }
+    let (remote_peer_id, connection_prototype, mut tcp_socket) = loop {
+        match (handshake, tcp_socket) {
+            (
+                handshake::Handshake::Healthy(healthy),
+                async_std_connection::RunOutcome::Ready(mut ready),
+            ) => {
+                match healthy.read_write(&mut ready.read_write(Instant::now())) {
+                    Ok(handshake_update) => handshake = handshake_update,
                     Err(err) => {
                         panic!("Error during handshake with remote: {}", err)
                     }
-                }
+                };
+
+                tcp_socket = ready.resume().await;
             }
-            handshake::Handshake::NoiseKeyRequired(noise_key_req) => {
+            (_, async_std_connection::RunOutcome::IoError(err)) => {
+                panic!("Error during handshake with remote: {}", err)
+            }
+            (handshake_update, async_std_connection::RunOutcome::TimerNeeded(timer)) => {
+                handshake = handshake_update;
+
+                let now = Instant::now();
+                let when = *timer.when();
+                tcp_socket = timer
+                    .resume(if when <= now {
+                        future::Either::Left(future::ready(()))
+                    } else {
+                        future::Either::Right(futures_timer::Delay::new(when - now))
+                    })
+                    .await;
+            }
+            (handshake::Handshake::NoiseKeyRequired(noise_key_req), tcp_socket_update) => {
                 handshake = noise_key_req.resume(&noise_key).into();
+                tcp_socket = tcp_socket_update;
             }
-            handshake::Handshake::Success {
-                remote_peer_id,
-                connection,
-            } => break (remote_peer_id, connection),
+            (
+                handshake::Handshake::Success {
+                    remote_peer_id,
+                    connection,
+                },
+                tcp_socket_update,
+            ) => break (remote_peer_id, connection, tcp_socket_update),
         }
     };
 
-    println!("Remove identity is: {}", remote_peer_id);
+    println!("Remote identity is: {}", remote_peer_id);
 
-    //handshake.
+    let mut established = connection_prototype.into_connection::<_, (), ()>(established::Config {
+        notifications_protocols: Vec::new(),
+        first_out_ping: Instant::now(),
+        ping_interval: Duration::from_secs(60),
+        ping_protocol: "/ipfs/ping/1.0.0".into(),
+        ping_timeout: Duration::from_secs(10),
+        randomness_seed: rand::random(),
+        request_protocols: vec![established::ConfigRequestResponse {
+            name: "/ipfs/id/1.0.0".into(),
+            inbound_config: established::ConfigRequestResponseIn::Empty,
+            max_response_size: 4096,
+            inbound_allowed: false,
+            timeout: Duration::from_secs(20),
+        }],
+    });
+
+    let _ = established.add_request(Instant::now(), 0, Vec::new(), ());
+
+    let identify = 'outer: loop {
+        match tcp_socket {
+            async_std_connection::RunOutcome::Ready(mut ready) => {
+                loop {
+                    let event = match established.read_write(&mut ready.read_write(Instant::now()))
+                    {
+                        Ok((established_update, event)) => {
+                            established = established_update;
+                            event
+                        }
+                        Err(err) => {
+                            panic!("Error during connection with remote: {}", err)
+                        }
+                    };
+
+                    match event {
+                        Some(established::Event::Response { response, .. }) => {
+                            match protocol::decode_identify_response(&response.unwrap()) {
+                                Ok(identify) => break 'outer identify,
+                                Err(err) => panic!("Failed to decode remote identify: {}", err),
+                            }
+                        }
+                        Some(_) => {}
+                        None => break,
+                    }
+                }
+
+                tcp_socket = ready.resume().await;
+            }
+            async_std_connection::RunOutcome::IoError(err) => {
+                panic!("Error during connection with remote: {}", err)
+            }
+            async_std_connection::RunOutcome::TimerNeeded(timer) => {
+                let now = Instant::now();
+                let when = *timer.when();
+                tcp_socket = timer
+                    .resume(if when <= now {
+                        future::Either::Left(future::ready(()))
+                    } else {
+                        future::Either::Right(futures_timer::Delay::new(when - now))
+                    })
+                    .await;
+            }
+        }
+    };
+
+    // TODO: print nicer?
+    println!("Remote identification: {:?}", identify);
+
+    // TODO: open a substream for each supported `/block-announces/` protocol and find the best block of the node
 }

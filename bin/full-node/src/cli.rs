@@ -49,9 +49,9 @@ pub struct CliOptionsNodeInfo {
     /// IP address to connect to (format: `<ip>:<port>`).
     // Note: we accept a String rather than a SocketAddr in order to allow for DNS addresses.
     pub address: String,
-    /// Ed25519 private key of network identity of the local node (32 bytes hexadecimal).
-    #[structopt(long)]
-    pub node_key: Option<NodeKey>,
+    /// Ed25519 private key of network identity (as a seed phrase).
+    #[structopt(long, parse(try_from_str = seed_phrase::decode_ed25519_private_key))]
+    pub libp2p_key: Option<[u8; 32]>,
 }
 
 #[derive(Debug, structopt::StructOpt)]
