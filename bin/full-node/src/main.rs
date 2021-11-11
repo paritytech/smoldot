@@ -20,6 +20,7 @@
 #![deny(unused_crate_dependencies)]
 
 mod cli;
+mod node_info;
 mod run;
 
 fn main() {
@@ -29,5 +30,6 @@ fn main() {
 async fn async_main() {
     match <cli::CliOptions as structopt::StructOpt>::from_args() {
         cli::CliOptions::Run(r) => run::run(r).await,
+        cli::CliOptions::NodeInfo(opt) => node_info::run(opt).await,
     }
 }

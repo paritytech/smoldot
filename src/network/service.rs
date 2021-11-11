@@ -25,6 +25,7 @@ use crate::network::{kademlia, protocol};
 use crate::util;
 
 use alloc::{
+    borrow::Cow,
     collections::BTreeSet,
     format,
     string::{String, ToString as _},
@@ -2338,11 +2339,13 @@ where
     pub async fn respond(self, agent_version: &str) {
         let response = {
             protocol::build_identify_response(protocol::IdentifyResponse {
-                protocol_version: "/substrate/1.0", // TODO: same value as in Substrate
-                agent_version,
-                ed25519_public_key: self.service.inner.noise_key().libp2p_public_ed25519_key(),
+                protocol_version: "/substrate/1.0".into(), // TODO: same value as in Substrate
+                agent_version: agent_version.into(),
+                ed25519_public_key: Cow::Borrowed(
+                    self.service.inner.noise_key().libp2p_public_ed25519_key(),
+                ),
                 listen_addrs: iter::empty(), // TODO:
-                observed_addr: &self.observed_addr,
+                observed_addr: Cow::Borrowed(&self.observed_addr),
                 protocols: self
                     .service
                     .inner

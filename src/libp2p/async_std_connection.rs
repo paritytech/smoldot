@@ -161,10 +161,18 @@ impl<TNow> ConnectionTask<TNow> {
             self.latest_read_outcome.written_bytes,
         );
 
+        let immediately_resume =
+            self.latest_read_outcome.read_bytes != 0 || self.latest_read_outcome.written_bytes != 0;
+
         self.latest_read_outcome.read_bytes = 0;
         self.latest_read_outcome.written_bytes = 0;
+        let wake_up = self.latest_read_outcome.wake_up_after.take();
 
-        if let Some(wake_up) = self.latest_read_outcome.wake_up_after.take() {
+        if immediately_resume {
+            return RunOutcome::Ready(self);
+        }
+
+        if let Some(wake_up) = wake_up {
             return RunOutcome::TimerNeeded(TimerNeeded {
                 inner: self,
                 wake_up_future,

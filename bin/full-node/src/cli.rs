@@ -40,6 +40,18 @@ use std::{net::SocketAddr, path::PathBuf};
 pub enum CliOptions {
     /// Connect to the chain and synchronize the local database with the network.
     Run(CliOptionsRun),
+    /// Connects to an IP address and prints some information about the node.
+    NodeInfo(CliOptionsNodeInfo),
+}
+
+#[derive(Debug, structopt::StructOpt)]
+pub struct CliOptionsNodeInfo {
+    /// IP address to connect to (format: `<ip>:<port>`).
+    // Note: we accept a String rather than a SocketAddr in order to allow for DNS addresses.
+    pub address: String,
+    /// Ed25519 private key of network identity (as a seed phrase).
+    #[structopt(long, parse(try_from_str = seed_phrase::decode_ed25519_private_key))]
+    pub libp2p_key: Option<[u8; 32]>,
 }
 
 #[derive(Debug, structopt::StructOpt)]
