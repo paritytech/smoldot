@@ -23,9 +23,16 @@ use core::{ops, pin::Pin};
 use futures::prelude::*;
 use std::io;
 
+/// Outcome of processing the connection task.
 pub enum RunOutcome<TNow> {
+    /// Data is ready on the socket.
     Ready(ConnectionTask<TNow>),
+
+    /// In order to continue, connection task needs a future that becomes ready at a specific
+    /// moment.
     TimerNeeded(TimerNeeded<TNow>),
+
+    /// Connection task has ended because an I/O error has happened on the socket.
     IoError(io::Error),
 }
 
@@ -90,6 +97,9 @@ impl<TNow> ConnectionTask<TNow> {
         }
     }
 
+    /// Gives access to a [`ReadWrite`] pointing to the internals of the connection task. This
+    /// [`ReadWrite`] can be passed to networking-related functions in order to synchronize a
+    /// network state machine with the actual socket.
     pub fn read_write(&mut self, now: TNow) -> ReadWriteLock<TNow> {
         let (read_buffer, write_buffer) = self.tcp_socket.buffers().unwrap();
 
@@ -107,6 +117,11 @@ impl<TNow> ConnectionTask<TNow> {
         }
     }
 
+    /// After calling [`ConnectionTask::read_write`] and updating the [`ReadWrite`], call this
+    /// function to synchronize the buffers with the actual socket.
+    ///
+    /// This function returns when the connection task needs something or when data is ready on
+    /// the socket.
     pub async fn resume(mut self) -> RunOutcome<TNow> {
         let wake_up_future =
             if let Some(wake_up_future) = self.latest_read_outcome.wake_up_future.take() {
@@ -173,6 +188,7 @@ struct ReadWriteOutcome<TNow> {
     wake_up_future: Option<future::BoxFuture<'static, ()>>,
 }
 
+/// In order to continue, connection task needs a future that becomes ready at a specific moment.
 pub struct TimerNeeded<TNow> {
     inner: ConnectionTask<TNow>,
     wake_up_future: future::BoxFuture<'static, ()>,
@@ -180,10 +196,13 @@ pub struct TimerNeeded<TNow> {
 }
 
 impl<TNow> TimerNeeded<TNow> {
+    /// Returns the moment when the timer to pass to [`TimerNeeded::resume`] must become ready.
     pub fn when(&self) -> &TNow {
         &self.when_wake_up
     }
 
+    /// Resumes the connection task, using the timer passed as parameter. The timer passed as
+    /// parameter must become ready at the moment returned by [`TimerNeeded::when`].
     pub async fn resume(self, delay: impl Future<Output = ()>) -> RunOutcome<TNow> {
         self.inner
             .continue_with_timer(self.wake_up_future, delay)
