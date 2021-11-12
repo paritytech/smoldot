@@ -26,7 +26,6 @@ use alloc::{boxed::Box, rc::Rc, string::String, vec::Vec};
 use core::{
     cell::RefCell,
     cmp, fmt,
-    pin::Pin,
     task::{Context, Poll, Waker},
 };
 
@@ -369,7 +368,7 @@ pub struct Jit {
     /// `Future` that drives the execution. Contains an invocation of
     /// `wasmtime::Func::call_async`.
     /// `None` if the execution has finished and future has returned `Poll::Ready` in the past.
-    function_call: Option<Pin<Box<dyn Future<Output = Result<Option<WasmValue>, String>>>>>,
+    function_call: Option<future::LocalBoxFuture<'static, Result<Option<WasmValue>, String>>>,
 
     /// Shared between the "outside" and the external functions. See [`Shared`].
     shared: Rc<RefCell<Shared>>,

@@ -54,13 +54,10 @@ impl From<SqliteFullDatabase> for DatabaseThread {
 
         thread::Builder::new()
             .name("sqlite-database".into())
-            .spawn(move || loop {
-                let closure = match futures::executor::block_on(rx.next()) {
-                    Some(c) => c,
-                    None => break,
-                };
-
-                closure(&db)
+            .spawn(move || {
+                while let Some(closure) = futures::executor::block_on(rx.next()) {
+                    closure(&db)
+                }
             })
             .unwrap();
 

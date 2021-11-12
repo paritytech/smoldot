@@ -370,7 +370,7 @@ impl SyncBackground {
                     Some((author::build::Builder::WaitSlot(when), _)) => {
                         let delay = (UNIX_EPOCH + when.when())
                             .duration_since(SystemTime::now())
-                            .unwrap_or(Duration::new(0, 0));
+                            .unwrap_or_else(|_| Duration::new(0, 0));
                         future::Either::Right(futures_timer::Delay::new(delay).fuse())
                     }
                     None => future::Either::Left(future::Either::Right(future::pending::<()>())),
@@ -549,6 +549,7 @@ impl SyncBackground {
                         .duration_since(SystemTime::UNIX_EPOCH)
                         .unwrap(),
                     parent_runtime,
+                    block_body_capacity: 0, // TODO: could be set to the size of the tx pool
                     top_trie_root_calculation_cache: None, // TODO: pretty important for performances
                 })
             };

@@ -221,7 +221,7 @@ impl Keystore {
                     for (label, value) in transcript_items {
                         match value {
                             either::Left(bytes) => {
-                                transcript.append_message(label, &bytes);
+                                transcript.append_message(label, bytes);
                             }
                             either::Right(value) => {
                                 transcript.append_u64(label, value);

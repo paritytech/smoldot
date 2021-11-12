@@ -603,10 +603,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             .shared
             .requests
             .iter()
-            .filter(|(_, rq)| match rq {
-                RequestMapping::Inline(id, _, _) if *id == source_id => true,
-                _ => false,
-            })
+            .filter(|(_, rq)| matches!(rq, RequestMapping::Inline(id, _, _) if *id == source_id))
             .count();
 
         let num_inner = match (&self.inner, self.shared.sources.get(source_id.0).unwrap()) {

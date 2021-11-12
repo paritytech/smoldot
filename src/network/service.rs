@@ -676,21 +676,18 @@ where
                 });
             }
 
-            match (&block.header, &block.body) {
-                (Some(header), Some(body)) => {
-                    let decoded_header = header::decode(header).unwrap();
-                    let expected = header::extrinsics_root(&body[..]);
-                    if expected != *decoded_header.extrinsics_root {
-                        return Err(BlocksRequestError::Entry {
-                            index: block_index,
-                            error: BlocksRequestResponseEntryError::InvalidExtrinsicsRoot {
-                                calculated: expected,
-                                in_header: *decoded_header.extrinsics_root,
-                            },
-                        });
-                    }
+            if let (Some(header), Some(body)) = (&block.header, &block.body) {
+                let decoded_header = header::decode(header).unwrap();
+                let expected = header::extrinsics_root(&body[..]);
+                if expected != *decoded_header.extrinsics_root {
+                    return Err(BlocksRequestError::Entry {
+                        index: block_index,
+                        error: BlocksRequestResponseEntryError::InvalidExtrinsicsRoot {
+                            calculated: expected,
+                            in_header: *decoded_header.extrinsics_root,
+                        },
+                    });
                 }
-                _ => {}
             }
         }
 
@@ -699,7 +696,7 @@ where
                 return Err(BlocksRequestError::InvalidStart);
             }
             protocol::BlocksRequestConfigStart::Number(n)
-                if header::decode(&result[0].header.as_ref().unwrap())
+                if header::decode(result[0].header.as_ref().unwrap())
                     .unwrap()
                     .number
                     != n =>
@@ -1155,7 +1152,7 @@ where
                 } if ((*protocol_index - 1) % REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN) == 0 => {
                     let chain_index = (*protocol_index - 1) / REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN;
 
-                    match protocol::decode_block_request(&request_payload) {
+                    match protocol::decode_block_request(request_payload) {
                         Ok(config) => {
                             return match guarded.to_process_pre_event.take().unwrap() {
                                 peers::Event::RequestIn {
@@ -1322,12 +1319,11 @@ where
                     let ephemeral_guarded = self.ephemeral_guarded.lock().await;
 
                     let notification = {
-                        let grandpa_config = ephemeral_guarded.chains[chain_index]
+                        let grandpa_config = *ephemeral_guarded.chains[chain_index]
                             .chain_config
                             .grandpa_protocol_config
                             .as_ref()
-                            .unwrap()
-                            .clone();
+                            .unwrap();
 
                         protocol::GrandpaNotificationRef::Neighbor(protocol::NeighborPacket {
                             round_number: grandpa_config.round_number,
@@ -1549,7 +1545,7 @@ where
                     }
 
                     // Check the format of the block announce.
-                    if let Err(err) = protocol::decode_block_announce(&notification) {
+                    if let Err(err) = protocol::decode_block_announce(notification) {
                         return Event::ProtocolError {
                             error: ProtocolError::BadBlockAnnounce(err),
                             peer_id: match guarded.to_process_pre_event.take().unwrap() {
@@ -1615,7 +1611,7 @@ where
                         continue;
                     }
 
-                    let decoded_notif = match protocol::decode_grandpa_notification(&notification) {
+                    let decoded_notif = match protocol::decode_grandpa_notification(notification) {
                         Ok(n) => n,
                         Err(err) => {
                             return Event::ProtocolError {
@@ -2039,7 +2035,7 @@ where
             // potential future cancellation issues.
             self.inner
                 .set_peer_notifications_out_desired(
-                    &peer_id,
+                    peer_id,
                     chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
                     peers::DesiredState::DesiredReset, // TODO: ?
                 )

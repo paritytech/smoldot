@@ -96,7 +96,7 @@ impl JaegerService {
         let trace_id = NonZeroU128::new(u128::from_be_bytes(
             <[u8; 16]>::try_from(&block_hash[16..]).unwrap(),
         ))
-        .unwrap_or(NonZeroU128::new(1u128).unwrap());
+        .unwrap_or_else(|| NonZeroU128::new(1u128).unwrap());
         self.traces_in.span(trace_id, operation_name)
     }
 

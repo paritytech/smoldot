@@ -82,6 +82,10 @@ pub struct Config<'a> {
     /// Optional cache corresponding to the storage trie root hash calculation coming from the
     /// parent block verification.
     pub top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
+
+    /// Capacity to reserve for the number of extrinsics. Should be higher than the approximate
+    /// number of extrinsics that are going to be applied.
+    pub block_body_capacity: usize,
 }
 
 /// Extra configuration depending on the consensus algorithm.
@@ -190,7 +194,7 @@ pub fn build_block(config: Config) -> BlockBuild {
 
     let shared = Shared {
         stage: Stage::InitializeBlock,
-        block_body: Vec::new(), // TODO: with_capacity?
+        block_body: Vec::with_capacity(config.block_body_capacity),
         logs: String::new(),
     };
 
@@ -730,7 +734,7 @@ fn parse_inherent_extrinsics_output(output: &[u8]) -> Result<Vec<Vec<u8>>, Error
                 nom::combinator::map(
                     nom::combinator::recognize(nom::combinator::flat_map(
                         crate::util::nom_scale_compact_usize,
-                        |n| nom::bytes::complete::take(n),
+                        nom::bytes::complete::take,
                     )),
                     |v: &[u8]| v.to_vec(),
                 ),
