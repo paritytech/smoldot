@@ -91,7 +91,10 @@ pub struct Config {
 pub struct NonFinalizedTree<T> {
     /// All fields are wrapped into an `Option` in order to be able to extract the
     /// [`NonFinalizedTree`] and later put it back.
-    inner: Option<NonFinalizedTreeInner<T>>,
+    ///
+    /// A `Box` is used in order to minimize the impact of moving the value around, and to reduce
+    /// the size of the [`NonFinalizedTree`].
+    inner: Option<Box<NonFinalizedTreeInner<T>>>,
 }
 
 impl<T> NonFinalizedTree<T> {
@@ -108,7 +111,7 @@ impl<T> NonFinalizedTree<T> {
         let finalized_block_hash = chain_information.finalized_block_header.hash();
 
         NonFinalizedTree {
-            inner: Some(NonFinalizedTreeInner {
+            inner: Some(Box::new(NonFinalizedTreeInner {
                 finalized_block_header: chain_information.finalized_block_header,
                 finalized_block_hash,
                 finality: match chain_information.finality {
@@ -146,7 +149,7 @@ impl<T> NonFinalizedTree<T> {
                 },
                 blocks: fork_tree::ForkTree::with_capacity(config.blocks_capacity),
                 current_best: None,
-            }),
+            })),
         }
     }
 

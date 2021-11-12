@@ -114,7 +114,7 @@ impl<T> NonFinalizedTreeInner<T> {
     /// Common implementation for both [`NonFinalizedTree::verify_header`] and
     /// [`NonFinalizedTree::verify_body`].
     fn verify(
-        self,
+        self: Box<Self>,
         scale_encoded_header: Vec<u8>,
         now_from_unix_epoch: Duration,
         full: bool,
@@ -283,13 +283,13 @@ impl<T> NonFinalizedTreeInner<T> {
 
 enum VerifyOut<T> {
     HeaderOk(VerifyContext<T>, bool, BlockConsensus),
-    HeaderErr(NonFinalizedTreeInner<T>, HeaderVerifyError),
-    HeaderDuplicate(NonFinalizedTreeInner<T>),
+    HeaderErr(Box<NonFinalizedTreeInner<T>>, HeaderVerifyError),
+    HeaderDuplicate(Box<NonFinalizedTreeInner<T>>),
     Body(BodyVerifyStep1<T>),
 }
 
 struct VerifyContext<T> {
-    chain: NonFinalizedTreeInner<T>,
+    chain: Box<NonFinalizedTreeInner<T>>,
     parent_tree_index: Option<fork_tree::NodeIndex>,
     header: header::Header,
     consensus: VerifyConsensusSpecific,
@@ -726,7 +726,7 @@ pub enum BodyVerifyStep2<T> {
     /// A new runtime must be compiled.
     ///
     /// This variant doesn't require any specific input from the user, but is provided in order to
-    /// make it possible to benchmark the time it takes to compile runtimes.
+    /// make it possible to benchmBodyVerifyStep2<ark the time it takes to compile runtimes.
     RuntimeCompilation(RuntimeCompilation<T>),
 }
 
