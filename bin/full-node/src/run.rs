@@ -159,7 +159,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     let relay_chain_database = if let Some(relay_chain_spec) = &relay_chain_spec {
         Some(Arc::new(database_thread::DatabaseThread::from(
             open_database(
-                &relay_chain_spec,
+                relay_chain_spec,
                 relay_genesis_chain_information.as_ref().unwrap(),
                 cli_options.tmp,
                 matches!(cli_output, cli::Output::Informant),

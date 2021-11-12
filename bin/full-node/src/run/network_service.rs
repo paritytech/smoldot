@@ -328,7 +328,7 @@ impl NetworkService {
                                 {
                                     let mut span = inner
                                         .jaeger_service
-                                        .block_span(&block_hash, "incoming-blocks-request");
+                                        .block_span(block_hash, "incoming-blocks-request");
                                     let hex = hex::encode(block_hash);
                                     span.add_string_tag("hash", &hex);
                                     _jaeger_span1.add_string_tag("hash", &hex);
