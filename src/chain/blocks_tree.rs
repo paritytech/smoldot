@@ -66,7 +66,7 @@ use crate::{
     header,
 };
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{cmp, fmt, mem, num::NonZeroU64, time::Duration};
 use hashbrown::HashMap;
 
