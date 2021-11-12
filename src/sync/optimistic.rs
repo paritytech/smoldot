@@ -52,7 +52,7 @@ use crate::{
     trie::calculate_root,
 };
 
-use alloc::{borrow::ToOwned as _, collections::BTreeMap, vec::Vec};
+use alloc::{borrow::ToOwned as _, boxed::Box, collections::BTreeMap, vec::Vec};
 use core::{
     cmp, fmt, iter, mem,
     num::{NonZeroU32, NonZeroU64},
@@ -117,7 +117,10 @@ pub struct OptimisticSync<TRq, TSrc, TBl> {
     chain: blocks_tree::NonFinalizedTree<Block<TBl>>,
 
     /// Extra fields. In a separate structure in order to be moved around.
-    inner: OptimisticSyncInner<TRq, TSrc, TBl>,
+    ///
+    /// A `Box` is used in order to minimize the impact of moving the value around, and to reduce
+    /// the size of the [`OptimisticSync`].
+    inner: Box<OptimisticSyncInner<TRq, TSrc, TBl>>,
 }
 
 /// Extra fields. In a separate structure in order to be moved around.
@@ -183,9 +186,9 @@ impl<TRq, TSrc, TBl> OptimisticSyncInner<TRq, TSrc, TBl> {
     }
 
     fn with_requests_obsoleted(
-        mut self,
+        mut self: Box<Self>,
         chain: &blocks_tree::NonFinalizedTree<Block<TBl>>,
-    ) -> Self {
+    ) -> Box<Self> {
         self.make_requests_obsolete(chain);
         self
     }
@@ -247,7 +250,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
 
         OptimisticSync {
             chain,
-            inner: OptimisticSyncInner {
+            inner: Box::new(OptimisticSyncInner {
                 finalized_chain_information: blocks_tree_config,
                 finalized_runtime: config.full.map(|f| f.finalized_runtime),
                 best_to_finalized_storage_diff: BTreeMap::new(),
@@ -265,7 +268,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                 download_ahead_blocks: config.download_ahead_blocks,
                 next_request_id: RequestId(0),
                 obsolete_requests: HashMap::with_capacity_and_hasher(0, Default::default()),
-            },
+            }),
         }
     }
 
@@ -724,7 +727,7 @@ impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
 
 /// Start the processing of a block verification.
 pub struct BlockVerify<TRq, TSrc, TBl> {
-    inner: OptimisticSyncInner<TRq, TSrc, TBl>,
+    inner: Box<OptimisticSyncInner<TRq, TSrc, TBl>>,
     chain: blocks_tree::NonFinalizedTree<Block<TBl>>,
 }
 
@@ -902,7 +905,7 @@ enum Inner<TBl> {
 
 struct BlockVerificationShared<TRq, TSrc, TBl> {
     /// See [`OptimisticSync::inner`].
-    inner: OptimisticSyncInner<TRq, TSrc, TBl>,
+    inner: Box<OptimisticSyncInner<TRq, TSrc, TBl>>,
     /// Body of the block being verified.
     block_body: Vec<Vec<u8>>,
     /// User data of the block being verified.
@@ -1088,12 +1091,11 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     let chain = blocks_tree::NonFinalizedTree::new(
                         shared.inner.finalized_chain_information.clone(),
                     );
-                    let inner = OptimisticSyncInner {
-                        best_to_finalized_storage_diff: Default::default(),
-                        best_runtime: None,
-                        top_trie_root_calculation_cache: None,
-                        ..shared.inner.with_requests_obsoleted(&chain)
-                    };
+
+                    let mut inner = shared.inner.with_requests_obsoleted(&chain);
+                    inner.best_to_finalized_storage_diff = Default::default();
+                    inner.best_runtime = None;
+                    inner.top_trie_root_calculation_cache = None;
 
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
@@ -1118,12 +1120,11 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     let chain = blocks_tree::NonFinalizedTree::new(
                         shared.inner.finalized_chain_information.clone(),
                     );
-                    let inner = OptimisticSyncInner {
-                        best_to_finalized_storage_diff: Default::default(),
-                        best_runtime: None,
-                        top_trie_root_calculation_cache: None,
-                        ..shared.inner.with_requests_obsoleted(&chain)
-                    };
+
+                    let mut inner = shared.inner.with_requests_obsoleted(&chain);
+                    inner.best_to_finalized_storage_diff = Default::default();
+                    inner.best_runtime = None;
+                    inner.top_trie_root_calculation_cache = None;
 
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
@@ -1152,12 +1153,11 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     let chain = blocks_tree::NonFinalizedTree::new(
                         shared.inner.finalized_chain_information.clone(),
                     );
-                    let inner = OptimisticSyncInner {
-                        best_to_finalized_storage_diff: Default::default(),
-                        best_runtime: None,
-                        top_trie_root_calculation_cache: None,
-                        ..shared.inner.with_requests_obsoleted(&chain)
-                    };
+
+                    let mut inner = shared.inner.with_requests_obsoleted(&chain);
+                    inner.best_to_finalized_storage_diff = Default::default();
+                    inner.best_runtime = None;
+                    inner.top_trie_root_calculation_cache = None;
 
                     break BlockVerification::Reset {
                         previous_best_height: old_chain.best_block_header().number,
@@ -1172,7 +1172,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
 
 /// Start the processing of a justification verification.
 pub struct JustificationVerify<TRq, TSrc, TBl> {
-    inner: OptimisticSyncInner<TRq, TSrc, TBl>,
+    inner: Box<OptimisticSyncInner<TRq, TSrc, TBl>>,
     chain: blocks_tree::NonFinalizedTree<Block<TBl>>,
 }
 
@@ -1203,12 +1203,11 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
                 let chain = blocks_tree::NonFinalizedTree::new(
                     self.inner.finalized_chain_information.clone(),
                 );
-                let inner = OptimisticSyncInner {
-                    best_to_finalized_storage_diff: Default::default(),
-                    best_runtime: None,
-                    top_trie_root_calculation_cache: None,
-                    ..self.inner.with_requests_obsoleted(&chain)
-                };
+
+                let mut inner = self.inner.with_requests_obsoleted(&chain);
+                inner.best_to_finalized_storage_diff = Default::default();
+                inner.best_runtime = None;
+                inner.top_trie_root_calculation_cache = None;
 
                 let previous_best_height = chain.best_block_header().number;
                 return (
