@@ -251,7 +251,7 @@ struct EphemeralGuardedChain<TNow> {
 }
 
 // Update this when a new request response protocol is added.
-const REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN: usize = 4;
+const REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN: usize = 5;
 // Update this when a new notifications protocol is added.
 const NOTIFICATIONS_PROTOCOLS_PER_CHAIN: usize = 3;
 
@@ -343,6 +343,17 @@ where
                 inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 32 },
                 max_response_size: 16 * 1024 * 1024,
                 // We don't support inbound warp sync requests (yet).
+                inbound_allowed: false,
+                // The timeout needs to be long enough to potentially download the maximum
+                // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
+                // TODO: 128 seconds is way too much so we temporarily put less, we need to reduce these 16 MiB to less
+                timeout: Duration::from_secs(32),
+            }))
+            .chain(iter::once(peers::ConfigRequestResponse {
+                name: format!("/{}/state/2", chain.protocol_id),
+                inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
+                max_response_size: 16 * 1024 * 1024,
+                // We don't support inbound state requests (yet).
                 inbound_allowed: false,
                 // The timeout needs to be long enough to potentially download the maximum
                 // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
@@ -759,6 +770,49 @@ where
 
         protocol::decode_grandpa_warp_sync_response(&response)
             .map_err(GrandpaWarpSyncRequestError::Decode)
+    }
+
+    /// Sends a state request to a peer.
+    ///
+    /// A state request makes it possible to download the storage of the chain at a given block.
+    /// The response is not unverified by this function. In other words, the peer is free to send
+    /// back erroneous data. It is the responsibility of the API user to verify the storage by
+    /// calculating the state trie root hash and comparing it with the value stored in the
+    /// block's header.
+    ///
+    /// Because response have a size limit, it is unlikely that a single request will return the
+    /// entire storage of the chain at once. Instead, call this function multiple times, each call
+    /// passing a `start_key` that follows the last key of the previous response.
+    // TODO: does an empty response mean that `start_key` is the last key of the storage? unclear
+    pub async fn state_request_unchecked(
+        &self,
+        now: TNow,
+        target: &peer_id::PeerId,
+        chain_index: usize,
+        block_hash: [u8; 32],
+        start_key: &[u8],
+    ) -> Result<Vec<protocol::StateResponseEntry>, StateRequestError> {
+        let request_data = protocol::build_state_request(protocol::StateRequestConfig {
+            block_hash,
+            start_key: start_key.to_vec(),
+        })
+        .fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        });
+
+        let response = self
+            .inner
+            .request(
+                now,
+                target,
+                self.protocol_index(chain_index, 4),
+                request_data,
+            )
+            .map_err(StateRequestError::Request)
+            .await?;
+
+        protocol::decode_state_response(&response).map_err(StateRequestError::Decode)
     }
 
     /// Sends a storage request to the given peer.
@@ -2501,6 +2555,13 @@ impl CallProofRequestError {
 pub enum GrandpaWarpSyncRequestError {
     Request(peers::RequestError),
     Decode(protocol::DecodeGrandpaWarpSyncResponseError),
+}
+
+/// Error returned by [`ChainNetwork::state_request_unchecked`].
+#[derive(Debug, derive_more::Display)]
+pub enum StateRequestError {
+    Request(peers::RequestError),
+    Decode(protocol::DecodeStateResponseError),
 }
 
 /// See [`Event::ProtocolError`].
