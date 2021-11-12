@@ -47,6 +47,7 @@ fn block_building_works() {
         parent_runtime,
         parent_hash: &parent_hash,
         parent_number: 0,
+        block_body_capacity: 0,
         consensus_digest_log_item: super::ConfigPreRuntime::Aura(crate::header::AuraPreDigest {
             slot_number: 1234u64,
         }),
