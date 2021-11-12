@@ -730,7 +730,7 @@ fn parse_inherent_extrinsics_output(output: &[u8]) -> Result<Vec<Vec<u8>>, Error
                 nom::combinator::map(
                     nom::combinator::recognize(nom::combinator::flat_map(
                         crate::util::nom_scale_compact_usize,
-                        |n| nom::bytes::complete::take(n),
+                        nom::bytes::complete::take,
                     )),
                     |v: &[u8]| v.to_vec(),
                 ),

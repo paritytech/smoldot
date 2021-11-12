@@ -1296,7 +1296,7 @@ impl ReadyToRun {
                                     num_elems,
                                     nom::combinator::flat_map(
                                         crate::util::nom_scale_compact_usize,
-                                        |n| nom::bytes::complete::take(n),
+                                        nom::bytes::complete::take,
                                     ),
                                 )
                             },

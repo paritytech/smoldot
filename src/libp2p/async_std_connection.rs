@@ -173,11 +173,11 @@ impl<TNow> ConnectionTask<TNow> {
         }
 
         if let Some(wake_up) = wake_up {
-            return RunOutcome::TimerNeeded(TimerNeeded {
+            RunOutcome::TimerNeeded(TimerNeeded {
                 inner: self,
                 wake_up_future,
                 when_wake_up: wake_up,
-            });
+            })
         } else {
             self.continue_with_timer(wake_up_future, future::pending())
                 .await

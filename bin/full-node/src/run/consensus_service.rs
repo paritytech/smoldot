@@ -370,7 +370,7 @@ impl SyncBackground {
                     Some((author::build::Builder::WaitSlot(when), _)) => {
                         let delay = (UNIX_EPOCH + when.when())
                             .duration_since(SystemTime::now())
-                            .unwrap_or(Duration::new(0, 0));
+                            .unwrap_or_else(|_| Duration::new(0, 0));
                         future::Either::Right(futures_timer::Delay::new(delay).fuse())
                     }
                     None => future::Either::Left(future::Either::Right(future::pending::<()>())),
