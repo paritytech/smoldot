@@ -64,7 +64,8 @@ pub struct GrandpaWarpSyncResponseFragment {
     /// if [`GrandpaWarpSyncResponse::is_finished`] is `true`.
     pub scale_encoded_header: Vec<u8>,
 
-    /// Justification that proves the finality of [`GrandpaWarpSyncResponseFragment::header`].
+    /// Justification that proves the finality of
+    /// [`GrandpaWarpSyncResponseFragment::scale_encoded_header`].
     pub scale_encoded_justification: Vec<u8>,
 }
 
