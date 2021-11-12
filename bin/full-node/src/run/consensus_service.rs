@@ -549,6 +549,7 @@ impl SyncBackground {
                         .duration_since(SystemTime::UNIX_EPOCH)
                         .unwrap(),
                     parent_runtime,
+                    block_body_capacity: 0, // TODO: could be set to the size of the tx pool
                     top_trie_root_calculation_cache: None, // TODO: pretty important for performances
                 })
             };
