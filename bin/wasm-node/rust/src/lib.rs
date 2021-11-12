@@ -163,9 +163,9 @@ impl Client {
                 type Output = F::Output;
                 fn poll(self: Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
                     let this = self.project();
-                    log::trace!("enter: {}", &this.name);
+                    log::trace!(target: "smoldot", "enter: {}", &this.name);
                     let out = this.future.poll(cx);
-                    log::trace!("leave");
+                    log::trace!(target: "smoldot", "leave");
                     out
                 }
             }
@@ -471,6 +471,7 @@ impl Client {
                         // than `Display`) because it is an untrusted user input.
                         if let Some((_, relay_chain_log_name)) = relay_chain.as_ref() {
                             log::info!(
+                                target: "smoldot",
                                 "Parachain initialization complete for {}. Name: {:?}. Genesis \
                                 hash: {}. Network identity: {}. Relay chain: {} (id: {})",
                                 log_name,
@@ -482,6 +483,7 @@ impl Client {
                             );
                         } else {
                             log::info!(
+                                target: "smoldot",
                                 "Chain initialization complete for {}. Name: {:?}. Genesis \
                                 hash: {}. Network identity: {}. Starting at block #{} ({})",
                                 log_name,
@@ -647,7 +649,7 @@ impl Client {
 
                 let running_chain = self.chains_by_key.get_mut(&key).unwrap();
                 if running_chain.2.get() == 1 {
-                    log::info!("Shutting down chain {}", running_chain.1);
+                    log::info!(target: "smoldot", "Shutting down chain {}", running_chain.1);
                     self.chains_by_key.remove(&key);
                 } else {
                     running_chain.2 = NonZeroU32::new(running_chain.2.get() - 1).unwrap();
