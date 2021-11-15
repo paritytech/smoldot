@@ -72,7 +72,7 @@ rand_chacha = { version = "0.3.1", default-features = false }
 ruzstd = { version = "0.2.4" }  # TODO: doesn't support no_std :-/
 schnorrkel = { version = "0.10.2", default-features = false, features = ["preaudit_deprecated", "u64_backend"] }
 serde = { version = "1.0.130", default-features = false, features = ["alloc", "derive"] }
-serde_json = { version = "1.0.69", default-features = false, features = ["alloc", "raw_value"] }
+serde_json = { version = "1.0.70", default-features = false, features = ["alloc", "raw_value"] }
 sha2 = { version = "0.9.8", default-features = false }
 slab = { version = "0.4.5", default-features = false }
 smallvec = "1.7.0"
