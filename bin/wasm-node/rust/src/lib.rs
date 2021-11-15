@@ -577,11 +577,12 @@ impl Client {
             // background task once the user decides to get rid of this chain.
             let abort_run_task: future::AbortHandle = {
                 let shared_init = json_rpc_service_init.clone();
+                let log_target = format!("json-rpc-{}", log_name);
                 let run_task = async move {
                     let json_rpc_service = shared_init.await;
                     loop {
                         let response = json_rpc_service.next_response().await;
-                        send_back(&response, new_chain_id)
+                        send_back(&response, &log_target, new_chain_id)
                     }
                 };
                 let (run_task, abort_run_task) = future::abortable(run_task);
@@ -673,11 +674,36 @@ impl Client {
     }
 
     fn json_rpc_request_inner(&mut self, json_rpc_request: String, chain_id: ChainId) {
-        log::debug!(
-            target: "json-rpc", // TODO: put chain id here
+        let (json_rpc_service, log_target) = match self.public_api_chains.get(chain_id.0) {
+            Some(PublicApiChain::Ok {
+                json_rpc_service,
+                key,
+                ..
+            }) => {
+                let log_name = &self.chains_by_key.get(key).unwrap().1;
+                (Some(json_rpc_service), format!("json-rpc-{}", log_name))
+            }
+            _ => (None, "json-rpc-<unknown>".to_string()),
+        };
+
+        log::log!(
+            target: &log_target,
+            if json_rpc_service.is_some() {
+                log::Level::Debug
+            } else {
+                log::Level::Warn
+            },
             "JSON-RPC => {:?}{}",
-            if json_rpc_request.len() > 100 { &json_rpc_request[..100] } else { &json_rpc_request[..] },
-            if json_rpc_request.len() > 100 { "…" } else { "" }
+            if json_rpc_request.len() > 100 {
+                &json_rpc_request[..100]
+            } else {
+                &json_rpc_request[..]
+            },
+            if json_rpc_request.len() > 100 {
+                "…"
+            } else {
+                ""
+            }
         );
 
         // Check whether the JSON-RPC request is correct, and bail out if it isn't.
@@ -685,25 +711,24 @@ impl Client {
             Ok((rq_id, _)) => rq_id,
             Err(methods::ParseError::Method { request_id, error }) => {
                 log::warn!(
-                    target: "json-rpc", // TODO: put chain id here
-                    "Error in JSON-RPC method call: {}", error
+                    target: &log_target,
+                    "Error in JSON-RPC method call: {}",
+                    error
                 );
-                send_back(&error.to_json_error(request_id), chain_id);
+                send_back(&error.to_json_error(request_id), &log_target, chain_id);
                 return;
             }
             Err(error) => {
                 log::warn!(
-                    target: "json-rpc", // TODO: put chain id here
-                    "Ignoring malformed JSON-RPC call: {}", error
+                    target: &log_target,
+                    "Ignoring malformed JSON-RPC call: {}",
+                    error
                 );
                 return;
             }
         };
 
-        if let Some(PublicApiChain::Ok {
-            json_rpc_service, ..
-        }) = self.public_api_chains.get(chain_id.0)
-        {
+        if let Some(json_rpc_service) = json_rpc_service {
             if let Some((ref json_rpc_service, _)) = json_rpc_service {
                 let mut json_rpc_service = match json_rpc_service {
                     future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
@@ -716,7 +741,7 @@ impl Client {
                     let json_rpc_service = Pin::new(&mut json_rpc_service).take_output().unwrap();
                     if let Err(err) = json_rpc_service.queue_rpc_request(json_rpc_request).await {
                         if let Some(err) = err.into_json_rpc_error() {
-                            send_back(&err, chain_id);
+                            send_back(&err, &log_target, chain_id);
                         }
                     }
                 };
@@ -738,6 +763,7 @@ impl Client {
                         ),
                         None,
                     ),
+                    &log_target,
                     chain_id,
                 );
             }
@@ -751,6 +777,7 @@ impl Client {
                     ),
                     None,
                 ),
+                &log_target,
                 chain_id,
             );
         }
@@ -775,11 +802,15 @@ enum PublicApiChain {
 ///
 /// > **Note**: This method wraps around [`ffi::emit_json_rpc_response`] and exists primarily
 /// >           in order to print a log message.
-fn send_back(message: &str, chain_id: ChainId) {
+fn send_back(message: &str, log_target: &str, chain_id: ChainId) {
     log::debug!(
-        target: "json-rpc", // TODO: put chain id here
+        target: &log_target,
         "JSON-RPC <= {}{}",
-        if message.len() > 100 { &message[..100] } else { &message[..] },
+        if message.len() > 100 {
+            &message[..100]
+        } else {
+            &message[..]
+        },
         if message.len() > 100 { "…" } else { "" }
     );
 
