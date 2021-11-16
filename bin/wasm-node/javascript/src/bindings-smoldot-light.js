@@ -98,11 +98,11 @@ export default (config) => {
             addr_len >>>= 0;
             error_ptr_ptr >>>= 0;
 
-            try {
-                if (!!connections[id]) {
-                    throw new Error("internal error: connection already allocated");
-                }
+            if (!!connections[id]) {
+                throw new Error("internal error: connection already allocated");
+            }
 
+            try {
                 const addr = Buffer.from(config.instance.exports.memory.buffer)
                     .toString('utf8', addr_ptr, addr_ptr + addr_len);
 
