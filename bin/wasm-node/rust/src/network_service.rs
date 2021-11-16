@@ -442,10 +442,13 @@ impl NetworkService {
 
                                 match result {
                                     Ok(ws) => ws,
-                                    Err(_err) => {
+                                    Err(err) => {
                                         network_service
                                             .network
-                                            .pending_outcome_err(start_connect.id, false) // TODO: should pass a proper value for `is_unreachable`, but an error is sometimes returned despite a timeout https://github.com/paritytech/smoldot/issues/1531
+                                            .pending_outcome_err(
+                                                start_connect.id,
+                                                err.map_or(false, |err| err.is_bad_addr),
+                                            ) // TODO: should pass a proper value for `is_unreachable`, but an error is sometimes returned despite a timeout https://github.com/paritytech/smoldot/issues/1531
                                             .await;
 
                                         // After a failed connection attempt, wait for a bit
