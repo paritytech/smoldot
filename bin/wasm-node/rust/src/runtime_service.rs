@@ -372,12 +372,6 @@ impl RuntimeService {
 
     /// Returns the SCALE-encoded header of the current finalized block, plus an unlimited stream
     /// that produces one item every time the finalized block is changed.
-    ///
-    /// It is guaranteed that when a notification is sent out, calling
-    /// [`RuntimeService::recent_finalized_block_runtime_lock`] will operate on this block or more
-    /// recent. In other words, if you call [`RuntimeService::recent_finalized_block_runtime_lock`]
-    /// and the stream of notifications is empty, you are guaranteed that the call has been
-    /// performed on the finalized block.
     pub async fn subscribe_finalized(
         self: &Arc<RuntimeService>,
     ) -> (Vec<u8>, NotificationsReceiver<Vec<u8>>) {
@@ -466,19 +460,6 @@ impl RuntimeService {
             finalized_block_scale_encoded_header: tree.finalized_block_header().to_vec(),
             new_blocks,
             non_finalized_blocks_ancestry_order,
-        }
-    }
-
-    // TODO: doc
-    pub async fn recent_finalized_block_runtime_lock<'a>(
-        self: &'a Arc<RuntimeService>,
-    ) -> RuntimeLock<'a> {
-        let guarded = self.guarded.lock().await;
-        let block_hash = *guarded.tree.as_ref().unwrap().finalized_block_hash();
-        RuntimeLock {
-            service: self,
-            inner: RuntimeLockInner::InTree(guarded),
-            block_hash,
         }
     }
 
@@ -703,25 +684,6 @@ impl<'a> RuntimeLock<'a> {
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
         &self.block_hash
-    }
-
-    pub fn runtime(&self) -> &executor::host::HostVmPrototype {
-        match &self.inner {
-            RuntimeLockInner::InTree(guarded) => {
-                let tree = guarded.tree.as_ref().unwrap();
-                tree.block_runtime(&self.block_hash)
-                    .unwrap()
-                    .runtime
-                    .as_ref()
-                    .unwrap()
-                    .virtual_machine
-                    .as_ref()
-                    .unwrap()
-            }
-            RuntimeLockInner::OutOfTree {
-                virtual_machine, ..
-            } => virtual_machine,
-        }
     }
 
     pub async fn start<'b>(

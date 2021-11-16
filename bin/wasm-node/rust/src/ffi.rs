@@ -240,9 +240,17 @@ pub struct Connection {
     _pinned: marker::PhantomPinned,
 }
 
+/// Error potentially returned by [`Connection::connect`].
+pub struct ConnectError {
+    /// Human-readable error message.
+    pub message: String,
+    /// `true` if the error is caused by the address to connect to being forbidden or unsupported.
+    pub is_bad_addr: bool,
+}
+
 impl Connection {
     /// Connects to the given URL. Returns a [`Connection`] on success.
-    pub fn connect(url: &str) -> impl Future<Output = Result<Pin<Box<Self>>, String>> {
+    pub fn connect(url: &str) -> impl Future<Output = Result<Pin<Box<Self>>, ConnectError>> {
         let mut pointer = Box::pin(Connection {
             id: None,
             open: false,
@@ -255,14 +263,14 @@ impl Connection {
 
         let id = u32::try_from(&*pointer as *const Connection as usize).unwrap();
 
-        let mut error_ptr = [0u8; 8];
+        let mut error_ptr = [0u8; 9];
 
         let ret_code = unsafe {
             bindings::connection_new(
                 id,
                 u32::try_from(url.as_bytes().as_ptr() as usize).unwrap(),
                 u32::try_from(url.as_bytes().len()).unwrap(),
-                u32::try_from(&mut error_ptr as *mut [u8; 8] as usize).unwrap(),
+                u32::try_from(&mut error_ptr as *mut [u8; 9] as usize).unwrap(),
             )
         };
 
@@ -276,7 +284,11 @@ impl Connection {
                         usize::try_from(len).unwrap(),
                     ))
                 };
-                return Err(str::from_utf8(&error_message).unwrap().to_owned());
+
+                return Err(ConnectError {
+                    message: str::from_utf8(&error_message).unwrap().to_owned(),
+                    is_bad_addr: error_ptr[8] != 0,
+                });
             }
 
             unsafe {
@@ -304,7 +316,10 @@ impl Connection {
                 Ok(pointer)
             } else {
                 debug_assert!(pointer.closed_message.is_some());
-                Err(pointer.closed_message.as_ref().unwrap().clone())
+                Err(ConnectError {
+                    message: pointer.closed_message.as_ref().unwrap().clone(),
+                    is_bad_addr: false,
+                })
             }
         }
     }

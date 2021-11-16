@@ -804,18 +804,31 @@ impl ReadyToRun {
                     prefix_size,
                     inner: self.inner,
                     max_keys_to_remove: None,
+                    is_v2: false,
                 })
             }
             HostFunction::ext_storage_clear_prefix_version_2 => {
                 let (prefix_ptr, prefix_size) = expect_pointer_size_raw!(0);
 
-                let max_keys_to_remove =
-                    Option::<u32>::decode_all(expect_pointer_size!(1).as_ref());
+                let max_keys_to_remove = {
+                    let input = expect_pointer_size!(1);
+                    let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
+                        nom::combinator::all_consuming(util::nom_option_decode(
+                            nom::number::complete::le_u32,
+                        ))(input.as_ref())
+                        .map(|(_, parse_result)| parse_result);
+
+                    match parsing_result {
+                        Ok(val) => Ok(val),
+                        Err(_) => Err(()),
+                    }
+                };
+
                 let max_keys_to_remove = match max_keys_to_remove {
                     Ok(l) => l,
-                    Err(err) => {
+                    Err(()) => {
                         return HostVm::Error {
-                            error: Error::ParamDecodeError(err),
+                            error: Error::ParamDecodeError,
                             prototype: self.inner.into_prototype(),
                         };
                     }
@@ -826,6 +839,7 @@ impl ReadyToRun {
                     prefix_size,
                     inner: self.inner,
                     max_keys_to_remove,
+                    is_v2: true,
                 })
             }
             HostFunction::ext_storage_root_version_1 => {
@@ -1252,9 +1266,9 @@ impl ReadyToRun {
 
                 let elements = match decode_result {
                     Ok(e) => e,
-                    Err(err) => {
+                    Err(_) => {
                         return HostVm::Error {
-                            error: Error::ParamDecodeError(err),
+                            error: Error::ParamDecodeError,
                             prototype: self.inner.into_prototype(),
                         }
                     }
@@ -1271,22 +1285,39 @@ impl ReadyToRun {
                     .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
             }
             HostFunction::ext_trie_blake2_256_ordered_root_version_1 => {
-                // TODO: don't use parity_scale_codec
-                let decode_result = Vec::<Vec<u8>>::decode_all(expect_pointer_size!(0).as_ref());
+                let result = {
+                    let input = expect_pointer_size!(0);
+                    let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
+                        nom::combinator::all_consuming(nom::combinator::flat_map(
+                            crate::util::nom_scale_compact_usize,
+                            |num_elems| {
+                                nom::multi::many_m_n(
+                                    num_elems,
+                                    num_elems,
+                                    nom::combinator::flat_map(
+                                        crate::util::nom_scale_compact_usize,
+                                        nom::bytes::complete::take,
+                                    ),
+                                )
+                            },
+                        ))(input.as_ref())
+                        .map(|(_, parse_result)| parse_result);
 
-                let elements = match decode_result {
-                    Ok(e) => e,
-                    Err(err) => {
-                        return HostVm::Error {
-                            error: Error::ParamDecodeError(err),
-                            prototype: self.inner.into_prototype(),
-                        }
+                    match parsing_result {
+                        Ok(elements) => Ok(trie::ordered_root(&elements[..])),
+                        Err(_) => Err(()),
                     }
                 };
 
-                let out = trie::ordered_root(elements.into_iter());
-                self.inner
-                    .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
+                match result {
+                    Ok(out) => self
+                        .inner
+                        .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out)),
+                    Err(()) => HostVm::Error {
+                        error: Error::ParamDecodeError,
+                        prototype: self.inner.into_prototype(),
+                    },
+                }
             }
             HostFunction::ext_trie_keccak_256_ordered_root_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_misc_print_num_version_1 => {
@@ -1765,6 +1796,9 @@ pub struct ExternalStorageClearPrefix {
 
     /// Maximum number of keys to remove.
     max_keys_to_remove: Option<u32>,
+
+    /// `true` if version 2 of the function is called, `false` for version 1.
+    is_v2: bool,
 }
 
 impl ExternalStorageClearPrefix {
@@ -1782,11 +1816,25 @@ impl ExternalStorageClearPrefix {
     }
 
     /// Resumes execution after having cleared the values.
-    pub fn resume(self) -> HostVm {
-        HostVm::ReadyToRun(ReadyToRun {
-            inner: self.inner,
-            resume_value: None,
-        })
+    ///
+    /// Must be passed how many keys have been cleared, and whether some keys remaing to be
+    /// cleared.
+    pub fn resume(self, num_cleared: u32, some_keys_remain: bool) -> HostVm {
+        if self.is_v2 {
+            self.inner.alloc_write_and_return_pointer_size(
+                HostFunction::ext_storage_clear_prefix_version_2.name(),
+                [
+                    either::Left(if some_keys_remain { [1u8] } else { [0u8] }),
+                    either::Right(num_cleared.to_le_bytes()),
+                ]
+                .into_iter(),
+            )
+        } else {
+            HostVm::ReadyToRun(ReadyToRun {
+                inner: self.inner,
+                resume_value: None,
+            })
+        }
     }
 }
 
@@ -2268,8 +2316,7 @@ pub enum Error {
         actual: usize,
     },
     /// Failed to decode a SCALE-encoded parameter.
-    // TODO: refactor and/or remove
-    ParamDecodeError(parity_scale_codec::Error),
+    ParamDecodeError,
     /// The type of one of the parameters is wrong.
     #[display(
         fmt = "Type mismatch in parameter #{}: {}, expected = {:?}, actual = {:?}",

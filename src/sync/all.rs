@@ -212,6 +212,30 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         }
     }
 
+    /// Returns consensus information about the current best block of the chain.
+    pub fn best_block_consensus(&self) -> chain_information::ChainInformationConsensusRef {
+        match &self.inner {
+            AllSyncInner::AllForks(_) => todo!(), // TODO:
+            AllSyncInner::Optimistic { inner } => inner.best_block_consensus(),
+            AllSyncInner::GrandpaWarpSync { .. } => todo!(), // TODO: ?!
+            AllSyncInner::Poisoned => unreachable!(),
+        }
+    }
+
+    /// Returns access to the storage of the best block.
+    ///
+    /// Returns `None` if [`Config::full`] was `None`.
+    pub fn best_block_storage(&self) -> Option<BlockStorage<TRq, TSrc, TBl>> {
+        match &self.inner {
+            AllSyncInner::AllForks(_) => None, // TODO: not implemented
+            AllSyncInner::Optimistic { inner } => Some(BlockStorage {
+                inner: BlockStorageInner::Optimistic(inner.best_block_storage()?),
+            }),
+            AllSyncInner::GrandpaWarpSync { .. } => None, // TODO: unclear API
+            AllSyncInner::Poisoned => unreachable!(),
+        }
+    }
+
     /// Returns the header of all known non-finalized blocks in the chain without any specific
     /// order.
     pub fn non_finalized_blocks_unordered(&self) -> impl Iterator<Item = header::HeaderRef> {
@@ -579,10 +603,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             .shared
             .requests
             .iter()
-            .filter(|(_, rq)| match rq {
-                RequestMapping::Inline(id, _, _) if *id == source_id => true,
-                _ => false,
-            })
+            .filter(|(_, rq)| matches!(rq, RequestMapping::Inline(id, _, _) if *id == source_id))
             .count();
 
         let num_inner = match (&self.inner, self.shared.sources.get(source_id.0).unwrap()) {
@@ -1472,6 +1493,49 @@ pub enum BlockAnnounceOutcome {
 
     /// Header cannot be verified now and has been silently discarded.
     Discarded,
+}
+
+/// See [`AllSync::best_block_storage`].
+pub struct BlockStorage<'a, TRq, TSrc, TBl> {
+    inner: BlockStorageInner<'a, TRq, TSrc, TBl>,
+}
+
+enum BlockStorageInner<'a, TRq, TSrc, TBl> {
+    Optimistic(
+        optimistic::BlockStorage<'a, OptimisticRequestExtra<TRq>, OptimisticSourceExtra<TSrc>, TBl>,
+    ),
+}
+
+impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
+    /// Returns the runtime built against this block.
+    pub fn runtime(&self) -> &host::HostVmPrototype {
+        match &self.inner {
+            BlockStorageInner::Optimistic(inner) => inner.runtime(),
+        }
+    }
+
+    /// Returns the storage value at the given key. `None` if this key doesn't have any value.
+    pub fn get<'val: 'a>(
+        &'val self, // TODO: unclear lifetime
+        key: &[u8],
+        or_finalized: impl FnOnce() -> Option<&'val [u8]>,
+    ) -> Option<&'val [u8]> {
+        match &self.inner {
+            BlockStorageInner::Optimistic(inner) => inner.get(key, or_finalized),
+        }
+    }
+
+    pub fn prefix_keys_ordered<'k: 'a>(
+        &'k self, // TODO: unclear lifetime
+        prefix: &'k [u8],
+        in_finalized_ordered: impl Iterator<Item = &'k [u8]> + 'k,
+    ) -> impl Iterator<Item = &'k [u8]> + 'k {
+        match &self.inner {
+            BlockStorageInner::Optimistic(inner) => {
+                inner.prefix_keys_ordered(prefix, in_finalized_ordered)
+            }
+        }
+    }
 }
 
 /// Outcome of calling [`AllSync::process_one`].

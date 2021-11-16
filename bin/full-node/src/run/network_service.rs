@@ -27,16 +27,19 @@
 // TODO: doc
 // TODO: re-review this once finished
 
+use crate::run::{database_thread, jaeger_service};
+
 use core::{cmp, pin::Pin, task::Poll, time::Duration};
 use futures::{channel::mpsc, prelude::*};
 use futures_timer::Delay;
 use smoldot::{
+    database::full_sqlite,
+    header,
     informant::HashDisplay,
     libp2p::{
-        async_rw_with_buffers, connection,
+        async_std_connection, connection,
         multiaddr::{Multiaddr, Protocol},
-        peer_id::PeerId,
-        read_write::ReadWrite,
+        peer_id::{self, PeerId},
     },
     network::{protocol, service},
 };
@@ -61,6 +64,9 @@ pub struct Config {
     /// This is a Noise static key, according to the Noise specification.
     /// Signed using the actual libp2p key.
     pub noise_key: connection::NoiseKey,
+
+    /// Service to use to report traces.
+    pub jaeger_service: Arc<jaeger_service::JaegerService>,
 }
 
 /// Configuration for one chain.
@@ -68,6 +74,9 @@ pub struct ChainConfig {
     /// List of node identities and addresses that are known to belong to the chain's peer-to-pee
     /// network.
     pub bootstrap_nodes: Vec<(PeerId, Multiaddr)>,
+
+    /// Database to use to read blocks from when answering requests.
+    pub database: Arc<database_thread::DatabaseThread>,
 
     /// Hash of the genesis block of the chain. Sent to other nodes in order to determine whether
     /// the chains match.
@@ -118,6 +127,15 @@ pub struct NetworkService {
 struct Inner {
     /// Data structure holding the entire state of the networking.
     network: service::ChainNetwork<Instant>,
+
+    /// Databases to use to read blocks from when answering requests.
+    databases: Vec<Arc<database_thread::DatabaseThread>>,
+
+    /// Identity of the local node.
+    local_peer_id: PeerId,
+
+    /// Service to use to report traces.
+    jaeger_service: Arc<jaeger_service::JaegerService>,
 }
 
 impl NetworkService {
@@ -129,70 +147,11 @@ impl NetworkService {
             .map(|_| mpsc::channel(16))
             .unzip();
 
-        // For each listening address in the configuration, create a background task dedicated to
-        // listening on that address.
-        for listen_address in config.listen_addresses {
-            // Try to parse the requested address and create the corresponding listening socket.
-            let tcp_listener: async_std::net::TcpListener = {
-                let mut iter = listen_address.iter();
-                let proto1 = match iter.next() {
-                    Some(p) => p,
-                    None => return Err(InitError::BadListenMultiaddr(listen_address)),
-                };
-                let proto2 = match iter.next() {
-                    Some(p) => p,
-                    None => return Err(InitError::BadListenMultiaddr(listen_address)),
-                };
-
-                if iter.next().is_some() {
-                    return Err(InitError::BadListenMultiaddr(listen_address));
-                }
-
-                let addr = match (proto1, proto2) {
-                    (Protocol::Ip4(ip), Protocol::Tcp(port)) => SocketAddr::from((ip, port)),
-                    (Protocol::Ip6(ip), Protocol::Tcp(port)) => SocketAddr::from((ip, port)),
-                    _ => return Err(InitError::BadListenMultiaddr(listen_address)),
-                };
-
-                match async_std::net::TcpListener::bind(addr).await {
-                    Ok(l) => l,
-                    Err(err) => {
-                        return Err(InitError::ListenerIo(listen_address, err));
-                    }
-                }
-            };
-
-            // Spawn a background task dedicated to this listener.
-            (config.tasks_executor)(Box::pin(
-                async move {
-                    loop {
-                        // TODO: add a way to immediately interrupt the listener if the network service is destroyed (or fails to create altogether), in order to immediately liberate the port
-
-                        let (_socket, _addr) = match tcp_listener.accept().await {
-                            Ok(v) => v,
-                            Err(_) => {
-                                // Errors here can happen if the accept failed, for example if no file
-                                // descriptor is available.
-                                // A wait is added in order to avoid having a busy-loop failing to
-                                // accept connections.
-                                futures_timer::Delay::new(Duration::from_secs(2)).await;
-                                continue;
-                            }
-                        };
-
-                        todo!() // TODO: report new connection
-                    }
-                }
-                .instrument(
-                    tracing::debug_span!(parent: None, "listener", address = %listen_address),
-                ),
-            ))
-        }
-
         // TODO: code is messy
         let mut known_nodes =
             Vec::with_capacity(config.chains.iter().map(|c| c.bootstrap_nodes.len()).sum());
         let mut chains = Vec::with_capacity(config.chains.len());
+        let mut databases = Vec::with_capacity(config.chains.len());
         for chain in config.chains {
             let mut bootstrap_nodes = Vec::with_capacity(chain.bootstrap_nodes.len());
             for (peer_id, addr) in chain.bootstrap_nodes {
@@ -219,11 +178,19 @@ impl NetworkService {
                 } else {
                     None
                 },
+                allow_inbound_block_requests: true,
             });
+
+            databases.push(chain.database);
         }
 
         // Initialize the inner network service.
         let inner = Arc::new(Inner {
+            local_peer_id: peer_id::PublicKey::Ed25519(
+                *config.noise_key.libp2p_public_ed25519_key(),
+            )
+            .into_peer_id(),
+            databases,
             network: service::ChainNetwork::new(service::Config {
                 now: Instant::now(),
                 chains,
@@ -236,6 +203,7 @@ impl NetworkService {
                 pending_api_events_buffer_size: NonZeroUsize::new(64).unwrap(),
                 randomness_seed: rand::random(),
             }),
+            jaeger_service: config.jaeger_service,
         });
 
         let mut abort_handles = Vec::new();
@@ -269,6 +237,19 @@ impl NetworkService {
                                 announce,
                             } => {
                                 let decoded = announce.decode();
+
+                                let mut _jaeger_span = inner.jaeger_service.net_connection_span(
+                                    &inner.local_peer_id,
+                                    &peer_id,
+                                    "block-announce-received",
+                                );
+                                _jaeger_span.add_int_tag(
+                                    "number",
+                                    i64::try_from(decoded.header.number).unwrap(),
+                                );
+                                _jaeger_span
+                                    .add_string_tag("hash", &hex::encode(&decoded.header.hash()));
+
                                 tracing::debug!(
                                     %chain_index, %peer_id,
                                     hash = %HashDisplay(&decoded.header.hash()),
@@ -276,6 +257,7 @@ impl NetworkService {
                                     is_best = ?decoded.is_best,
                                     "block-announce"
                                 );
+
                                 break Event::BlockAnnounce {
                                     chain_index,
                                     peer_id,
@@ -289,6 +271,12 @@ impl NetworkService {
                                 best_hash,
                                 ..
                             } => {
+                                tracing::debug!(
+                                    %peer_id,
+                                    %best_number,
+                                    best_hash = %HashDisplay(&best_hash),
+                                    "chain-connected"
+                                );
                                 break Event::Connected {
                                     peer_id,
                                     chain_index,
@@ -300,6 +288,7 @@ impl NetworkService {
                                 peer_id,
                                 chain_index,
                             } => {
+                                tracing::debug!(%peer_id, "chain-disconnected");
                                 break Event::Disconnected {
                                     chain_index,
                                     peer_id,
@@ -316,6 +305,50 @@ impl NetworkService {
                             service::Event::IdentifyRequestIn { peer_id, request } => {
                                 tracing::debug!(%peer_id, "identify-request");
                                 request.respond("smoldot").await;
+                            }
+                            service::Event::BlocksRequestIn {
+                                peer_id,
+                                chain_index,
+                                config,
+                                request,
+                            } => {
+                                tracing::debug!(%peer_id, "incoming-blocks-request");
+                                let mut _jaeger_span1 = inner.jaeger_service.net_connection_span(
+                                    &inner.local_peer_id,
+                                    &peer_id,
+                                    "incoming-blocks-request",
+                                );
+                                _jaeger_span1
+                                    .add_int_tag("num-blocks", config.desired_count.get().into());
+                                let _jaeger_span2 = if let (
+                                    1,
+                                    protocol::BlocksRequestConfigStart::Hash(block_hash),
+                                ) =
+                                    (config.desired_count.get(), &config.start)
+                                {
+                                    let mut span = inner
+                                        .jaeger_service
+                                        .block_span(block_hash, "incoming-blocks-request");
+                                    let hex = hex::encode(block_hash);
+                                    span.add_string_tag("hash", &hex);
+                                    _jaeger_span1.add_string_tag("hash", &hex);
+                                    Some(span)
+                                } else {
+                                    None
+                                };
+
+                                let response =
+                                    blocks_request_response(&inner.databases[chain_index], config)
+                                        .await;
+                                request
+                                    .respond(match response {
+                                        Ok(b) => Some(b),
+                                        Err(error) => {
+                                            tracing::warn!(%error, "incoming-blocks-request-error");
+                                            None
+                                        }
+                                    })
+                                    .await;
                             }
                             service::Event::GrandpaCommitMessage {
                                 chain_index,
@@ -351,7 +384,7 @@ impl NetworkService {
             };
 
             let (abortable, abort_handle) = future::abortable(
-                future.instrument(tracing::debug_span!(parent: None, "network-events-poll")),
+                future.instrument(tracing::trace_span!(parent: None, "network-events-poll")),
             );
             abort_handles.push(abort_handle);
             abortable.map(|_| ())
@@ -376,7 +409,7 @@ impl NetworkService {
                             Ok(insert) => {
                                 insert
                                     .insert(&Instant::now())
-                                    .instrument(tracing::debug_span!("insert"))
+                                    .instrument(tracing::trace_span!("insert"))
                                     .await
                             }
                             Err(error) => {
@@ -387,7 +420,7 @@ impl NetworkService {
                 };
 
                 let (abortable, abort_handle) = future::abortable(
-                    future.instrument(tracing::debug_span!(parent: None, "kademlia-discovery")),
+                    future.instrument(tracing::trace_span!(parent: None, "kademlia-discovery")),
                 );
                 abort_handles.push(abort_handle);
                 abortable.map(|_| ())
@@ -407,7 +440,7 @@ impl NetworkService {
                 };
 
                 let (abortable, abort_handle) = future::abortable(
-                    future.instrument(tracing::debug_span!(parent: None, "slots-assign")),
+                    future.instrument(tracing::trace_span!(parent: None, "slots-assign")),
                 );
                 abort_handles.push(abort_handle);
                 abortable.map(|_| ())
@@ -417,50 +450,164 @@ impl NetworkService {
         // A channel is used to communicate new tasks dedicated to handling connections.
         let (connec_tx, mut connec_rx) = mpsc::channel(num_cpus::get());
 
-        // Spawn task dedicated to opening connections.
-        // TODO: spawn multiple of these tasks and block them on the connection attempt; not possible now because `next_start_connect` has a bug
-        (config.tasks_executor)(Box::pin({
-            let inner = inner.clone();
-            let mut connec_tx = connec_tx.clone();
-            let future = async move {
-                loop {
-                    let start_connect = inner.network.next_start_connect(Instant::now()).await;
+        // For each listening address in the configuration, create a background task dedicated to
+        // listening on that address.
+        for listen_address in config.listen_addresses {
+            // Try to parse the requested address and create the corresponding listening socket.
+            let tcp_listener: async_std::net::TcpListener = {
+                let mut iter = listen_address.iter();
+                let proto1 = match iter.next() {
+                    Some(p) => p,
+                    None => return Err(InitError::BadListenMultiaddr(listen_address)),
+                };
+                let proto2 = match iter.next() {
+                    Some(p) => p,
+                    None => return Err(InitError::BadListenMultiaddr(listen_address)),
+                };
 
-                    let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
-                    let _enter = span.enter();
+                if iter.next().is_some() {
+                    return Err(InitError::BadListenMultiaddr(listen_address));
+                }
 
-                    // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
-                    // a `Future<dyn Output = Result<TcpStream, ...>>`.
-                    let socket = match multiaddr_to_socket(&start_connect.multiaddr) {
-                        Ok(socket) => socket,
-                        Err(_) => {
-                            tracing::debug!(%start_connect.multiaddr, "not-tcp");
-                            inner
-                                .network
-                                .pending_outcome_err(start_connect.id, true)
-                                .await;
-                            continue;
-                        }
-                    };
+                let addr = match (proto1, proto2) {
+                    (Protocol::Ip4(ip), Protocol::Tcp(port)) => SocketAddr::from((ip, port)),
+                    (Protocol::Ip6(ip), Protocol::Tcp(port)) => SocketAddr::from((ip, port)),
+                    _ => return Err(InitError::BadListenMultiaddr(listen_address)),
+                };
 
-                    // TODO: handle dialing timeout here
-
-                    let inner = inner.clone();
-
-                    // Ignore errors, as it is possible for the destination task to have been
-                    // aborted already.
-                    let _ = connec_tx.send(connection_task(socket, start_connect.timeout, inner, start_connect.id).instrument(
-                        tracing::debug_span!(parent: None, "connection", address = %start_connect.multiaddr),
-                    ).boxed()).await;
+                match async_std::net::TcpListener::bind(addr).await {
+                    Ok(l) => l,
+                    Err(err) => {
+                        return Err(InitError::ListenerIo(listen_address, err));
+                    }
                 }
             };
 
-            let (abortable, abort_handle) = future::abortable(
-                future.instrument(tracing::debug_span!(parent: None, "tcp-dial")),
-            );
-            abort_handles.push(abort_handle);
-            abortable.map(|_| ())
-        }));
+            // Spawn a background task dedicated to this listener.
+            (config.tasks_executor)(Box::pin({
+                let mut connec_tx = connec_tx.clone();
+                let inner = inner.clone();
+                let future = async move {
+                    loop {
+                        let (socket, addr) = match tcp_listener.accept().await {
+                            Ok(v) => v,
+                            Err(_) => {
+                                // Errors here can happen if the accept failed, for example if no file
+                                // descriptor is available.
+                                // A wait is added in order to avoid having a busy-loop failing to
+                                // accept connections.
+                                futures_timer::Delay::new(Duration::from_secs(2)).await;
+                                continue;
+                            }
+                        };
+
+                        let multiaddr = Multiaddr::from(addr.ip()).with(Protocol::Tcp(addr.port()));
+
+                        tracing::debug!(%multiaddr, "incoming-connection");
+
+                        let connection_id = inner
+                            .network
+                            .add_incoming_connection(Instant::now(), multiaddr.clone())
+                            .await;
+
+                        // Ignore errors, as it is possible for the destination task to have been
+                        // aborted already.
+                        let inner = inner.clone();
+                        let _ = connec_tx.send(
+                            connection_task(socket, inner, connection_id).instrument(
+                                tracing::trace_span!(parent: None, "connection", address = %multiaddr),
+                            ).boxed()
+                        ).await;
+                    }
+                };
+
+                let (abortable, abort_handle) = future::abortable(future.instrument(
+                    tracing::trace_span!(parent: None, "listener", address = %listen_address),
+                ));
+                abort_handles.push(abort_handle);
+                abortable.map(|_| ())
+            }))
+        }
+
+        // Spawn task dedicated to opening connections.
+        // Multiple tasks are spawned, and each task blocks during the connection process, in
+        // order to limit the number of simultaneous connection attempts.
+        for _ in 0..16 {
+            (config.tasks_executor)(Box::pin({
+                let inner = inner.clone();
+                let mut connec_tx = connec_tx.clone();
+                let future = async move {
+                    loop {
+                        let start_connect = inner.network.next_start_connect(Instant::now()).await;
+
+                        let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
+                        let _enter = span.enter();
+
+                        // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d`) into
+                        // a `Future<dyn Output = Result<TcpStream, ...>>`.
+                        let socket = match multiaddr_to_socket(&start_connect.multiaddr) {
+                            Ok(socket) => socket,
+                            Err(_) => {
+                                tracing::debug!(%start_connect.multiaddr, "not-tcp");
+                                drop(_enter);
+                                inner
+                                    .network
+                                    .pending_outcome_err(start_connect.id, true)
+                                    .await;
+                                continue;
+                            }
+                        };
+                        drop(_enter);
+
+                        // Finishing ongoing connection process.
+                        let socket = {
+                            let now = Instant::now();
+                            let mut timeout = Delay::new(if start_connect.timeout >= now {
+                                start_connect.timeout - now
+                            } else {
+                                // `timeout - now` would panic
+                                Duration::new(0, 0)
+                            })
+                            .fuse();
+                            let socket = socket.fuse();
+                            futures::pin_mut!(socket);
+                            futures::select! {
+                                _ = timeout => {
+                                    inner.network.pending_outcome_err(start_connect.id, false).await;
+                                    continue;
+                                }
+                                result = socket => {
+                                    match result {
+                                        Ok(s) => s,
+                                        Err(_) => {
+                                            inner.network.pending_outcome_err(start_connect.id, true).await;
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                        };
+
+                        // Inform the underlying network state machine that this dialing attempt
+                        // has succeeded.
+                        let id = inner.network.pending_outcome_ok(start_connect.id).await;
+
+                        // Ignore errors, as it is possible for the destination task to have been
+                        // aborted already.
+                        let inner = inner.clone();
+                        let _ = connec_tx.send(connection_task(socket, inner, id).instrument(
+                            tracing::trace_span!(parent: None, "connection", address = %start_connect.multiaddr),
+                        ).boxed()).await;
+                    }
+                };
+
+                let (abortable, abort_handle) = future::abortable(
+                    future.instrument(tracing::trace_span!(parent: None, "tcp-dial")),
+                );
+                abort_handles.push(abort_handle);
+                abortable.map(|_| ())
+            }));
+        }
 
         // Spawn task dedicated to processing connections.
         // A single task is responsible for all connections, thereby ensuring that the networking
@@ -479,7 +626,7 @@ impl NetworkService {
             };
 
             let (abortable, abort_handle) = future::abortable(
-                future.instrument(tracing::debug_span!(parent: None, "connections-executor")),
+                future.instrument(tracing::trace_span!(parent: None, "connections-executor")),
             );
             abort_handles.push(abort_handle);
             abortable.map(|_| ())
@@ -542,6 +689,13 @@ impl NetworkService {
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, service::BlocksRequestError> {
+        let mut _jaeger_span = self.inner.jaeger_service.net_connection_span(
+            &self.inner.local_peer_id,
+            &target,
+            "outgoing-blocks-request",
+        );
+        _jaeger_span.add_int_tag("num-blocks", config.desired_count.get().into());
+
         self.inner
             .network
             .blocks_request(Instant::now(), &target, chain_index, config)
@@ -570,151 +724,63 @@ pub enum InitError {
 /// Asynchronous task managing a specific TCP connection.
 #[tracing::instrument(level = "trace", skip(tcp_socket, network_service))]
 async fn connection_task(
-    tcp_socket: impl Future<Output = Result<async_std::net::TcpStream, io::Error>>,
-    timeout: Instant,
+    tcp_socket: async_std::net::TcpStream,
     network_service: Arc<Inner>,
-    id: service::PendingId,
+    id: service::ConnectionId,
 ) {
-    // Finishing ongoing connection process.
-    let tcp_socket = {
-        let now = Instant::now();
-        let mut timeout = Delay::new(if timeout >= now {
-            timeout - now
-        } else {
-            // `timeout - now` would panic
-            Duration::new(0, 0)
-        })
-        .fuse();
-        let tcp_socket = tcp_socket.fuse();
-        futures::pin_mut!(tcp_socket);
-        futures::select! {
-            _ = timeout => {
-                network_service.network.pending_outcome_err(id, false).await;
-                return;
-            }
-            result = tcp_socket => {
-                match result {
-                    Ok(s) => s,
-                    Err(_) => {
-                        network_service.network.pending_outcome_err(id, true).await;
-                        return;
-                    }
-                }
-            }
-        }
-    };
-
-    let id = network_service.network.pending_outcome_ok(id).await;
-
-    // The Nagle algorithm, implemented in the kernel, consists in buffering the data to be sent
-    // out and waiting a bit before actually sending it out, in order to potentially merge
-    // multiple writes in a row into one packet. In the implementation below, it is guaranteed
-    // that the buffer in `WithBuffers` is filled with as much data as possible before the
-    // operating system gets involved. As such, we disable the Nagle algorithm, in order to avoid
-    // adding an artificial delay to all sends.
-    let _ = tcp_socket.set_nodelay(true);
-
-    // The socket is wrapped around a `WithBuffers` object containing a read buffer and a write
-    // buffer. These are the buffers whose pointer is passed to `read(2)` and `write(2)` when
-    // reading/writing the socket.
-    let tcp_socket = async_rw_with_buffers::WithBuffers::new(tcp_socket);
-    futures::pin_mut!(tcp_socket);
+    let mut task = async_std_connection::RunOutcome::Ready(
+        async_std_connection::ConnectionTask::new(tcp_socket),
+    );
 
     loop {
-        let (read_buffer, write_buffer) = match tcp_socket.buffers() {
-            Ok(b) => b,
-            Err(error) => {
+        match task {
+            async_std_connection::RunOutcome::Ready(mut ready) => {
+                {
+                    let mut read_write = ready.read_write(Instant::now());
+
+                    match network_service
+                        .network
+                        .read_write(id, &mut read_write)
+                        .await
+                    {
+                        Ok(()) => (),
+                        Err(error) => {
+                            tracing::debug!(%error, "task-finished");
+                            return;
+                        }
+                    };
+
+                    if read_write.read_bytes != 0
+                        || read_write.written_bytes != 0
+                        || read_write.outgoing_buffer.is_none()
+                    {
+                        tracing::event!(
+                            tracing::Level::TRACE,
+                            read = read_write.read_bytes,
+                            written = read_write.written_bytes,
+                            "wake-up" = ?read_write.wake_up_after,  // TODO: ugly display
+                            "write-close" = read_write.outgoing_buffer.is_none(),
+                        );
+                    }
+                }
+
+                task = ready.resume().await;
+            }
+            async_std_connection::RunOutcome::IoError(error) => {
                 tracing::debug!(%error, "task-finished");
                 // TODO: report disconnect to service
                 return;
             }
-        };
-
-        let now = Instant::now();
-
-        let mut read_write = ReadWrite {
-            now,
-            incoming_buffer: read_buffer.map(|b| b.0),
-            outgoing_buffer: write_buffer,
-            read_bytes: 0,
-            written_bytes: 0,
-            wake_up_after: None,
-            wake_up_future: None,
-        };
-
-        match network_service
-            .network
-            .read_write(id, &mut read_write)
-            .await
-        {
-            Ok(rw) => rw,
-            Err(error) => {
-                // Make sure to finish closing the TCP socket.
-                tcp_socket
-                    .flush_close()
-                    .instrument(tracing::debug_span!("flush-close"))
+            async_std_connection::RunOutcome::TimerNeeded(timer) => {
+                let now = Instant::now();
+                let when = *timer.when();
+                task = timer
+                    .resume(if when <= now {
+                        future::Either::Left(future::ready(()))
+                    } else {
+                        future::Either::Right(futures_timer::Delay::new(when - now))
+                    })
                     .await;
-                tracing::debug!(%error, "task-finished");
-                return;
-            }
-        };
-
-        if read_write.read_bytes != 0
-            || read_write.written_bytes != 0
-            || read_write.outgoing_buffer.is_none()
-        {
-            tracing::event!(
-                tracing::Level::TRACE,
-                read = read_write.read_bytes,
-                written = read_write.written_bytes,
-                "wake-up" = ?read_write.wake_up_after,  // TODO: ugly display
-                "write-close" = read_write.outgoing_buffer.is_none(),
-            );
-        }
-
-        let read_bytes = read_write.read_bytes;
-        let written_bytes = read_write.written_bytes;
-        let write_closed = read_write.outgoing_buffer.is_none();
-        let wake_up_after = read_write.wake_up_after;
-        let wake_up_future = if let Some(wake_up_future) = read_write.wake_up_future {
-            future::Either::Left(wake_up_future)
-        } else {
-            future::Either::Right(future::pending())
-        };
-
-        if write_closed && !tcp_socket.is_closed() {
-            tcp_socket.close();
-            tracing::debug!("write-closed");
-        }
-
-        tcp_socket.advance(read_bytes, written_bytes);
-
-        let mut poll_after = if let Some(wake_up) = wake_up_after {
-            if wake_up > now {
-                let dur = wake_up - now;
-                future::Either::Left(futures_timer::Delay::new(dur))
-            } else {
-                continue;
-            }
-        } else {
-            future::Either::Right(future::pending())
-        }
-        .fuse();
-
-        futures::select! {
-            _ = tcp_socket.as_mut().process().fuse() => {
-                tracing::event!(
-                    tracing::Level::TRACE,
-                    "socket-ready"
-                );
-            },
-            _ = wake_up_future.fuse() => {},
-            () = poll_after => {
-                // Nothing to do, but guarantees that we loop again.
-                tracing::event!(
-                    tracing::Level::TRACE,
-                    "timer-ready"
-                );
             }
         }
     }
@@ -764,4 +830,77 @@ fn multiaddr_to_socket(
             _ => unreachable!(),
         }
     })
+}
+
+/// Builds the response to a block request by reading from the given database.
+async fn blocks_request_response(
+    database: &database_thread::DatabaseThread,
+    config: protocol::BlocksRequestConfig,
+) -> Result<Vec<protocol::BlockData>, full_sqlite::AccessError> {
+    database
+        .with_database(move |database| {
+            let num_blocks = cmp::min(
+                usize::try_from(config.desired_count.get()).unwrap_or(usize::max_value()),
+                128,
+            );
+
+            let mut output = Vec::with_capacity(num_blocks);
+            let mut next_block = config.start;
+
+            loop {
+                if output.len() >= num_blocks {
+                    break;
+                }
+
+                let hash = match next_block {
+                    protocol::BlocksRequestConfigStart::Hash(hash) => hash,
+                    protocol::BlocksRequestConfigStart::Number(number) => {
+                        // TODO: naive block selection ; should choose the best chain instead
+                        match database.block_hash_by_number(number)?.next() {
+                            Some(h) => h,
+                            None => break,
+                        }
+                    }
+                };
+
+                let header = match database.block_scale_encoded_header(&hash)? {
+                    Some(h) => h,
+                    None => break,
+                };
+
+                next_block = {
+                    let decoded = header::decode(&header).unwrap();
+                    match config.direction {
+                        protocol::BlocksRequestDirection::Ascending => {
+                            protocol::BlocksRequestConfigStart::Hash(*decoded.parent_hash)
+                        }
+                        protocol::BlocksRequestDirection::Descending => {
+                            // TODO: right now, since we don't necessarily pick the best chain in `block_hash_by_number`, it is possible that the next block doesn't have the current block as parent
+                            protocol::BlocksRequestConfigStart::Number(decoded.number + 1)
+                        }
+                    }
+                };
+
+                output.push(protocol::BlockData {
+                    hash,
+                    header: if config.fields.header {
+                        Some(header)
+                    } else {
+                        None
+                    },
+                    body: if config.fields.body {
+                        Some(match database.block_extrinsics(&hash)? {
+                            Some(body) => body.collect(),
+                            None => break,
+                        })
+                    } else {
+                        None
+                    },
+                    justification: None, // TODO: justifications aren't saved in database at the moment
+                });
+            }
+
+            Ok(output)
+        })
+        .await
 }

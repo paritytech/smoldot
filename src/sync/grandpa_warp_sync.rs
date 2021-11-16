@@ -65,7 +65,7 @@ use crate::{
         vm::ExecHint,
     },
     finality::grandpa::warp_sync,
-    header::{Header, HeaderRef},
+    header::{self, Header, HeaderRef},
     network::protocol::GrandpaWarpSyncResponse,
 };
 
@@ -646,9 +646,13 @@ impl<TSrc> Verifier<TSrc> {
                 Ok(()),
             ),
             Ok(warp_sync::Next::Success {
-                header,
+                scale_encoded_header,
                 chain_information_finality,
             }) => {
+                // As the verification of the fragment has succeeded, we are sure that the header
+                // is valid and can decode it.
+                let header: Header = header::decode(&scale_encoded_header).unwrap().into();
+
                 if self.final_set_of_fragments {
                     (
                         InProgressGrandpaWarpSync::VirtualMachineParamsGet(

@@ -38,7 +38,7 @@
 
 use crate::ffi;
 
-use core::{cmp, fmt, num::NonZeroUsize, pin::Pin, task::Poll, time::Duration};
+use core::{cmp, num::NonZeroUsize, pin::Pin, task::Poll, time::Duration};
 use futures::{channel::mpsc, prelude::*};
 use itertools::Itertools as _;
 use smoldot::{
@@ -170,6 +170,7 @@ impl NetworkService {
                 best_number: chain.best_block.0,
                 genesis_hash: chain.genesis_block_hash,
                 role: protocol::Role::Light,
+                allow_inbound_block_requests: false,
             });
 
             known_nodes.extend(chain.bootstrap_nodes);
@@ -313,6 +314,7 @@ impl NetworkService {
                                     );
                                     request.respond("smoldot").await;
                                 }
+                                service::Event::BlocksRequestIn { .. } => unreachable!(),
                                 service::Event::GrandpaCommitMessage {
                                     chain_index,
                                     message,
@@ -358,63 +360,143 @@ impl NetworkService {
             }),
         );
 
-        let (mut connec_tx, mut connec_rx) = mpsc::channel(8);
+        let (connec_tx, mut connec_rx) = mpsc::channel(8);
 
         // Spawn tasks dedicated to opening connections.
-        // TODO: spawn multiple of these and tweak the `connection_task`, so that we limit ourselves to N simultaneous connection openings, to please some ISPs
-        (config.tasks_executor)(
-            "connections-open".into(),
-            Box::pin({
-                let network_service = network_service.clone();
-                let future = async move {
-                    loop {
-                        let start_connect = network_service
-                            .network
-                            .next_start_connect(ffi::Instant::now())
-                            .await;
+        // Multiple tasks are spawned, and each task blocks during the connection process, in
+        // order to limit the number of simultaneous connection attempts.
+        for _ in 0..8 {
+            (config.tasks_executor)(
+                "connections-open".into(),
+                Box::pin({
+                    let network_service = network_service.clone();
+                    let mut connec_tx = connec_tx.clone();
+                    let future = async move {
+                        loop {
+                            let start_connect = network_service
+                                .network
+                                .next_start_connect(ffi::Instant::now())
+                                .await;
 
-                        let is_important_peer = network_service
-                            .important_nodes
-                            .contains(&start_connect.expected_peer_id);
+                            let is_important_peer = network_service
+                                .important_nodes
+                                .contains(&start_connect.expected_peer_id);
 
-                        // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`)
-                        // into a `Future<dyn Output = Result<TcpStream, ...>>`.
-                        let socket = {
+                            // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`)
+                            // into a `Future<dyn Output = Result<TcpStream, ...>>`.
+                            let socket = {
+                                log::debug!(
+                                    target: "connections",
+                                    "Pending({:?}, {}) started: {}",
+                                    start_connect.id, start_connect.expected_peer_id,
+                                    start_connect.multiaddr
+                                );
+                                ffi::Connection::connect(&start_connect.multiaddr.to_string())
+                            };
+
+                            // Perform the connection process.
+                            let socket = {
+                                let socket = socket.fuse();
+                                futures::pin_mut!(socket);
+                                let mut timeout = ffi::Delay::new_at(start_connect.timeout);
+
+                                let result = futures::select! {
+                                    _ = timeout => Err(None),
+                                    result = socket => result.map_err(Some),
+                                };
+
+                                match (&result, is_important_peer) {
+                                    (Ok(_), _) => {}
+                                    (Err(None), true) => {
+                                        log::warn!(
+                                            target: "connections",
+                                            "Timeout when trying to reach {} through {}",
+                                            start_connect.expected_peer_id, start_connect.multiaddr
+                                        );
+                                    }
+                                    (Err(None), false) => {
+                                        log::debug!(
+                                            target: "connections",
+                                            "Pending({:?}, {}) => Timeout ({})",
+                                            start_connect.id, start_connect.expected_peer_id,
+                                            start_connect.multiaddr
+                                        );
+                                    }
+                                    (Err(Some(err)), true) if !err.is_bad_addr => {
+                                        log::warn!(
+                                            target: "connections",
+                                            "Failed to reach {} through {}: {}",
+                                            start_connect.expected_peer_id, start_connect.multiaddr,
+                                            err.message
+                                        );
+                                    }
+                                    (Err(Some(err)), _) => {
+                                        log::debug!(
+                                            target: "connections",
+                                            "Pending({:?}, {}) => Failed to reach ({}): {}",
+                                            start_connect.id, start_connect.expected_peer_id,
+                                            start_connect.multiaddr, err.message
+                                        );
+                                    }
+                                }
+
+                                match result {
+                                    Ok(ws) => ws,
+                                    Err(err) => {
+                                        network_service
+                                            .network
+                                            .pending_outcome_err(
+                                                start_connect.id,
+                                                err.map_or(false, |err| err.is_bad_addr),
+                                            ) // TODO: should pass a proper value for `is_unreachable`, but an error is sometimes returned despite a timeout https://github.com/paritytech/smoldot/issues/1531
+                                            .await;
+
+                                        // After a failed connection attempt, wait for a bit
+                                        // before trying again.
+                                        ffi::Delay::new(Duration::from_millis(500)).await;
+                                        continue;
+                                    }
+                                }
+                            };
+
+                            // Connection process is successful. Notify the network state machine.
+                            let id = network_service
+                                .network
+                                .pending_outcome_ok(start_connect.id)
+                                .await;
                             log::debug!(
                                 target: "connections",
-                                "Pending({:?}, {}) started: {}",
-                                start_connect.id, start_connect.expected_peer_id,
+                                "Pending({:?}, {}) => Connection({:?}) through {}",
+                                start_connect.id,
+                                start_connect.expected_peer_id,
+                                id,
                                 start_connect.multiaddr
                             );
-                            ffi::Connection::connect(&start_connect.multiaddr.to_string())
-                        };
 
-                        // TODO: handle dialing timeout here
+                            let network_service2 = network_service.clone();
+                            // Sending the new connection might fail in case a shutdown is
+                            // happening.
+                            let _ = connec_tx
+                                .send(Box::pin({
+                                    connection_task(
+                                        socket,
+                                        network_service2,
+                                        id,
+                                        start_connect.expected_peer_id,
+                                        start_connect.multiaddr,
+                                        is_important_peer,
+                                    )
+                                }))
+                                .await;
+                        }
+                    };
 
-                        let network_service2 = network_service.clone();
-
-                        // Sending the new connection might fail in case a shutdown is happening.
-                        let _ = connec_tx
-                            .send(Box::pin({
-                                connection_task(
-                                    socket,
-                                    network_service2,
-                                    start_connect.id,
-                                    start_connect.timeout,
-                                    start_connect.expected_peer_id,
-                                    start_connect.multiaddr,
-                                    is_important_peer,
-                                )
-                            }))
-                            .await;
-                    }
-                };
-
-                let (abortable, abort_handle) = future::abortable(future);
-                abort_handles.push(abort_handle);
-                abortable.map(|_| ())
-            }),
-        );
+                    let (abortable, abort_handle) = future::abortable(future);
+                    abort_handles.push(abort_handle);
+                    abortable.map(|_| ())
+                }),
+            );
+        }
 
         // Spawn tasks dedicated to processing existing connections.
         (config.tasks_executor)(
@@ -792,80 +874,13 @@ pub enum Event {
 ///
 /// `is_important_peer` controls the log level used for problems that happen on this connection.
 async fn connection_task(
-    websocket: impl Future<Output = Result<Pin<Box<ffi::Connection>>, impl fmt::Display>>,
+    mut websocket: Pin<Box<ffi::Connection>>,
     network_service: Arc<NetworkServiceInner>,
-    pending_id: service::PendingId,
-    timeout: ffi::Instant,
+    id: service::ConnectionId,
     expected_peer_id: PeerId,
     attemped_multiaddr: Multiaddr,
     is_important_peer: bool,
 ) {
-    // Finishing the ongoing connection process.
-    let mut websocket = {
-        let websocket = websocket.fuse();
-        futures::pin_mut!(websocket);
-        let mut timeout = ffi::Delay::new_at(timeout);
-
-        let result = futures::select! {
-            _ = timeout => Err(None),
-            result = websocket => result.map_err(Some),
-        };
-
-        match (&result, is_important_peer) {
-            (Ok(_), _) => {}
-            (Err(None), true) => {
-                log::warn!(
-                    target: "connections",
-                    "Timeout when trying to reach {} through {}",
-                    expected_peer_id, attemped_multiaddr
-                );
-            }
-            (Err(None), false) => {
-                log::debug!(
-                    target: "connections",
-                    "Pending({:?}, {}) => Timeout ({})",
-                    pending_id, expected_peer_id, attemped_multiaddr
-                );
-            }
-            (Err(Some(err)), true) => {
-                log::warn!(
-                    target: "connections",
-                    "Failed to reach {} through {}: {}",
-                    expected_peer_id, attemped_multiaddr, err
-                );
-            }
-            (Err(Some(err)), false) => {
-                log::debug!(
-                    target: "connections",
-                    "Pending({:?}, {}) => Failed to reach ({}): {}",
-                    pending_id, expected_peer_id, attemped_multiaddr, err
-                );
-            }
-        }
-
-        match result {
-            Ok(ws) => ws,
-            Err(err) => {
-                network_service
-                    .network
-                    .pending_outcome_err(pending_id, err.is_some())
-                    .await;
-                return;
-            }
-        }
-    };
-
-    // Connection process is successful. Notify the network state machine.
-    let id = network_service.network.pending_outcome_ok(pending_id).await;
-    log::debug!(
-        target: "connections",
-        "Pending({:?}, {}) => Connection({:?}) through {}",
-        pending_id,
-        expected_peer_id,
-        id,
-        attemped_multiaddr
-    );
-
     let mut write_buffer = vec![0; 4096];
 
     loop {

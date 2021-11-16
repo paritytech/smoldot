@@ -1095,6 +1095,9 @@ where
                     })
                     .unwrap();
 
+                let _index = guarded.connections_by_id.remove(&connection_id);
+                debug_assert_eq!(_index, Some(connection_index));
+
                 guarded.connections.remove(connection_index);
                 match mem::replace(&mut connection_lock.connection, ConnectionInner::Dead) {
                     ConnectionInner::PendingErrorReport { error } => {
@@ -1412,7 +1415,7 @@ where
         debug_assert!(self.pending_event.is_none());
 
         match mem::replace(&mut self.connection, ConnectionInner::Poisoned) {
-            ConnectionInner::Established(connection) if self.shutting_down => {
+            ConnectionInner::Established(_) if self.shutting_down => {
                 // TODO: shut down should be graceful instead of an error
                 debug_assert!(self.pending_event.is_none());
                 self.connection = ConnectionInner::PendingErrorReport {

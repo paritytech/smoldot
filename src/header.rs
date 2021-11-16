@@ -115,7 +115,7 @@ pub fn hash_from_scale_encoded_header_vectored(
 
 /// Returns the value appropriate for [`Header::extrinsics_root`]. Must be passed the list of
 /// transactions in that block.
-pub fn extrinsics_root(transactions: impl Iterator<Item = impl AsRef<[u8]>>) -> [u8; 32] {
+pub fn extrinsics_root(transactions: &[impl AsRef<[u8]>]) -> [u8; 32] {
     trie::ordered_root(transactions)
 }
 

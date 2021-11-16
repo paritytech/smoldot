@@ -445,20 +445,41 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     ///
     #[must_use]
     pub fn set_best_block(&mut self, new_best_block_hash: &[u8; 32]) -> SetBestBlock {
-        let new_best_block_index = *self.blocks_by_id.get(new_best_block_hash).unwrap();
+        // Index of the provided block within the tree. `None` if equal to `blocks_tree_root_hash`.
+        let new_best_block_index = if *new_best_block_hash == self.blocks_tree_root_hash {
+            None
+        } else {
+            Some(*self.blocks_by_id.get(new_best_block_hash).unwrap())
+        };
 
         // Iterators over the potential re-org. Used below to report the transaction status
         // updates.
         let (old_best_to_common_ancestor, common_ancestor_to_new_best) =
-            if let Some(old_best_index) = self.best_block_index {
-                let (ascend, descend) = self
-                    .blocks_tree
-                    .ascend_and_descend(old_best_index, new_best_block_index);
-                (either::Left(ascend), either::Left(descend))
-            } else {
-                let ascend = iter::empty::<fork_tree::NodeIndex>();
-                let descend = self.blocks_tree.root_to_node_path(new_best_block_index);
-                (either::Right(ascend), either::Right(descend))
+            match (self.best_block_index, new_best_block_index) {
+                (Some(old_best_index), Some(new_best_block_index)) => {
+                    let (ascend, descend) = self
+                        .blocks_tree
+                        .ascend_and_descend(old_best_index, new_best_block_index);
+                    (
+                        either::Left(either::Left(ascend)),
+                        either::Left(either::Left(descend)),
+                    )
+                }
+                (Some(old_best_index), None) => {
+                    let ascend = self.blocks_tree.node_to_root_path(old_best_index);
+                    let descend = iter::empty::<fork_tree::NodeIndex>();
+                    (either::Left(either::Right(ascend)), either::Right(descend))
+                }
+                (None, Some(new_best_block_index)) => {
+                    let ascend = iter::empty::<fork_tree::NodeIndex>();
+                    let descend = self.blocks_tree.root_to_node_path(new_best_block_index);
+                    (either::Right(ascend), either::Left(either::Right(descend)))
+                }
+                (None, None) => {
+                    let ascend = iter::empty::<fork_tree::NodeIndex>();
+                    let descend = iter::empty::<fork_tree::NodeIndex>();
+                    (either::Right(ascend), either::Right(descend))
+                }
             };
 
         let mut retracted_transactions = Vec::new();
@@ -483,7 +504,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             }
         }
 
-        self.best_block_index = Some(new_best_block_index);
+        self.best_block_index = new_best_block_index;
 
         SetBestBlock {
             retracted_transactions,

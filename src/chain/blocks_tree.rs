@@ -66,7 +66,7 @@ use crate::{
     header,
 };
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{cmp, fmt, mem, num::NonZeroU64, time::Duration};
 use hashbrown::HashMap;
 
@@ -91,7 +91,10 @@ pub struct Config {
 pub struct NonFinalizedTree<T> {
     /// All fields are wrapped into an `Option` in order to be able to extract the
     /// [`NonFinalizedTree`] and later put it back.
-    inner: Option<NonFinalizedTreeInner<T>>,
+    ///
+    /// A `Box` is used in order to minimize the impact of moving the value around, and to reduce
+    /// the size of the [`NonFinalizedTree`].
+    inner: Option<Box<NonFinalizedTreeInner<T>>>,
 }
 
 impl<T> NonFinalizedTree<T> {
@@ -108,7 +111,7 @@ impl<T> NonFinalizedTree<T> {
         let finalized_block_hash = chain_information.finalized_block_header.hash();
 
         NonFinalizedTree {
-            inner: Some(NonFinalizedTreeInner {
+            inner: Some(Box::new(NonFinalizedTreeInner {
                 finalized_block_header: chain_information.finalized_block_header,
                 finalized_block_hash,
                 finality: match chain_information.finality {
@@ -146,7 +149,7 @@ impl<T> NonFinalizedTree<T> {
                 },
                 blocks: fork_tree::ForkTree::with_capacity(config.blocks_capacity),
                 current_best: None,
-            }),
+            })),
         }
     }
 
@@ -279,6 +282,75 @@ impl<T> NonFinalizedTree<T> {
             inner.blocks.get(index).unwrap().hash
         } else {
             inner.finalized_block_hash
+        }
+    }
+
+    /// Returns consensus information about the current best block of the chain.
+    pub fn best_block_consensus(&self) -> chain_information::ChainInformationConsensusRef {
+        let inner = self.inner.as_ref().unwrap();
+        match (
+            &inner.finalized_consensus,
+            inner
+                .current_best
+                .map(|idx| &inner.blocks.get(idx).unwrap().consensus),
+        ) {
+            (FinalizedConsensus::AllAuthorized, _) => {
+                chain_information::ChainInformationConsensusRef::AllAuthorized
+            }
+            (
+                FinalizedConsensus::Aura {
+                    authorities_list,
+                    slot_duration,
+                },
+                None,
+            ) => chain_information::ChainInformationConsensusRef::Aura {
+                finalized_authorities_list: header::AuraAuthoritiesIter::from_slice(
+                    authorities_list,
+                ),
+                slot_duration: *slot_duration,
+            },
+            (
+                FinalizedConsensus::Aura { slot_duration, .. },
+                Some(BlockConsensus::Aura { authorities_list }),
+            ) => chain_information::ChainInformationConsensusRef::Aura {
+                finalized_authorities_list: header::AuraAuthoritiesIter::from_slice(
+                    authorities_list,
+                ),
+                slot_duration: *slot_duration,
+            },
+            (
+                FinalizedConsensus::Babe {
+                    block_epoch_information,
+                    next_epoch_transition,
+                    slots_per_epoch,
+                },
+                None,
+            ) => chain_information::ChainInformationConsensusRef::Babe {
+                slots_per_epoch: *slots_per_epoch,
+                finalized_block_epoch_information: block_epoch_information
+                    .as_ref()
+                    .map(|info| From::from(&**info)),
+                finalized_next_epoch_transition: next_epoch_transition.as_ref().into(),
+            },
+            (
+                FinalizedConsensus::Babe {
+                    slots_per_epoch, ..
+                },
+                Some(BlockConsensus::Babe {
+                    current_epoch,
+                    next_epoch,
+                }),
+            ) => chain_information::ChainInformationConsensusRef::Babe {
+                slots_per_epoch: *slots_per_epoch,
+                finalized_block_epoch_information: current_epoch
+                    .as_ref()
+                    .map(|info| From::from(&**info)),
+                finalized_next_epoch_transition: next_epoch.as_ref().into(),
+            },
+
+            // Any mismatch of consensus engine between the finalized and best block is not
+            // supported at the moment.
+            _ => unreachable!(),
         }
     }
 
