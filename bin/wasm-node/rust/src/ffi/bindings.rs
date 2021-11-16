@@ -155,11 +155,13 @@ extern "C" {
     /// >           keep in mind that exceptions should be caught and turned into an error code.
     ///
     /// The `error_ptr_ptr` parameter should be treated as a pointer to two consecutive
-    /// little-endian 32-bits unsigned numbers. If an error happened, call [`alloc`] to allocate
-    /// memory, write a UTF-8 error message in that given location, then write that location at
-    /// the location indicated by `error_ptr_ptr` and the length of that string at the location
-    /// `error_ptr_ptr + 4`. The buffer is then de-allocated by the client. If no error happens,
-    /// nothing should be written to `error_ptr_ptr`.
+    /// little-endian 32-bits unsigned numbers and a 8-bits unsigned number. If an error happened,
+    /// call [`alloc`] to allocate memory, write a UTF-8 error message in that given location,
+    /// then write that location at the location indicated by `error_ptr_ptr` and the length of
+    /// that string at the location `error_ptr_ptr + 4`. The buffer will be de-allocated by the
+    /// client. Then, write at location `error_ptr_ptr + 8` a `1` if the error is caused by the
+    /// address being forbidden or unsupported, and `0` otherwise. If no error happens, nothing
+    /// should be written to `error_ptr_ptr`.
     ///
     /// At any time, a connection can be in one of the three following states:
     ///

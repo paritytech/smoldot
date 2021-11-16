@@ -418,21 +418,24 @@ impl NetworkService {
                                         log::debug!(
                                             target: "connections",
                                             "Pending({:?}, {}) => Timeout ({})",
-                                            start_connect.id, start_connect.expected_peer_id, start_connect.multiaddr
+                                            start_connect.id, start_connect.expected_peer_id,
+                                            start_connect.multiaddr
                                         );
                                     }
-                                    (Err(Some(err)), true) => {
+                                    (Err(Some(err)), true) if !err.is_bad_addr => {
                                         log::warn!(
                                             target: "connections",
                                             "Failed to reach {} through {}: {}",
-                                            start_connect.expected_peer_id, start_connect.multiaddr, err
+                                            start_connect.expected_peer_id, start_connect.multiaddr,
+                                            err.message
                                         );
                                     }
-                                    (Err(Some(err)), false) => {
+                                    (Err(Some(err)), _) => {
                                         log::debug!(
                                             target: "connections",
                                             "Pending({:?}, {}) => Failed to reach ({}): {}",
-                                            start_connect.id, start_connect.expected_peer_id, start_connect.multiaddr, err
+                                            start_connect.id, start_connect.expected_peer_id,
+                                            start_connect.multiaddr, err.message
                                         );
                                     }
                                 }
