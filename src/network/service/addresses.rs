@@ -96,13 +96,23 @@ impl Addresses {
     ///
     pub(super) fn set_disconnected(&mut self, addr: &multiaddr::Multiaddr) {
         if let Some(index) = self.list.iter().position(|(a, _)| a == addr) {
-            assert!(matches!(
-                self.list[index].1,
-                State::Connected | State::PendingConnect
-            ));
-
-            self.list[index].1 = State::DisconnectedReachable;
+            match &mut self.list[index].1 {
+                st @ State::Connected => *st = State::DisconnectedReachable,
+                st @ State::PendingConnect => *st = State::NotTried,
+                _ => panic!(),
+            }
         }
+    }
+
+    /// Changes the order of the addresses, in order to prevent the same address from being
+    /// picked again.
+    pub(super) fn shuffle(&mut self) {
+        if self.list.is_empty() {
+            return;
+        }
+
+        let item = self.list.remove(0);
+        self.list.push(item);
     }
 
     /// Picks an address from the list whose state is "not connected", and switches it to
