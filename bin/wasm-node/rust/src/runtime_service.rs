@@ -1788,8 +1788,14 @@ impl Background {
 
         match &mut guarded.tree {
             GuardedInner::FinalizedBlockRuntimeKnown {
-                tree: Some(tree), ..
+                tree: Some(tree),
+                finalized_block,
             } => {
+                // TODO: this if is a small hack because the sync service currently sends multiple identical finalized notifications
+                if finalized_block.hash == hash_to_finalize {
+                    return;
+                }
+
                 let (node_to_finalize, _, _, _) = tree
                     .input_iter_unordered()
                     .find(|(_, b, _, _)| b.hash == hash_to_finalize)
