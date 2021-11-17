@@ -532,9 +532,8 @@ impl RuntimeService {
         self: &'a Arc<RuntimeService>,
         block_hash: &[u8; 32],
     ) -> Option<RuntimeLock<'a>> {
-        let guarded = self.guarded.lock().await;
-
         // TODO: restore
+        //let guarded = self.guarded.lock().await;
         /*if guarded
             .tree
             .as_ref()
