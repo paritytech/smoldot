@@ -1060,9 +1060,6 @@ pub enum MetadataError {
     /// Error during the runtime call.
     #[display(fmt = "{}", _0)]
     CallError(RuntimeCallError),
-    /// Runtime of the best block isn't valid.
-    #[display(fmt = "Runtime of the best block isn't valid: {}", _0)]
-    InvalidRuntime(RuntimeError),
     /// Error in the metadata-specific runtime API.
     #[display(fmt = "Error in the metadata-specific runtime API: {}", _0)]
     MetadataQuery(metadata::Error),
