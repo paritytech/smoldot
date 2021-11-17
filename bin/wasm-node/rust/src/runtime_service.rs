@@ -256,7 +256,8 @@ impl RuntimeService {
     ) -> Result<executor::CoreVersion, RuntimeCallError> {
         // If the requested block is the best known block, optimize by
         // immediately returning the cached spec.
-        {
+        // TODO: restore
+        /*{
             let guarded = self.guarded.lock().await;
             if guarded.tree.as_ref().unwrap().best_block_hash() == block_hash {
                 return guarded
@@ -269,7 +270,7 @@ impl RuntimeService {
                     .map(|r| r.runtime_spec.clone())
                     .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()));
             }
-        }
+        }*/
 
         let (_, vm) = self.network_block_info(block_hash).await?;
 
@@ -806,21 +807,30 @@ impl<'a> RuntimeLock<'a> {
 
             // It is not guaranteed that the block is still in the tree after the storage proof
             // has ended.
-            match guarded
-                .tree
-                .as_mut()
-                .unwrap()
-                .block_runtime_mut(&block_hash)
-            {
-                Some(block) => {
-                    let virtual_machine = match block.runtime.as_mut() {
+            let runtime_index = match &guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    tree: Some(tree), ..
+                } => tree
+                    .input_iter_unordered()
+                    .find(|(_, block, _, _)| block.hash == block_hash)
+                    .map(|(_, _, idx, _)| *idx.unwrap()),
+                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => tree
+                    .input_iter_unordered()
+                    .find(|(_, block, _, _)| block.hash == block_hash)
+                    .map(|(_, _, idx, _)| idx.unwrap().unwrap()),
+                _ => unreachable!(),
+            };
+
+            match runtime_index {
+                Some(runtime_index) => {
+                    let virtual_machine = match guarded.runtimes[runtime_index].runtime.as_mut() {
                         Ok(r) => r.virtual_machine.take().unwrap(),
                         Err(err) => {
                             return Err(RuntimeCallError::InvalidRuntime(err.clone()));
                         }
                     };
 
-                    (Some(guarded), virtual_machine)
+                    (Some((guarded, runtime_index)), virtual_machine)
                 }
                 None => {
                     let (_, virtual_machine) = self.service.network_block_info(&block_hash).await?;
