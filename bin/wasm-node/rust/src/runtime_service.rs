@@ -372,10 +372,8 @@ impl RuntimeService {
     ) -> Result<executor::CoreVersion, RuntimeError> {
         let guarded = self.guarded.lock().await;
         guarded
-            .tree
-            .as_ref()
-            .unwrap()
             .best_block_runtime()
+            .unwrap() // TODO: explain the unwrap
             .runtime
             .as_ref()
             .map(|spec| spec.runtime_spec.clone())
@@ -422,30 +420,7 @@ impl RuntimeService {
         let (tx, rx) = lossy_channel::channel();
         let mut guarded = self.guarded.lock().await;
         guarded.best_blocks_subscriptions.push(tx);
-
-        let best_block_header = match &guarded.tree {
-            GuardedInner::FinalizedBlockRuntimeKnown {
-                tree: Some(tree),
-                finalized_block,
-            } => tree
-                .best_block_index()
-                .map_or(&finalized_block.scale_encoded_header, |(idx, _)| {
-                    &tree.block_user_data(idx).scale_encoded_header
-                }),
-            GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
-                match tree.best_block_index() {
-                    Some((idx, _)) => &tree.block_user_data(idx).scale_encoded_header,
-                    None => {
-                        debug_assert_eq!(tree.children(None).count(), 1);
-                        &tree
-                            .block_user_data(tree.children(None).next().unwrap())
-                            .scale_encoded_header
-                    }
-                }
-            }
-            _ => unreachable!(),
-        };
-
+        let best_block_header = guarded.best_block_header().unwrap(); // TODO: explain the unwrap
         (best_block_header.clone(), rx)
     }
 
@@ -688,16 +663,21 @@ async fn is_near_head_of_chain_heuristic(
 pub struct RuntimeLock<'a> {
     service: &'a Arc<RuntimeService>,
     inner: RuntimeLockInner<'a>,
-    /// Hash of the block to make the call against.
-    block_hash: [u8; 32],
 }
 
 enum RuntimeLockInner<'a> {
-    /// Block is found in [`Guarded::tree`].
-    InTree(MutexGuard<'a, Guarded>),
+    /// Call made against [`GuardedInner::FinalizedBlockRuntimeKnown::finalized_block`].
+    Finalized(MutexGuard<'a, Guarded>),
+    /// Block is found in the tree at the given index.
+    InTree {
+        guarded: MutexGuard<'a, Guarded>,
+        /// Index of the block to make the call against.
+        block_index: async_tree::NodeIndex,
+    },
     /// Block information directly inlined in this enum.
     OutOfTree {
         scale_encoded_header: Vec<u8>,
+        hash: [u8; 32],
         virtual_machine: executor::host::HostVmPrototype,
     },
 }
@@ -708,12 +688,24 @@ impl<'a> RuntimeLock<'a> {
     /// Guaranteed to always be valid.
     pub fn block_scale_encoded_header(&self) -> &[u8] {
         match &self.inner {
-            RuntimeLockInner::InTree(guarded) => guarded
-                .tree
-                .as_ref()
-                .unwrap()
-                .block_header(&self.block_hash)
-                .unwrap(),
+            RuntimeLockInner::Finalized(guarded) => match guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    finalized_block, ..
+                } => &finalized_block.scale_encoded_header,
+                _ => unreachable!(),
+            },
+            RuntimeLockInner::InTree {
+                guarded,
+                block_index,
+            } => match &guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    tree: Some(tree), ..
+                } => &tree.block_user_data(*block_index).scale_encoded_header[..],
+                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                    &tree.block_user_data(*block_index).scale_encoded_header[..]
+                }
+                _ => unreachable!(),
+            },
             RuntimeLockInner::OutOfTree {
                 scale_encoded_header,
                 ..
@@ -723,7 +715,27 @@ impl<'a> RuntimeLock<'a> {
 
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
-        &self.block_hash
+        match &self.inner {
+            RuntimeLockInner::Finalized(guarded) => match guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    finalized_block, ..
+                } => &finalized_block.hash,
+                _ => unreachable!(),
+            },
+            RuntimeLockInner::InTree {
+                guarded,
+                block_index,
+            } => match &guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    tree: Some(tree), ..
+                } => &tree.block_user_data(*block_index).hash,
+                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                    &tree.block_user_data(*block_index).hash
+                }
+                _ => unreachable!(),
+            },
+            RuntimeLockInner::OutOfTree { hash, .. } => hash,
+        }
     }
 
     pub async fn start<'b>(
@@ -739,10 +751,10 @@ impl<'a> RuntimeLock<'a> {
         let block_hash = *self.block_hash();
         let runtime_block_header = self.block_scale_encoded_header().to_owned(); // TODO: cloning :-/
         let virtual_machine = match self.inner {
-            RuntimeLockInner::InTree(lock) => {
+            RuntimeLockInner::Finalized(guarded) | RuntimeLockInner::InTree { guarded, .. } => {
                 // Unlock `guarded` before doing anything that takes a long time, such as the
                 // network request below.
-                drop(lock);
+                drop(guarded);
                 None
             }
             RuntimeLockInner::OutOfTree {
@@ -781,7 +793,7 @@ impl<'a> RuntimeLock<'a> {
                 .tree
                 .as_mut()
                 .unwrap()
-                .block_runtime_mut(&self.block_hash)
+                .block_runtime_mut(&block_hash)
             {
                 Some(block) => {
                     let virtual_machine = match block.runtime.as_mut() {
@@ -794,8 +806,7 @@ impl<'a> RuntimeLock<'a> {
                     (Some(guarded), virtual_machine)
                 }
                 None => {
-                    let (_, virtual_machine) =
-                        self.service.network_block_info(&self.block_hash).await?;
+                    let (_, virtual_machine) = self.service.network_block_info(&block_hash).await?;
                     (None, virtual_machine)
                 }
             }
@@ -803,7 +814,7 @@ impl<'a> RuntimeLock<'a> {
 
         let lock = RuntimeCallLock {
             guarded,
-            block_hash: self.block_hash,
+            block_index,
             runtime_block_header,
             call_proof,
         };
@@ -818,7 +829,7 @@ pub struct RuntimeCallLock<'a> {
     /// If `Some`, the virtual machine must be put back in the tree.
     guarded: Option<MutexGuard<'a, Guarded>>,
     runtime_block_header: Vec<u8>,
-    block_hash: [u8; 32],
+    block_index: async_tree::NodeIndex,
     call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
 }
 
@@ -1085,6 +1096,41 @@ enum GuardedInner {
 }
 
 impl Guarded {
+    /// Returns the header of the "output" best block found in the tree.
+    fn best_block_header(&self) -> Option<&Vec<u8>> {
+        match &self.tree {
+            GuardedInner::FinalizedBlockRuntimeKnown {
+                tree: Some(tree),
+                finalized_block,
+            } => Some(
+                tree.best_block_index()
+                    .map_or(&finalized_block.scale_encoded_header, |(idx, _)| {
+                        &tree.block_user_data(idx).scale_encoded_header
+                    }),
+            ),
+            GuardedInner::FinalizedBlockRuntimeUnknown { .. } => None,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the runtime of the "output" best block found in the tree. Returns `None` if there
+    /// is no output yet.
+    fn best_block_runtime(&self) -> Option<&Runtime> {
+        let runtime_index = match &self.tree {
+            GuardedInner::FinalizedBlockRuntimeKnown {
+                tree: Some(tree), ..
+            } => tree
+                .best_block_index()
+                .map_or(*tree.finalized_async_user_data(), |(_, rt_idx)| *rt_idx),
+            GuardedInner::FinalizedBlockRuntimeUnknown { .. } => {
+                return None;
+            }
+            _ => unreachable!(),
+        };
+
+        Some(&self.runtimes[runtime_index])
+    }
+
     /// Notifies the subscribers about changes to the best and finalized blocks.
     fn notify_subscribers(
         &mut self,
@@ -1093,12 +1139,13 @@ impl Guarded {
         finalized_block_updated: bool,
     ) {
         if best_block_updated {
-            let best_block_header = self.tree.as_ref().unwrap().best_block_header();
+            // TODO: unwrap? clarify in API
+            let best_block_header = self.best_block_header().unwrap();
 
             // Elements are removed one by one and inserted back if the channel is still open.
             for index in (0..self.best_blocks_subscriptions.len()).rev() {
                 let mut subscription = self.best_blocks_subscriptions.swap_remove(index);
-                if subscription.send(best_block_header.to_vec()).is_err() {
+                if subscription.send(best_block_header.clone()).is_err() {
                     continue;
                 }
 
@@ -1112,6 +1159,7 @@ impl Guarded {
                     finalized_block, ..
                 } => &finalized_block.scale_encoded_header,
                 GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                    // TODO: panic here instead?
                     debug_assert_eq!(tree.children(None).count(), 1);
                     &tree
                         .block_user_data(tree.children(None).next().unwrap())
@@ -1132,13 +1180,8 @@ impl Guarded {
         }
 
         if best_block_runtime_changed {
-            let runtime_version = &self
-                .tree
-                .as_ref()
-                .unwrap()
-                .best_block_runtime()
-                .runtime
-                .as_ref();
+            // TODO: unwrap? clarify in API
+            let runtime_version = &self.best_block_runtime().unwrap().runtime.as_ref();
 
             // Elements are removed one by one and inserted back if the channel is still open.
             for index in (0..self.runtime_version_subscriptions.len()).rev() {
@@ -1318,7 +1361,32 @@ async fn run_background(
                             if new_block.is_new_best {
                                 guarded.best_near_head_of_chain = near_head_of_chain;
                             }
-                            guarded.tree.as_mut().unwrap().input_insert_block(new_block.scale_encoded_header, &new_block.parent_hash, new_block.is_new_best);
+
+                            match &mut guarded.tree {
+                                GuardedInner::FinalizedBlockRuntimeKnown {
+                                    tree: Some(tree), finalized_block,
+                                } => {
+                                    let parent_index = if new_block.parent_hash == finalized_block.hash {
+                                        None
+                                    } else {
+                                        Some(tree.input_iter_unordered().find(|(_, block, _, _)| block.hash == new_block.parent_hash).unwrap().0)
+                                    };
+
+                                    tree.input_insert_block(Block {
+                                        hash: header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
+                                        scale_encoded_header: new_block.scale_encoded_header,
+                                    }, parent_index, false /* TODO: */, new_block.is_new_best);
+                                }
+                                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                                    let parent_index = tree.input_iter_unordered().find(|(_, block, _, _)| block.hash == new_block.parent_hash).unwrap().0;
+                                    tree.input_insert_block(Block {
+                                        hash: header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
+                                        scale_encoded_header: new_block.scale_encoded_header,
+                                    }, Some(parent_index), false /* TODO: */, new_block.is_new_best);
+                                }
+                                _ => unreachable!(),
+                            }
+
                             background.advance_and_notify_subscribers(&mut guarded);
                         },
                         Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {
@@ -1461,59 +1529,97 @@ impl Background {
     }
 
     fn advance_and_notify_subscribers(&self, guarded: &mut Guarded) {
-        let tree = guarded.tree.as_mut().unwrap();
-
         let mut best_block_updated = false;
         let mut best_block_runtime_changed = false;
         let mut finalized_block_updated = false;
 
         loop {
-            let notif = match tree.try_advance_output() {
-                None | Some(async_tree::OutputUpdate::None) => break,
-                Some(notif) => notif,
+            let notif = match &mut guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    tree: Some(tree), ..
+                } => tree.try_advance_output().map(either::Left),
+                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                    tree.try_advance_output().map(either::Right)
+                }
+                _ => unreachable!(),
             };
 
             let all_blocks_notif = match notif {
-                async_tree::OutputUpdate::None => unreachable!(),
-                async_tree::OutputUpdate::FirstFinalized { .. } => {
+                None => break,
+                Some(either::Right(async_tree::OutputUpdate::Finalized {
+                    user_data: new_finalized,
+                    former_finalized_async_op_user_data,
+                    best_block_index,
+                    pruned_blocks,
+                    ..
+                })) => {
+                    debug_assert!(former_finalized_async_op_user_data.is_none());
+
                     best_block_updated = true;
                     finalized_block_updated = true;
                     best_block_runtime_changed = true; // TODO: ?!
-                    continue;
-                }
-                async_tree::OutputUpdate::Finalized {
-                    hash,
-                    best_block_hash,
-                } => {
-                    best_block_updated = true;
-                    finalized_block_updated = true;
-                    best_block_runtime_changed = true; // TODO: ?!
+
+                    let tree = match guarded.tree {
+                        GuardedInner::FinalizedBlockRuntimeUnknown { tree } => tree.take().unwrap(),
+                        _ => unreachable!(),
+                    };
+
+                    let best_block_hash = best_block_index
+                        .map_or(new_finalized.hash, |idx| tree.block_user_data(idx).hash);
+
+                    guarded.tree = GuardedInner::FinalizedBlockRuntimeKnown {
+                        tree: Some(
+                            tree.map_async_op_user_data(|runtime_index| runtime_index.unwrap()),
+                        ),
+                        finalized_block: new_finalized,
+                    };
+
+                    for (_, _, runtime_index) in pruned_blocks {
+                        if let Some(Some(runtime_index)) = runtime_index {
+                            guarded.runtimes[runtime_index].num_references -= 1;
+                        }
+                    }
 
                     sync_service::Notification::Finalized {
-                        best_block_hash: *best_block_hash,
-                        hash: *hash,
+                        best_block_hash,
+                        hash: new_finalized.hash,
                     }
                 }
-                async_tree::OutputUpdate::Block(async_tree::OutputUpdateBlock {
-                    is_new_best:
-                        is_new_best @ async_tree::OutputUpdateBlockBest::NewBest
-                        | is_new_best @ async_tree::OutputUpdateBlockBest::NewBestAndRuntimeUpgrade,
-                    parent_hash,
-                    scale_encoded_header,
-                }) => {
+                Some(either::Left(async_tree::OutputUpdate::Finalized {
+                    user_data: new_finalized,
+                    best_block_index,
+                    pruned_blocks,
+                    ..
+                })) => {
                     best_block_updated = true;
-                    if let async_tree::OutputUpdateBlockBest::NewBestAndRuntimeUpgrade = is_new_best
-                    {
-                        best_block_runtime_changed = true;
+                    finalized_block_updated = true;
+                    best_block_runtime_changed = true; // TODO: ?!
+
+                    let best_block_hash = match guarded.tree {
+                        GuardedInner::FinalizedBlockRuntimeKnown {
+                            tree: Some(tree),
+                            finalized_block,
+                        } => best_block_index
+                            .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash),
+                        _ => unreachable!(),
+                    };
+
+                    for (_, _, runtime_index) in pruned_blocks {
+                        if let Some(runtime_index) = runtime_index {
+                            guarded.runtimes[runtime_index].num_references -= 1;
+                        }
                     }
 
-                    sync_service::Notification::Block(sync_service::BlockNotification {
-                        parent_hash: *parent_hash,
-                        is_new_best: true,
-                        scale_encoded_header: scale_encoded_header.to_vec(),
-                    })
+                    sync_service::Notification::Finalized {
+                        best_block_hash,
+                        hash: new_finalized.hash,
+                    }
                 }
-                async_tree::OutputUpdate::Block(block) => {
+                Some(either::Left(async_tree::OutputUpdate::Block(block))) => {
+                    best_block_updated |= block.is_new_best;
+                    //block.async_op_user_data != ; // TODO: ?!
+                    // TODO: best_block_runtime_changed = true; ?!?!
+
                     sync_service::Notification::Block(sync_service::BlockNotification {
                         parent_hash: *block.parent_hash,
                         is_new_best: false,

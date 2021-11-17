@@ -2481,6 +2481,7 @@ version = "0.5.2"
 dependencies = [
  "blake2-rfc",
  "derive_more",
+ "either",
  "fnv",
  "futures",
  "itertools",
