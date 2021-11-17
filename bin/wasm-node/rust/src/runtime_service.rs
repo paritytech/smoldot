@@ -238,8 +238,16 @@ impl RuntimeService {
         let (tx, rx) = lossy_channel::channel();
         let mut guarded = self.guarded.lock().await;
         guarded.runtime_version_subscriptions.push(tx);
-        let current_best_index = guarded.tree.as_ref().unwrap().best_block_index().unwrap().1;
-        let current_version = guarded.runtimes[*current_best_index]
+        let runtime_index = match &guarded.tree {
+            GuardedInner::FinalizedBlockRuntimeKnown {
+                tree: Some(tree), ..
+            } => tree
+                .best_block_index()
+                .map_or(*tree.finalized_async_user_data(), |(_, rt_idx)| *rt_idx),
+            GuardedInner::FinalizedBlockRuntimeUnknown { .. } => return (None, rx),
+            _ => unreachable!(),
+        };
+        let current_version = guarded.runtimes[runtime_index]
             .runtime
             .as_ref()
             .map(|spec| spec.runtime_spec.clone())
@@ -497,11 +505,23 @@ impl RuntimeService {
         self: &'a Arc<RuntimeService>,
     ) -> RuntimeLock<'a> {
         let guarded = self.guarded.lock().await;
-        let block_hash = *guarded.tree.as_ref().unwrap().best_block_hash();
+        let block_index = match &guarded.tree {
+            GuardedInner::FinalizedBlockRuntimeKnown {
+                tree: Some(tree), ..
+            } => tree.best_block_index().map(|(idx, _)| idx),
+            _ => unreachable!(),
+        };
+
         RuntimeLock {
             service: self,
-            inner: RuntimeLockInner::InTree(guarded),
-            block_hash,
+            inner: if let Some(block_index) = block_index {
+                RuntimeLockInner::InTree {
+                    guarded,
+                    block_index,
+                }
+            } else {
+                RuntimeLockInner::Finalized(guarded)
+            },
         }
     }
 
@@ -589,7 +609,7 @@ impl RuntimeService {
         self: Arc<RuntimeService>,
         block_hash: Option<&[u8; 32]>,
     ) -> Result<Vec<u8>, MetadataError> {
-        let (mut runtime_call_lock, virtual_machine) = if let Some(block_hash) = block_hash {
+        let (runtime_call_lock, virtual_machine) = if let Some(block_hash) = block_hash {
             self.runtime_lock(block_hash)
                 .await
                 .ok_or(MetadataError::RuntimeFetch)?
@@ -706,10 +726,10 @@ impl<'a> RuntimeLock<'a> {
     /// Guaranteed to always be valid.
     pub fn block_scale_encoded_header(&self) -> &[u8] {
         match &self.inner {
-            RuntimeLockInner::Finalized(guarded) => match guarded.tree {
+            RuntimeLockInner::Finalized(guarded) => match &guarded.tree {
                 GuardedInner::FinalizedBlockRuntimeKnown {
                     finalized_block, ..
-                } => &finalized_block.scale_encoded_header,
+                } => &finalized_block.scale_encoded_header[..],
                 _ => unreachable!(),
             },
             RuntimeLockInner::InTree {
@@ -727,14 +747,14 @@ impl<'a> RuntimeLock<'a> {
             RuntimeLockInner::OutOfTree {
                 scale_encoded_header,
                 ..
-            } => scale_encoded_header,
+            } => &scale_encoded_header[..],
         }
     }
 
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
         match &self.inner {
-            RuntimeLockInner::Finalized(guarded) => match guarded.tree {
+            RuntimeLockInner::Finalized(guarded) => match &guarded.tree {
                 GuardedInner::FinalizedBlockRuntimeKnown {
                     finalized_block, ..
                 } => &finalized_block.hash,
@@ -1155,7 +1175,7 @@ impl Guarded {
     ) {
         if best_block_updated {
             // TODO: unwrap? clarify in API
-            let best_block_header = self.best_block_header().unwrap();
+            let best_block_header = self.best_block_header().unwrap().clone();
 
             // Elements are removed one by one and inserted back if the channel is still open.
             for index in (0..self.best_blocks_subscriptions.len()).rev() {
@@ -1195,8 +1215,21 @@ impl Guarded {
         }
 
         if best_block_runtime_changed {
-            // TODO: unwrap? clarify in API
-            let runtime_version = &self.best_block_runtime().unwrap().runtime.as_ref();
+            let runtime_version = {
+                let runtime_index = match &self.tree {
+                    GuardedInner::FinalizedBlockRuntimeKnown {
+                        tree: Some(tree), ..
+                    } => tree
+                        .best_block_index()
+                        .map_or(*tree.finalized_async_user_data(), |(_, rt_idx)| *rt_idx),
+                    GuardedInner::FinalizedBlockRuntimeUnknown { .. } => {
+                        panic!() // TODO: clarify in API
+                    }
+                    _ => unreachable!(),
+                };
+
+                self.runtimes[runtime_index].runtime.as_ref()
+            };
 
             // Elements are removed one by one and inserted back if the channel is still open.
             for index in (0..self.runtime_version_subscriptions.len()).rev() {
@@ -1552,98 +1585,104 @@ impl Background {
         let mut finalized_block_updated = false;
 
         loop {
-            let notif = match &mut guarded.tree {
+            let all_blocks_notif = match &mut guarded.tree {
                 GuardedInner::FinalizedBlockRuntimeKnown {
-                    tree: Some(tree), ..
-                } => tree.try_advance_output().map(either::Left),
-                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
-                    tree.try_advance_output().map(either::Right)
+                    tree: Some(tree),
+                    finalized_block,
+                } => match tree.try_advance_output() {
+                    None => break,
+                    Some(async_tree::OutputUpdate::Finalized {
+                        user_data: new_finalized,
+                        best_block_index,
+                        pruned_blocks,
+                        ..
+                    }) => {
+                        best_block_updated = true;
+                        finalized_block_updated = true;
+                        best_block_runtime_changed = true; // TODO: ?!
+
+                        let best_block_hash = best_block_index
+                            .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash);
+
+                        for (_, _, runtime_index) in pruned_blocks {
+                            if let Some(runtime_index) = runtime_index {
+                                guarded.runtimes[runtime_index].num_references -= 1;
+                            }
+                        }
+
+                        sync_service::Notification::Finalized {
+                            best_block_hash,
+                            hash: new_finalized.hash,
+                        }
+                    }
+                    Some(async_tree::OutputUpdate::Block(block)) => {
+                        let block_index = block.index;
+                        let block_runtime_index = *block.async_op_user_data;
+                        let scale_encoded_header = block.user_data.scale_encoded_header.clone();
+
+                        best_block_updated |= block.is_new_best;
+                        let parent_runtime_index = tree
+                            .parent(block_index)
+                            .map_or(*tree.finalized_async_user_data(), |idx| {
+                                *tree.block_async_user_data(idx).unwrap()
+                            });
+                        best_block_runtime_changed |= parent_runtime_index != block_runtime_index;
+
+                        sync_service::Notification::Block(sync_service::BlockNotification {
+                            parent_hash: tree
+                                .parent(block_index)
+                                .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash),
+                            is_new_best: false,
+                            scale_encoded_header,
+                        })
+                    }
+                },
+                GuardedInner::FinalizedBlockRuntimeUnknown {
+                    tree: tree @ Some(_),
+                } => {
+                    match tree.as_mut().unwrap().try_advance_output() {
+                        None => break,
+                        Some(async_tree::OutputUpdate::Block(_)) => continue,
+                        Some(async_tree::OutputUpdate::Finalized {
+                            user_data: new_finalized,
+                            former_finalized_async_op_user_data,
+                            best_block_index,
+                            pruned_blocks,
+                            ..
+                        }) => {
+                            debug_assert!(former_finalized_async_op_user_data.is_none());
+
+                            best_block_updated = true;
+                            finalized_block_updated = true;
+                            best_block_runtime_changed = true; // TODO: ?!
+
+                            let best_block_hash = best_block_index
+                                .map_or(new_finalized.hash, |idx| {
+                                    tree.as_ref().unwrap().block_user_data(idx).hash
+                                });
+                            let new_finalized_hash = new_finalized.hash;
+
+                            guarded.tree = GuardedInner::FinalizedBlockRuntimeKnown {
+                                tree: Some(tree.take().unwrap().map_async_op_user_data(
+                                    |runtime_index| runtime_index.unwrap(),
+                                )),
+                                finalized_block: new_finalized,
+                            };
+
+                            for (_, _, runtime_index) in pruned_blocks {
+                                if let Some(Some(runtime_index)) = runtime_index {
+                                    guarded.runtimes[runtime_index].num_references -= 1;
+                                }
+                            }
+
+                            sync_service::Notification::Finalized {
+                                best_block_hash,
+                                hash: new_finalized_hash,
+                            }
+                        }
+                    }
                 }
                 _ => unreachable!(),
-            };
-
-            let all_blocks_notif = match notif {
-                None => break,
-                Some(either::Right(async_tree::OutputUpdate::Finalized {
-                    user_data: new_finalized,
-                    former_finalized_async_op_user_data,
-                    best_block_index,
-                    pruned_blocks,
-                    ..
-                })) => {
-                    debug_assert!(former_finalized_async_op_user_data.is_none());
-
-                    best_block_updated = true;
-                    finalized_block_updated = true;
-                    best_block_runtime_changed = true; // TODO: ?!
-
-                    let tree = match guarded.tree {
-                        GuardedInner::FinalizedBlockRuntimeUnknown { tree } => tree.take().unwrap(),
-                        _ => unreachable!(),
-                    };
-
-                    let best_block_hash = best_block_index
-                        .map_or(new_finalized.hash, |idx| tree.block_user_data(idx).hash);
-
-                    guarded.tree = GuardedInner::FinalizedBlockRuntimeKnown {
-                        tree: Some(
-                            tree.map_async_op_user_data(|runtime_index| runtime_index.unwrap()),
-                        ),
-                        finalized_block: new_finalized,
-                    };
-
-                    for (_, _, runtime_index) in pruned_blocks {
-                        if let Some(Some(runtime_index)) = runtime_index {
-                            guarded.runtimes[runtime_index].num_references -= 1;
-                        }
-                    }
-
-                    sync_service::Notification::Finalized {
-                        best_block_hash,
-                        hash: new_finalized.hash,
-                    }
-                }
-                Some(either::Left(async_tree::OutputUpdate::Finalized {
-                    user_data: new_finalized,
-                    best_block_index,
-                    pruned_blocks,
-                    ..
-                })) => {
-                    best_block_updated = true;
-                    finalized_block_updated = true;
-                    best_block_runtime_changed = true; // TODO: ?!
-
-                    let best_block_hash = match guarded.tree {
-                        GuardedInner::FinalizedBlockRuntimeKnown {
-                            tree: Some(tree),
-                            finalized_block,
-                        } => best_block_index
-                            .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash),
-                        _ => unreachable!(),
-                    };
-
-                    for (_, _, runtime_index) in pruned_blocks {
-                        if let Some(runtime_index) = runtime_index {
-                            guarded.runtimes[runtime_index].num_references -= 1;
-                        }
-                    }
-
-                    sync_service::Notification::Finalized {
-                        best_block_hash,
-                        hash: new_finalized.hash,
-                    }
-                }
-                Some(either::Left(async_tree::OutputUpdate::Block(block))) => {
-                    best_block_updated |= block.is_new_best;
-                    //block.async_op_user_data != ; // TODO: ?!
-                    // TODO: best_block_runtime_changed = true; ?!?!
-
-                    sync_service::Notification::Block(sync_service::BlockNotification {
-                        parent_hash: *block.parent_hash,
-                        is_new_best: false,
-                        scale_encoded_header: block.scale_encoded_header.to_vec(),
-                    })
-                }
             };
 
             // Elements are removed one by one and inserted back if the channel is still open.
