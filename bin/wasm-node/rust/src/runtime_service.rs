@@ -169,7 +169,7 @@ impl RuntimeService {
             }
         };
 
-        let runtimes = slab::Slab::with_capacity(2);
+        let mut runtimes = slab::Slab::with_capacity(2);
         let runtime_id = runtimes.insert(genesis_runtime);
         let tree = async_tree::AsyncTree::new(async_tree::Config {
             finalized_async_user_data: runtime_id,
@@ -1281,7 +1281,7 @@ async fn run_background(
         };
 
         for block in subscription.non_finalized_blocks_ancestry_order {
-            match background.guarded.try_lock().unwrap().tree {
+            match &mut background.guarded.try_lock().unwrap().tree {
                 GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
                     let (parent_index, ..) = tree
                         .input_iter_unordered()
@@ -1311,11 +1311,14 @@ async fn run_background(
             if !Arc::ptr_eq(&background.guarded, &original_guarded) {
                 // The `Background` object is manipulating a temporary runtime service. Check if
                 // it is possible to write to the original runtime service.
-                let mut temporary_guarded = background.guarded.try_lock().unwrap();
+                let mut temporary_guarded_lock = background.guarded.try_lock().unwrap();
+                let temporary_guarded = &mut *temporary_guarded_lock;
+
                 if let GuardedInner::FinalizedBlockRuntimeKnown {
                     tree,
                     finalized_block,
-                } = temporary_guarded.tree
+                    ..
+                } = &mut temporary_guarded.tree
                 {
                     log::debug!(target: &log_target, "Background worker now in sync");
 
@@ -1328,7 +1331,7 @@ async fn run_background(
                     };
                     original_guarded_lock.runtimes = mem::take(&mut temporary_guarded.runtimes);
 
-                    drop(temporary_guarded);
+                    drop(temporary_guarded_lock);
 
                     original_guarded_lock.all_blocks_subscriptions.clear();
                     // TODO: correct? especially for the runtime?
