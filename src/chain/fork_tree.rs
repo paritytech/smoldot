@@ -164,6 +164,29 @@ impl<T> ForkTree<T> {
         self.nodes.get_mut(index.0).map(|n| &mut n.data)
     }
 
+    /// Modifies all the block user datas and returns a new map.
+    pub fn map<U>(self, mut map: impl FnMut(T) -> U) -> ForkTree<U> {
+        ForkTree {
+            nodes: self
+                .nodes
+                .into_iter()
+                .map(|(index, node)| {
+                    let node = Node {
+                        parent: node.parent,
+                        first_child: node.first_child,
+                        next_sibling: node.next_sibling,
+                        previous_sibling: node.previous_sibling,
+                        is_prune_target_ancestor: node.is_prune_target_ancestor,
+                        data: map(node.data),
+                    };
+
+                    (index, node)
+                })
+                .collect(),
+            first_root: self.first_root,
+        }
+    }
+
     /// Returns the parent of the given node. Returns `None` if the node doesn't have any parent.
     ///
     /// # Panic
@@ -172,6 +195,21 @@ impl<T> ForkTree<T> {
     ///
     pub fn parent(&self, node: NodeIndex) -> Option<NodeIndex> {
         self.nodes[node.0].parent.map(NodeIndex)
+    }
+
+    /// Returns the list of children that have the given node as parent.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`NodeIndex`] is invalid.
+    ///
+    pub fn children(&'_ self, node: Option<NodeIndex>) -> impl Iterator<Item = NodeIndex> + '_ {
+        let first = match node {
+            Some(n) => self.nodes[n.0].first_child,
+            None => self.first_root,
+        };
+
+        iter::successors(first, move |n| self.nodes[*n].next_sibling).map(NodeIndex)
     }
 
     /// Removes from the tree:
