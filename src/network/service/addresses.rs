@@ -106,6 +106,7 @@ impl Addresses {
 
     /// Changes the order of the addresses, in order to prevent the same address from being
     /// picked again.
+    // TODO: this system is a bit naive?
     pub(super) fn shuffle(&mut self) {
         if self.list.is_empty() {
             return;
