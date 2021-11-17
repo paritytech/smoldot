@@ -212,11 +212,16 @@ impl RuntimeService {
     /// Returns the current runtime version, plus an unlimited stream that produces one item every
     /// time the specs of the runtime of the best block are changed.
     ///
-    /// The stream can generate an `Err(())` if the runtime in the best block is invalid.
+    /// The future returned by this function is expected to finish relatively quickly and is
+    /// necessary only for locking purposes.
+    ///
+    /// The current runtime version can be `None` in case it isn't known yet.
+    ///
+    /// The stream can generate an `Err` if the runtime in the best block is invalid.
     pub async fn subscribe_runtime_version(
         self: &Arc<RuntimeService>,
     ) -> (
-        Result<executor::CoreVersion, RuntimeError>,
+        Option<Result<executor::CoreVersion, RuntimeError>>,
         NotificationsReceiver<Result<executor::CoreVersion, RuntimeError>>,
     ) {
         let (tx, rx) = lossy_channel::channel();
@@ -231,10 +236,12 @@ impl RuntimeService {
             .as_ref()
             .map(|spec| spec.runtime_spec.clone())
             .map_err(|err| err.clone());
-        (current_version, rx)
+        (Some(current_version), rx)
     }
 
     /// Returns the runtime version of the block with the given hash.
+    ///
+    /// The future returned by this function might take a long time.
     pub async fn runtime_version_of_block(
         self: &Arc<RuntimeService>,
         block_hash: &[u8; 32],
@@ -350,6 +357,8 @@ impl RuntimeService {
     }
 
     /// Returns the runtime version of the current best block.
+    ///
+    /// The future returned by this function might take a long time.
     pub async fn best_block_runtime(
         self: &Arc<RuntimeService>,
     ) -> Result<executor::CoreVersion, RuntimeError> {
