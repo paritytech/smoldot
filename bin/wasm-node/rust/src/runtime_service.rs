@@ -440,28 +440,36 @@ impl RuntimeService {
     ) -> sync_service::SubscribeAll {
         let (tx, new_blocks) = mpsc::channel(buffer_size);
         let mut guarded = self.guarded.lock().await;
-        debug_assert!(guarded.tree.as_ref().unwrap().has_output());
         guarded.all_blocks_subscriptions.push(tx);
 
-        let tree = guarded.tree.as_ref().unwrap();
+        let non_finalized_blocks_ancestry_order: Vec<_> = match &guarded.tree {
+            GuardedInner::FinalizedBlockRuntimeKnown {
+                tree: Some(tree),
+                finalized_block: _finalized_block,
+            } => {
+                tree.input_iter_ancestry_order()
+                    .filter(|(_, _, runtime_index, _)| runtime_index.is_some())
+                    .map(|(_, block, _, is_best)| {
+                        let parent_hash = *header::decode(&block.scale_encoded_header)
+                            .unwrap()
+                            .parent_hash; // TODO: correct? if yes, document
+                        debug_assert!(
+                            parent_hash == _finalized_block.hash
+                                || tree
+                                    .input_iter_ancestry_order()
+                                    .any(|(_, b, rt, _)| parent_hash == b.hash && rt.is_some())
+                        );
 
-        let non_finalized_blocks_ancestry_order: Vec<_> = tree
-            .non_finalized_blocks_headers_ancestry_order()
-            .map(|(scale_encoded_header, is_new_best)| {
-                let parent_hash = *header::decode(scale_encoded_header).unwrap().parent_hash; // TODO: correct? if yes, document
-                debug_assert!(
-                    parent_hash == *tree.finalized_block_hash()
-                        || tree
-                            .non_finalized_blocks_headers_ancestry_order()
-                            .any(|(h, _)| parent_hash == header::hash_from_scale_encoded_header(h))
-                );
-                sync_service::BlockNotification {
-                    is_new_best,
-                    parent_hash,
-                    scale_encoded_header: scale_encoded_header.to_vec(),
-                }
-            })
-            .collect();
+                        sync_service::BlockNotification {
+                            is_new_best: is_best,
+                            parent_hash,
+                            scale_encoded_header: block.scale_encoded_header.clone(),
+                        }
+                    })
+                    .collect()
+            }
+            _ => unreachable!(),
+        };
 
         debug_assert!(matches!(
             non_finalized_blocks_ancestry_order
@@ -472,7 +480,12 @@ impl RuntimeService {
         ));
 
         sync_service::SubscribeAll {
-            finalized_block_scale_encoded_header: tree.finalized_block_header().to_vec(),
+            finalized_block_scale_encoded_header: match &guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    finalized_block, ..
+                } => finalized_block.scale_encoded_header.clone(),
+                _ => unreachable!(),
+            },
             new_blocks,
             non_finalized_blocks_ancestry_order,
         }
@@ -499,7 +512,9 @@ impl RuntimeService {
         block_hash: &[u8; 32],
     ) -> Option<RuntimeLock<'a>> {
         let guarded = self.guarded.lock().await;
-        if guarded
+
+        // TODO: restore
+        /*if guarded
             .tree
             .as_ref()
             .unwrap()
@@ -511,17 +526,17 @@ impl RuntimeService {
                 inner: RuntimeLockInner::InTree(guarded),
                 block_hash: *block_hash,
             });
-        }
+        }*/
 
         let (scale_encoded_header, virtual_machine) =
             self.network_block_info(block_hash).await.ok()?;
         Some(RuntimeLock {
             service: self,
             inner: RuntimeLockInner::OutOfTree {
+                hash: *block_hash,
                 scale_encoded_header,
                 virtual_machine,
             },
-            block_hash: *block_hash,
         })
     }
 
@@ -544,7 +559,8 @@ impl RuntimeService {
     /// >           again after every runtime change.
     pub async fn best_block_metadata(self: Arc<RuntimeService>) -> Result<Vec<u8>, MetadataError> {
         // First, try the cache.
-        {
+        // TODO: restore
+        /*{
             let guarded = self.guarded.lock().await;
             match guarded
                 .tree
@@ -563,7 +579,7 @@ impl RuntimeService {
                     return Err(MetadataError::InvalidRuntime(err.clone()));
                 }
             }
-        }
+        }*/
 
         self.metadata_inner(None).await
     }
@@ -587,7 +603,8 @@ impl RuntimeService {
         let (metadata_result, virtual_machine) = loop {
             match query {
                 metadata::Query::Finished(Ok(metadata), virtual_machine) => {
-                    if let Some(guarded) = &mut runtime_call_lock.guarded {
+                    // TODO: restore
+                    /*if let Some(guarded) = &mut runtime_call_lock.guarded {
                         guarded
                             .tree
                             .as_mut()
@@ -597,7 +614,7 @@ impl RuntimeService {
                             .as_mut()
                             .unwrap()
                             .metadata = Some(metadata.clone());
-                    }
+                    }*/
                     break (Ok(metadata), virtual_machine);
                 }
                 metadata::Query::StorageGet(storage_get) => {
@@ -814,7 +831,6 @@ impl<'a> RuntimeLock<'a> {
 
         let lock = RuntimeCallLock {
             guarded,
-            block_index,
             runtime_block_header,
             call_proof,
         };
@@ -826,10 +842,9 @@ impl<'a> RuntimeLock<'a> {
 /// See [`RuntimeService::recent_best_block_runtime_lock`].
 #[must_use]
 pub struct RuntimeCallLock<'a> {
-    /// If `Some`, the virtual machine must be put back in the tree.
-    guarded: Option<MutexGuard<'a, Guarded>>,
+    /// If `Some`, the virtual machine must be put back in the runtimes at the given index.
+    guarded: Option<(MutexGuard<'a, Guarded>, usize)>,
     runtime_block_header: Vec<u8>,
-    block_index: async_tree::NodeIndex,
     call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
 }
 
@@ -930,13 +945,8 @@ impl<'a> RuntimeCallLock<'a> {
     ///
     /// This method **must** be called.
     pub fn unlock(mut self, vm: executor::host::HostVmPrototype) {
-        if let Some(guarded) = &mut self.guarded {
-            guarded
-                .tree
-                .as_mut()
-                .unwrap()
-                .block_runtime_mut(&self.block_hash)
-                .unwrap()
+        if let Some((guarded, runtime_index)) = &mut self.guarded {
+            guarded.runtimes[*runtime_index]
                 .runtime
                 .as_mut()
                 .unwrap()
@@ -947,15 +957,10 @@ impl<'a> RuntimeCallLock<'a> {
 
 impl<'a> Drop for RuntimeCallLock<'a> {
     fn drop(&mut self) {
-        if let Some(guarded) = &mut self.guarded {
-            let vm = &mut guarded
-                .tree
-                .as_mut()
-                .unwrap()
-                .block_runtime_mut(&self.block_hash)
-                .unwrap()
+        if let Some((guarded, runtime_index)) = &mut self.guarded {
+            let vm = &guarded.runtimes[*runtime_index]
                 .runtime
-                .as_mut()
+                .as_ref()
                 .unwrap()
                 .virtual_machine;
 
