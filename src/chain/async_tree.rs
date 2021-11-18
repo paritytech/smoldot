@@ -169,6 +169,51 @@ where
         }
     }
 
+    /// Replaces all asynchronous operation user data with new values.
+    ///
+    /// The returned tree keeps the same [`NodeIndex`]es as `self`.
+    pub fn map_async_op_user_data<TAsync2>(
+        self,
+        mut map: impl FnMut(TAsync) -> TAsync2,
+    ) -> AsyncTree<TNow, TBl, TAsync2> {
+        AsyncTree {
+            best_block_index: self.best_block_index,
+            finalized_async_user_data: map(self.finalized_async_user_data),
+            non_finalized_blocks: self.non_finalized_blocks.map(move |block| Block {
+                async_op: match block.async_op {
+                    AsyncOpState::Finished {
+                        user_data,
+                        reported,
+                    } => AsyncOpState::Finished {
+                        user_data: map(user_data),
+                        reported,
+                    },
+                    AsyncOpState::InProgress {
+                        async_op_id,
+                        timeout,
+                    } => AsyncOpState::InProgress {
+                        async_op_id,
+                        timeout,
+                    },
+                    AsyncOpState::Pending {
+                        same_as_parent,
+                        timeout,
+                    } => AsyncOpState::Pending {
+                        same_as_parent,
+                        timeout,
+                    },
+                },
+                input_best_block_weight: block.input_best_block_weight,
+                user_data: block.user_data,
+            }),
+            input_finalized_index: self.input_finalized_index,
+            input_best_block_next_weight: self.input_best_block_next_weight,
+            finalized_block_weight: self.finalized_block_weight,
+            next_async_op_id: self.next_async_op_id,
+            retry_after_failed: self.retry_after_failed,
+        }
+    }
+
     /// Returns the [`NodeIndex`] of the current "output" best block.
     ///
     /// Returns `None` if there is no best block. In terms of logic, this means that the best block
@@ -271,6 +316,16 @@ where
     ///
     pub fn parent(&self, node: NodeIndex) -> Option<NodeIndex> {
         self.non_finalized_blocks.parent(node)
+    }
+
+    /// Returns the list of children that have the given node as parent.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`NodeIndex`] is invalid.
+    ///
+    pub fn children(&'_ self, node: Option<NodeIndex>) -> impl Iterator<Item = NodeIndex> + '_ {
+        self.non_finalized_blocks.children(node)
     }
 
     /// Similar to [`AsyncTree::input_iter_unordered`], except that the returned items are
