@@ -484,14 +484,19 @@ impl Client {
 
                         // Note that the chain name is printed through the `Debug` trait (rather
                         // than `Display`) because it is an untrusted user input.
+                        //
+                        // The state root hash is printed in order to make it easy to put it
+                        // in the chain specification.
                         if let Some((_, relay_chain_log_name)) = relay_chain.as_ref() {
                             log::info!(
                                 target: "smoldot",
                                 "Parachain initialization complete for {}. Name: {:?}. Genesis \
-                                hash: {}. Network identity: {}. Relay chain: {} (id: {})",
+                                hash: {}. State root hash: 0x{}. Network identity: {}. Relay \
+                                chain: {} (id: {})",
                                 log_name,
                                 chain_name,
                                 HashDisplay(&genesis_block_hash),
+                                hex::encode(&genesis_block_state_root),
                                 running_chain.network_identity,
                                 relay_chain_log_name,
                                 relay_chain_para_id.unwrap(),
@@ -500,10 +505,12 @@ impl Client {
                             log::info!(
                                 target: "smoldot",
                                 "Chain initialization complete for {}. Name: {:?}. Genesis \
-                                hash: {}. Network identity: {}. Starting at block #{} ({})",
+                                hash: {}. State root hash: 0x{}. Network identity: {}. Starting \
+                                at block #{} ({})",
                                 log_name,
                                 chain_name,
                                 HashDisplay(&genesis_block_hash),
+                                hex::encode(&genesis_block_state_root),
                                 running_chain.network_identity,
                                 starting_block_number,
                                 HashDisplay(&starting_block_hash)
