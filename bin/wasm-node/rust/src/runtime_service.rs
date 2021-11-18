@@ -1422,6 +1422,7 @@ async fn run_background(
                             let near_head_of_chain = background.sync_service.is_near_head_of_chain_heuristic().await;
 
                             let mut guarded = background.guarded.lock().await;
+                            let mut guarded = &mut *guarded;
                             // TODO: note that this code is never reached for parachains
                             if new_block.is_new_best {
                                 guarded.best_near_head_of_chain = near_head_of_chain;
@@ -1434,9 +1435,18 @@ async fn run_background(
                                     tree: Some(tree), finalized_block,
                                 } => {
                                     let parent_index = if new_block.parent_hash == finalized_block.hash {
+                                        if same_runtime_as_parent {
+                                            guarded.runtimes[*tree.finalized_async_user_data()].num_references += 1;
+                                        }
                                         None
                                     } else {
-                                        Some(tree.input_iter_unordered().find(|(_, block, _, _)| block.hash == new_block.parent_hash).unwrap().0)
+                                        let index = tree.input_iter_unordered().find(|(_, block, _, _)| block.hash == new_block.parent_hash).unwrap().0;
+                                        if same_runtime_as_parent {
+                                            if let Some(runtime_index) = tree.block_async_user_data(index) {
+                                                guarded.runtimes[*runtime_index].num_references += 1;
+                                            }
+                                        }
+                                        Some(index)
                                     };
 
                                     tree.input_insert_block(Block {
@@ -1446,6 +1456,11 @@ async fn run_background(
                                 }
                                 GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
                                     let parent_index = tree.input_iter_unordered().find(|(_, block, _, _)| block.hash == new_block.parent_hash).unwrap().0;
+                                    if same_runtime_as_parent {
+                                        if let Some(runtime_index) = tree.block_async_user_data(parent_index) {
+                                            guarded.runtimes[runtime_index.unwrap()].num_references += 1;
+                                        }
+                                    }
                                     tree.input_insert_block(Block {
                                         hash: header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
                                         scale_encoded_header: new_block.scale_encoded_header,
@@ -1454,7 +1469,7 @@ async fn run_background(
                                 _ => unreachable!(),
                             }
 
-                            background.advance_and_notify_subscribers(&mut guarded);
+                            background.advance_and_notify_subscribers(guarded);
                         },
                         Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {
                             log::debug!(
