@@ -504,6 +504,7 @@ impl RuntimeService {
                     })
                     .collect()
             }
+            GuardedInner::FinalizedBlockRuntimeUnknown { .. } => Vec::new(),
             _ => unreachable!(),
         };
 
@@ -520,6 +521,12 @@ impl RuntimeService {
                 GuardedInner::FinalizedBlockRuntimeKnown {
                     finalized_block, ..
                 } => finalized_block.scale_encoded_header.clone(),
+                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                    debug_assert_eq!(tree.children(None).count(), 1);
+                    tree.block_user_data(tree.children(None).next().unwrap())
+                        .scale_encoded_header
+                        .clone()
+                }
                 _ => unreachable!(),
             },
             new_blocks,
