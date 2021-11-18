@@ -1595,6 +1595,7 @@ impl Background {
                         user_data: new_finalized,
                         best_block_index,
                         pruned_blocks,
+                        former_finalized_async_op_user_data: former_finalized_runtime_index,
                         ..
                     }) => {
                         best_block_updated = true;
@@ -1605,6 +1606,7 @@ impl Background {
                         let best_block_hash = best_block_index
                             .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash);
 
+                        guarded.runtimes[former_finalized_runtime_index].num_references -= 1;
                         for (_, _, runtime_index) in pruned_blocks {
                             if let Some(runtime_index) = runtime_index {
                                 guarded.runtimes[runtime_index].num_references -= 1;
