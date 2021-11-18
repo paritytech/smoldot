@@ -536,6 +536,10 @@ impl RuntimeService {
             GuardedInner::FinalizedBlockRuntimeKnown {
                 tree: Some(tree), ..
             } => tree.best_block_index().map(|(idx, _)| idx),
+            GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                debug_assert_eq!(tree.children(None).count(), 1);
+                Some(tree.children(None).next().unwrap())
+            }
             _ => unreachable!(),
         };
 
