@@ -161,6 +161,7 @@ impl RuntimeService {
             }
 
             Some(Runtime {
+                num_references: 1,
                 runtime,
                 runtime_code: code,
                 heap_pages,
@@ -170,11 +171,41 @@ impl RuntimeService {
         };
 
         let mut runtimes = slab::Slab::with_capacity(2);
-        let runtime_id = runtimes.insert(genesis_runtime);
-        let tree = async_tree::AsyncTree::new(async_tree::Config {
-            finalized_async_user_data: runtime_id,
-            retry_after_failed: Duration::from_secs(10),
-        });
+
+        let tree = if let Some(genesis_runtime) = genesis_runtime {
+            let runtime_id = runtimes.insert(genesis_runtime);
+            GuardedInner::FinalizedBlockRuntimeKnown {
+                tree: Some(async_tree::AsyncTree::new(async_tree::Config {
+                    finalized_async_user_data: runtime_id,
+                    retry_after_failed: Duration::from_secs(10),
+                })),
+                finalized_block: Block {
+                    hash: header::hash_from_scale_encoded_header(
+                        &config.genesis_block_scale_encoded_header,
+                    ),
+                    scale_encoded_header: config.genesis_block_scale_encoded_header,
+                },
+            }
+        } else {
+            let mut tree = async_tree::AsyncTree::new(async_tree::Config {
+                finalized_async_user_data: None,
+                retry_after_failed: Duration::from_secs(10),
+            });
+            let node_index = tree.input_insert_block(
+                Block {
+                    hash: header::hash_from_scale_encoded_header(
+                        &config.genesis_block_scale_encoded_header,
+                    ),
+                    scale_encoded_header: config.genesis_block_scale_encoded_header,
+                },
+                None,
+                false,
+                true,
+            );
+            tree.input_finalize(node_index, node_index);
+
+            GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) }
+        };
 
         let guarded = Arc::new(Mutex::new(Guarded {
             all_blocks_subscriptions: Vec::new(),
@@ -182,16 +213,8 @@ impl RuntimeService {
             best_blocks_subscriptions: Vec::new(),
             runtime_version_subscriptions: Vec::new(),
             best_near_head_of_chain,
-            tree: Some(if let Some(genesis_runtime) = genesis_runtime {
-                download_tree::DownloadTree::from_finalized_block_and_runtime(
-                    config.genesis_block_scale_encoded_header,
-                    genesis_runtime,
-                )
-            } else {
-                download_tree::DownloadTree::from_finalized_block(
-                    config.genesis_block_scale_encoded_header,
-                )
-            }),
+            tree,
+            runtimes,
         }));
 
         // Spawns a task that downloads the runtime code at every block to check whether it has
