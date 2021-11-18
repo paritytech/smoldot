@@ -946,35 +946,37 @@ impl Background {
                     )
                     .await;
 
-                let notification = if let Ok(runtime_spec) = current_specs {
-                    let runtime_spec = runtime_spec.decode();
-                    serde_json::to_string(&methods::RuntimeVersion {
-                        spec_name: runtime_spec.spec_name.into(),
-                        impl_name: runtime_spec.impl_name.into(),
-                        authoring_version: u64::from(runtime_spec.authoring_version),
-                        spec_version: u64::from(runtime_spec.spec_version),
-                        impl_version: u64::from(runtime_spec.impl_version),
-                        transaction_version: runtime_spec.transaction_version.map(u64::from),
-                        apis: runtime_spec
-                            .apis
-                            .map(|api| (api.name_hash, api.version))
-                            .collect(),
-                    })
-                    .unwrap()
-                } else {
-                    "null".to_string()
-                };
+                if let Some(current_specs) = current_specs {
+                    let notification = if let Ok(runtime_spec) = current_specs {
+                        let runtime_spec = runtime_spec.decode();
+                        serde_json::to_string(&methods::RuntimeVersion {
+                            spec_name: runtime_spec.spec_name.into(),
+                            impl_name: runtime_spec.impl_name.into(),
+                            authoring_version: u64::from(runtime_spec.authoring_version),
+                            spec_version: u64::from(runtime_spec.spec_version),
+                            impl_version: u64::from(runtime_spec.impl_version),
+                            transaction_version: runtime_spec.transaction_version.map(u64::from),
+                            apis: runtime_spec
+                                .apis
+                                .map(|api| (api.name_hash, api.version))
+                                .collect(),
+                        })
+                        .unwrap()
+                    } else {
+                        "null".to_string()
+                    };
 
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(json_rpc::parse::build_subscription_event(
-                        "state_runtimeVersion",
-                        &subscription,
-                        &notification,
-                    ))
-                    .await;
+                    let _ = self
+                        .responses_sender
+                        .lock()
+                        .await
+                        .send(json_rpc::parse::build_subscription_event(
+                            "state_runtimeVersion",
+                            &subscription,
+                            &notification,
+                        ))
+                        .await;
+                }
 
                 let mut responses_sender = self.responses_sender.lock().await.clone();
                 self.new_child_tasks_tx

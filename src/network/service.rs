@@ -1008,6 +1008,10 @@ where
                     addrs.remove(&multiaddr);
                 } else {
                     addrs.set_disconnected(&multiaddr);
+
+                    // Shuffle the known addresses, otherwise the same address might get picked
+                    // again.
+                    addrs.shuffle();
                 }
             }
         }
