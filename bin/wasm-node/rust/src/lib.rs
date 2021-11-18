@@ -24,7 +24,7 @@
 use futures::{channel::mpsc, prelude::*};
 use itertools::Itertools as _;
 use smoldot::{
-    chain, chain_spec,
+    chain, chain_spec, header,
     informant::{BytesDisplay, HashDisplay},
     json_rpc::{self, methods},
     libp2p::{connection, multiaddr, peer_id},
@@ -242,13 +242,14 @@ impl Client {
         let genesis_chain_information =
             match chain_spec.as_chain_information() {
                 Ok(ci) => match chain::chain_information::ValidChainInformation::try_from(ci) {
-                    Ok(ci) => ci,
+                    Ok(ci) => Some(ci),
                     Err(err) => {
                         return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
                             format!("Invalid genesis chain information: {}", err),
                         )));
                     }
                 },
+                Err(chain_spec::FromGenesisStorageError::UnknownStorageItems) => None,
                 Err(err) => {
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
                         format!("Failed to build genesis chain information: {}", err),
@@ -266,8 +267,31 @@ impl Client {
                     )));
                 }
             }
-        } else {
+        } else if let Some(genesis_chain_information) = &genesis_chain_information {
             genesis_chain_information.clone()
+        } else {
+            // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
+            return ChainId(
+                self.public_api_chains
+                    .insert(PublicApiChain::Erroneous(format!(
+                        "Either a checkpoint or the genesis storage must be provided"
+                    ))),
+            );
+        };
+
+        // TODO: this code is a bit messy
+        let genesis_block_header = match genesis_chain_information {
+            Some(ci) => header::Header::from(ci.as_ref().finalized_block_header),
+            None => match chain_spec.genesis_storage() {
+                chain_spec::GenesisStorage::TrieRootHash(state_root) => header::Header {
+                    parent_hash: [0; 32],
+                    number: 0,
+                    state_root: *state_root,
+                    extrinsics_root: smoldot::trie::empty_trie_merkle_value(),
+                    digest: header::DigestRef::empty().into(),
+                },
+                chain_spec::GenesisStorage::Items(_) => unreachable!(),
+            },
         };
 
         // If the chain specification specifies a parachain, find the corresponding relay chain
@@ -310,6 +334,12 @@ impl Client {
 
         // All the checks are performed above. Adding the chain can't fail anymore at this point.
 
+        // Grab a couple of fields from the chain specification for later, as the chain
+        // specification is consumed below.
+        let chain_spec_chain_id = chain_spec.id().to_owned();
+        let genesis_block_hash = genesis_block_header.hash();
+        let genesis_block_state_root = genesis_block_header.state_root;
+
         // The key generated here uniquely identifies this chain within smoldot. Mutiple chains
         // having the same key will use the same services.
         //
@@ -317,10 +347,7 @@ impl Client {
         // identical chains to be de-duplicated, but security issues would arise if two chains
         // were considered identical while they're in reality not identical.
         let new_chain_key = ChainKey {
-            genesis_block_hash: genesis_chain_information
-                .as_ref()
-                .finalized_block_header
-                .hash(),
+            genesis_block_hash,
             relay_chain: relay_chain_id.map(|ck| {
                 (
                     Box::new(match self.public_api_chains.get(ck.0).unwrap() {
@@ -332,18 +359,6 @@ impl Client {
             }),
             protocol_id: chain_spec.protocol_id().to_owned(),
         };
-
-        // Grab a couple of fields from the chain specification for later, as the chain
-        // specification is consumed below.
-        let chain_spec_chain_id = chain_spec.id().to_owned();
-        let genesis_block_hash = genesis_chain_information
-            .as_ref()
-            .finalized_block_header
-            .hash();
-        let genesis_block_state_root = *genesis_chain_information
-            .as_ref()
-            .finalized_block_header
-            .state_root;
 
         // Grab the services of the relay chain.
         //
@@ -460,7 +475,7 @@ impl Client {
                             log_name.clone(),
                             new_tasks_tx,
                             chain_information,
-                            genesis_chain_information,
+                            genesis_block_header.scale_encoding_vec(),
                             chain_spec,
                             relay_chain.as_ref().map(|(r, _)| r),
                             network_noise_key,
@@ -856,7 +871,7 @@ async fn start_services(
         Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
     )>,
     chain_information: chain::chain_information::ValidChainInformation,
-    genesis_chain_information: chain::chain_information::ValidChainInformation,
+    genesis_block_scale_encoded_header: Vec<u8>,
     chain_spec: chain_spec::ChainSpec,
     relay_chain: Option<&RunningChain>,
     network_noise_key: connection::NoiseKey,
@@ -891,13 +906,12 @@ async fn start_services(
                     list
                 },
                 has_grandpa_protocol: matches!(
-                    genesis_chain_information.as_ref().finality,
+                    chain_information.as_ref().finality,
                     chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
                 ),
-                genesis_block_hash: genesis_chain_information
-                    .as_ref()
-                    .finalized_block_header
-                    .hash(),
+                genesis_block_hash: header::hash_from_scale_encoded_header(
+                    &genesis_block_scale_encoded_header,
+                ),
                 finalized_block_height: chain_information.as_ref().finalized_block_header.number,
                 best_block: (
                     chain_information.as_ref().finalized_block_header.number,
@@ -942,10 +956,7 @@ async fn start_services(
             }),
             sync_service: sync_service.clone(),
             chain_spec: &chain_spec,
-            genesis_block_scale_encoded_header: genesis_chain_information
-                .as_ref()
-                .finalized_block_header
-                .scale_encoding_vec(),
+            genesis_block_scale_encoded_header,
         })
         .await;
 
@@ -981,10 +992,7 @@ async fn start_services(
             }),
             sync_service: sync_service.clone(),
             chain_spec: &chain_spec,
-            genesis_block_scale_encoded_header: genesis_chain_information
-                .as_ref()
-                .finalized_block_header
-                .scale_encoding_vec(),
+            genesis_block_scale_encoded_header,
         })
         .await;
 

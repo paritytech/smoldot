@@ -602,7 +602,11 @@ async fn open_database(
                     genesis_chain_information,
                     iter::empty(),
                     None,
-                    chain_spec.genesis_storage(),
+                    chain_spec
+                        .genesis_storage()
+                        .into_genesis_items()
+                        .unwrap() // TODO: return error instead
+                        .iter(),
                 )
                 .unwrap();
             (database, false)
