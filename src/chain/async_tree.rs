@@ -170,6 +170,8 @@ where
     }
 
     /// Replaces all asynchronous operation user data with new values.
+    ///
+    /// The returned tree keeps the same [`NodeIndex`]es as `self`.
     pub fn map_async_op_user_data<TAsync2>(
         self,
         mut map: impl FnMut(TAsync) -> TAsync2,

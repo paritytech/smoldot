@@ -165,6 +165,8 @@ impl<T> ForkTree<T> {
     }
 
     /// Modifies all the block user datas and returns a new map.
+    ///
+    /// The returned tree keeps the same [`NodeIndex`]es as `self`.
     pub fn map<U>(self, mut map: impl FnMut(T) -> U) -> ForkTree<U> {
         ForkTree {
             nodes: self
