@@ -1573,7 +1573,7 @@ impl Background {
         guarded.runtimes[runtime_index].num_references += num_blocks;
 
         if num_blocks == 0 {
-            guarded.runtimes.retain(|_, rt| rt.num_references > 1);
+            guarded.runtimes.retain(|_, rt| rt.num_references > 0);
         }
 
         self.advance_and_notify_subscribers(&mut guarded);
