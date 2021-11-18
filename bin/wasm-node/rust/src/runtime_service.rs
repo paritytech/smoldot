@@ -42,10 +42,7 @@
 //! [`RuntimeService::recent_best_block_runtime_lock`], that performs a runtime call on the latest
 //! reported best block or more recent.
 
-use crate::{
-    ffi, lossy_channel,
-    sync_service::{self, StorageQueryError},
-};
+use crate::{ffi, lossy_channel, sync_service};
 
 use futures::{
     channel::mpsc,
@@ -1554,6 +1551,23 @@ async fn run_background(
     }
 }
 
+#[derive(Debug, Clone, derive_more::Display)]
+enum RuntimeDownloadError {
+    StorageQuery(sync_service::StorageQueryError),
+    InvalidHeader(header::Error),
+}
+
+impl RuntimeDownloadError {
+    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
+    /// issue.
+    fn is_network_problem(&self) -> bool {
+        match self {
+            RuntimeDownloadError::StorageQuery(err) => err.is_network_problem(),
+            RuntimeDownloadError::InvalidHeader(_) => false,
+        }
+    }
+}
+
 struct Background {
     log_target: String,
 
@@ -1573,7 +1587,7 @@ struct Background {
             'static,
             (
                 async_tree::AsyncOpId,
-                Result<(Option<Vec<u8>>, Option<Vec<u8>>), StorageQueryError>,
+                Result<(Option<Vec<u8>>, Option<Vec<u8>>), RuntimeDownloadError>,
             ),
         >,
     >,
@@ -1802,37 +1816,52 @@ impl Background {
             );
 
             // Dispatches a runtime download task to `runtime_downloads`.
-            self.runtime_downloads.push(Box::pin({
-                let sync_service = self.sync_service.clone();
-                let block_hash = download_params.block_user_data.hash;
+            self.runtime_downloads.push({
                 let download_id = download_params.id;
-                // TODO: unwrap?!
-                let state_root =
-                    *header::decode(&download_params.block_user_data.scale_encoded_header)
-                        .unwrap()
-                        .state_root;
 
-                async move {
-                    let result = sync_service
-                        .storage_query(
-                            &block_hash,
-                            &state_root,
-                            iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
-                        )
-                        .await;
+                // In order to perform the download, we need to known the state root hash of the
+                // block in question, which requires decoding the block. If the decoding fails,
+                // we report that the asynchronous operation has failed with the hope that this
+                // block gets pruned in the future.
+                match header::decode(&download_params.block_user_data.scale_encoded_header) {
+                    Ok(decoded_header) => {
+                        let sync_service = self.sync_service.clone();
+                        let block_hash = download_params.block_user_data.hash;
+                        let state_root = *decoded_header.state_root;
 
-                    let result = match result {
-                        Ok(mut c) => {
-                            let heap_pages = c.pop().unwrap();
-                            let code = c.pop().unwrap();
-                            Ok((code, heap_pages))
-                        }
-                        Err(error) => Err(error),
-                    };
+                        Box::pin(async move {
+                            let result = sync_service
+                                .storage_query(
+                                    &block_hash,
+                                    &state_root,
+                                    iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+                                )
+                                .await;
 
-                    (download_id, result)
+                            let result = match result {
+                                Ok(mut c) => {
+                                    let heap_pages = c.pop().unwrap();
+                                    let code = c.pop().unwrap();
+                                    Ok((code, heap_pages))
+                                }
+                                Err(error) => Err(RuntimeDownloadError::StorageQuery(error)),
+                            };
+
+                            (download_id, result)
+                        })
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            target: &self.log_target,
+                            "Failed to decode header from sync service: {}", error
+                        );
+
+                        Box::pin(async move {
+                            (download_id, Err(RuntimeDownloadError::InvalidHeader(error)))
+                        })
+                    }
                 }
-            }));
+            });
         }
     }
 
