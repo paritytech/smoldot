@@ -1332,6 +1332,8 @@ async fn run_background(
                         .find(|(_, b, _, _)| b.hash == block.parent_hash)
                         .unwrap();
 
+                    let same_runtime_as_parent =
+                        same_runtime_as_parent(&block.scale_encoded_header);
                     let _ = tree.input_insert_block(
                         Block {
                             hash: header::hash_from_scale_encoded_header(
@@ -1340,7 +1342,7 @@ async fn run_background(
                             scale_encoded_header: block.scale_encoded_header,
                         },
                         Some(parent_index),
-                        false, // TODO: ?!
+                        same_runtime_as_parent,
                         block.is_new_best,
                     );
                 }
@@ -1409,6 +1411,8 @@ async fn run_background(
                                 guarded.best_near_head_of_chain = near_head_of_chain;
                             }
 
+                            let same_runtime_as_parent = same_runtime_as_parent(&new_block.scale_encoded_header);
+
                             match &mut guarded.tree {
                                 GuardedInner::FinalizedBlockRuntimeKnown {
                                     tree: Some(tree), finalized_block,
@@ -1422,14 +1426,14 @@ async fn run_background(
                                     tree.input_insert_block(Block {
                                         hash: header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
                                         scale_encoded_header: new_block.scale_encoded_header,
-                                    }, parent_index, false /* TODO: */, new_block.is_new_best);
+                                    }, parent_index, same_runtime_as_parent, new_block.is_new_best);
                                 }
                                 GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
                                     let parent_index = tree.input_iter_unordered().find(|(_, block, _, _)| block.hash == new_block.parent_hash).unwrap().0;
                                     tree.input_insert_block(Block {
                                         hash: header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
                                         scale_encoded_header: new_block.scale_encoded_header,
-                                    }, Some(parent_index), false /* TODO: */, new_block.is_new_best);
+                                    }, Some(parent_index), same_runtime_as_parent, new_block.is_new_best);
                                 }
                                 _ => unreachable!(),
                             }
@@ -1915,5 +1919,13 @@ impl SuccessfulRuntime {
             runtime_spec,
             virtual_machine: Some(vm),
         })
+    }
+}
+
+/// Returns `true` if the block can be assumed to have the same runtime as its parent.
+fn same_runtime_as_parent(header: &[u8]) -> bool {
+    match header::decode(header) {
+        Ok(h) => !h.digest.has_runtime_environment_updated(),
+        Err(_) => false,
     }
 }
