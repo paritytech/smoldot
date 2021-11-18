@@ -538,16 +538,25 @@ impl RuntimeService {
     pub async fn recent_best_block_runtime_lock<'a>(
         self: &'a Arc<RuntimeService>,
     ) -> RuntimeLock<'a> {
-        let guarded = self.guarded.lock().await;
-        let block_index = match &guarded.tree {
-            GuardedInner::FinalizedBlockRuntimeKnown {
-                tree: Some(tree), ..
-            } => tree.best_block_index().map(|(idx, _)| idx),
-            GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
-                debug_assert_eq!(tree.children(None).count(), 1);
-                Some(tree.children(None).next().unwrap())
-            }
-            _ => unreachable!(),
+        // TODO: clean up implementation
+        let (_, mut notifs) = self.subscribe_best().await;
+
+        let (guarded, block_index) = loop {
+            let guarded = self.guarded.lock().await;
+            match &guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    tree: Some(tree), ..
+                } => {
+                    let index = tree.best_block_index().map(|(idx, _)| idx);
+                    break (guarded, index);
+                }
+                GuardedInner::FinalizedBlockRuntimeUnknown { .. } => {}
+                _ => unreachable!(),
+            };
+
+            // Wait for the best block to change.
+            drop::<MutexGuard<_>>(guarded);
+            let _ = notifs.next().await;
         };
 
         RuntimeLock {
