@@ -1601,6 +1601,7 @@ impl Background {
                         finalized_block_updated = true;
                         best_block_runtime_changed = true; // TODO: ?!
 
+                        *finalized_block = new_finalized;
                         let best_block_hash = best_block_index
                             .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash);
 
@@ -1612,7 +1613,7 @@ impl Background {
 
                         sync_service::Notification::Finalized {
                             best_block_hash,
-                            hash: new_finalized.hash,
+                            hash: finalized_block.hash,
                         }
                     }
                     Some(async_tree::OutputUpdate::Block(block)) => {
