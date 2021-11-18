@@ -16,6 +16,7 @@ blake2-rfc = { version = "0.2.18", default-features = false }
 derive_more = "0.99.16"
 fnv = { version = "1.0.7", default-features = false }
 futures = "0.3.17"
+hex = { version = "0.4.3", default-features = false }
 itertools = "0.10.1"
 lazy_static = "1.4.0"
 log = { version = "0.4.14", features = ["std"] }
