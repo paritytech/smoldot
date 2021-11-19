@@ -244,8 +244,7 @@ impl<'a> HeaderRef<'a> {
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
         // TODO: don't allocate?
-        let encoded_number =
-            parity_scale_codec::Encode::encode(&parity_scale_codec::Compact(self.number));
+        let encoded_number = util::encode_scale_compact_u64(self.number);
 
         iter::once(either::Left(either::Left(&self.parent_hash[..])))
             .chain(iter::once(either::Left(either::Right(encoded_number))))
