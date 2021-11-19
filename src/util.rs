@@ -175,29 +175,36 @@ pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
     }
 }
 
-/// Returns a buffer containing the SCALE-compact encoding of the parameter.
-pub(crate) fn encode_scale_compact_usize(mut value: usize) -> impl AsRef<[u8]> + Clone {
-    const MAX_BITS: usize = 1 + (usize::BITS as usize) / 8;
-    let mut array = arrayvec::ArrayVec::<u8, MAX_BITS>::new();
+macro_rules! encode_scale_compact {
+    ($fn_name:ident, $num_ty:ty) => {
+        /// Returns a buffer containing the SCALE-compact encoding of the parameter.
+        pub(crate) fn $fn_name(mut value: $num_ty) -> impl AsRef<[u8]> + Clone {
+            const MAX_BITS: usize = 1 + (<$num_ty>::BITS as usize) / 8;
+            let mut array = arrayvec::ArrayVec::<u8, MAX_BITS>::new();
 
-    if value < 64 {
-        array.push(u8::try_from(value).unwrap() << 2);
-    } else if value < (1 << 14) {
-        array.push((u8::try_from(value & 0b111111).unwrap() << 2) | 0b01);
-        array.push(u8::try_from((value >> 6) & 0xff).unwrap());
-    } else if value < (1 << 30) {
-        array.push((u8::try_from(value & 0b111111).unwrap() << 2) | 0b10);
-        array.push(u8::try_from((value >> 6) & 0xff).unwrap());
-        array.push(u8::try_from((value >> 14) & 0xff).unwrap());
-        array.push(u8::try_from((value >> 22) & 0xff).unwrap());
-    } else {
-        array.push(0);
-        while value != 0 {
-            array.push(u8::try_from(value & 0xff).unwrap());
-            value >>= 8;
+            if value < 64 {
+                array.push(u8::try_from(value).unwrap() << 2);
+            } else if value < (1 << 14) {
+                array.push((u8::try_from(value & 0b111111).unwrap() << 2) | 0b01);
+                array.push(u8::try_from((value >> 6) & 0xff).unwrap());
+            } else if value < (1 << 30) {
+                array.push((u8::try_from(value & 0b111111).unwrap() << 2) | 0b10);
+                array.push(u8::try_from((value >> 6) & 0xff).unwrap());
+                array.push(u8::try_from((value >> 14) & 0xff).unwrap());
+                array.push(u8::try_from((value >> 22) & 0xff).unwrap());
+            } else {
+                array.push(0);
+                while value != 0 {
+                    array.push(u8::try_from(value & 0xff).unwrap());
+                    value >>= 8;
+                }
+                array[0] = (u8::try_from(array.len() - 1 - 4).unwrap() << 2) | 0b11;
+            }
+
+            array
         }
-        array[0] = (u8::try_from(array.len() - 1 - 4).unwrap() << 2) | 0b11;
-    }
-
-    array
+    };
 }
+
+encode_scale_compact!(encode_scale_compact_u64, u64);
+encode_scale_compact!(encode_scale_compact_usize, usize);

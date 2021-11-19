@@ -71,9 +71,9 @@ impl<'a> AuraConsensusLogRef<'a> {
                         .map(either::Left),
                 )
             }
-            AuraConsensusLogRef::OnDisabled(digest) => either::Right(
-                iter::once(parity_scale_codec::Encode::encode(digest)).map(either::Right),
-            ),
+            AuraConsensusLogRef::OnDisabled(digest) => {
+                either::Right(iter::once(digest.to_le_bytes()).map(either::Right))
+            }
         };
 
         index.map(either::Left).chain(body.map(either::Right))
