@@ -23,7 +23,7 @@ const chain = await client.addChain({
   chainSpec,
   jsonRpcCallback: (jsonRpcResponse) => {
       // Called whenever the client emits a response to a JSON-RPC request,
-      // or a JSON-RPC pub-sub notification.
+      // or an incoming JSON-RPC notification.
       console.log(jsonRpcResponse)
   }
 });

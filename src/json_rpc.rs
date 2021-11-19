@@ -49,12 +49,14 @@
 //!
 //! # JSON-RPC protocol
 //!
-//! The protocol used is the JSON-RPC v2.0 protocol described [here](https://www.jsonrpc.org/),
-//! with two extensions:
+//! The protocol used is the JSON-RPC v2.0 protocol described [here](https://www.jsonrpc.org/).
 //!
-//! - The pub-sub extension, as described
-//!   [here](https://besu.hyperledger.org/en/stable/HowTo/Interact/APIs/RPC-PubSub/).
-//! - The method named `rpc_methods` returns a list of all methods available.
+//! As specified in the JSON-RPC v2.0 protocol, both sides of the TCP/IP connection may send
+//! requests and/or notifications to the other side.
+//!
+//! In practice, the listening side of the connection should be capable of serving the various
+//! JSON-RPC functions described in the [`methods`] submodule. As part of the logic of these
+//! functions, the listening side might send notifications to the initiator of the connection.
 //!
 
 // TODO: write docs about usage ^
