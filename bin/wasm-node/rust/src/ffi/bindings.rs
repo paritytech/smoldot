@@ -306,17 +306,17 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
     super::chain_error_ptr(chain_id)
 }
 
-/// Emit a JSON-RPC request towards the given chain previously added using [`add_chain`].
+/// Emit a JSON-RPC request or notification towards the given chain previously added using
+/// [`add_chain`].
 ///
-/// A buffer containing a UTF-8 JSON-RPC request must be passed as parameter. The format of the
-/// JSON-RPC requests is described in
-/// [the standard JSON-RPC 2.0 specification](https://www.jsonrpc.org/specification). A pub-sub
-/// extension is supported.
+/// A buffer containing a UTF-8 JSON-RPC request or notification must be passed as parameter. The
+/// format of the JSON-RPC requests and notifications is described in
+/// [the standard JSON-RPC 2.0 specification](https://www.jsonrpc.org/specification).
 ///
 /// The buffer passed as parameter **must** have been allocated with [`alloc`]. It is freed when
 /// this function is called.
 ///
-/// Responses and subscriptions notifications are sent back using [`json_rpc_respond`].
+/// Responses and notifications are sent back using [`json_rpc_respond`].
 #[no_mangle]
 pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) {
     super::json_rpc_send(text_ptr, text_len, chain_id)
