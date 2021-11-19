@@ -1661,10 +1661,16 @@ impl ExternalStorageGet {
                     None
                 };
 
-                let outcome_encoded = parity_scale_codec::Encode::encode(&outcome);
                 return self.inner.alloc_write_and_return_pointer_size(
                     host_fn.name(),
-                    iter::once(&outcome_encoded),
+                    if let Some(outcome) = outcome {
+                        either::Left(
+                            iter::once(either::Left([1u8]))
+                                .chain(iter::once(either::Right(outcome.to_le_bytes()))),
+                        )
+                    } else {
+                        either::Right(iter::once(either::Left([0u8])))
+                    },
                 );
             }
             HostFunction::ext_storage_exists_version_1 => HostVm::ReadyToRun(ReadyToRun {
