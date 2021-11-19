@@ -243,11 +243,10 @@ impl<'a> HeaderRef<'a> {
     pub fn scale_encoding(
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        // TODO: don't allocate?
-        let encoded_number = util::encode_scale_compact_u64(self.number);
-
         iter::once(either::Left(either::Left(&self.parent_hash[..])))
-            .chain(iter::once(either::Left(either::Right(encoded_number))))
+            .chain(iter::once(either::Left(either::Right(
+                util::encode_scale_compact_u64(self.number),
+            ))))
             .chain(iter::once(either::Left(either::Left(&self.state_root[..]))))
             .chain(iter::once(either::Left(either::Left(
                 &self.extrinsics_root[..],
