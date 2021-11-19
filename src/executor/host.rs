@@ -1261,28 +1261,45 @@ impl ReadyToRun {
             HostFunction::ext_sandbox_instance_teardown_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_sandbox_get_global_val_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_trie_blake2_256_root_version_1 => {
-                let decode_result =
-                    Vec::<(Vec<u8>, Vec<u8>)>::decode_all(expect_pointer_size!(0).as_ref());
+                let result = {
+                    let input = expect_pointer_size!(0);
+                    let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
+                        nom::combinator::all_consuming(nom::combinator::flat_map(
+                            crate::util::nom_scale_compact_usize,
+                            |num_elems| {
+                                nom::multi::many_m_n(
+                                    num_elems,
+                                    num_elems,
+                                    nom::sequence::tuple((
+                                        nom::combinator::flat_map(
+                                            crate::util::nom_scale_compact_usize,
+                                            nom::bytes::complete::take,
+                                        ),
+                                        nom::combinator::flat_map(
+                                            crate::util::nom_scale_compact_usize,
+                                            nom::bytes::complete::take,
+                                        ),
+                                    )),
+                                )
+                            },
+                        ))(input.as_ref())
+                        .map(|(_, parse_result)| parse_result);
 
-                let elements = match decode_result {
-                    Ok(e) => e,
-                    Err(_) => {
-                        return HostVm::Error {
-                            error: Error::ParamDecodeError,
-                            prototype: self.inner.into_prototype(),
-                        }
+                    match parsing_result {
+                        Ok(elements) => Ok(trie::trie_root(&elements[..])),
+                        Err(_) => Err(()),
                     }
                 };
 
-                // TODO: optimize this
-                let mut trie = crate::trie::Trie::new();
-                for (key, value) in elements {
-                    trie.insert(&key, value);
+                match result {
+                    Ok(out) => self
+                        .inner
+                        .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out)),
+                    Err(()) => HostVm::Error {
+                        error: Error::ParamDecodeError,
+                        prototype: self.inner.into_prototype(),
+                    },
                 }
-                let out = trie.root_merkle_value(None);
-
-                self.inner
-                    .alloc_write_and_return_pointer(host_fn.name(), iter::once(&out))
             }
             HostFunction::ext_trie_blake2_256_ordered_root_version_1 => {
                 let result = {
