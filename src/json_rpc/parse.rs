@@ -89,22 +89,41 @@ pub fn build_success_response(id_json: &str, result_json: &str) -> String {
 
 /// Builds a JSON event to a subscription.
 ///
-/// `method` must be the name of the method that was used for the subscription. `id` must
-/// be the identifier of the subscription, as previously attributed by the server and returned to
-/// the client. `result_json` must be the JSON-formatted event.
+/// `method` must be the name of the method to use for the notification. `id` must be the
+/// identifier of the subscription, as previously attributed by the server and returned to the
+/// client. `result_json` must be the JSON-formatted event.
 ///
 /// # Panic
 ///
 /// Panics if `result_json` isn't valid JSON.
 ///
+// TODO: consider removing this function and use `build_notification` instead
 pub fn build_subscription_event(method: &str, id: &str, result_json: &str) -> String {
-    serde_json::to_string(&SerdeSubscriptionEvent {
-        jsonrpc: SerdeVersion::V2,
+    build_notification(
         method,
-        params: SerdeSubscriptionEventParams {
+        &serde_json::to_string(&SerdeSubscriptionEventParams {
             subscription: id,
             result: serde_json::from_str(result_json).expect("invalid result_json"),
-        },
+        })
+        .unwrap(),
+    )
+}
+
+/// Builds a JSON notification.
+///
+/// `method` must be the name of the method to call. `params_json` must be the JSON-formatted
+/// object or array containing the parameters of the call.
+///
+/// # Panic
+///
+/// Panics if `result_json` isn't valid JSON.
+///
+pub fn build_notification(method: &str, params_json: &str) -> String {
+    serde_json::to_string(&SerdeCall {
+        jsonrpc: SerdeVersion::V2,
+        id: None,
+        method,
+        params: serde_json::from_str(params_json).expect("invalid params_json"),
     })
     .unwrap()
 }
