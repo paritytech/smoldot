@@ -872,11 +872,18 @@ impl<'a> RuntimeLock<'a> {
             // has ended.
             let runtime_index = match &guarded.tree {
                 GuardedInner::FinalizedBlockRuntimeKnown {
-                    tree: Some(tree), ..
-                } => tree
-                    .input_iter_unordered()
-                    .find(|(_, block, _, _)| block.hash == block_hash)
-                    .map(|(_, _, idx, _)| *idx.unwrap()),
+                    tree: Some(tree),
+                    finalized_block,
+                    ..
+                } => {
+                    if finalized_block.hash == block_hash {
+                        Some(*tree.finalized_async_user_data())
+                    } else {
+                        tree.input_iter_unordered()
+                            .find(|(_, block, _, _)| block.hash == block_hash)
+                            .map(|(_, _, idx, _)| *idx.unwrap())
+                    }
+                }
                 GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => tree
                     .input_iter_unordered()
                     .find(|(_, block, _, _)| block.hash == block_hash)
