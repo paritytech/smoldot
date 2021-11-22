@@ -119,11 +119,11 @@ pub(super) async fn start_parachain(
         let mut in_progress_paraheads = stream::FuturesUnordered::new();
 
         // Future that is ready when we need to wake up the `select!` below.
-        let mut wakeup_deadline;
+        let mut wakeup_deadline = future::Either::Right(future::pending());
 
         loop {
             // Start fetching paraheads of new blocks whose parahead needs to be fetched.
-            loop {
+            while in_progress_paraheads.len() < 4 {
                 match async_tree.next_necessary_async_op(&ffi::Instant::now()) {
                     async_tree::NextNecessaryAsyncOp::NotReady { when: Some(when) } => {
                         wakeup_deadline = future::Either::Left(ffi::Delay::new_at(when));
