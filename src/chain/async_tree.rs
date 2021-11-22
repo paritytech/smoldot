@@ -361,9 +361,6 @@ where
     ///
     /// The `Option<&'_ TAsync>` is `Some` if and only if the block has been reported in a
     /// [`OutputUpdate`] before.
-    ///
-    /// The returned items are guaranteed to be in an order in which the parents are found before
-    /// their children.
     pub fn input_iter_unordered(
         &'_ self,
     ) -> impl Iterator<Item = (NodeIndex, &'_ TBl, Option<&'_ TAsync>, bool)> + '_ {
