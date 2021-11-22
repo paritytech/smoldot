@@ -44,8 +44,11 @@ pub(super) async fn start_parachain(
     // Necessary for the `select!` loop below.
     let mut from_network_service = from_network_service.fuse();
 
-    // Parahead of the genesis block.
-    let chainspec_finalized_parahead = chain_information
+    // Last good known parachain header of a relay chain finalized block.
+    // Updated after we successfully fetch the parahead of a relay chain finalized block, and left
+    // untouched if the fetch fails.
+    // Initialized to the parachain genesis block header.
+    let mut finalized_parahead = chain_information
         .as_ref()
         .finalized_block_header
         .scale_encoding_vec();
@@ -53,9 +56,7 @@ pub(super) async fn start_parachain(
     // State machine that tracks the list of parachain network sources and their known blocks.
     let mut sync_sources = sources::AllForksSources::<(PeerId, protocol::Role)>::new(
         40,
-        header::decode(&chainspec_finalized_parahead)
-            .unwrap()
-            .number,
+        header::decode(&finalized_parahead).unwrap().number,
     );
     // Maps `PeerId`s to their indices within `sync_sources`.
     let mut sync_sources_map = HashMap::new();
@@ -80,45 +81,34 @@ pub(super) async fn start_parachain(
 
         is_near_head_of_chain = relay_chain_sync.is_near_head_of_chain_heuristic().await;
 
-        // Block the rest of the syncing before we could determine the parahead of the relay
-        // chain finalized block.
-        let (finalized_parahead, finalized_parahead_valid) = if let Ok(finalized) = parahead(
-            &relay_chain_sync,
-            parachain_id,
-            &header::hash_from_scale_encoded_header(
-                &relay_chain_subscribe_all.finalized_block_scale_encoded_header,
-            ),
-        )
-        .await
-        {
-            (finalized, true)
-        } else {
-            (Vec::new(), false)
-        };
-
         // Tree of relay chain blocks. Blocks are inserted when received from the relay chain
         // sync service. Once inside, their corresponding parahead is fetched. Once the parahead
         // is fetched, this parahead is reported to our subscriptions.
-        let mut async_tree =
-            async_tree::AsyncTree::<ffi::Instant, [u8; 32], _>::new(async_tree::Config {
-                finalized_async_user_data: finalized_parahead,
-                retry_after_failed: Duration::from_secs(5),
-            });
-        for block in relay_chain_subscribe_all.non_finalized_blocks_ancestry_order {
-            let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-            let parent = async_tree
-                .input_iter_unordered()
-                .find(|(_, b, _, _)| **b == block.parent_hash)
-                .map(|b| b.0);
-            debug_assert!(
-                parent.is_some()
-                    || block.parent_hash
-                        == header::hash_from_scale_encoded_header(
-                            &relay_chain_subscribe_all.finalized_block_scale_encoded_header
-                        )
+        //
+        // Each block in the tree has an associated parahead behind an `Option`. This `Option`
+        // always contains `Some`, unless the relay chain finalized block hasn't had its parahead
+        // fetched yet.
+        let mut async_tree = {
+            let mut async_tree =
+                async_tree::AsyncTree::<ffi::Instant, [u8; 32], _>::new(async_tree::Config {
+                    finalized_async_user_data: None,
+                    retry_after_failed: Duration::from_secs(5),
+                });
+            let finalized_hash = header::hash_from_scale_encoded_header(
+                &relay_chain_subscribe_all.finalized_block_scale_encoded_header,
             );
-            async_tree.input_insert_block(hash, parent, false, block.is_new_best);
-        }
+            let finalized_index = async_tree.input_insert_block(finalized_hash, None, false, true);
+            for block in relay_chain_subscribe_all.non_finalized_blocks_ancestry_order {
+                let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                let parent = async_tree
+                    .input_iter_unordered()
+                    .find(|(_, b, _, _)| **b == block.parent_hash)
+                    .map(|b| b.0)
+                    .unwrap_or(finalized_index);
+                async_tree.input_insert_block(hash, Some(parent), false, block.is_new_best);
+            }
+            async_tree
+        };
 
         // List of senders that get notified when the tree of blocks is modified.
         // Note that this list is created in the inner loop, as to be cleared if the relay chain
@@ -129,43 +119,40 @@ pub(super) async fn start_parachain(
         let mut in_progress_paraheads = stream::FuturesUnordered::new();
 
         // Future that is ready when we need to wake up the `select!` below.
-        let mut wakeup_deadline = future::Either::Right(future::pending());
+        let mut wakeup_deadline;
 
         loop {
             // Start fetching paraheads of new blocks whose parahead needs to be fetched.
-            if finalized_parahead_valid {
-                loop {
-                    match async_tree.next_necessary_async_op(&ffi::Instant::now()) {
-                        async_tree::NextNecessaryAsyncOp::NotReady { when: Some(when) } => {
-                            wakeup_deadline = future::Either::Left(ffi::Delay::new_at(when));
-                            break;
-                        }
-                        async_tree::NextNecessaryAsyncOp::NotReady { when: None } => {
-                            wakeup_deadline = future::Either::Right(future::pending());
-                            break;
-                        }
-                        async_tree::NextNecessaryAsyncOp::Ready(op) => {
-                            log::debug!(
-                                target: &log_target,
-                                "Fetching parahead for relay chain block 0x{} (operation id: {:?})",
-                                HashDisplay(op.block_user_data),
-                                op.id
-                            );
+            loop {
+                match async_tree.next_necessary_async_op(&ffi::Instant::now()) {
+                    async_tree::NextNecessaryAsyncOp::NotReady { when: Some(when) } => {
+                        wakeup_deadline = future::Either::Left(ffi::Delay::new_at(when));
+                        break;
+                    }
+                    async_tree::NextNecessaryAsyncOp::NotReady { when: None } => {
+                        wakeup_deadline = future::Either::Right(future::pending());
+                        break;
+                    }
+                    async_tree::NextNecessaryAsyncOp::Ready(op) => {
+                        log::debug!(
+                            target: &log_target,
+                            "Fetching parahead for relay chain block 0x{} (operation id: {:?})",
+                            HashDisplay(op.block_user_data),
+                            op.id
+                        );
 
-                            in_progress_paraheads.push({
-                                let relay_chain_sync = relay_chain_sync.clone();
-                                let block_hash = *op.block_user_data;
-                                let async_op_id = op.id;
-                                async move {
-                                    (
-                                        async_op_id,
-                                        parahead(&relay_chain_sync, parachain_id, &block_hash)
-                                            .await,
-                                    )
-                                }
-                                .boxed()
-                            });
-                        }
+                        in_progress_paraheads.push({
+                            let relay_chain_sync = relay_chain_sync.clone();
+                            let block_hash = *op.block_user_data;
+                            let async_op_id = op.id;
+                            async move {
+                                (
+                                    async_op_id,
+                                    parahead(&relay_chain_sync, parachain_id, &block_hash).await,
+                                )
+                            }
+                            .boxed()
+                        });
                     }
                 }
             }
@@ -178,9 +165,16 @@ pub(super) async fn start_parachain(
                         former_finalized_async_op_user_data: former_parahead,
                         ..
                     } if *new_parahead != former_parahead => {
-                        debug_assert!(finalized_parahead_valid);
+                        debug_assert!(new_parahead.is_some());
+                        let hash =
+                            header::hash_from_scale_encoded_header(new_parahead.as_ref().unwrap());
 
-                        let hash = header::hash_from_scale_encoded_header(new_parahead);
+                        finalized_parahead = new_parahead.clone().unwrap();
+
+                        if let Ok(header) = header::decode(&finalized_parahead) {
+                            sync_sources.set_finalized_block_height(header.number);
+                            // TODO: what about an `else`? does sync_sources leak if the block can't be decoded?
+                        }
 
                         log::debug!(
                             target: &log_target,
@@ -188,12 +182,15 @@ pub(super) async fn start_parachain(
                             HashDisplay(&hash)
                         );
 
-                        // Elements in `all_subscriptions` are removed one by one and
-                        // inserted back if the channel is still open.
                         let best_block_hash = async_tree
                             .best_block_index()
-                            .map(|(_, parahead)| header::hash_from_scale_encoded_header(parahead))
+                            .map(|(_, parahead)| {
+                                header::hash_from_scale_encoded_header(parahead.as_ref().unwrap())
+                            })
                             .unwrap_or(hash);
+
+                        // Elements in `all_subscriptions` are removed one by one and
+                        // inserted back if the channel is still open.
                         for index in (0..all_subscriptions.len()).rev() {
                             let mut sender = all_subscriptions.swap_remove(index);
                             let notif = Notification::Finalized {
@@ -210,16 +207,24 @@ pub(super) async fn start_parachain(
                         // report it again.
                     }
                     async_tree::OutputUpdate::Block(block) => {
-                        // We need to access `async_tree` below, so deconstruct `block`.
+                        // `block` borrows `async_tree`. We need to mutably access `async_tree`
+                        // below, so deconstruct `block` beforehand.
                         let is_new_best = block.is_new_best;
-                        let scale_encoded_header = block.async_op_user_data.clone();
+                        let scale_encoded_header: Vec<u8> =
+                            block.async_op_user_data.clone().unwrap();
                         let block_index = block.index;
 
-                        debug_assert!(finalized_parahead_valid);
-                        let parent_header = async_tree
+                        let parent_header: &Vec<u8> = async_tree
                             .parent(block_index)
-                            .map(|idx| async_tree.block_async_user_data(idx).unwrap())
-                            .unwrap_or_else(|| async_tree.finalized_async_user_data());
+                            .map(|idx| {
+                                async_tree
+                                    .block_async_user_data(idx)
+                                    .unwrap()
+                                    .as_ref()
+                                    .unwrap()
+                            })
+                            .or_else(|| async_tree.finalized_async_user_data().as_ref())
+                            .unwrap_or(&finalized_parahead);
 
                         // Do not report the new block if it is the same as its parent.
                         if *parent_header == scale_encoded_header {
@@ -277,13 +282,6 @@ pub(super) async fn start_parachain(
                                 HashDisplay(&hash)
                             );
 
-                            // If finalized parahead is outdated, it would be a logic error to
-                            // notify any new block. Instead, reset the syncing in order to try
-                            // fetching the parahead of the relay finalized block again.
-                            if !finalized_parahead_valid {
-                                break;
-                            }
-
                             let finalized = async_tree.input_iter_unordered().find(|(_, b, _, _)| **b == hash).unwrap().0;
                             let best = async_tree.input_iter_unordered().find(|(_, b, _, _)| **b == best_block_hash).unwrap().0;
                             async_tree.input_finalize(finalized, best);
@@ -306,9 +304,6 @@ pub(super) async fn start_parachain(
                 (async_op_id, parahead_result) = in_progress_paraheads.select_next_some() => {
                     // A parahead fetching operation is finished.
 
-                    // We shouldn't have started any request if `!finalized_parahead_valid`.
-                    debug_assert!(finalized_parahead_valid);
-
                     // Log and update the `async_tree` accordingly.
                     match parahead_result {
                         Ok(parahead) => {
@@ -319,7 +314,7 @@ pub(super) async fn start_parachain(
                                 async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", ")
                             );
 
-                            async_tree.async_op_finished(async_op_id, parahead);
+                            async_tree.async_op_finished(async_op_id, Some(parahead));
                         },
                         Err(error) => {
                             // Only a debug line is printed if not near the head of the chain,
@@ -353,18 +348,19 @@ pub(super) async fn start_parachain(
 
                     match foreground_message {
                         ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
-                            let _ = send_back.send(is_near_head_of_chain && finalized_parahead_valid);
+                            let _ = send_back.send(is_near_head_of_chain);
                         },
                         ToBackground::SubscribeAll { send_back, buffer_size } => {
                             let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
                             let _ = send_back.send(SubscribeAll {
-                                finalized_block_scale_encoded_header: async_tree.finalized_async_user_data().clone(),
+                                finalized_block_scale_encoded_header: finalized_parahead.clone(),
                                 non_finalized_blocks_ancestry_order: async_tree.input_iter_unordered().filter_map(|(node_index, _, parahead, is_best)| {
-                                    let parahead = parahead?;
-                                    debug_assert!(finalized_parahead_valid);
+                                    // TODO: is this correct? can it be that the parent's parahead isn't known yet?
+                                    let parahead = parahead?.as_ref().unwrap();
                                     let parent_hash = async_tree.parent(node_index)
-                                        .map(|idx| header::hash_from_scale_encoded_header(&async_tree.block_async_user_data(idx).unwrap()))
-                                        .unwrap_or_else(|| header::hash_from_scale_encoded_header(async_tree.finalized_async_user_data()));
+                                        .map(|idx| header::hash_from_scale_encoded_header(&async_tree.block_async_user_data(idx).unwrap().as_ref().unwrap()))
+                                        .or_else(|| async_tree.finalized_async_user_data().as_ref().map(header::hash_from_scale_encoded_header))
+                                        .unwrap_or(header::hash_from_scale_encoded_header(&finalized_parahead));
 
                                     Some(BlockNotification {
                                         is_new_best: is_best,
