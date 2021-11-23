@@ -44,7 +44,26 @@ pub fn parse_call(call_json: &str) -> Result<Call, ParseError> {
     })
 }
 
-/// Parsed JSON-RPC call.
+/// Builds a JSON call.
+///
+/// `method` must be the name of the method to call. `params_json` must be the JSON-formatted
+/// object or array containing the parameters of the call.
+///
+/// # Panic
+///
+/// Panics if the [`Call::id_json`] or [`Call::params_json`] isn't valid JSON.
+///
+pub fn build_call(call: Call) -> String {
+    serde_json::to_string(&SerdeCall {
+        jsonrpc: SerdeVersion::V2,
+        id: call.id_json.map(|id| serde_json::from_str(id).unwrap()),
+        method: call.method,
+        params: serde_json::from_str(call.params_json).unwrap(),
+    })
+    .unwrap()
+}
+
+/// Decoded JSON-RPC call.
 #[derive(Debug)]
 pub struct Call<'a> {
     /// JSON-formatted identifier of the request. `None` for notifications.
@@ -99,33 +118,15 @@ pub fn build_success_response(id_json: &str, result_json: &str) -> String {
 ///
 // TODO: consider removing this function and use `build_notification` instead
 pub fn build_subscription_event(method: &str, id: &str, result_json: &str) -> String {
-    build_notification(
+    build_call(Call {
+        id_json: None,
         method,
-        &serde_json::to_string(&SerdeSubscriptionEventParams {
+        params_json: &serde_json::to_string(&SerdeSubscriptionEventParams {
             subscription: id,
             result: serde_json::from_str(result_json).expect("invalid result_json"),
         })
         .unwrap(),
-    )
-}
-
-/// Builds a JSON notification.
-///
-/// `method` must be the name of the method to call. `params_json` must be the JSON-formatted
-/// object or array containing the parameters of the call.
-///
-/// # Panic
-///
-/// Panics if `result_json` isn't valid JSON.
-///
-pub fn build_notification(method: &str, params_json: &str) -> String {
-    serde_json::to_string(&SerdeCall {
-        jsonrpc: SerdeVersion::V2,
-        id: None,
-        method,
-        params: serde_json::from_str(params_json).expect("invalid params_json"),
     })
-    .unwrap()
 }
 
 /// Builds a JSON response.
