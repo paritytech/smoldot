@@ -1011,6 +1011,7 @@ where
 }
 
 /// See [`AsyncTree::input_iter_unordered`] and [`AsyncTree::input_iter_ancestry_order`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputIterItem<'a, TBl, TAsync> {
     /// Index of the block.
     pub id: NodeIndex,
