@@ -328,15 +328,17 @@ where
         self.non_finalized_blocks.children(node)
     }
 
+    /// Returns the list of all non-finalized blocks that have been inserted.
+    ///
     /// Similar to [`AsyncTree::input_iter_unordered`], except that the returned items are
     /// guaranteed to be in an order in which the parents are found before their children.
     pub fn input_iter_ancestry_order(
         &'_ self,
-    ) -> impl Iterator<Item = (NodeIndex, &'_ TBl, Option<&'_ TAsync>, bool)> + '_ {
+    ) -> impl Iterator<Item = InputIterItem<'_, TBl, TAsync>> + '_ {
         self.non_finalized_blocks
             .iter_ancestry_order()
-            .map(move |(idx, b)| {
-                let async_ud = match &b.async_op {
+            .map(move |(id, b)| {
+                let async_op_user_data = match &b.async_op {
                     AsyncOpState::Finished {
                         reported: true,
                         user_data,
@@ -344,30 +346,24 @@ where
                     _ => None,
                 };
 
-                (
-                    idx,
-                    &b.user_data,
-                    async_ud,
-                    self.best_block_index == Some(idx),
-                )
+                InputIterItem {
+                    id,
+                    user_data: &b.user_data,
+                    async_op_user_data,
+                    is_output_best: self.best_block_index == Some(id),
+                }
             })
     }
 
-    /// Returns the list of all non-finalized blocks that have been inserted, plus a boolean
-    /// indicating whether this is the output best block.
-    ///
-    /// Either 0 or 1 blocks will have the "is output best" boolean set to true. If no blocks have
-    /// this boolean set, then the best block is the finalized block.
-    ///
-    /// The `Option<&'_ TAsync>` is `Some` if and only if the block has been reported in a
-    /// [`OutputUpdate`] before.
+    /// Returns the list of all non-finalized blocks that have been inserted, in no particular
+    /// order.
     pub fn input_iter_unordered(
         &'_ self,
-    ) -> impl Iterator<Item = (NodeIndex, &'_ TBl, Option<&'_ TAsync>, bool)> + '_ {
+    ) -> impl Iterator<Item = InputIterItem<'_, TBl, TAsync>> + '_ {
         self.non_finalized_blocks
             .iter_unordered()
-            .map(move |(idx, b)| {
-                let async_ud = match &b.async_op {
+            .map(move |(id, b)| {
+                let async_op_user_data = match &b.async_op {
                     AsyncOpState::Finished {
                         reported: true,
                         user_data,
@@ -375,12 +371,12 @@ where
                     _ => None,
                 };
 
-                (
-                    idx,
-                    &b.user_data,
-                    async_ud,
-                    self.best_block_index == Some(idx),
-                )
+                InputIterItem {
+                    id,
+                    user_data: &b.user_data,
+                    async_op_user_data,
+                    is_output_best: self.best_block_index == Some(id),
+                }
             })
     }
 
@@ -1012,6 +1008,26 @@ where
         // Nothing to do.
         None
     }
+}
+
+/// See [`AsyncTree::input_iter_unordered`] and [`AsyncTree::input_iter_ancestry_order`].
+pub struct InputIterItem<'a, TBl, TAsync> {
+    /// Index of the block.
+    pub id: NodeIndex,
+
+    /// User data associated to this block that was passed to [`AsyncTree::input_insert_block`].
+    pub user_data: &'a TBl,
+
+    /// User data of the asynchronous operation of this block.
+    ///
+    /// `Some` if and only if the block has been reported in a [`OutputUpdate`] before.
+    pub async_op_user_data: Option<&'a TAsync>,
+
+    /// Whether this block is considered as the best block of the output.
+    ///
+    /// Either 0 or 1 blocks will have the "is output best" boolean set to true. If no blocks have
+    /// this boolean set, then the best block is the finalized block.
+    pub is_output_best: bool,
 }
 
 /// See [`AsyncTree::try_advance_output`].
