@@ -20,7 +20,7 @@ ctrlc = "3.2.1"
 derive_more = "0.99.16"
 directories = "4.0.1"
 fnv = { version = "1.0.7", default-features = false }
-futures = { version = "0.3.17", default-features = false, features = ["std", "thread-pool"] }
+futures = { version = "0.3.18", default-features = false, features = ["std", "thread-pool"] }
 futures-timer = "3.0"
 hashbrown = { version = "0.11.2", default-features = false }
 hex = { version = "0.4.3", default-features = false }
