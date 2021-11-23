@@ -102,8 +102,8 @@ pub(super) async fn start_parachain(
                 let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
                 let parent = async_tree
                     .input_iter_unordered()
-                    .find(|(_, b, _, _)| **b == block.parent_hash)
-                    .map(|b| b.0)
+                    .find(|b| *b.user_data == block.parent_hash)
+                    .map(|b| b.id)
                     .unwrap_or(finalized_index);
                 async_tree.input_insert_block(hash, Some(parent), false, block.is_new_best);
             }
@@ -282,8 +282,8 @@ pub(super) async fn start_parachain(
                                 HashDisplay(&hash)
                             );
 
-                            let finalized = async_tree.input_iter_unordered().find(|(_, b, _, _)| **b == hash).unwrap().0;
-                            let best = async_tree.input_iter_unordered().find(|(_, b, _, _)| **b == best_block_hash).unwrap().0;
+                            let finalized = async_tree.input_iter_unordered().find(|b| *b.user_data == hash).unwrap().id;
+                            let best = async_tree.input_iter_unordered().find(|b| *b.user_data == best_block_hash).unwrap().id;
                             async_tree.input_finalize(finalized, best);
                         }
                         Notification::Block(block) => {
@@ -295,7 +295,7 @@ pub(super) async fn start_parachain(
                                 HashDisplay(&hash)
                             );
 
-                            let parent = async_tree.input_iter_unordered().find(|(_, b, _, _)| **b == block.parent_hash).map(|b| b.0); // TODO: check if finalized
+                            let parent = async_tree.input_iter_unordered().find(|b| *b.user_data == block.parent_hash).map(|b| b.id); // TODO: check if finalized
                             async_tree.input_insert_block(hash, parent, false, block.is_new_best);
                         }
                     };
@@ -354,16 +354,18 @@ pub(super) async fn start_parachain(
                             let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
                             let _ = send_back.send(SubscribeAll {
                                 finalized_block_scale_encoded_header: finalized_parahead.clone(),
-                                non_finalized_blocks_ancestry_order: async_tree.input_iter_unordered().filter_map(|(node_index, _, parahead, is_best)| {
-                                    // TODO: is this correct? can it be that the parent's parahead isn't known yet?
-                                    let parahead = parahead?.as_ref().unwrap();
-                                    let parent_hash = async_tree.parent(node_index)
+                                non_finalized_blocks_ancestry_order: async_tree.input_iter_unordered().filter_map(|block| {
+                                    // `async_op_user_data` is `Some` only if this block has
+                                    // already been reported on the output. In order to maintain
+                                    // consistency, only these blocks should be reported.
+                                    let parahead = block.async_op_user_data?.as_ref().unwrap();
+                                    let parent_hash = async_tree.parent(block.id)
                                         .map(|idx| header::hash_from_scale_encoded_header(&async_tree.block_async_user_data(idx).unwrap().as_ref().unwrap()))
                                         .or_else(|| async_tree.finalized_async_user_data().as_ref().map(header::hash_from_scale_encoded_header))
                                         .unwrap_or(header::hash_from_scale_encoded_header(&finalized_parahead));
 
                                     Some(BlockNotification {
-                                        is_new_best: is_best,
+                                        is_new_best: block.is_output_best,
                                         scale_encoded_header: parahead.clone(),
                                         parent_hash,
                                     })

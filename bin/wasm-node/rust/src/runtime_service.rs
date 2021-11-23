@@ -481,22 +481,23 @@ impl RuntimeService {
                 finalized_block: _finalized_block,
             } => {
                 tree.input_iter_ancestry_order()
-                    .filter(|(_, _, runtime_index, _)| runtime_index.is_some())
-                    .map(|(_, block, _, is_best)| {
-                        let parent_hash = *header::decode(&block.scale_encoded_header)
+                    .filter(|block| block.async_op_user_data.is_some())
+                    .map(|block| {
+                        let parent_hash = *header::decode(&block.user_data.scale_encoded_header)
                             .unwrap()
                             .parent_hash; // TODO: correct? if yes, document
                         debug_assert!(
                             parent_hash == _finalized_block.hash
                                 || tree
                                     .input_iter_ancestry_order()
-                                    .any(|(_, b, rt, _)| parent_hash == b.hash && rt.is_some())
+                                    .any(|b| parent_hash == b.user_data.hash
+                                        && b.async_op_user_data.is_some())
                         );
 
                         sync_service::BlockNotification {
-                            is_new_best: is_best,
+                            is_new_best: block.is_output_best,
                             parent_hash,
-                            scale_encoded_header: block.scale_encoded_header.clone(),
+                            scale_encoded_header: block.user_data.scale_encoded_header.clone(),
                         }
                     })
                     .collect()
@@ -880,14 +881,14 @@ impl<'a> RuntimeLock<'a> {
                         Some(*tree.finalized_async_user_data())
                     } else {
                         tree.input_iter_unordered()
-                            .find(|(_, block, _, _)| block.hash == block_hash)
-                            .map(|(_, _, idx, _)| *idx.unwrap())
+                            .find(|block| block.user_data.hash == block_hash)
+                            .map(|block| *block.async_op_user_data.unwrap())
                     }
                 }
                 GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => tree
                     .input_iter_unordered()
-                    .find(|(_, block, _, _)| block.hash == block_hash)
-                    .map(|(_, _, idx, _)| idx.unwrap().unwrap()),
+                    .find(|block| block.user_data.hash == block_hash)
+                    .map(|block| block.async_op_user_data.unwrap().unwrap()),
                 _ => unreachable!(),
             };
 
@@ -1367,10 +1368,11 @@ async fn run_background(
         for block in subscription.non_finalized_blocks_ancestry_order {
             match &mut background.guarded.try_lock().unwrap().tree {
                 GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
-                    let (parent_index, ..) = tree
+                    let parent_index = tree
                         .input_iter_unordered()
-                        .find(|(_, b, _, _)| b.hash == block.parent_hash)
-                        .unwrap();
+                        .find(|b| b.user_data.hash == block.parent_hash)
+                        .unwrap()
+                        .id;
 
                     let same_runtime_as_parent =
                         same_runtime_as_parent(&block.scale_encoded_header);
@@ -1464,7 +1466,7 @@ async fn run_background(
                                         }
                                         None
                                     } else {
-                                        let index = tree.input_iter_unordered().find(|(_, block, _, _)| block.hash == new_block.parent_hash).unwrap().0;
+                                        let index = tree.input_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id;
                                         if same_runtime_as_parent {
                                             if let Some(runtime_index) = tree.block_async_user_data(index) {
                                                 guarded.runtimes[*runtime_index].num_references += 1;
@@ -1479,7 +1481,7 @@ async fn run_background(
                                     }, parent_index, same_runtime_as_parent, new_block.is_new_best);
                                 }
                                 GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
-                                    let parent_index = tree.input_iter_unordered().find(|(_, block, _, _)| block.hash == new_block.parent_hash).unwrap().0;
+                                    let parent_index = tree.input_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id;
                                     if same_runtime_as_parent {
                                         if let Some(runtime_index) = tree.block_async_user_data(parent_index) {
                                             guarded.runtimes[runtime_index.unwrap()].num_references += 1;
@@ -1886,25 +1888,29 @@ impl Background {
                     return;
                 }
 
-                let (node_to_finalize, _, _, _) = tree
+                let node_to_finalize = tree
                     .input_iter_unordered()
-                    .find(|(_, b, _, _)| b.hash == hash_to_finalize)
-                    .unwrap();
-                let (new_best_block, _, _, _) = tree
+                    .find(|block| block.user_data.hash == hash_to_finalize)
+                    .unwrap()
+                    .id;
+                let new_best_block = tree
                     .input_iter_unordered()
-                    .find(|(_, b, _, _)| b.hash == new_best_block_hash)
-                    .unwrap();
+                    .find(|block| block.user_data.hash == new_best_block_hash)
+                    .unwrap()
+                    .id;
                 tree.input_finalize(node_to_finalize, new_best_block);
             }
             GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
-                let (node_to_finalize, _, _, _) = tree
+                let node_to_finalize = tree
                     .input_iter_unordered()
-                    .find(|(_, b, _, _)| b.hash == hash_to_finalize)
-                    .unwrap();
-                let (new_best_block, _, _, _) = tree
+                    .find(|block| block.user_data.hash == hash_to_finalize)
+                    .unwrap()
+                    .id;
+                let new_best_block = tree
                     .input_iter_unordered()
-                    .find(|(_, b, _, _)| b.hash == new_best_block_hash)
-                    .unwrap();
+                    .find(|block| block.user_data.hash == new_best_block_hash)
+                    .unwrap()
+                    .id;
                 tree.input_finalize(node_to_finalize, new_best_block);
             }
             _ => unreachable!(),
