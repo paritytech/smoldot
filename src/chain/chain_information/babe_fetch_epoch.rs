@@ -22,7 +22,6 @@ use crate::{
 };
 
 use alloc::vec::Vec;
-use parity_scale_codec::{Decode, DecodeAll as _, Encode};
 
 /// The Babe epoch to fetch.
 pub enum BabeEpochToFetch {
@@ -50,9 +49,8 @@ pub enum Error {
     /// Error while running the Wasm virtual machine.
     #[display(fmt = "{}", _0)]
     WasmVm(read_only_runtime_host::ErrorDetail),
-    /// Error while decoding the babe epoch.
-    #[display(fmt = "{}", _0)]
-    DecodeFailed(parity_scale_codec::Error),
+    /// Error while decoding the output of the runtime.
+    DecodeFailed,
     /// Invalid Babe information found in the runtime.
     InvalidBabeInfo(BabeValidityError),
 }
@@ -104,30 +102,10 @@ impl Query {
     fn from_inner(inner: read_only_runtime_host::RuntimeHostVm) -> Self {
         match inner {
             read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                let decoded = DecodableBabeEpochInformation::decode_all(
-                    success.virtual_machine.value().as_ref(),
-                );
-
+                let decoded = decode_babe_info(success.virtual_machine.value().as_ref());
                 let virtual_machine = success.virtual_machine.into_prototype();
-
                 match decoded {
-                    Ok(epoch) => {
-                        let info = BabeEpochInformation {
-                            epoch_index: epoch.epoch_index,
-                            start_slot_number: Some(epoch.start_slot_number),
-                            authorities: epoch
-                                .authorities
-                                .into_iter()
-                                .map(|authority| header::BabeAuthority {
-                                    public_key: authority.public_key,
-                                    weight: authority.weight,
-                                })
-                                .collect(),
-                            randomness: epoch.randomness,
-                            c: epoch.c,
-                            allowed_slots: epoch.allowed_slots,
-                        };
-
+                    Ok(info) => {
                         if let Err(err) = info.validate() {
                             return Query::Finished {
                                 result: Err(Error::InvalidBabeInfo(err)),
@@ -141,7 +119,7 @@ impl Query {
                         }
                     }
                     Err(error) => Query::Finished {
-                        result: Err(Error::DecodeFailed(error)),
+                        result: Err(error),
                         virtual_machine,
                     },
                 }
@@ -216,27 +194,71 @@ impl StorageRoot {
     }
 }
 
-#[derive(Decode, Encode)]
-struct DecodableBabeEpochInformation {
-    epoch_index: u64,
-    start_slot_number: u64,
-    duration: u64,
-    authorities: Vec<DecodableBabeAuthority>,
-    randomness: [u8; 32],
-    c: (u64, u64),
-    allowed_slots: header::BabeAllowedSlots,
-}
+fn decode_babe_info(scale_encoded: &'_ [u8]) -> Result<BabeEpochInformation, Error> {
+    let mut combinator = nom::combinator::all_consuming(nom::combinator::map(
+        nom::sequence::tuple((
+            nom::number::complete::le_u64,
+            nom::number::complete::le_u64,
+            nom::number::complete::le_u64,
+            nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
+                nom::multi::many_m_n(
+                    num_elems,
+                    num_elems,
+                    nom::combinator::map(
+                        nom::sequence::tuple((
+                            nom::bytes::complete::take(32u32),
+                            nom::number::complete::le_u64,
+                        )),
+                        move |(public_key, weight)| header::BabeAuthority {
+                            public_key: <[u8; 32]>::try_from(public_key).unwrap(),
+                            weight,
+                        },
+                    ),
+                )
+            }),
+            nom::combinator::map(nom::bytes::complete::take(32u32), |b| {
+                <[u8; 32]>::try_from(b).unwrap()
+            }),
+            nom::number::complete::le_u64,
+            nom::number::complete::le_u64,
+            |b| {
+                header::BabeAllowedSlots::from_slice(b)
+                    .map(|v| (&[][..], v))
+                    .map_err(|_| {
+                        nom::Err::Error(nom::error::make_error(b, nom::error::ErrorKind::Verify))
+                    })
+            },
+        )),
+        |(
+            epoch_index,
+            start_slot_number,
+            _duration,
+            authorities,
+            randomness,
+            c0,
+            c1,
+            allowed_slots,
+        )| {
+            BabeEpochInformation {
+                epoch_index,
+                start_slot_number: Some(start_slot_number),
+                authorities,
+                randomness,
+                c: (c0, c1),
+                allowed_slots,
+            }
+        },
+    ));
 
-#[derive(Decode, Encode)]
-struct DecodableBabeAuthority {
-    public_key: [u8; 32],
-    weight: u64,
+    let result: Result<_, nom::Err<nom::error::Error<&'_ [u8]>>> = combinator(scale_encoded);
+    match result {
+        Ok((_, info)) => Ok(info),
+        Err(_) => Err(Error::DecodeFailed),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use parity_scale_codec::DecodeAll;
-
     #[test]
     fn sample_decode() {
         // Sample taken from an actual Westend block.
@@ -255,6 +277,6 @@ mod tests {
             0, 0, 0, 0, 2,
         ];
 
-        super::DecodableBabeEpochInformation::decode_all(&sample_data).unwrap();
+        super::decode_babe_info(&sample_data).unwrap();
     }
 }
