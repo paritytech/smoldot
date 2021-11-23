@@ -94,8 +94,6 @@ impl ConsensusService {
     /// Initializes the [`ConsensusService`] with the given configuration.
     #[tracing::instrument(level = "trace", skip(config))]
     pub async fn new(mut config: Config) -> Arc<Self> {
-        let (to_database, messages_rx) = mpsc::channel(4);
-
         // Perform the initial access to the database to load a bunch of information.
         let (
             finalized_block_hash,
@@ -149,7 +147,12 @@ impl ConsensusService {
             finalized_block_number,
         }));
 
-        let background_sync = {
+        // Channel that sends blocks to the database for the database to write them.
+        // Writing blocks asynchronously considerably speeds up the syncing.
+        let (to_database, messages_rx) = mpsc::channel(4);
+
+        // Spawn the background task that synchronizes blocks and updates the database.
+        (config.tasks_executor)({
             let mut sync = all::AllSync::new(all::Config {
                 chain_information: finalized_chain_information,
                 sources_capacity: 32,
@@ -191,7 +194,7 @@ impl ConsensusService {
 
             let block_author_sync_source = sync.add_source(None, 0, [0; 32]); // TODO: proper values?
 
-            SyncBackground {
+            let background_sync = SyncBackground {
                 sync,
                 block_author_sync_source,
                 block_authoring: None,
@@ -206,13 +209,16 @@ impl ConsensusService {
                 peers_source_id_map: Default::default(),
                 block_requests_finished: stream::FuturesUnordered::new(),
                 jaeger_service: config.jaeger_service,
-            }
-        };
+            };
 
-        (config.tasks_executor)(Box::pin(background_sync.run()));
+            Box::pin(background_sync.run().instrument(
+                tracing::trace_span!(parent: None, "sync-background", root = %HashDisplay(&finalized_block_hash)),
+            ))
+        });
 
+        // Spawn the background task that writes blocks to the database.
         (config.tasks_executor)(Box::pin(
-            start_database_write(config.database, messages_rx).instrument(
+            run_database_write(config.database, messages_rx).instrument(
                 tracing::trace_span!(parent: None, "database-write", root = %HashDisplay(&finalized_block_hash)),
             ),
         ));
@@ -235,6 +241,17 @@ enum ToDatabase {
 }
 
 struct SyncBackground {
+    /// State machine containing the list of all the peers, all the non-finalized blocks, and all
+    /// the network requests in progress.
+    ///
+    /// Each peer holds an `Option<PeerId>` containing either its `PeerId` for a networking peer,
+    /// or `None` if this is the "special peer" representing the local block authoring. Only one
+    /// peer must contain `None` and its id must be [`SyncBackground::block_author_sync_source`].
+    ///
+    /// Each on-going request has a corresponding future within
+    /// [`SyncBackground::block_requests_finished`]. This future is wrapped within an aborter, and
+    /// the an `AbortHandle` is held within this state machine. It can be used to abort the
+    /// request if necessary.
     sync: all::AllSync<future::AbortHandle, Option<libp2p::PeerId>, ()>,
 
     /// Source within the [`SyncBackground::sync`] to use to import locally-authored blocks.
@@ -269,12 +286,28 @@ struct SyncBackground {
     finalized_block_storage: BTreeMap<Vec<u8>, Vec<u8>>,
 
     sync_state: Arc<Mutex<SyncState>>,
-    network_service: Arc<network_service::NetworkService>,
-    network_chain_index: usize,
-    from_network_service: stream::BoxStream<'static, network_service::Event>,
-    to_database: mpsc::Sender<ToDatabase>,
 
+    /// Service managing the connections to the networking peers.
+    network_service: Arc<network_service::NetworkService>,
+
+    /// Index, within the [`SyncBackground::network_service`], of the chain that this sync service
+    /// is syncing from. This value must be passed as parameter when starting requests on the
+    /// network service.
+    network_chain_index: usize,
+
+    /// Stream of events coming from the [`SyncBackground::network_service`]. Used to know what
+    /// happens on the peer-to-peer network.
+    from_network_service: stream::BoxStream<'static, network_service::Event>,
+
+    /// For each networking peer, the identifier of the source in [`SyncBackground::sync`].
+    /// This map is kept up-to-date with the "chain connections" of the network service. Whenever
+    /// a connection is established with a peer, an entry is inserted in this map and a source is
+    /// added to [`SyncBackground::sync`], and whenever a connection is closed, the map entry and
+    /// source are removed.
     peers_source_id_map: hashbrown::HashMap<libp2p::PeerId, all::SourceId, fnv::FnvBuildHasher>,
+
+    /// Block requests that have been emitted on the networking service and that are still in
+    /// progress. Each entry in this field also has an entry in [`SyncBackground::sync`].
     block_requests_finished: stream::FuturesUnordered<
         future::BoxFuture<
             'static,
@@ -285,6 +318,10 @@ struct SyncBackground {
         >,
     >,
 
+    /// Channel to send messages to the background task dedicated to writing to the database
+    /// asynchronously.
+    to_database: mpsc::Sender<ToDatabase>,
+
     /// How to report events about blocks.
     jaeger_service: Arc<jaeger_service::JaegerService>,
 }
@@ -293,7 +330,7 @@ impl SyncBackground {
     #[tracing::instrument(level = "trace", skip(self))]
     async fn run(mut self) {
         loop {
-            self.start_requests().await;
+            self.start_network_requests().await;
             self = self.process_blocks().await;
 
             // Update the current best block, used for CLI-related purposes.
@@ -707,8 +744,9 @@ impl SyncBackground {
         ));
     }
 
+    /// Starts all the new network requests that should be started.
     // TODO: handle obsolete requests
-    async fn start_requests(&mut self) {
+    async fn start_network_requests(&mut self) {
         loop {
             // `desired_requests()` returns, in decreasing order of priority, the requests
             // that should be started in order for the syncing to proceed. We simply pick the
@@ -799,7 +837,7 @@ impl SyncBackground {
                 } => {
                     let peer_id = self.sync.source_user_data_mut(source_id).clone().unwrap();
 
-                    // TODO: handle requests to the block author source
+                    // TODO: add jaeger span
 
                     let request = self.network_service.clone().blocks_request(
                         peer_id,
@@ -1084,9 +1122,9 @@ impl SyncBackground {
     }
 }
 
-/// Starts the task that writes blocks to the database.
+/// Runs the task that writes blocks to the database.
 #[tracing::instrument(level = "trace", skip(database, messages_rx))]
-async fn start_database_write(
+async fn run_database_write(
     database: Arc<database_thread::DatabaseThread>,
     mut messages_rx: mpsc::Receiver<ToDatabase>,
 ) {
