@@ -819,13 +819,13 @@ impl Digest {
 
     /// Pushes an Aura seal at the end of the list. Returns an error if there is already an Aura
     /// seal.
-    pub fn push_aura_seal(&mut self, seal: [u8; 64]) -> Result<(), ()> {
+    pub fn push_aura_seal(&mut self, seal: [u8; 64]) -> Result<(), PushSealError> {
         if self.aura_seal_index.is_none() {
             self.aura_seal_index = Some(self.list.len());
             self.list.push(DigestItem::AuraSeal(seal));
             Ok(())
         } else {
-            Err(())
+            Err(PushSealError())
         }
     }
 
@@ -836,13 +836,13 @@ impl Digest {
 
     /// Pushes a Babe seal at the end of the list. Returns an error if there is already a Babe
     /// seal.
-    pub fn push_babe_seal(&mut self, seal: [u8; 64]) -> Result<(), ()> {
+    pub fn push_babe_seal(&mut self, seal: [u8; 64]) -> Result<(), PushSealError> {
         if self.babe_seal_index.is_none() {
             self.babe_seal_index = Some(self.list.len());
             self.list.push(DigestItem::BabeSeal(seal));
             Ok(())
         } else {
-            Err(())
+            Err(PushSealError())
         }
     }
 
@@ -940,6 +940,11 @@ impl<'a> Iterator for LogsIter<'a> {
 }
 
 impl<'a> ExactSizeIterator for LogsIter<'a> {}
+
+/// Error potentially returned when pushing a seal at the end of the digest log items.
+#[derive(Debug, Copy, Clone, derive_more::Display)]
+#[display(fmt = "Seal already exists")]
+pub struct PushSealError();
 
 // TODO: document
 #[derive(Debug, PartialEq, Eq, Clone)]
