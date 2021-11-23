@@ -183,7 +183,7 @@
 use super::{allocator, vm};
 use crate::{trie, util};
 
-use alloc::{borrow::ToOwned as _, format, string::String, vec::Vec};
+use alloc::{borrow::ToOwned as _, format, string::String, vec, vec::Vec};
 use core::{fmt, hash::Hasher as _, iter, str};
 use sha2::Digest as _;
 use tiny_keccak::Hasher as _;
@@ -1012,14 +1012,6 @@ impl ReadyToRun {
             HostFunction::ext_crypto_ecdsa_public_keys_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1
             | HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2 => {
-                // TODO: clean up
-                #[derive(parity_scale_codec::Encode)]
-                enum EcdsaVerifyError {
-                    RsError,
-                    VError,
-                    BadSignature,
-                }
-
                 let sig = expect_pointer_constant_size!(0, 65);
                 let msg = expect_pointer_constant_size!(1, 32);
                 let is_v2 = matches!(
@@ -1027,46 +1019,48 @@ impl ReadyToRun {
                     HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2
                 );
 
-                let result = (|| -> Result<_, EcdsaVerifyError> {
+                let result = {
                     let rs = if is_v2 {
                         libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
                     } else {
                         libsecp256k1::Signature::parse_overflowing_slice(&sig[0..64])
-                    }
-                    .map_err(|_| EcdsaVerifyError::RsError)?;
-                    let v = libsecp256k1::RecoveryId::parse(if sig[64] > 26 {
-                        sig[64] - 27
-                    } else {
-                        sig[64]
-                    } as u8)
-                    .map_err(|_| EcdsaVerifyError::VError)?;
-                    let pubkey = libsecp256k1::recover(
-                        &libsecp256k1::Message::parse_slice(&msg).unwrap(),
-                        &rs,
-                        &v,
-                    )
-                    .map_err(|_| EcdsaVerifyError::BadSignature)?;
-                    let mut res = [0u8; 64];
-                    res.copy_from_slice(&pubkey.serialize()[1..65]);
-                    Ok(res)
-                })();
-                let result_encoded = parity_scale_codec::Encode::encode(&result);
+                    };
 
-                self.inner.alloc_write_and_return_pointer_size(
-                    host_fn.name(),
-                    iter::once(&result_encoded),
-                )
+                    if let Ok(rs) = rs {
+                        let v = libsecp256k1::RecoveryId::parse(if sig[64] > 26 {
+                            sig[64] - 27
+                        } else {
+                            sig[64]
+                        } as u8);
+
+                        if let Ok(v) = v {
+                            let pubkey = libsecp256k1::recover(
+                                &libsecp256k1::Message::parse_slice(&msg).unwrap(),
+                                &rs,
+                                &v,
+                            );
+
+                            if let Ok(pubkey) = pubkey {
+                                let mut res = Vec::with_capacity(65);
+                                res.push(0);
+                                res.extend_from_slice(&pubkey.serialize()[1..65]);
+                                res
+                            } else {
+                                vec![1, 2]
+                            }
+                        } else {
+                            vec![1, 1]
+                        }
+                    } else {
+                        vec![1, 0]
+                    }
+                };
+
+                self.inner
+                    .alloc_write_and_return_pointer_size(host_fn.name(), iter::once(&result))
             }
             HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_1
             | HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_2 => {
-                // TODO: clean up
-                #[derive(parity_scale_codec::Encode)]
-                enum EcdsaVerifyError {
-                    RsError,
-                    VError,
-                    BadSignature,
-                }
-
                 let sig = expect_pointer_constant_size!(0, 65);
                 let msg = expect_pointer_constant_size!(1, 32);
                 let is_v2 = matches!(
@@ -1074,33 +1068,45 @@ impl ReadyToRun {
                     HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_2
                 );
 
-                let result = (|| -> Result<_, EcdsaVerifyError> {
+                let result = {
                     let rs = if is_v2 {
                         libsecp256k1::Signature::parse_standard_slice(&sig[0..64])
                     } else {
                         libsecp256k1::Signature::parse_overflowing_slice(&sig[0..64])
-                    }
-                    .map_err(|_| EcdsaVerifyError::RsError)?;
-                    let v = libsecp256k1::RecoveryId::parse(if sig[64] > 26 {
-                        sig[64] - 27
-                    } else {
-                        sig[64]
-                    } as u8)
-                    .map_err(|_| EcdsaVerifyError::VError)?;
-                    let pubkey = libsecp256k1::recover(
-                        &libsecp256k1::Message::parse_slice(&msg).unwrap(),
-                        &rs,
-                        &v,
-                    )
-                    .map_err(|_| EcdsaVerifyError::BadSignature)?;
-                    Ok(pubkey.serialize_compressed())
-                })();
-                let result_encoded = parity_scale_codec::Encode::encode(&result);
+                    };
 
-                self.inner.alloc_write_and_return_pointer_size(
-                    host_fn.name(),
-                    iter::once(&result_encoded),
-                )
+                    if let Ok(rs) = rs {
+                        let v = libsecp256k1::RecoveryId::parse(if sig[64] > 26 {
+                            sig[64] - 27
+                        } else {
+                            sig[64]
+                        } as u8);
+
+                        if let Ok(v) = v {
+                            let pubkey = libsecp256k1::recover(
+                                &libsecp256k1::Message::parse_slice(&msg).unwrap(),
+                                &rs,
+                                &v,
+                            );
+
+                            if let Ok(pubkey) = pubkey {
+                                let mut res = Vec::with_capacity(34);
+                                res.push(0);
+                                res.extend_from_slice(&pubkey.serialize_compressed());
+                                res
+                            } else {
+                                vec![1, 2]
+                            }
+                        } else {
+                            vec![1, 1]
+                        }
+                    } else {
+                        vec![1, 0]
+                    }
+                };
+
+                self.inner
+                    .alloc_write_and_return_pointer_size(host_fn.name(), iter::once(&result))
             }
             HostFunction::ext_crypto_start_batch_verify_version_1 => {
                 HostVm::ReadyToRun(ReadyToRun {
