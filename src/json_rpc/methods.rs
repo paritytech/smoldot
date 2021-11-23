@@ -141,9 +141,10 @@ pub struct JsonRpcParseError(serde_json::Error);
 #[derive(Debug, derive_more::Display)]
 pub struct InvalidParameterError(serde_json::Error);
 
-/// Generates the [`MethodCall`] and [`Response`] enums based on the list of supported requests.
+/// Generates two enums, one for requests and one for responses, based on the list of supported
+/// requests.
 macro_rules! define_methods {
-    ($(
+    ($rq_name:ident, $rp_name:ident, $(
         $(#[$attrs:meta])*
         $name:ident ($($p_name:ident: $p_ty:ty),*) -> $ret_ty:ty
             $([$($alias:ident),*])*
@@ -151,7 +152,7 @@ macro_rules! define_methods {
     )*) => {
         #[allow(non_camel_case_types)]
         #[derive(Debug, Clone)]
-        pub enum MethodCall<'a> {
+        pub enum $rq_name<'a> {
             $(
                 $(#[$attrs])*
                 $name {
@@ -160,8 +161,8 @@ macro_rules! define_methods {
             )*
         }
 
-        impl<'a> MethodCall<'a> {
-            /// Returns a list of RPC method names of all the methods in the [`MethodCall`] enum.
+        impl<'a> $rq_name<'a> {
+            /// Returns a list of RPC method names of all the methods in the enum.
             pub fn method_names() -> impl ExactSizeIterator<Item = &'static str> {
                 [$(stringify!($name)),*].iter().copied()
             }
@@ -187,7 +188,7 @@ macro_rules! define_methods {
                         }
                         if let Ok(params) = serde_json::from_str(params) {
                             let Params { _dummy: _, $($p_name),* } = params;
-                            return Ok(MethodCall::$name {
+                            return Ok($rq_name::$name {
                                 $($p_name,)*
                             })
                         }
@@ -223,7 +224,7 @@ macro_rules! define_methods {
                                     actual: params.len(),
                                 })
                             }
-                            return Ok(MethodCall::$name {
+                            return Ok($rq_name::$name {
                                 $($p_name,)*
                             })
                         }
@@ -240,13 +241,13 @@ macro_rules! define_methods {
 
         #[allow(non_camel_case_types)]
         #[derive(Debug, Clone)]
-        pub enum Response<'a> {
+        pub enum $rp_name<'a> {
             $(
                 $name($ret_ty),
             )*
         }
 
-        impl<'a> Response<'a> {
+        impl<'a> $rp_name<'a> {
             /// Serializes the response into a JSON string.
             ///
             /// `id_json` must be a valid JSON-formatted request identifier, the same the user
@@ -259,7 +260,7 @@ macro_rules! define_methods {
             pub fn to_json_response(&self, id_json: &str) -> String {
                 match self {
                     $(
-                        Response::$name(out) => {
+                        $rp_name::$name(out) => {
                             let result_json = serde_json::to_string(&out).unwrap();
                             parse::build_success_response(id_json, &result_json)
                         },
@@ -273,6 +274,8 @@ macro_rules! define_methods {
 // TODO: change everything to take parameters by ref when possible
 // TODO: change everything to return values by ref when possible
 define_methods! {
+    MethodCall,
+    Response,
     account_nextIndex() -> (), // TODO:
     author_hasKey() -> (), // TODO:
     author_hasSessionKeys() -> (), // TODO:
