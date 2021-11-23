@@ -183,7 +183,7 @@
 use super::{allocator, vm};
 use crate::{trie, util};
 
-use alloc::{borrow::ToOwned as _, format, string::String, vec::Vec};
+use alloc::{borrow::ToOwned as _, format, string::String, vec, vec::Vec};
 use core::{fmt, hash::Hasher as _, iter, str};
 use sha2::Digest as _;
 use tiny_keccak::Hasher as _;
