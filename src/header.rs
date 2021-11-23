@@ -1098,7 +1098,18 @@ impl<'a> DigestItemRef<'a> {
             }
             DigestItemRef::ChangesTrieSignal(ref changes) => {
                 let mut ret = vec![7];
-                ret.extend_from_slice(&parity_scale_codec::Encode::encode(changes));
+                match changes {
+                    ChangesTrieSignal::NewConfiguration(Some(cfg)) => {
+                        ret.extend_from_slice(&[0]);
+                        ret.extend_from_slice(&[1]);
+                        ret.extend_from_slice(&cfg.digest_interval.to_le_bytes());
+                        ret.extend_from_slice(&cfg.digest_levels.to_le_bytes());
+                    }
+                    ChangesTrieSignal::NewConfiguration(None) => {
+                        ret.extend_from_slice(&[0]);
+                        ret.extend_from_slice(&[0]);
+                    }
+                }
                 iter::once(ret)
             }
             DigestItemRef::ChangesTrieRoot(data) => {
@@ -1214,7 +1225,7 @@ impl<'a> From<DigestItemRef<'a>> for DigestItem {
 
 /// Available changes trie signals.
 // TODO: review documentation
-#[derive(Debug, PartialEq, Eq, Clone, parity_scale_codec::Encode, parity_scale_codec::Decode)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ChangesTrieSignal {
     /// New changes trie configuration is enacted, starting from **next block**.
     ///
@@ -1232,9 +1243,7 @@ pub enum ChangesTrieSignal {
 
 /// Substrate changes trie configuration.
 // TODO: review documentation
-#[derive(
-    Debug, Clone, PartialEq, Eq, Default, parity_scale_codec::Encode, parity_scale_codec::Decode,
-)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangesTrieConfiguration {
     /// Interval (in blocks) at which level1-digests are created. Digests are not
     /// created when this is less or equal to 1.
@@ -1289,8 +1298,24 @@ fn decode_item(mut slice: &[u8]) -> Result<(DigestItemRef, &[u8]), Error> {
             Ok((DigestItemRef::ChangesTrieRoot(hash), slice))
         }
         7 => {
-            let item = parity_scale_codec::Decode::decode(&mut slice)
-                .map_err(|_| Error::DigestItemDecodeError)?;
+            let (slice, item) = nom::combinator::map(
+                nom::sequence::preceded(
+                    nom::bytes::complete::tag(&[0u8]),
+                    crate::util::nom_option_decode(nom::combinator::map(
+                        nom::sequence::tuple((
+                            nom::number::complete::le_u32,
+                            nom::number::complete::le_u32,
+                        )),
+                        |(digest_interval, digest_levels)| ChangesTrieConfiguration {
+                            digest_interval,
+                            digest_levels,
+                        },
+                    )),
+                ),
+                ChangesTrieSignal::NewConfiguration,
+            )(slice)
+            .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::DigestItemDecodeError)?;
+
             Ok((DigestItemRef::ChangesTrieSignal(item), slice))
         }
         8 => Ok((DigestItemRef::RuntimeEnvironmentUpdated, slice)),
