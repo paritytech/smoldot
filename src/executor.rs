@@ -98,6 +98,9 @@ pub fn core_version(
             }
 
             // Emitted log lines are ignored.
+            host::HostVm::GetMaxLogLevel(resume) => {
+                vm = resume.resume(0); // Off
+            }
             host::HostVm::LogEmit(log) => vm = log.resume(),
 
             host::HostVm::Error { prototype, error } => {

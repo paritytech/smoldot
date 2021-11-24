@@ -87,6 +87,9 @@ impl BabeGenesisConfiguration {
                     vm = req.resume_full_value(value.as_ref().map(|v| &v[..]));
                 }
 
+                host::HostVm::GetMaxLogLevel(resume) => {
+                    vm = resume.resume(0); // Off
+                }
                 host::HostVm::LogEmit(req) => vm = req.resume(),
 
                 _ => break Err(FromVmPrototypeError::HostFunctionNotAllowed),
