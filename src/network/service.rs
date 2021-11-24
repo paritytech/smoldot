@@ -41,7 +41,7 @@ use futures::{
     lock::{Mutex, MutexGuard},
     prelude::*,
 };
-use rand::{Rng as _, RngCore as _, SeedableRng as _};
+use rand::{seq::SliceRandom as _, Rng as _, RngCore as _, SeedableRng as _};
 
 pub use crate::libp2p::{
     collection::ReadWrite,
@@ -2067,7 +2067,14 @@ where
         let mut lock = self.ephemeral_guarded.lock().await;
         let chain = &mut lock.chains[chain_index];
 
-        for (peer_id, _) in chain.kbuckets.iter() {
+        let list = {
+            let mut list = chain.kbuckets.iter().collect::<Vec<_>>();
+            let mut randomness = self.randomness.lock().await;
+            list.shuffle(&mut *randomness);
+            list
+        };
+
+        for (peer_id, _) in list {
             // Check if maximum number of slots is reached.
             if chain.out_peers.len()
                 >= usize::try_from(chain.chain_config.out_slots).unwrap_or(usize::max_value())
