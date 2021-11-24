@@ -440,7 +440,11 @@ impl NetworkService {
                     let mut next_round = Duration::from_millis(500);
 
                     loop {
-                        inner.network.assign_slots(chain_index).await;
+                        let assigned_peer = inner.network.assign_slots(chain_index).await;
+                        if let Some(assigned_peer) = assigned_peer {
+                            // TODO: log slot de-assignments
+                            tracing::debug!(peer_id = %assigned_peer, %chain_index, "slot-assigned");
+                        }
 
                         futures_timer::Delay::new(next_round).await;
                         next_round = cmp::min(next_round * 2, Duration::from_secs(5));
