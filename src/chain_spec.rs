@@ -34,12 +34,9 @@
 //! - Multiple other miscellaneous information.
 //!
 
-use crate::{
-    chain::chain_information::{
-        aura_config, babe_config, BabeEpochInformation, ChainInformation,
-        ChainInformationConsensus, ChainInformationFinality,
-    },
-    finality::grandpa,
+use crate::chain::chain_information::{
+    aura_config, babe_config, grandpa_config, BabeEpochInformation, ChainInformation,
+    ChainInformationConsensus, ChainInformationFinality,
 };
 
 use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
@@ -139,7 +136,7 @@ impl ChainSpec {
 
         let finality = {
             let grandpa_genesis_config =
-                grandpa::chain_config::GrandpaGenesisConfiguration::from_genesis_storage(|k| {
+                grandpa_config::GrandpaGenesisConfiguration::from_genesis_storage(|k| {
                     genesis_storage.value(k).map(|v| v.to_owned())
                 });
 
@@ -389,7 +386,7 @@ enum ParseErrorInner {
 #[derive(Debug, derive_more::Display)]
 pub enum FromGenesisStorageError {
     /// Error when retrieving the GrandPa configuration.
-    GrandpaConfigLoad(grandpa::chain_config::FromGenesisStorageError),
+    GrandpaConfigLoad(grandpa_config::FromGenesisStorageError),
     /// Error when retrieving the Aura algorithm configuration.
     AuraConfigLoad(aura_config::FromGenesisStorageError),
     /// Error when retrieving the Babe algorithm configuration.
