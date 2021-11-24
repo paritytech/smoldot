@@ -147,8 +147,8 @@ impl<T> NonFinalizedTree<T> {
     ) -> Result<SetFinalizedBlockIter<T>, SetFinalizedError> {
         let inner = self.inner.as_mut().unwrap();
 
-        let block_index = match inner.blocks.find(|b| b.hash == *block_hash) {
-            Some(idx) => idx,
+        let block_index = match inner.blocks_by_hash.get(block_hash) {
+            Some(idx) => *idx,
             None => return Err(SetFinalizedError::UnknownBlock),
         };
 
@@ -196,8 +196,8 @@ impl<T> NonFinalizedTreeInner<T> {
                 }
 
                 // Find in the list of non-finalized blocks the one targeted by the justification.
-                let block_index = match self.blocks.find(|b| b.hash == *target_hash) {
-                    Some(idx) => idx,
+                let block_index = match self.blocks_by_hash.get(target_hash) {
+                    Some(idx) => *idx,
                     None => {
                         return Err(FinalityVerifyError::UnknownTargetBlock {
                             block_number: target_number,
@@ -384,9 +384,9 @@ impl<T> NonFinalizedTreeInner<T> {
                 }
                 grandpa::commit::verify::InProgress::IsParent(is_parent) => {
                     // Find in the list of non-finalized blocks the target of the check.
-                    match self.blocks.find(|b| b.hash == *is_parent.block_hash()) {
+                    match self.blocks_by_hash.get(is_parent.block_hash()) {
                         Some(idx) => {
-                            let result = self.blocks.is_ancestor(block_index, idx);
+                            let result = self.blocks.is_ancestor(block_index, *idx);
                             verification = is_parent.resume(Some(result));
                         }
                         None => {
@@ -554,8 +554,10 @@ impl<T> NonFinalizedTreeInner<T> {
         );
         self.finalized_block_hash = self.finalized_block_header.hash();
 
+        debug_assert_eq!(self.blocks.len(), self.blocks_by_hash.len());
         SetFinalizedBlockIter {
             iter: self.blocks.prune_ancestors(block_index_to_finalize),
+            blocks_by_hash: &mut self.blocks_by_hash,
             updates_best_block,
         }
     }
@@ -679,6 +681,7 @@ pub enum FinalityVerifyError {
 /// is updated.
 pub struct SetFinalizedBlockIter<'a, T> {
     iter: fork_tree::PruneAncestorsIter<'a, Block<T>>,
+    blocks_by_hash: &'a mut HashMap<[u8; 32], fork_tree::NodeIndex, fnv::FnvBuildHasher>,
     updates_best_block: bool,
 }
 
@@ -695,6 +698,8 @@ impl<'a, T> Iterator for SetFinalizedBlockIter<'a, T> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let pruned = self.iter.next()?;
+            let _removed = self.blocks_by_hash.remove(&pruned.user_data.hash);
+            debug_assert_eq!(_removed, Some(pruned.index));
             if !pruned.is_prune_target_ancestor {
                 continue;
             }
