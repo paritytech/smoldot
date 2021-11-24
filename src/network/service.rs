@@ -2336,9 +2336,18 @@ impl<'a, TNow> DiscoveryInsert<'a, TNow>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
-    /// Returns the list of [`peer_id::PeerId`]s that will be inserted.
-    pub fn peer_ids(&self) -> impl Iterator<Item = &peer_id::PeerId> {
-        self.outcome.iter().map(|(peer_id, _)| peer_id)
+    /// Returns the list of [`peer_id::PeerId`]s that will be inserted and their addresses.
+    pub fn discovered(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &peer_id::PeerId,
+            impl Iterator<Item = &multiaddr::Multiaddr>,
+        ),
+    > {
+        self.outcome
+            .iter()
+            .map(|(peer_id, addrs)| (peer_id, addrs.iter()))
     }
 
     /// Insert the results in the [`ChainNetwork`].
