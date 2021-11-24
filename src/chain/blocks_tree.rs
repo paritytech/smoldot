@@ -148,6 +148,10 @@ impl<T> NonFinalizedTree<T> {
                     },
                 },
                 blocks: fork_tree::ForkTree::with_capacity(config.blocks_capacity),
+                blocks_by_hash: hashbrown::HashMap::with_capacity_and_hasher(
+                    config.blocks_capacity,
+                    Default::default(),
+                ),
                 current_best: None,
             })),
         }
@@ -157,6 +161,7 @@ impl<T> NonFinalizedTree<T> {
     pub fn clear(&mut self) {
         let mut inner = self.inner.as_mut().unwrap();
         inner.blocks.clear();
+        inner.blocks_by_hash.clear();
         inner.current_best = None;
     }
 
@@ -196,12 +201,16 @@ impl<T> NonFinalizedTree<T> {
 
     /// Reserves additional capacity for at least `additional` new blocks without allocating.
     pub fn reserve(&mut self, additional: usize) {
-        self.inner.as_mut().unwrap().blocks.reserve(additional)
+        let inner = self.inner.as_mut().unwrap();
+        inner.blocks_by_hash.reserve(additional);
+        inner.blocks.reserve(additional);
     }
 
     /// Shrink the capacity of the chain as much as possible.
     pub fn shrink_to_fit(&mut self) {
-        self.inner.as_mut().unwrap().blocks.shrink_to_fit()
+        let inner = self.inner.as_mut().unwrap();
+        inner.blocks_by_hash.shrink_to_fit();
+        inner.blocks.shrink_to_fit();
     }
 
     /// Builds a [`chain_information::ChainInformationRef`] struct that might later be used to
@@ -359,15 +368,14 @@ impl<T> NonFinalizedTree<T> {
         self.inner
             .as_ref()
             .unwrap()
-            .blocks
-            .find(|b| b.hash == *hash)
-            .is_some()
+            .blocks_by_hash
+            .contains_key(hash)
     }
 
     /// Gives access to a block stored by the [`NonFinalizedTree`], identified by its hash.
     pub fn non_finalized_block_by_hash(&mut self, hash: &[u8; 32]) -> Option<BlockAccess<T>> {
         let inner = self.inner.as_mut().unwrap();
-        let node_index = inner.blocks.find(|b| b.hash == *hash)?;
+        let node_index = *inner.blocks_by_hash.get(hash)?;
         Some(BlockAccess {
             tree: inner,
             node_index,
@@ -406,6 +414,9 @@ struct NonFinalizedTreeInner<T> {
 
     /// Container for non-finalized blocks.
     blocks: fork_tree::ForkTree<Block<T>>,
+    /// For each block hash, the index of this block in [`NonFinalizedTreeInner::blocks`].
+    /// Must always have the same number of entries as [`NonFinalizedTreeInner::blocks`].
+    blocks_by_hash: HashMap<[u8; 32], fork_tree::NodeIndex, fnv::FnvBuildHasher>,
     /// Index within [`NonFinalizedTreeInner::blocks`] of the current best block. `None` if and
     /// only if the fork tree is empty.
     current_best: Option<fork_tree::NodeIndex>,
