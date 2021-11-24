@@ -330,6 +330,7 @@ impl Inner {
                 }
 
                 host::HostVm::GetMaxLogLevel(resume) => {
+                    // TODO: make configurable?
                     self.vm = resume.resume(0); // Off
                 }
 
