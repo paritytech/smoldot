@@ -21,9 +21,9 @@ use std::{io, net::SocketAddr};
 use tracing::Instrument as _;
 
 /// Configuration for a [`JsonRpcService`].
-pub struct Config {
+pub struct Config<'a> {
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
+    pub tasks_executor: &'a mut dyn FnMut(future::BoxFuture<'static, ()>),
 
     /// Where to bind the WebSocket server.
     pub bind_address: SocketAddr,
@@ -37,7 +37,7 @@ pub struct JsonRpcService {
 
 impl JsonRpcService {
     /// Initializes a new [`JsonRpcService`].
-    pub async fn new(mut config: Config) -> Result<Self, io::Error> {
+    pub async fn new(config: Config<'_>) -> Result<Self, io::Error> {
         let server = websocket_server::WsServer::new(websocket_server::Config {
             bind_address: config.bind_address,
             capacity: 1,

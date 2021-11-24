@@ -49,9 +49,9 @@ use std::{
 use tracing::Instrument as _;
 
 /// Configuration for a [`ConsensusService`].
-pub struct Config {
+pub struct Config<'a> {
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
+    pub tasks_executor: &'a mut dyn FnMut(future::BoxFuture<'static, ()>),
 
     /// Database to use to read and write information about the chain.
     pub database: Arc<database_thread::DatabaseThread>,
@@ -93,7 +93,7 @@ pub struct ConsensusService {
 impl ConsensusService {
     /// Initializes the [`ConsensusService`] with the given configuration.
     #[tracing::instrument(level = "trace", skip(config))]
-    pub async fn new(mut config: Config) -> Arc<Self> {
+    pub async fn new(config: Config<'_>) -> Arc<Self> {
         // Perform the initial access to the database to load a bunch of information.
         let (
             finalized_block_hash,
