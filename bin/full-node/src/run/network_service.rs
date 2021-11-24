@@ -404,9 +404,17 @@ impl NetworkService {
                         match inner
                             .network
                             .kademlia_discovery_round(Instant::now(), chain_index)
+                            .instrument(tracing::trace_span!("discovery"))
                             .await
                         {
                             Ok(insert) => {
+                                tracing::debug!(
+                                    discovered = ?insert.discovered().map(|(peer_id, addrs)| {
+                                        (peer_id, addrs.collect::<Vec<_>>())
+                                    }).collect::<Vec<_>>(),
+                                    "discovered"
+                                );
+
                                 insert
                                     .insert(&Instant::now())
                                     .instrument(tracing::trace_span!("insert"))

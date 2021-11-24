@@ -542,7 +542,7 @@ impl NetworkService {
                                     log::debug!(
                                         target: "connections", "On chain {}, discovered: {}",
                                         &network_service.log_chain_names[chain_index],
-                                        insert.peer_ids().map(|p| p.to_string()).join(", ")
+                                        insert.discovered().map(|(p, _)| p.to_string()).join(", ")
                                     );
 
                                     insert.insert(&ffi::Instant::now()).await;
