@@ -17,13 +17,13 @@
 
 use futures::{channel::oneshot, prelude::*};
 use smoldot::json_rpc::{self, methods, websocket_server};
-use std::{io, net::SocketAddr, pin::Pin};
+use std::{io, net::SocketAddr};
 use tracing::Instrument as _;
 
 /// Configuration for a [`JsonRpcService`].
 pub struct Config {
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+    pub tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
 
     /// Where to bind the WebSocket server.
     pub bind_address: SocketAddr,

@@ -57,7 +57,7 @@ use std::{collections::HashSet, sync::Arc};
 /// Configuration for a [`NetworkService`].
 pub struct Config {
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+    pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
     /// Key to use for the encryption layer of all the connections. Gives the node its identity.
     pub noise_key: connection::NoiseKey,

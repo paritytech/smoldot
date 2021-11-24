@@ -29,7 +29,7 @@
 
 use crate::run::{database_thread, jaeger_service};
 
-use core::{cmp, pin::Pin, task::Poll, time::Duration};
+use core::{cmp, task::Poll, time::Duration};
 use futures::{channel::mpsc, prelude::*};
 use futures_timer::Delay;
 use smoldot::{
@@ -49,7 +49,7 @@ use tracing::Instrument as _;
 /// Configuration for a [`NetworkService`].
 pub struct Config {
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+    pub tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
 
     /// Number of event receivers returned by [`NetworkService::new`].
     pub num_events_receivers: usize,

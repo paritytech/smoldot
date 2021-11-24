@@ -26,7 +26,7 @@
 
 use crate::run::{database_thread, jaeger_service, network_service};
 
-use core::{num::NonZeroU32, pin::Pin};
+use core::num::NonZeroU32;
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
     author,
@@ -51,7 +51,7 @@ use tracing::Instrument as _;
 /// Configuration for a [`ConsensusService`].
 pub struct Config {
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+    pub tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
 
     /// Database to use to read and write information about the chain.
     pub database: Arc<database_thread::DatabaseThread>,

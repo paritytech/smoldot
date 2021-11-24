@@ -68,7 +68,7 @@ pub fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static) 
     struct Waker {
         done: atomic::AtomicBool,
         wake_up_registered: atomic::AtomicBool,
-        future: Mutex<Pin<Box<dyn Future<Output = ()> + Send>>>,
+        future: Mutex<future::BoxFuture<'static, ()>>,
     }
 
     impl task::Wake for Waker {

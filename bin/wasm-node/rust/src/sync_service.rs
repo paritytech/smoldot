@@ -39,7 +39,7 @@ use smoldot::{
     network::{protocol, service},
     trie::{self, prefix_proof, proof_verify},
 };
-use std::{fmt, num::NonZeroU32, pin::Pin, sync::Arc};
+use std::{fmt, num::NonZeroU32, sync::Arc};
 
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 
@@ -58,7 +58,7 @@ pub struct Config {
     pub chain_information: chain::chain_information::ValidChainInformation,
 
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+    pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
     /// Access to the network, and index of the chain to sync from the point of view of the
     /// network service.
