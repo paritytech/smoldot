@@ -38,7 +38,7 @@
 // TODO: more docs
 
 use crate::{
-    executor::{self, host, vm},
+    executor::{self, host, storage_overlay, vm},
     trie::calculate_root,
     util,
 };
@@ -86,7 +86,7 @@ pub fn run(
             .virtual_machine
             .run_vectored(config.function_to_call, config.parameter)?
             .into(),
-        top_trie_changes: config.storage_top_trie_changes,
+        top_trie_changes: config.storage_top_trie_changes.into(),
         top_trie_transaction_revert: None,
         offchain_storage_changes: config.offchain_storage_changes,
         top_trie_root_calculation_cache: Some(
@@ -257,7 +257,7 @@ impl StorageGet {
                 append_to_storage_value(&mut value, req.value().as_ref());
                 self.inner
                     .top_trie_changes
-                    .insert(req.key().as_ref().to_vec(), Some(value));
+                    .diff_insert(req.key().as_ref().to_vec(), value);
                 self.inner.vm = req.resume();
             }
             host::HostVm::ExternalStorageRoot(_) => {
@@ -367,7 +367,7 @@ impl PrefixKeys {
                         .unwrap()
                         .storage_value_update(&key, false);
 
-                    let previous_value = self.inner.top_trie_changes.insert(key.clone(), None);
+                    let previous_value = self.inner.top_trie_changes.diff_insert_erase(key.clone());
 
                     if let Some(top_trie_transaction_revert) =
                         self.inner.top_trie_transaction_revert.as_mut()
@@ -390,7 +390,7 @@ impl PrefixKeys {
                         .filter(|v| {
                             self.inner
                                 .top_trie_changes
-                                .get(v.as_ref())
+                                .diff_get(v.as_ref())
                                 .map_or(true, |v| v.is_some())
                         })
                         .map(|v| v.as_ref().to_vec())
@@ -522,7 +522,7 @@ struct Inner {
     vm: host::HostVm,
 
     /// Pending changes to the top storage trie that this execution performs.
-    top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    top_trie_changes: storage_overlay::StorageChanges,
 
     /// `Some` if and only if we're within a storage transaction. When changes are applied to
     /// [`Inner::top_trie_changes`], the reverse operation is added here.
@@ -566,7 +566,7 @@ impl Inner {
                 host::HostVm::Finished(finished) => {
                     return RuntimeHostVm::Finished(Ok(Success {
                         virtual_machine: SuccessVirtualMachine(finished),
-                        storage_top_trie_changes: self.top_trie_changes,
+                        storage_top_trie_changes: self.top_trie_changes.into(),
                         offchain_storage_changes: self.offchain_storage_changes,
                         top_trie_root_calculation_cache: self
                             .top_trie_root_calculation_cache
@@ -576,9 +576,8 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageGet(req) => {
-                    let change = self.top_trie_changes.get(req.key().as_ref());
-                    if let Some(overlay) = change {
-                        self.vm = req.resume_full_value(overlay.as_ref().map(|v| &v[..]));
+                    if let Some(overlay) = self.top_trie_changes.diff_get(req.key().as_ref()) {
+                        self.vm = req.resume_full_value(overlay);
                     } else {
                         self.vm = req.into();
                         return RuntimeHostVm::StorageGet(StorageGet { inner: self });
@@ -591,7 +590,7 @@ impl Inner {
                         .unwrap()
                         .storage_value_update(req.key().as_ref(), req.value().is_some());
 
-                    let previous_value = self.top_trie_changes.insert(
+                    let previous_value = self.top_trie_changes.diff_insert(
                         req.key().as_ref().to_vec(),
                         req.value().map(|v| v.as_ref().to_vec()),
                     );
@@ -615,13 +614,13 @@ impl Inner {
                         .unwrap()
                         .storage_value_update(req.key().as_ref(), true);
 
-                    let current_value = self.top_trie_changes.get(req.key().as_ref());
+                    let current_value = self.top_trie_changes.diff_get(req.key().as_ref());
                     if let Some(current_value) = current_value {
-                        let mut current_value = current_value.clone().unwrap_or_default();
+                        let mut current_value = current_value.unwrap_or_default().to_vec();
                         append_to_storage_value(&mut current_value, req.value().as_ref());
                         let previous_value = self
                             .top_trie_changes
-                            .insert(req.key().as_ref().to_vec(), Some(current_value));
+                            .diff_insert(req.key().as_ref().to_vec(), current_value);
                         if let Some(top_trie_transaction_revert) =
                             self.top_trie_transaction_revert.as_mut()
                         {
@@ -666,10 +665,9 @@ impl Inner {
                             // TODO: allocating a Vec, meh
                             if let Some(overlay) = self
                                 .top_trie_changes
-                                .get(&value_request.key().collect::<Vec<_>>())
+                                .diff_get(&value_request.key().collect::<Vec<_>>())
                             {
-                                self.root_calculation =
-                                    Some(value_request.inject(overlay.as_ref()));
+                                self.root_calculation = Some(value_request.inject(overlay));
                             } else {
                                 self.root_calculation =
                                     Some(calculate_root::RootMerkleValueCalculation::StorageValue(
@@ -746,7 +744,7 @@ impl Inner {
                     if rollback {
                         for (key, value) in self.top_trie_transaction_revert.take().unwrap() {
                             if let Some(value) = value {
-                                let _ = self.top_trie_changes.insert(key, value);
+                                let _ = self.top_trie_changes.diff_insert(key, value);
                             } else {
                                 let _ = self.top_trie_changes.remove(&key);
                             }
