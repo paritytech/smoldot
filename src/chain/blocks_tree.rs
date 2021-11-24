@@ -394,7 +394,7 @@ where
                 inner
                     .blocks
                     .iter_unordered()
-                    .map(|(_, v)| (&v.hash, &v.user_data)),
+                    .map(|(_, v)| (format!("0x{}", hex::encode(&v.hash)), &v.user_data)),
             )
             .finish()
     }
