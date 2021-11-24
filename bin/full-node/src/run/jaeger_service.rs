@@ -35,17 +35,15 @@
 // TODO: more documentation
 
 use async_std::net::UdpSocket;
+use futures::prelude::*;
 use smoldot::libp2p::PeerId;
-use std::{
-    convert::TryFrom as _, future::Future, io, net::SocketAddr, num::NonZeroU128, pin::Pin,
-    sync::Arc,
-};
+use std::{convert::TryFrom as _, io, net::SocketAddr, num::NonZeroU128, sync::Arc};
 use tracing::Instrument as _;
 
 /// Configuration for a [`JaegerService`].
 pub struct Config {
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+    pub tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
 
     /// Service name to report to the Jaeger agent.
     pub service_name: String,
