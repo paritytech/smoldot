@@ -41,9 +41,9 @@ use std::{convert::TryFrom as _, io, net::SocketAddr, num::NonZeroU128, sync::Ar
 use tracing::Instrument as _;
 
 /// Configuration for a [`JaegerService`].
-pub struct Config {
+pub struct Config<'a> {
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(future::BoxFuture<'static, ()>) + Send>,
+    pub tasks_executor: &'a mut dyn FnMut(future::BoxFuture<'static, ()>),
 
     /// Service name to report to the Jaeger agent.
     pub service_name: String,
@@ -59,7 +59,7 @@ pub struct JaegerService {
 }
 
 impl JaegerService {
-    pub async fn new(mut config: Config) -> Result<Arc<Self>, io::Error> {
+    pub async fn new(config: Config<'_>) -> Result<Arc<Self>, io::Error> {
         let (traces_in, mut traces_out) = mick_jaeger::init(mick_jaeger::Config {
             service_name: config.service_name,
         });
