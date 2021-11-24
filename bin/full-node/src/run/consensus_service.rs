@@ -192,7 +192,8 @@ impl ConsensusService {
                 }),
             });
 
-            let block_author_sync_source = sync.add_source(None, 0, [0; 32]); // TODO: proper values?
+            let block_author_sync_source =
+                sync.add_source(None, best_block_number, best_block_hash);
 
             let background_sync = SyncBackground {
                 sync,
