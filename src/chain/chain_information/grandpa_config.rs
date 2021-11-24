@@ -96,6 +96,9 @@ impl GrandpaGenesisConfiguration {
                     vm = rq.resume_full_value(value.as_ref().map(|v| &v[..]));
                 }
 
+                host::HostVm::GetMaxLogLevel(resume) => {
+                    vm = resume.resume(0); // Off
+                }
                 host::HostVm::LogEmit(rq) => vm = rq.resume(),
 
                 _ => return Err(FromVmPrototypeError::HostFunctionNotAllowed),

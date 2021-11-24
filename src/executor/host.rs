@@ -442,6 +442,9 @@ pub enum HostVm {
         #[must_use]
         rollback: bool,
     },
+    /// Need to provide the maximum log level.
+    #[from]
+    GetMaxLogLevel(GetMaxLogLevel),
     /// Runtime has emitted a log entry.
     #[from]
     LogEmit(LogEmit),
@@ -465,6 +468,7 @@ impl HostVm {
             HostVm::CallRuntimeVersion(inner) => inner.inner.into_prototype(),
             HostVm::StartStorageTransaction(inner) => inner.inner.into_prototype(),
             HostVm::EndStorageTransaction { resume, .. } => resume.inner.into_prototype(),
+            HostVm::GetMaxLogLevel(inner) => inner.inner.into_prototype(),
             HostVm::LogEmit(inner) => inner.inner.into_prototype(),
         }
     }
@@ -1473,12 +1477,7 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_logging_max_level_version_1 => {
-                // TODO: always returns `0` at the moment (which means "Off"); make this configurable?
-                // see https://github.com/paritytech/substrate/blob/bb22414e9729fa6ffc3b3126c57d3a9f2b85a2ff/primitives/core/src/lib.rs#L341
-                HostVm::ReadyToRun(ReadyToRun {
-                    resume_value: Some(vm::WasmValue::I32(0)),
-                    inner: self.inner,
-                })
+                HostVm::GetMaxLogLevel(GetMaxLogLevel { inner: self.inner })
             }
         }
     }
@@ -2100,6 +2099,25 @@ impl fmt::Debug for LogEmit {
         f.debug_struct("LogEmit")
             .field("message", &self.log_entry)
             .finish()
+    }
+}
+
+/// Queries the maximum log level.
+pub struct GetMaxLogLevel {
+    inner: Inner,
+}
+
+impl GetMaxLogLevel {
+    /// Resumes execution after indicating the maximum log level.
+    ///
+    /// 0 means off, 1 means error, 2 means warn, 3 means info, 4 means debug, 5 means trace.
+    pub fn resume(self, max_level: u32) -> HostVm {
+        HostVm::ReadyToRun(ReadyToRun {
+            inner: self.inner,
+            resume_value: Some(vm::WasmValue::I32(i32::from_ne_bytes(
+                max_level.to_ne_bytes(),
+            ))),
+        })
     }
 }
 
