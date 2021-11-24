@@ -57,14 +57,21 @@ pub struct ChainSpec {
 impl ChainSpec {
     /// Parse JSON content into a [`ChainSpec`].
     pub fn from_json_bytes(json: impl AsRef<[u8]>) -> Result<Self, ParseError> {
-        let client_spec: structs::ClientSpec =
-            serde_json::from_slice(json.as_ref()).map_err(ParseError)?;
+        let client_spec: structs::ClientSpec = serde_json::from_slice(json.as_ref())
+            .map_err(ParseErrorInner::Serde)
+            .map_err(ParseError)?;
 
         // TODO: we don't support child tries in the genesis block
         assert!(match &client_spec.genesis {
             structs::Genesis::Raw(genesis) => genesis.children_default.is_empty(),
             structs::Genesis::StateRootHash(_) => true,
         });
+
+        // Make sure that the light sync state can be successfully decoded.
+        if let Some(light_sync_state) = &client_spec.light_sync_state {
+            light_sync_state.decode()?;
+        }
+
         Ok(ChainSpec { client_spec })
     }
 
@@ -248,7 +255,8 @@ impl ChainSpec {
             .light_sync_state
             .as_ref()
             .map(|state| LightSyncState {
-                inner: state.decode(),
+                // We made sure at initialization that the decoding succeeds.
+                inner: state.decode().unwrap(),
             })
     }
 }
@@ -369,7 +377,13 @@ impl LightSyncState {
 
 /// Error that can happen when parsing a chain spec JSON.
 #[derive(Debug, derive_more::Display)]
-pub struct ParseError(serde_json::Error);
+pub struct ParseError(ParseErrorInner);
+
+#[derive(Debug, derive_more::Display)]
+enum ParseErrorInner {
+    Serde(serde_json::Error),
+    Other,
+}
 
 /// Error when building the chain information from the genesis storage.
 #[derive(Debug, derive_more::Display)]
