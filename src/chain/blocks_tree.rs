@@ -66,7 +66,7 @@ use crate::{
     header,
 };
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
 use core::{cmp, fmt, mem, num::NonZeroU64, time::Duration};
 use hashbrown::HashMap;
 
@@ -389,12 +389,13 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let inner = self.inner.as_ref().unwrap();
+        // TODO: add the finalized block hash
         f.debug_map()
             .entries(
                 inner
                     .blocks
                     .iter_unordered()
-                    .map(|(_, v)| (&v.hash, &v.user_data)),
+                    .map(|(_, v)| (format!("0x{}", hex::encode(&v.hash)), &v.user_data)),
             )
             .finish()
     }
