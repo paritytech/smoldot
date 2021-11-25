@@ -15,6 +15,57 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+//! K-buckets are a collection used to store a partial view of the list of nodes in a
+//! peer-to-peer network.
+//!
+//! # How it works
+//!
+//! The k-buckets consist in 256 so-called "buckets", each containing up to `ENTRIES_PER_BUCKET`
+//! elements. The value for `ENTRIES_PER_BUCKET` is configurable as a parameter of the [`KBuckets`]
+//! struct, but is typically equal to 20. Therefore, the k-buckets cannot contain more than `256 *
+//! ENTRIES_PER_BUCKET` elements in total.
+//!
+//! The API of the [`KBuckets`] struct is similar to the one of a `key => value` map. In addition
+//! to its value, each element also contains a [`PeerState`] indicating whether this node is
+//! connected to the local node.
+//!
+//! In order to insert an element, its key is first hashed using the SHA-256 algorithm, then this
+//! hash is compared with the hash of a `local_key` that was passed at initialization. The
+//! position of the highest non-matching bit in this comparison determines in which of the 256
+//! buckets the element will be inserted. It is forbidden to insert the `local_key` itself.
+//!
+//! Within a bucket, each new element is inserted one after the other, except that the elements
+//! whose [`PeerState`] is [`PeerState::Connected`] are always earlier in the list compared to the
+//! ones whose state is [`PeerState::Disconnected`]. If the state of an element is updated using
+//! [`OccupiedEntry::set_state`], the elements are re-ordered accordingly.
+//!
+//! Each bucket can only contain `ENTRIES_PER_BUCKET` elements. If a bucket is full and contains
+//! only elements in the [`PeerState::Connected`] state, then no new element can be added. If a
+//! bucket is full and contains at least one [`PeerState::Disconnected`] elements, then the last
+//! element in the bucket will expire after a certain time after which it can be replaced with a
+//! new one.
+//!
+//! # Properties
+//!
+//! While this data structure is generic, the `local_key` passed at initialization is typically
+//! the network identity of the local node, and the keys being inserted are typically the network
+//! identities of the other nodes of the peer-to-peer network.
+//!
+//! Assuming that all the network identities that exist are distributed uniformly, the k-buckets
+//! will hold more network identities that are close to the the local node's network identity, and
+//! fewer network identities that are far away. In other words, the k-buckets store the neighbors
+//! of the local node, and a few far-away nodes.
+//!
+//! Since all the nodes of the network do the same, one can find all the node whose identity is
+//! closest to a certain key `K` by doing the following:
+//! 
+//! - Find in our local k-buckets the node `N` closest to `K`.
+//! - Ask `N` to look into its own k-buckets what is the node closest to `K`.
+//! - If `N` has a node `N2` where `distance(K, N2) < distance(K, N)`, then repeat the previous
+//! step but with `N2`.
+//! - If no closer node is found, we know that `N` is the node closest to `K` in the network.
+//!
+
 use alloc::vec::Vec;
 use core::{fmt, ops::Add, time::Duration};
 use sha2::{Digest as _, Sha256};
@@ -26,7 +77,7 @@ pub struct KBuckets<K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
     /// List of buckets, ordered by increasing distance. In other words, the first elements of
     /// this field are the ones that are the closests to [`KBuckets::local_key`].
     buckets: Vec<Bucket<K, V, TNow, ENTRIES_PER_BUCKET>>,
-    /// Duration after which . // TODO:
+    /// Duration after which the last entry of each bucket will expired if it is disconnected.
     pending_timeout: Duration,
 }
 
@@ -309,7 +360,7 @@ struct Bucket<K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
     /// List of entries in the bucket. Ordered by decreasing importance. The first entries in
     /// the list are the ones we've been connected to for the longest time, while the last entries
     /// are the ones we've disconnected from for a long time.
-    entries: arrayvec::ArrayVec<(K, V), ENTRIES_PER_BUCKET>,
+    entries: arrayvec::ArrayVec<(K, V), ENTRIES_PER_BUCKET>, // TODO: should be ENTRIES_PER_BUCKET - 1
     /// Number of entries in the [`Bucket::entries`] that are in the [`PeerState::Connected`]
     /// state.
     num_connected_entries: usize,
