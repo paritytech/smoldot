@@ -19,20 +19,18 @@ use alloc::vec::Vec;
 use core::{fmt, ops::Add, time::Duration};
 use sha2::{Digest as _, Sha256};
 
-const ENTRIES_PER_BUCKET: usize = 20;
-
 /// K-buckets, as popularized by the Kademlia algorithm, and defined by the libp2p specification.
-pub struct KBuckets<K, V, TNow> {
+pub struct KBuckets<K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
     /// Key of the "local" node, that holds the buckets.
     local_key: (K, Key),
     /// List of buckets, ordered by increasing distance. In other words, the first elements of
     /// this field are the ones that are the closests to [`KBuckets::local_key`].
-    buckets: Vec<Bucket<K, V, TNow>>,
+    buckets: Vec<Bucket<K, V, TNow, ENTRIES_PER_BUCKET>>,
     /// Duration after which . // TODO:
     pending_timeout: Duration,
 }
 
-impl<K, V, TNow> KBuckets<K, V, TNow>
+impl<K, V, TNow, const ENTRIES_PER_BUCKET: usize> KBuckets<K, V, TNow, ENTRIES_PER_BUCKET>
 where
     K: Clone + PartialEq + AsRef<[u8]>,
     TNow: Clone + Add<Duration, Output = TNow> + Ord,
@@ -81,7 +79,7 @@ where
     }
 
     /// Inserts or updates an entry in the buckets.
-    pub fn entry<'a>(&'a mut self, key: &'a K) -> Entry<'a, K, V, TNow>
+    pub fn entry<'a>(&'a mut self, key: &'a K) -> Entry<'a, K, V, TNow, ENTRIES_PER_BUCKET>
     where
         K: Clone,
     {
@@ -122,7 +120,7 @@ where
     }
 }
 
-impl<K, V, TNow> KBuckets<K, V, TNow> {
+impl<K, V, TNow, const ENTRIES_PER_BUCKET: usize> KBuckets<K, V, TNow, ENTRIES_PER_BUCKET> {
     /// Iterates over all the peers in the k-buckets.
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.buckets
@@ -138,7 +136,8 @@ impl<K, V, TNow> KBuckets<K, V, TNow> {
     }
 }
 
-impl<K, V, TNow> fmt::Debug for KBuckets<K, V, TNow>
+impl<K, V, TNow, const ENTRIES_PER_BUCKET: usize> fmt::Debug
+    for KBuckets<K, V, TNow, ENTRIES_PER_BUCKET>
 where
     K: fmt::Debug,
     V: fmt::Debug,
@@ -148,21 +147,21 @@ where
     }
 }
 
-pub enum Entry<'a, K, V, TNow> {
+pub enum Entry<'a, K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
     /// Requested key is the same as local key. The local key is never present in the k-buckets.
     LocalKey,
-    Vacant(VacantEntry<'a, K, V, TNow>),
-    Occupied(OccupiedEntry<'a, K, V, TNow>),
+    Vacant(VacantEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>),
+    Occupied(OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>),
 }
 
-impl<'a, K, V, TNow> Entry<'a, K, V, TNow>
+impl<'a, K, V, TNow, const ENTRIES_PER_BUCKET: usize> Entry<'a, K, V, TNow, ENTRIES_PER_BUCKET>
 where
     K: Clone + PartialEq + AsRef<[u8]>,
     TNow: Clone + Add<Duration, Output = TNow> + Ord,
 {
     /// If `self` is [`Entry::Occupied`], returns the inner [`OccupiedEntry ]. Otherwise returns
     /// `None`.
-    pub fn into_occupied(self) -> Option<OccupiedEntry<'a, K, V, TNow>> {
+    pub fn into_occupied(self) -> Option<OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>> {
         match self {
             Entry::LocalKey | Entry::Vacant(_) => None,
             Entry::Occupied(e) => Some(e),
@@ -174,7 +173,7 @@ where
         value: V,
         now: &TNow,
         state: PeerState,
-    ) -> Result<OccupiedEntry<'a, K, V, TNow>, ()> {
+    ) -> Result<OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>, ()> {
         match self {
             Entry::LocalKey => Err(()),
             Entry::Vacant(v) => v.insert(value, now, state),
@@ -183,13 +182,14 @@ where
     }
 }
 
-pub struct VacantEntry<'a, K, V, TNow> {
-    inner: &'a mut KBuckets<K, V, TNow>,
+pub struct VacantEntry<'a, K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
+    inner: &'a mut KBuckets<K, V, TNow, ENTRIES_PER_BUCKET>,
     key: &'a K,
     distance: u8,
 }
 
-impl<'a, K, V, TNow> VacantEntry<'a, K, V, TNow>
+impl<'a, K, V, TNow, const ENTRIES_PER_BUCKET: usize>
+    VacantEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>
 where
     K: Clone + PartialEq + AsRef<[u8]>,
     TNow: Clone + Add<Duration, Output = TNow> + Ord,
@@ -200,7 +200,7 @@ where
         value: V,
         now: &TNow,
         state: PeerState,
-    ) -> Result<OccupiedEntry<'a, K, V, TNow>, ()> {
+    ) -> Result<OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>, ()> {
         let bucket = &mut self.inner.buckets[usize::from(self.distance)];
 
         match state {
@@ -247,13 +247,14 @@ where
     }
 }
 
-pub struct OccupiedEntry<'a, K, V, TNow> {
-    inner: &'a mut KBuckets<K, V, TNow>,
+pub struct OccupiedEntry<'a, K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
+    inner: &'a mut KBuckets<K, V, TNow, ENTRIES_PER_BUCKET>,
     key: &'a K,
     distance: u8,
 }
 
-impl<'a, K, V, TNow> OccupiedEntry<'a, K, V, TNow>
+impl<'a, K, V, TNow, const ENTRIES_PER_BUCKET: usize>
+    OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>
 where
     K: Clone + PartialEq + AsRef<[u8]>,
     TNow: Clone + Add<Duration, Output = TNow> + Ord,
@@ -304,7 +305,7 @@ pub enum PeerState {
     Disconnected,
 }
 
-struct Bucket<K, V, TNow> {
+struct Bucket<K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
     /// List of entries in the bucket. Ordered by decreasing importance. The first entries in
     /// the list are the ones we've been connected to for the longest time, while the last entries
     /// are the ones we've disconnected from for a long time.
@@ -317,7 +318,7 @@ struct Bucket<K, V, TNow> {
     pending_entry: Option<(K, V, TNow)>,
 }
 
-impl<K, V, TNow> Bucket<K, V, TNow>
+impl<K, V, TNow, const ENTRIES_PER_BUCKET: usize> Bucket<K, V, TNow, ENTRIES_PER_BUCKET>
 where
     K: PartialEq,
 {

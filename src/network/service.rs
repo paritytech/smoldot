@@ -247,7 +247,7 @@ struct EphemeralGuardedChain<TNow> {
     /// and disconnected when it is closed.
     ///
     /// For each peer, a list of addresses is hold. This list must never become empty.
-    kbuckets: kademlia::kbuckets::KBuckets<PeerId, addresses::Addresses, TNow>,
+    kbuckets: kademlia::kbuckets::KBuckets<PeerId, addresses::Addresses, TNow, 20>,
 }
 
 // Update this when a new request response protocol is added.
