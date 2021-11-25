@@ -393,6 +393,9 @@ fn distance_log2(a: &Key, b: &Key) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    use core::time::Duration;
+    use sha2::{Digest as _, Sha256};
+
     #[test]
     fn basic_distance_1() {
         let a = super::Key::from_sha256_hash([
@@ -424,10 +427,79 @@ mod tests {
     }
 
     #[test]
+    fn basic_distance_3() {
+        let a = super::Key::from_sha256_hash([
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0,
+        ]);
+
+        let b = super::Key::from_sha256_hash([
+            0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 6, 5, 7, 94, 103, 94, 26, 20, 0, 0,
+            1, 37, 198, 200, 57, 33, 32,
+        ]);
+
+        assert_eq!(super::distance_log2(&a, &b), Some(255));
+    }
+
+    #[test]
     fn distance_of_zero() {
         let a = super::Key::new(&[1, 2, 3, 4]);
         let b = super::Key::new(&[1, 2, 3, 4]);
         assert_eq!(super::distance_log2(&a, &b), None);
+    }
+
+    #[test]
+    fn nodes_kicked_out() {
+        let local_key = vec![0u8; 4];
+
+        // Iterator that generates random keys that are in the maximum size bucket.
+        let mut max_bucket_keys = {
+            let local_key_hash = Sha256::digest(&local_key);
+            (0..).map(move |_| loop {
+                let other_key: [u8; 32] = rand::random();
+                let other_key_hashed = Sha256::digest(&other_key);
+                if ((local_key_hash[0] ^ other_key_hashed[0]) & 0x80) != 0 {
+                    break other_key.to_vec();
+                }
+            })
+        };
+
+        let mut buckets = super::KBuckets::<_, _, _, 4>::new(local_key, Duration::from_secs(1));
+
+        // Insert 5 nodes in the bucket of maximum distance. Since there's only capacity for 4,
+        // the last one is in pending mode.
+        for _ in 0..5 {
+            match buckets.entry(&max_bucket_keys.next().unwrap()) {
+                super::Entry::Vacant(e) => {
+                    e.insert((), &Duration::new(0, 0), super::PeerState::Disconnected)
+                        .unwrap();
+                }
+                _ => panic!(),
+            }
+        }
+
+        // Inserting another node in that bucket. Since it's full, the insertion must fail.
+        match buckets.entry(&max_bucket_keys.next().unwrap()) {
+            super::Entry::Vacant(e) => {
+                match e.insert((), &Duration::new(0, 0), super::PeerState::Disconnected) {
+                    Ok(_) => panic!(),
+                    Err(_) => {}
+                }
+            }
+            _ => panic!(),
+        }
+
+        // Try again, but this time after the pending node's expiration has passed. This time,
+        // the insertion must succeed.
+        match buckets.entry(&max_bucket_keys.next().unwrap()) {
+            super::Entry::Vacant(e) => {
+                match e.insert((), &Duration::new(2, 0), super::PeerState::Disconnected) {
+                    Ok(_) => {}
+                    Err(_) => panic!(),
+                }
+            }
+            _ => panic!(),
+        }
     }
 
     // TODO: a lot of tests
