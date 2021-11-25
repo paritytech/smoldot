@@ -1117,7 +1117,7 @@ where
                     // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
                     for chain in &mut ephemeral_guarded.chains {
                         if let Some(mut entry) = chain.kbuckets.entry(peer_id).into_occupied() {
-                            entry.set_state(kademlia::kbuckets::PeerState::Disconnected);
+                            entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
                             entry.get_mut().set_disconnected(address);
                         }
                     }
@@ -1145,7 +1145,7 @@ where
                     // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
                     for chain in &mut ephemeral_guarded.chains {
                         if let Some(mut entry) = chain.kbuckets.entry(peer_id).into_occupied() {
-                            entry.set_state(kademlia::kbuckets::PeerState::Disconnected);
+                            entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
                             entry.get_mut().set_disconnected(address);
                         }
                     }
@@ -1329,7 +1329,7 @@ where
                             .entry(peer_id)
                             .into_occupied()
                         {
-                            entry.set_state(kademlia::kbuckets::PeerState::Connected);
+                            entry.set_state(&now, kademlia::kbuckets::PeerState::Connected);
                         }
                     }
 
@@ -1542,7 +1542,7 @@ where
                             .entry(peer_id)
                             .into_occupied()
                         {
-                            entry.set_state(kademlia::kbuckets::PeerState::Disconnected);
+                            entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
                         }
                     }
 

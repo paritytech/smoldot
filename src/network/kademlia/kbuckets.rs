@@ -58,7 +58,7 @@
 //!
 //! Since all the nodes of the network do the same, one can find all the node whose identity is
 //! closest to a certain key `K` by doing the following:
-//! 
+//!
 //! - Find in our local k-buckets the node `N` closest to `K`.
 //! - Ask `N` to look into its own k-buckets what is the node closest to `K`.
 //! - If `N` has a node `N2` where `distance(K, N2) < distance(K, N)`, then repeat the previous
@@ -256,37 +256,47 @@ where
 
         match state {
             PeerState::Connected if bucket.num_connected_entries < ENTRIES_PER_BUCKET => {
-                let index = bucket.num_connected_entries;
-                bucket.entries.insert(index, (self.key.clone(), value));
+                if bucket.entries.is_full() {
+                    let _ = bucket.entries.pop(); // TODO: return element?
+                    bucket.pending_entry = Some(now.clone() + self.inner.pending_timeout);
+                }
+
+                bucket
+                    .entries
+                    .insert(bucket.num_connected_entries, (self.key.clone(), value));
                 bucket.num_connected_entries += 1;
-            }
-            PeerState::Connected => {
-                debug_assert_eq!(bucket.num_connected_entries, ENTRIES_PER_BUCKET);
-                if bucket.pending_entry.is_none() {
-                    bucket.pending_entry = Some((
-                        self.key.clone(),
-                        value,
-                        now.clone() + self.inner.pending_timeout,
-                    ));
-                } else {
-                    return Err(());
+
+                if bucket.num_connected_entries == ENTRIES_PER_BUCKET {
+                    bucket.pending_entry = None;
                 }
             }
+            PeerState::Connected => {
+                debug_assert!(bucket.entries.is_full());
+                debug_assert_eq!(bucket.num_connected_entries, ENTRIES_PER_BUCKET);
+                debug_assert!(bucket.pending_entry.is_none());
+                return Err(());
+            }
             PeerState::Disconnected if bucket.entries.is_full() => {
-                if matches!(bucket.pending_entry, Some((_, _, ref exp)) if *exp > *now) {
+                if bucket.num_connected_entries == ENTRIES_PER_BUCKET {
                     return Err(());
                 }
 
-                bucket.pending_entry = Some((
-                    self.key.clone(),
-                    value,
-                    now.clone() + self.inner.pending_timeout,
-                ));
+                if *bucket.pending_entry.as_ref().unwrap() > *now {
+                    return Err(());
+                }
+
+                let _ = bucket.entries.pop(); // TODO: return element?
+                bucket.entries.push((self.key.clone(), value));
+                bucket.pending_entry = Some(now.clone() + self.inner.pending_timeout);
             }
             PeerState::Disconnected => {
                 debug_assert!(!bucket.entries.is_full());
                 debug_assert!(bucket.pending_entry.is_none());
                 bucket.entries.push((self.key.clone(), value));
+
+                if bucket.entries.is_full() {
+                    bucket.pending_entry = Some(now.clone() + self.inner.pending_timeout);
+                }
             }
         };
 
@@ -311,36 +321,43 @@ where
     TNow: Clone + Add<Duration, Output = TNow> + Ord,
 {
     /// Updates the state of this entry.
-    pub fn set_state(&mut self, state: PeerState) {
+    pub fn set_state(&mut self, now: &TNow, state: PeerState) {
         let bucket = &mut self.inner.buckets[usize::from(self.distance)];
-        match (bucket.pending_entry.as_ref(), state) {
-            (Some(pending_entry), PeerState::Disconnected) if pending_entry.0 == *self.key => {}
-            (Some(pending_entry), PeerState::Connected) if pending_entry.0 == *self.key => {}
-            (_, PeerState::Connected) => {
-                let position = bucket
-                    .entries
-                    .iter()
-                    .position(|(k, _)| *k == *self.key)
-                    .unwrap();
-                if position >= bucket.num_connected_entries {
-                    debug_assert!(bucket.num_connected_entries < ENTRIES_PER_BUCKET);
-                    let entry = bucket.entries.remove(position);
-                    bucket.entries.insert(bucket.num_connected_entries, entry);
-                    bucket.num_connected_entries += 1;
+        let position = bucket
+            .entries
+            .iter()
+            .position(|(k, _)| *k == *self.key)
+            .unwrap();
+
+        match state {
+            PeerState::Connected if position >= bucket.num_connected_entries => {
+                debug_assert!(bucket.num_connected_entries < ENTRIES_PER_BUCKET);
+                let entry = bucket.entries.remove(position);
+                bucket.entries.insert(bucket.num_connected_entries, entry);
+                bucket.num_connected_entries += 1;
+
+                // If the peer we switch from disconnected to connected was the last one, reset
+                // the expiration.
+                if position == bucket.entries.capacity() - 1 {
+                    debug_assert!(bucket.pending_entry.is_some());
+                    bucket.pending_entry = Some(now.clone() + self.inner.pending_timeout);
                 }
             }
-            (_, PeerState::Disconnected) => {
-                let position = bucket
-                    .entries
-                    .iter()
-                    .position(|(k, _)| *k == *self.key)
-                    .unwrap();
-                if position < bucket.num_connected_entries {
-                    let entry = bucket.entries.remove(position);
-                    bucket.num_connected_entries -= 1;
-                    bucket.entries.insert(bucket.num_connected_entries, entry);
+
+            PeerState::Disconnected if position < bucket.num_connected_entries => {
+                let entry = bucket.entries.remove(position);
+                bucket.num_connected_entries -= 1;
+                bucket.entries.insert(bucket.num_connected_entries, entry);
+
+                // If the peer we switch from connected to disconnected is now the last one, start
+                // the expiration.
+                if bucket.num_connected_entries == bucket.entries.capacity() - 1 {
+                    debug_assert!(bucket.pending_entry.is_none());
+                    bucket.pending_entry = Some(now.clone() + self.inner.pending_timeout);
                 }
             }
+
+            _ => {}
         }
     }
 
@@ -360,13 +377,13 @@ struct Bucket<K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
     /// List of entries in the bucket. Ordered by decreasing importance. The first entries in
     /// the list are the ones we've been connected to for the longest time, while the last entries
     /// are the ones we've disconnected from for a long time.
-    entries: arrayvec::ArrayVec<(K, V), ENTRIES_PER_BUCKET>, // TODO: should be ENTRIES_PER_BUCKET - 1
+    entries: arrayvec::ArrayVec<(K, V), ENTRIES_PER_BUCKET>,
     /// Number of entries in the [`Bucket::entries`] that are in the [`PeerState::Connected`]
     /// state.
     num_connected_entries: usize,
-    /// Entry that has been "kicked out" from [`Bucket::pending_entry`]. After the given `TNow`,
-    /// this entry will be switched to `None`.
-    pending_entry: Option<(K, V, TNow)>,
+    /// If `Some`, the last entry in [`Bucket::entries`] is going to get kicked out after `TNow`.
+    /// Always `None` if [`Bucket::entries`] isn't full or contains only connected entries.
+    pending_entry: Option<TNow>,
 }
 
 impl<K, V, TNow, const ENTRIES_PER_BUCKET: usize> Bucket<K, V, TNow, ENTRIES_PER_BUCKET>
@@ -378,12 +395,7 @@ where
             return Some(value);
         }
 
-        if let Some(pending_entry) = &self.pending_entry {
-            if pending_entry.0 == *key {
-                // TODO: check expiration?
-                return Some(&pending_entry.1);
-            }
-        }
+        // TODO: check expiration?
 
         None
     }
@@ -393,12 +405,7 @@ where
             return Some(value);
         }
 
-        if let Some(pending_entry) = &mut self.pending_entry {
-            if pending_entry.0 == *key {
-                // TODO: check expiration?
-                return Some(&mut pending_entry.1);
-            }
-        }
+        // TODO: check expiration?
 
         None
     }
@@ -517,9 +524,9 @@ mod tests {
 
         let mut buckets = super::KBuckets::<_, _, _, 4>::new(local_key, Duration::from_secs(1));
 
-        // Insert 5 nodes in the bucket of maximum distance. Since there's only capacity for 4,
+        // Insert 4 nodes in the bucket of maximum distance. Since there's only capacity for 4,
         // the last one is in pending mode.
-        for _ in 0..5 {
+        for _ in 0..4 {
             match buckets.entry(&max_bucket_keys.next().unwrap()) {
                 super::Entry::Vacant(e) => {
                     e.insert((), &Duration::new(0, 0), super::PeerState::Disconnected)
