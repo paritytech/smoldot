@@ -321,30 +321,6 @@ impl Connection {
         }
     }
 
-    /// Advances the read cursor by the given amount of bytes. The first `bytes` will no longer
-    /// be returned by [`Connection::read_buffer`] the next time it is called.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `bytes` is larger than the size of the buffer returned by
-    /// [`Connection::read_buffer`].
-    ///
-    pub fn advance_read_cursor(self: &mut Pin<Box<Self>>, bytes: usize) {
-        let this = unsafe { Pin::get_unchecked_mut(self.as_mut()) };
-
-        this.messages_queue_first_offset += bytes;
-
-        if let Some(buffer) = this.messages_queue.front() {
-            assert!(this.messages_queue_first_offset <= buffer.len());
-            if this.messages_queue_first_offset == buffer.len() {
-                this.messages_queue.pop_front();
-                this.messages_queue_first_offset = 0;
-            }
-        } else {
-            assert_eq!(bytes, 0);
-        };
-    }
-
     /// Queues the given buffer. For WebSocket connections, queues it as a binary frame.
     pub fn send(self: &mut Pin<Box<Self>>, data: &[u8]) {
         unsafe {
@@ -562,7 +538,19 @@ impl super::Platform for Platform {
     }
 
     fn advance_read_cursor(connection: &mut Self::Connection, bytes: usize) {
-        connection.advance_read_cursor(bytes)
+        let this = unsafe { Pin::get_unchecked_mut(connection.as_mut()) };
+
+        this.messages_queue_first_offset += bytes;
+
+        if let Some(buffer) = this.messages_queue.front() {
+            assert!(this.messages_queue_first_offset <= buffer.len());
+            if this.messages_queue_first_offset == buffer.len() {
+                this.messages_queue.pop_front();
+                this.messages_queue_first_offset = 0;
+            }
+        } else {
+            assert_eq!(bytes, 0);
+        };
     }
 
     fn send(connection: &mut Self::Connection, data: &[u8]) {
