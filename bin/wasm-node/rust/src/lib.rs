@@ -317,7 +317,7 @@ impl Client {
         let chain_information = {
             match (
                 chain_spec
-                    .as_chain_information()
+                    .as_chain_information() // TODO: very expensive, don't always call?
                     .map(chain::chain_information::ValidChainInformation::try_from),
                 chain_spec.light_sync_state().map(|s| {
                     chain::chain_information::ValidChainInformation::try_from(
