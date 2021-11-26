@@ -444,6 +444,7 @@ enum SubscriptionTy {
     Storage,
     Transaction,
     RuntimeSpec,
+    Follow,
 }
 
 struct Blocks {
@@ -1276,6 +1277,24 @@ impl Background {
                     )
                     .await;
             }
+
+            methods::MethodCall::chainHead_follow_unstable { runtimeUpdates } => {
+                self.chain_head_follow(request_id, runtimeUpdates).await;
+            }
+            methods::MethodCall::chainHead_genesisHash_unstable {} => {
+                let _ = self
+                    .responses_sender
+                    .lock()
+                    .await
+                    .send(
+                        methods::Response::chainHead_genesisHash_unstable(methods::HashHexString(
+                            self.genesis_block,
+                        ))
+                        .to_json_response(request_id),
+                    )
+                    .await;
+            }
+
             _method => {
                 log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
                 let _ = self
@@ -1872,6 +1891,102 @@ impl Background {
                 Err(())
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_follow_unstable`].
+    async fn chain_head_follow(&self, request_id: &str, runtime_updates: bool) {
+        assert!(!runtime_updates); // TODO: not supported yet
+
+        let (subscription, mut unsubscribe_rx) =
+            match self.alloc_subscription(SubscriptionTy::Follow).await {
+                Ok(v) => v,
+                Err(()) => {
+                    let _ = self
+                        .responses_sender
+                        .lock()
+                        .await
+                        .send(json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Too many active subscriptions",
+                            ),
+                            None,
+                        ))
+                        .await;
+                    return;
+                }
+            };
+
+        let mut subscribe_all = self.sync_service.subscribe_all(32).await;
+
+        let confirmation = methods::Response::chainHead_follow_unstable(methods::FollowResult {
+            subscription_id: subscription.clone(),
+            finalized_block_hash: methods::HashHexString(header::hash_from_scale_encoded_header(
+                &subscribe_all.finalized_block_scale_encoded_header[..],
+            )),
+            finalized_block_runtime: None,
+        })
+        .to_json_response(request_id);
+
+        let mut responses_sender = self.responses_sender.lock().await.clone();
+
+        // Spawn a separate task for the subscription.
+        self.new_child_tasks_tx
+            .lock()
+            .await
+            .unbounded_send(Box::pin(async move {
+                // Send back to the user the confirmation of the registration.
+                let _ = responses_sender.send(confirmation).await;
+
+                loop {
+                    // Wait for either a new block, or for the subscription to be canceled.
+                    let next_block = subscribe_all.new_blocks.next();
+                    futures::pin_mut!(next_block);
+                    match future::select(next_block, &mut unsubscribe_rx).await {
+                        future::Either::Left((None, _)) => {
+                            let _ = responses_sender
+                                .send(json_rpc::parse::build_subscription_event(
+                                    "chainHead_followEvent_unstable",
+                                    &subscription,
+                                    &"{\"event\": \"stop\"}",
+                                ))
+                                .await;
+                        }
+                        future::Either::Left((
+                            Some(sync_service::Notification::Finalized {
+                                hash,
+                                best_block_hash,
+                            }),
+                            _,
+                        )) => {}
+                        future::Either::Left((
+                            Some(sync_service::Notification::Block(block)),
+                            _,
+                        )) => {
+                            let hash =
+                                header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                            let _ = responses_sender
+                                .send(json_rpc::parse::build_subscription_event(
+                                    "chainHead_followEvent_unstable",
+                                    &subscription,
+                                    &"", // TODO:
+                                ))
+                                .await;
+
+                            // TODO: handle is_new_best
+                        }
+                        future::Either::Right((Ok(unsub_request_id), _)) => {
+                            let response = methods::Response::chainHead_unfollow_unstable(())
+                                .to_json_response(&unsub_request_id);
+                            let _ = responses_sender.send(response).await;
+                            break;
+                        }
+                        future::Either::Right((Err(_), _)) => break,
+                    }
+                }
+            }))
+            .unwrap();
     }
 
     /// Allocates a new subscription ID. Also checks the maximum number of subscriptions.

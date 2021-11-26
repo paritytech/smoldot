@@ -26,6 +26,7 @@ use alloc::{
     string::{String, ToString as _},
     vec::Vec,
 };
+use hashbrown::HashMap;
 
 /// Parses a JSON call (usually received from a JSON-RPC server).
 ///
@@ -150,7 +151,7 @@ macro_rules! define_methods {
             $([$($alias:ident),*])*
         ,
     )*) => {
-        #[allow(non_camel_case_types)]
+        #[allow(non_camel_case_types, non_snake_case)]
         #[derive(Debug, Clone)]
         pub enum $rq_name<'a> {
             $(
@@ -341,9 +342,22 @@ define_methods! {
     system_removeReservedPeer() -> (), // TODO:
     /// Returns, as an opaque string, the version of the client serving these JSON-RPC requests.
     system_version() -> &'a str,
+
+    // The functions below are experimental and are defined in the document https://hackmd.io/@JF-CdHdTQdSl-2XgOR4SnA/rJ8SaI5Pt
+    chainHead_body_unstable(followSubscriptionId: &'a str, hash: HashHexString, networkConfig: Option<NetworkConfig>) -> &'a str,
+    chainHead_bodyEnd_unstable(subscriptionId: &'a str) -> (),
+    chainHead_call_unstable(followSubscriptionId: &'a str, hash: HashHexString, function: &'a str, callParameters: Vec<HexString>, networkConfig: Option<NetworkConfig>) -> &'a str,
+    chainHead_callEnd_unstable(subscriptionId: &'a str) -> (),
+    chainHead_follow_unstable(runtimeUpdates: bool) -> FollowResult,
+    chainHead_genesisHash_unstable() -> HashHexString,
+    chainHead_header_unstable(followSubscriptionId: &'a str, hash: HashHexString) -> Option<&'a str>,
+    chainHead_storage_unstable(followSubscriptionId: &'a str, hash: HashHexString, key: HexString, childKey: Option<HexString>, r#type: StorageQueryType, networkConfig: Option<NetworkConfig>) -> &'a str,
+    chainHead_storageEnd_unstable(subscriptionId: &'a str) -> (),
+    chainHead_unfollow_unstable(followSubscriptionId: &'a str) -> (),
+    chainHead_unpin_unstable(followSubscriptionId: &'a str, hash: HashHexString) -> (),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HexString(pub Vec<u8>);
 
 // TODO: not great for type in public API
@@ -434,6 +448,19 @@ pub struct Block {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct FollowResult {
+    #[serde(rename = "subscriptionId")]
+    pub subscription_id: String,
+    #[serde(rename = "finalizedBlockHash")]
+    pub finalized_block_hash: HashHexString,
+    #[serde(
+        rename = "finalizedBlockRuntime",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub finalized_block_runtime: Option<MaybeRuntimeSpec>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Header {
     #[serde(rename = "parentHash")]
     pub parent_hash: HashHexString,
@@ -478,10 +505,39 @@ pub struct HeaderDigest {
     pub logs: Vec<HexString>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct NetworkConfig {
+    #[serde(rename = "totalAttempts")]
+    pub total_attempts: u32,
+    #[serde(rename = "maxParallel")]
+    pub max_parallel: u32,
+    #[serde(rename = "timeoutMs")]
+    pub timeout_ms: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct RpcMethods {
     pub version: u64,
     pub methods: Vec<String>,
+}
+
+// TODO: more strongly typed
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MaybeRuntimeSpec {
+    pub r#type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec: Option<RuntimeSpec>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeSpec {
+    pub spec_name: String,
+    pub impl_name: String,
+    pub authoring_version: u64,
+    pub spec_version: u64,
+    pub impl_version: u64,
+    pub transaction_version: Option<u64>,
+    pub apis: Vec<([u8; 8], u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -513,6 +569,16 @@ pub enum DispatchClass {
 pub struct StorageChangeSet {
     pub block: HashHexString,
     pub changes: Vec<(HexString, Option<HexString>)>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub enum StorageQueryType {
+    #[serde(rename = "value")]
+    Value,
+    #[serde(rename = "hash")]
+    Hash,
+    #[serde(rename = "size")]
+    Size,
 }
 
 #[derive(Debug, Clone)]
@@ -617,6 +683,47 @@ impl serde::Serialize for Block {
                 header: &self.header,
                 justification: self.justification.as_ref(),
             },
+        }
+        .serialize(serializer)
+    }
+}
+
+impl serde::Serialize for RuntimeSpec {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(serde::Serialize)]
+        struct SerdeRuntimeVersion<'a> {
+            #[serde(rename = "specName")]
+            spec_name: &'a str,
+            #[serde(rename = "implName")]
+            impl_name: &'a str,
+            #[serde(rename = "authoringVersion")]
+            authoring_version: u64,
+            #[serde(rename = "specVersion")]
+            spec_version: u64,
+            #[serde(rename = "implVersion")]
+            impl_version: u64,
+            #[serde(rename = "transactionVersion", skip_serializing_if = "Option::is_none")]
+            transaction_version: Option<u64>,
+            // TODO: optimize?
+            apis: HashMap<HexString, u32>,
+        }
+
+        SerdeRuntimeVersion {
+            spec_name: &self.spec_name,
+            impl_name: &self.impl_name,
+            authoring_version: self.authoring_version,
+            spec_version: self.spec_version,
+            impl_version: self.impl_version,
+            transaction_version: self.transaction_version,
+            // TODO: optimize?
+            apis: self
+                .apis
+                .iter()
+                .map(|(name_hash, version)| (HexString(name_hash.to_vec()), *version))
+                .collect(),
         }
         .serialize(serializer)
     }
