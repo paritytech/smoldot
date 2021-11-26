@@ -37,7 +37,7 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::{ffi, runtime_service, sync_service, transactions_service};
+use crate::{runtime_service, sync_service, transactions_service, Platform};
 
 use futures::{
     channel::{mpsc, oneshot},
@@ -56,6 +56,7 @@ use smoldot::{
 use std::{
     collections::HashMap,
     iter,
+    marker::PhantomData,
     num::NonZeroU32,
     str,
     sync::{atomic, Arc},
@@ -63,7 +64,7 @@ use std::{
 };
 
 /// Configuration for a JSON-RPC service.
-pub struct Config<'a> {
+pub struct Config<'a, TPlat: Platform> {
     /// Name of the chain, for logging purposes.
     ///
     /// > **Note**: This name will be directly printed out. Any special character should already
@@ -74,13 +75,13 @@ pub struct Config<'a> {
     pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
     /// Service responsible for synchronizing the chain.
-    pub sync_service: Arc<sync_service::SyncService>,
+    pub sync_service: Arc<sync_service::SyncService<TPlat>>,
 
     /// Service responsible for emitting transactions and tracking their state.
-    pub transactions_service: Arc<transactions_service::TransactionsService>,
+    pub transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
     /// Service that provides a ready-to-be-called runtime for the current best block.
-    pub runtime_service: Arc<runtime_service::RuntimeService>,
+    pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
 
     /// Specification of the chain.
     pub chain_spec: &'a chain_spec::ChainSpec,
@@ -126,7 +127,7 @@ pub struct Config<'a> {
     pub max_subscriptions: u32,
 }
 
-pub struct JsonRpcService {
+pub struct JsonRpcService<TPlat: Platform> {
     /// Channel to send JSON-RPC requests to the background task.
     ///
     /// Limited to [`Config::max_pending_requests`] elements.
@@ -134,11 +135,13 @@ pub struct JsonRpcService {
 
     /// Channel where responses are pushed out.
     responses_rx: Mutex<mpsc::Receiver<String>>,
+
+    platform: PhantomData<fn() -> TPlat>,
 }
 
-impl JsonRpcService {
+impl<TPlat: Platform> JsonRpcService<TPlat> {
     /// Creates a new JSON-RPC service with the given configuration.
-    pub fn new(mut config: Config<'_>) -> JsonRpcService {
+    pub fn new(mut config: Config<'_, TPlat>) -> JsonRpcService<TPlat> {
         // Channel from the foreground to the background.
         // Requests are dropped if the channel is full.
         let (new_requests_in, new_requests_rx) = mpsc::channel(
@@ -151,6 +154,7 @@ impl JsonRpcService {
         let client = JsonRpcService {
             new_requests_in: Mutex::new(new_requests_in),
             responses_rx: Mutex::new(responses_rx),
+            platform: PhantomData,
         };
 
         // Channel used in the background in order to spawn new tasks scoped to the background.
@@ -221,8 +225,11 @@ impl JsonRpcService {
                                 // awaiting on `handle_request`.
                                 match message {
                                     Some(m) => {
-                                        with_long_time_warning(background.handle_request(&m), &m)
-                                            .await
+                                        with_long_time_warning::<TPlat, _>(
+                                            background.handle_request(&m),
+                                            &m,
+                                        )
+                                        .await
                                     }
                                     None => return, // Foreground is closed.
                                 }
@@ -313,12 +320,12 @@ impl JsonRpcService {
 }
 
 /// Runs a future but prints a warning if it takes a long time to complete.
-fn with_long_time_warning<'a, T: Future + 'a>(
+fn with_long_time_warning<'a, TPlat: Platform, T: Future + 'a>(
     future: T,
     json_rpc_request: &'a str,
 ) -> impl Future<Output = T::Output> + 'a {
-    let now = ffi::Instant::now();
-    let mut warn_after = ffi::Delay::new(Duration::from_secs(1)).fuse();
+    let now = TPlat::now();
+    let mut warn_after = TPlat::sleep(Duration::from_secs(1)).fuse();
 
     async move {
         let future = future.fuse();
@@ -338,7 +345,7 @@ fn with_long_time_warning<'a, T: Future + 'a>(
                     if warn_after.is_terminated() {
                         log::info!(
                             "JSON-RPC request has finished after {}ms: {:?}{}",
-                            now.elapsed().as_millis(),
+                            (now - TPlat::now()).as_millis(),
                             if json_rpc_request.len() > 100 { &json_rpc_request[..100] }
                                 else { &json_rpc_request[..] },
                             if json_rpc_request.len() > 100 { "…" } else { "" }
@@ -384,7 +391,7 @@ impl HandleRpcError {
 }
 
 /// Fields used to process JSON-RPC requests in the background.
-struct Background {
+struct Background<TPlat: Platform> {
     /// Target to use for all the logs.
     log_target: String,
 
@@ -413,11 +420,11 @@ struct Background {
     peer_id_base58: String,
 
     /// See [`Config::sync_service`].
-    sync_service: Arc<sync_service::SyncService>,
+    sync_service: Arc<sync_service::SyncService<TPlat>>,
     /// See [`Config::runtime_service`].
-    runtime_service: Arc<runtime_service::RuntimeService>,
+    runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     /// See [`Config::transactions_service`].
-    transactions_service: Arc<transactions_service::TransactionsService>,
+    transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
     /// Blocks that are temporarily saved in order to serve JSON-RPC requests.
     // TODO: move somewhere else?
@@ -459,7 +466,7 @@ struct Blocks {
     finalized_block: [u8; 32],
 }
 
-impl Background {
+impl<TPlat: Platform> Background<TPlat> {
     async fn handle_request(&self, json_rpc_request: &str) {
         // Check whether the JSON-RPC request is correct, and bail out if it isn't.
         let (request_id, call) = match methods::parse_json_call(json_rpc_request) {
@@ -1906,8 +1913,8 @@ enum StorageQueryError {
     StorageRetrieval(sync_service::StorageQueryError),
 }
 
-async fn account_nonce(
-    relay_chain_sync: &Arc<runtime_service::RuntimeService>,
+async fn account_nonce<TPlat: Platform>(
+    relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
     account: methods::AccountId,
 ) -> Result<Vec<u8>, AnnounceNonceError> {
     // For each relay chain block, call `ParachainHost_persisted_validation_data` in
@@ -1973,8 +1980,8 @@ enum AnnounceNonceError {
     ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
 }
 
-async fn payment_query_info(
-    relay_chain_sync: &Arc<runtime_service::RuntimeService>,
+async fn payment_query_info<TPlat: Platform>(
+    relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
     extrinsic: &[u8],
 ) -> Result<methods::RuntimeDispatchInfo, PaymentQueryInfoError> {
     // For each relay chain block, call `ParachainHost_persisted_validation_data` in

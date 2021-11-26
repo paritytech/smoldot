@@ -32,6 +32,7 @@ use smoldot::{
 use std::{
     collections::{hash_map::Entry, HashMap},
     num::NonZeroU32,
+    ops,
     pin::Pin,
     str,
     sync::Arc,
@@ -73,6 +74,93 @@ pub struct AddChainConfig<'a, TRelays> {
     pub json_rpc_running: bool,
 }
 
+/// Access to a platform's capabilities.
+pub trait Platform: Send + 'static {
+    type Delay: Future<Output = ()> + Unpin + Send + 'static;
+    type Instant: Clone
+        + ops::Add<Duration, Output = Self::Instant>
+        + ops::Sub<Self::Instant, Output = Duration>
+        + PartialOrd
+        + Ord
+        + PartialEq
+        + Eq
+        + Send
+        + Sync
+        + 'static;
+    type Connection: Send + Sync + 'static;
+    type ConnectFuture: Future<Output = Result<Self::Connection, ConnectError>>
+        + Unpin
+        + Send
+        + 'static;
+    type ConnectionDataFuture: Future<Output = ()> + Unpin + Send + 'static;
+
+    /// Returns the time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time)
+    /// (i.e. 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
+    fn now_from_unix_epoch() -> Duration;
+
+    /// Spawn a background task that runs forever.
+    ///
+    /// This function is expected to called very rarely. It is fine to implement it for example by
+    /// spawning a thread.
+    fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static);
+
+    /// Returns an object that represents "now".
+    fn now() -> Self::Instant;
+
+    /// Creates a future that becomes ready after at least the given duration has elapsed.
+    fn sleep(duration: Duration) -> Self::Delay;
+
+    /// Creates a future that becomes ready after the given instant has been reached.
+    fn sleep_until(when: Self::Instant) -> Self::Delay;
+
+    /// Starts a connection attempt to the given multiaddress.
+    ///
+    /// The multiaddress is passed as a string. If the string can't be parsed, an error should be
+    /// returned where [`ConnectError::is_bad_addr`] is `true`.
+    fn connect(url: &str) -> Self::ConnectFuture;
+
+    /// Returns a future that becomes ready when either the read buffer of the given connection
+    /// contains data, or the remote has closed their sending side.
+    ///
+    /// The future is immediately ready if data is already available or the remote has already
+    /// closed their sending side.
+    ///
+    /// This function can be called multiple times with the same connection, in which case all
+    /// the futures must be notified. The user of this function, however, is encouraged to
+    /// maintain only one active future.
+    ///
+    /// If the future is polled after the connection object has been dropped, the behaviour is
+    /// not specified. The polling might panic, or return `Ready`, or return `Pending`.
+    fn wait_more_data(connection: &mut Self::Connection) -> Self::ConnectionDataFuture;
+
+    /// Gives access to the content of the read buffer of the given connection.
+    ///
+    /// Returns `None` if the remote has closed their sending side.
+    fn read_buffer(connection: &mut Self::Connection) -> Option<&[u8]>;
+
+    /// Discards the first `bytes` bytes of the read buffer of this connection. This makes it
+    /// possible for the remote to send more data.
+    ///
+    /// # Panic
+    ///
+    /// Panics if there aren't enough bytes to discard in the buffer.
+    ///
+    fn advance_read_cursor(connection: &mut Self::Connection, bytes: usize);
+
+    /// Queues the given bytes to be sent out on the given connection.
+    // TODO: back-pressure
+    fn send(connection: &mut Self::Connection, data: &[u8]);
+}
+
+/// Error potentially returned by [`Platform::connect`].
+pub struct ConnectError {
+    /// Human-readable error message.
+    pub message: String,
+
+    /// `true` if the error is caused by the address to connect to being forbidden or unsupported.
+    pub is_bad_addr: bool,
+}
+
 /// Chain registered in a [`Client`].
 //
 // Implementation detail: corresponds to indices within [`Client::public_api_chains`].
@@ -93,7 +181,7 @@ impl From<ChainId> for u32 {
     }
 }
 
-pub struct Client {
+pub struct Client<TPlat: Platform> {
     /// Tasks can be spawned by sending it on this channel. The first tuple element is the name
     /// of the task used for debugging purposes.
     new_task_tx: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
@@ -101,7 +189,7 @@ pub struct Client {
     /// List of chains currently running according to the public API. Indices in this container
     /// are reported through the public API. The values are either an error if the chain has failed
     /// to initialize, or key found in [`Client::chains_by_key`].
-    public_api_chains: slab::Slab<PublicApiChain>,
+    public_api_chains: slab::Slab<PublicApiChain<TPlat>>,
 
     /// De-duplicated list of chains that are *actually* running.
     ///
@@ -110,10 +198,10 @@ pub struct Client {
     ///
     /// The [`ChainServices`] is within a `MaybeDone`. The variant will be `MaybeDone::Future` if
     /// initialization is still in progress.
-    chains_by_key: HashMap<ChainKey, RunningChain>,
+    chains_by_key: HashMap<ChainKey, RunningChain<TPlat>>,
 }
 
-enum PublicApiChain {
+enum PublicApiChain<TPlat: Platform> {
     /// Chain initialization was successful.
     Ok {
         /// Index of the underlying chain found in [`Client::chains_by_key`].
@@ -132,7 +220,7 @@ enum PublicApiChain {
         // TODO: refactor or document this AbortHandle
         json_rpc_service: Option<(
             future::MaybeDone<
-                future::Shared<future::RemoteHandle<Arc<json_rpc_service::JsonRpcService>>>,
+                future::Shared<future::RemoteHandle<Arc<json_rpc_service::JsonRpcService<TPlat>>>>,
             >,
             future::AbortHandle,
         )>,
@@ -164,10 +252,10 @@ struct ChainKey {
     protocol_id: String,
 }
 
-struct RunningChain {
+struct RunningChain<TPlat: Platform> {
     /// Services that are dedicated to this chain. Wrapped within a `MaybeDone` because the
     /// initialization is performed asynchronously.
-    services: future::MaybeDone<future::Shared<future::RemoteHandle<ChainServices>>>,
+    services: future::MaybeDone<future::Shared<future::RemoteHandle<ChainServices<TPlat>>>>,
 
     /// Name of this chain in the logs. This is not necessarily the same as the identifier of the
     /// chain in its chain specification.
@@ -178,16 +266,27 @@ struct RunningChain {
     num_references: NonZeroU32,
 }
 
-#[derive(Clone)]
-struct ChainServices {
-    network_service: Arc<network_service::NetworkService>,
+struct ChainServices<TPlat: Platform> {
+    network_service: Arc<network_service::NetworkService<TPlat>>,
     network_identity: peer_id::PeerId,
-    sync_service: Arc<sync_service::SyncService>,
-    runtime_service: Arc<runtime_service::RuntimeService>,
-    transactions_service: Arc<transactions_service::TransactionsService>,
+    sync_service: Arc<sync_service::SyncService<TPlat>>,
+    runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
+    transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 }
 
-impl Client {
+impl<TPlat: Platform> Clone for ChainServices<TPlat> {
+    fn clone(&self) -> Self {
+        ChainServices {
+            network_service: self.network_service.clone(),
+            network_identity: self.network_identity.clone(),
+            sync_service: self.sync_service.clone(),
+            runtime_service: self.runtime_service.clone(),
+            transactions_service: self.transactions_service.clone(),
+        }
+    }
+}
+
+impl<TPlat: Platform> Client<TPlat> {
     /// Initializes the smoldot Wasm client.
     pub fn new(max_log_level: log::LevelFilter) -> Self {
         // Try initialize the logging and the panic hook.
@@ -216,7 +315,7 @@ impl Client {
 
         // This is the main future that executes the entire client.
         // It receives new tasks from `new_task_rx` and runs them.
-        ffi::spawn_background_task(async move {
+        TPlat::spawn_background_task(async move {
             let mut all_tasks = stream::FuturesUnordered::new();
 
             // The code below processes tasks that have names.
@@ -263,7 +362,7 @@ impl Client {
                 "memory-printer".to_owned(),
                 Box::pin(async move {
                     loop {
-                        ffi::Delay::new(Duration::from_secs(60)).await;
+                        TPlat::sleep(Duration::from_secs(60)).await;
 
                         // For the unwrap below to fail, the quantity of allocated would have to
                         // not fit in a `u64`, which as of 2021 is basically impossible.
@@ -514,7 +613,7 @@ impl Client {
 
                 // Spawn a background task that initializes the services of the new chain and
                 // yields a `ChainServices`.
-                let running_chain_init_future: future::RemoteHandle<ChainServices> = {
+                let running_chain_init_future: future::RemoteHandle<ChainServices<TPlat>> = {
                     let new_tasks_tx = self.new_task_tx.clone();
                     let chain_spec = chain_spec.clone(); // TODO: quite expensive
                     let log_name = log_name.clone();
@@ -626,7 +725,9 @@ impl Client {
             };
 
             // Spawn a background task that initializes the JSON-RPC service.
-            let json_rpc_service_init: future::RemoteHandle<Arc<json_rpc_service::JsonRpcService>> = {
+            let json_rpc_service_init: future::RemoteHandle<
+                Arc<json_rpc_service::JsonRpcService<TPlat>>,
+            > = {
                 let new_task_tx = self.new_task_tx.clone();
                 let log_name = log_name.clone();
                 let init_future = async move {
@@ -883,7 +984,7 @@ impl Client {
 ///
 /// Returns some of the services that have been started. If these service get shut down, all the
 /// other services will later shut down as well.
-async fn start_services(
+async fn start_services<TPlat: Platform>(
     log_name: String,
     new_task_tx: mpsc::UnboundedSender<(
         String,
@@ -892,9 +993,9 @@ async fn start_services(
     chain_information: chain::chain_information::ValidChainInformation,
     genesis_block_scale_encoded_header: Vec<u8>,
     chain_spec: chain_spec::ChainSpec,
-    relay_chain: Option<&ChainServices>,
+    relay_chain: Option<&ChainServices<TPlat>>,
     network_noise_key: connection::NoiseKey,
-) -> ChainServices {
+) -> ChainServices<TPlat> {
     // Since `network_noise_key` is moved out below, use it to build the network identity ahead
     // of the network service starting.
     let network_identity =
