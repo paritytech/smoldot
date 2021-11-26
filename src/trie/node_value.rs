@@ -23,7 +23,6 @@
 //! # Example
 //!
 //! ```
-//! use std::convert::TryFrom as _;
 //! use smoldot::trie::{Nibble, node_value};
 //!
 //! let merkle_value = {
@@ -72,7 +71,7 @@ use super::nibble::Nibble;
 use crate::util;
 
 use arrayvec::ArrayVec;
-use core::{convert::TryFrom as _, fmt};
+use core::fmt;
 
 /// Information about a node whose Merkle value is to be calculated.
 ///
@@ -349,7 +348,7 @@ impl HashOrInline {
 #[cfg(test)]
 mod tests {
     use super::Nibble;
-    use core::{convert::TryFrom as _, iter};
+    use core::iter;
 
     #[test]
     fn empty_root() {

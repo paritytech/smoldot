@@ -21,7 +21,7 @@ use crate::{
 };
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
-use core::{convert::TryFrom as _, num::NonZeroU64};
+use core::num::NonZeroU64;
 
 /// Grandpa configuration of a chain, as extracted from the genesis block.
 ///
@@ -70,10 +70,7 @@ impl GrandpaGenesisConfiguration {
                 .map_err(FromGenesisStorageError::VmError)?
         };
 
-        match decode_config(&encoded_list) {
-            Ok(cfg) => Ok(cfg),
-            Err(()) => return Err(FromGenesisStorageError::OutputDecode),
-        }
+        decode_config(&encoded_list).map_err(|()| FromGenesisStorageError::OutputDecode)
     }
 
     fn from_virtual_machine_prototype(
@@ -99,6 +96,9 @@ impl GrandpaGenesisConfiguration {
                     vm = rq.resume_full_value(value.as_ref().map(|v| &v[..]));
                 }
 
+                host::HostVm::GetMaxLogLevel(resume) => {
+                    vm = resume.resume(0); // Off
+                }
                 host::HostVm::LogEmit(rq) => vm = rq.resume(),
 
                 _ => return Err(FromVmPrototypeError::HostFunctionNotAllowed),
@@ -173,7 +173,7 @@ fn decode_config(scale_encoded: &[u8]) -> Result<GrandpaGenesisConfiguration, ()
                     nom::bytes::complete::take(32u32),
                     nom::combinator::map_opt(nom::number::complete::le_u64, NonZeroU64::new),
                 )),
-                GrandpaGenesisConfiguration {
+                move || GrandpaGenesisConfiguration {
                     initial_authorities: Vec::with_capacity(num_elems),
                 },
                 |mut acc, (public_key, weight)| {

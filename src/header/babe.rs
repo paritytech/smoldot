@@ -19,7 +19,7 @@ use super::Error;
 use crate::util;
 
 use alloc::vec::Vec;
-use core::{cmp, convert::TryFrom, fmt, iter, slice};
+use core::{cmp, fmt, iter, slice};
 
 /// A consensus log item for BABE.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,9 +290,8 @@ impl<'a> BabeAuthorityRef<'a> {
     pub fn scale_encoding(
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        iter::once(either::Right(self.public_key)).chain(iter::once(either::Left(
-            parity_scale_codec::Encode::encode(&self.weight),
-        )))
+        iter::once(either::Right(self.public_key))
+            .chain(iter::once(either::Left(self.weight.to_le_bytes())))
     }
 }
 

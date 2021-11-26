@@ -24,5 +24,16 @@ fn basic_works() {
 
 #[test]
 fn limit_reached() {
-    assert!(super::zstd_decode(&include_bytes!("./example-runtime")[..], 16 * 1024).is_err());
+    assert!(matches!(
+        super::zstd_decode(&include_bytes!("./example-runtime")[..], 16 * 1024),
+        Err(super::Error::TooLarge)
+    ));
+}
+
+#[test]
+fn invalid_data() {
+    assert!(matches!(
+        super::zstd_decode(&(0..2048).map(|_| 0xff).collect::<Vec<_>>(), 1024 * 1024),
+        Err(super::Error::InvalidZstd)
+    ));
 }

@@ -66,7 +66,9 @@ use alloc::{
     collections::{BTreeMap, BTreeSet},
     vec::Vec,
 };
-use core::{convert::TryFrom as _, fmt, iter};
+use core::{fmt, iter};
+
+mod tests;
 
 /// Configuration for [`LightPool::new`].
 pub struct Config {
@@ -136,7 +138,8 @@ pub struct LightPool<TTx, TBl> {
     /// Contains all blocks in [`LightPool::blocks_tree`], indexed by their hash.
     blocks_by_id: hashbrown::HashMap<[u8; 32], fork_tree::NodeIndex, fnv::FnvBuildHasher>,
 
-    /// Index of the best block in [`LightPool::blocks_tree`]. `None` iff the tree is empty.
+    /// Index of the best block in [`LightPool::blocks_tree`]. `None` iff the tree is empty
+    /// or if the best block is [`LightPool::blocks_tree_root_hash`].
     best_block_index: Option<fork_tree::NodeIndex>,
 
     /// Index of the finalized block in [`LightPool::blocks_tree`]. `None` if the tree is empty
@@ -173,23 +176,6 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         }
     }
 
-    /// Removes all transactions and blocks from the pool, and sets the current finalized block
-    /// hash to the value passed as parameter.
-    pub fn clear_and_reset(&mut self, new_finalized_block_hash: [u8; 32]) {
-        self.transactions.clear();
-        self.transactions_by_inclusion.clear();
-        self.included_transactions.clear();
-        self.transaction_validations.clear();
-        self.transactions_by_validation.clear();
-        self.not_validated.clear();
-        self.by_hash.clear();
-        self.blocks_tree.clear();
-        self.blocks_by_id.clear();
-        self.best_block_index = None;
-        self.finalized_block_index = None;
-        self.blocks_tree_root_hash = new_finalized_block_hash;
-    }
-
     /// Returns the number of transactions in the pool.
     pub fn num_transactions(&self) -> usize {
         self.transactions.len()
@@ -197,16 +183,12 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
 
     /// Inserts a new unvalidated transaction in the pool.
     ///
-    /// Must be passed as parameter the double-SCALE-encoded transaction.
-    pub fn add_unvalidated(
-        &mut self,
-        double_scale_encoded: Vec<u8>,
-        user_data: TTx,
-    ) -> TransactionId {
-        let hash = blake2_hash(double_scale_encoded.as_ref());
+    /// Must be passed as parameter the SCALE-encoded transaction.
+    pub fn add_unvalidated(&mut self, scale_encoded: Vec<u8>, user_data: TTx) -> TransactionId {
+        let hash = blake2_hash(scale_encoded.as_ref());
 
         let tx_id = TransactionId(self.transactions.insert(Transaction {
-            double_scale_encoded,
+            scale_encoded,
             user_data,
         }));
 
@@ -260,9 +242,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             debug_assert!(_removed);
         }
 
-        let _removed = self
-            .by_hash
-            .remove(&(blake2_hash(&tx.double_scale_encoded), id));
+        let _removed = self.by_hash.remove(&(blake2_hash(&tx.scale_encoded), id));
         debug_assert!(_removed);
 
         tx.user_data
@@ -313,16 +293,16 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Returns the bytes associated with a given transaction.
     ///
     /// Returns `None` if the identifier is invalid.
-    pub fn double_scale_encoding(&self, id: TransactionId) -> Option<&[u8]> {
-        Some(&self.transactions.get(id.0)?.double_scale_encoded)
+    pub fn scale_encoding(&self, id: TransactionId) -> Option<&[u8]> {
+        Some(&self.transactions.get(id.0)?.scale_encoded)
     }
 
-    /// Tries to find a transaction in the pool whose bytes are `double_scale_encoded`.
+    /// Tries to find the transactions in the pool whose bytes are `scale_encoded`.
     pub fn find_transaction(
         &'_ self,
-        double_scale_encoded: &[u8],
+        scale_encoded: &[u8],
     ) -> impl Iterator<Item = TransactionId> + '_ {
-        let hash = blake2_hash(double_scale_encoded);
+        let hash = blake2_hash(scale_encoded);
         self.by_hash
             .range(
                 (hash, TransactionId(usize::min_value()))
@@ -387,6 +367,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Panics if the transaction with the given id is invalid.
     /// Panics if no block with that hash has been inserted before.
     ///
+    // TODO: is it correct to pass a `Result`, instead of just a `ValidTransaction`?
     pub fn set_validation_result(
         &mut self,
         id: TransactionId,
@@ -464,24 +445,44 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     ///
     #[must_use]
     pub fn set_best_block(&mut self, new_best_block_hash: &[u8; 32]) -> SetBestBlock {
-        let new_best_block_index = *self.blocks_by_id.get(new_best_block_hash).unwrap();
+        // Index of the provided block within the tree. `None` if equal to `blocks_tree_root_hash`.
+        let new_best_block_index = if *new_best_block_hash == self.blocks_tree_root_hash {
+            None
+        } else {
+            Some(*self.blocks_by_id.get(new_best_block_hash).unwrap())
+        };
 
         // Iterators over the potential re-org. Used below to report the transaction status
         // updates.
         let (old_best_to_common_ancestor, common_ancestor_to_new_best) =
-            if let Some(old_best_index) = self.best_block_index {
-                let (ascend, descend) = self
-                    .blocks_tree
-                    .ascend_and_descend(old_best_index, new_best_block_index);
-                (either::Left(ascend), either::Left(descend))
-            } else {
-                let ascend = self.blocks_tree.node_to_root_path(new_best_block_index);
-                let descend = iter::empty::<fork_tree::NodeIndex>();
-                (either::Right(ascend), either::Right(descend))
+            match (self.best_block_index, new_best_block_index) {
+                (Some(old_best_index), Some(new_best_block_index)) => {
+                    let (ascend, descend) = self
+                        .blocks_tree
+                        .ascend_and_descend(old_best_index, new_best_block_index);
+                    (
+                        either::Left(either::Left(ascend)),
+                        either::Left(either::Left(descend)),
+                    )
+                }
+                (Some(old_best_index), None) => {
+                    let ascend = self.blocks_tree.node_to_root_path(old_best_index);
+                    let descend = iter::empty::<fork_tree::NodeIndex>();
+                    (either::Left(either::Right(ascend)), either::Right(descend))
+                }
+                (None, Some(new_best_block_index)) => {
+                    let ascend = iter::empty::<fork_tree::NodeIndex>();
+                    let descend = self.blocks_tree.root_to_node_path(new_best_block_index);
+                    (either::Right(ascend), either::Left(either::Right(descend)))
+                }
+                (None, None) => {
+                    let ascend = iter::empty::<fork_tree::NodeIndex>();
+                    let descend = iter::empty::<fork_tree::NodeIndex>();
+                    (either::Right(ascend), either::Right(descend))
+                }
             };
 
         let mut retracted_transactions = Vec::new();
-
         for to_retract_index in old_best_to_common_ancestor {
             let retracted = self.blocks_tree.get(to_retract_index).unwrap();
             for (_, tx_id) in self.transactions_by_inclusion.range(
@@ -503,7 +504,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             }
         }
 
-        self.best_block_index = Some(new_best_block_index);
+        self.best_block_index = new_best_block_index;
 
         SetBestBlock {
             retracted_transactions,
@@ -558,9 +559,9 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         ));
         self.blocks_tree.get_mut(block_index).unwrap().body = BodyState::Known;
 
-        let is_in_best_chain = self
-            .blocks_tree
-            .is_ancestor(block_index, self.best_block_index.unwrap());
+        let is_in_best_chain = self.best_block_index.map_or(false, |best_block_index| {
+            self.blocks_tree.is_ancestor(block_index, best_block_index)
+        });
 
         // Value returned from the function.
         // TODO: optimize by not having Vec
@@ -568,17 +569,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
 
         for included_body in body {
             let included_body = included_body.as_ref();
-
-            // As explained in the documentation, the transactions passed as parameter are
-            // single-SCALE-encoded, while the ones stored in the pool are double-SCALE-encoded.
-            // This is taken into account when comparing hashes.
-            let hash = {
-                let mut hasher = blake2_rfc::blake2b::Blake2b::new(32);
-                hasher
-                    .update(crate::util::encode_scale_compact_usize(included_body.len()).as_ref());
-                hasher.update(included_body);
-                <[u8; 32]>::try_from(hasher.finalize().as_bytes()).unwrap()
-            };
+            let hash = blake2_hash(included_body);
 
             'tx_in_pool: for (_, known_tx_id) in self.by_hash.range(
                 (hash, TransactionId(usize::min_value()))
@@ -621,10 +612,10 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
 
                         // If `existing_included_block_idx` is in the best chain, set
                         // `now_included` to false.
-                        if self.blocks_tree.is_ancestor(
-                            existing_included_block_idx,
-                            self.best_block_index.unwrap(),
-                        ) {
+                        if self.best_block_index.map_or(false, |best_block_index| {
+                            self.blocks_tree
+                                .is_ancestor(existing_included_block_idx, best_block_index)
+                        }) {
                             now_included = false;
                         }
                     }
@@ -819,7 +810,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             debug_assert_eq!(_removed, Some(pruned.index));
 
             // List of transactions that were included in this block.
-            let included_transactions = self
+            let included_transactions_ids = self
                 .transactions_by_inclusion
                 .range(
                     (pruned.user_data.hash, TransactionId(usize::min_value()))
@@ -827,17 +818,84 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 )
                 .map(|(_, tx_id)| *tx_id)
                 .collect::<Vec<_>>();
+            let mut included_transactions = Vec::with_capacity(included_transactions_ids.len());
 
-            for tx_id in included_transactions {
-                // TODO: finish here
-                //self.remove_transaction();
+            for tx_id in &included_transactions_ids {
+                // Completely remove this transaction from the pool, similar to what
+                // `remove_transaction` does.
+                let tx = self.transactions.remove(tx_id.0);
+                included_transactions.push((*tx_id, tx.user_data));
+
+                let blocks_included = self
+                    .included_transactions
+                    .range((*tx_id, [0; 32])..=(*tx_id, [0xff; 32]))
+                    .map(|(_, block)| *block)
+                    .collect::<Vec<_>>();
+
+                let blocks_validated = self
+                    .transaction_validations
+                    .range((*tx_id, [0; 32])..=(*tx_id, [0xff; 32]))
+                    .map(|((_, block), _)| *block)
+                    .collect::<Vec<_>>();
+
+                if blocks_validated.is_empty() {
+                    let _was_removed = self.not_validated.remove(tx_id);
+                    debug_assert!(_was_removed);
+                }
+
+                for block_hash in blocks_included {
+                    let _removed = self.included_transactions.remove(&(*tx_id, block_hash));
+                    debug_assert!(_removed);
+                    let _removed = self.transactions_by_inclusion.remove(&(block_hash, *tx_id));
+                    debug_assert!(_removed);
+                }
+
+                for block_hash in blocks_validated {
+                    let _removed = self.transaction_validations.remove(&(*tx_id, block_hash));
+                    debug_assert!(_removed.is_some());
+                    let _removed = self
+                        .transactions_by_validation
+                        .remove(&(block_hash, *tx_id));
+                    debug_assert!(_removed);
+                }
+
+                let _removed = self
+                    .by_hash
+                    .remove(&(blake2_hash(&tx.scale_encoded), *tx_id));
+                debug_assert!(_removed);
             }
 
-            // TODO: handle transactions validated against that block /!\ /!\
+            // Purge the state from any validation information about that block.
+            let validated_txs = self
+                .transactions_by_validation
+                .range(
+                    (pruned.user_data.hash, TransactionId(usize::min_value()))
+                        ..=(pruned.user_data.hash, TransactionId(usize::max_value())),
+                )
+                .map(|(_, tx)| *tx)
+                .collect::<Vec<_>>();
+
+            for tx_id in validated_txs {
+                let _was_removed = self
+                    .transactions_by_validation
+                    .remove(&(pruned.user_data.hash, tx_id));
+                debug_assert!(_was_removed);
+                let _was_removed = self
+                    .transaction_validations
+                    .remove(&(tx_id, pruned.user_data.hash));
+                debug_assert!(_was_removed.is_some());
+            }
+
+            return_value.push(PruneBodyFinalized {
+                block_hash: pruned.user_data.hash,
+                included_transactions,
+                user_data: pruned.user_data.user_data,
+            });
         }
 
+        // We returned earlier in the function if `finalized_node_index` is `None`. Consequently,
+        // `best_block_index` can't be `None` either.
         if self.best_block_index.unwrap() == upmost_to_remove {
-            debug_assert!(self.blocks_tree.is_empty());
             self.best_block_index = None;
         }
 
@@ -905,8 +963,8 @@ pub struct SetBestBlock {
 
 /// Entry in [`LightPool::transactions`].
 struct Transaction<TTx> {
-    /// Bytes corresponding to the double-SCALE-encoded transaction.
-    double_scale_encoded: Vec<u8>,
+    /// Bytes corresponding to the SCALE-encoded transaction.
+    scale_encoded: Vec<u8>,
 
     /// User data chosen by the user.
     user_data: TTx,
@@ -928,5 +986,3 @@ enum BodyState {
 fn blake2_hash(bytes: &[u8]) -> [u8; 32] {
     <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], bytes).as_bytes()).unwrap()
 }
-
-// TODO: needs tests

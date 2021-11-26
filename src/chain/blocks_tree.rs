@@ -66,8 +66,8 @@ use crate::{
     header,
 };
 
-use alloc::{sync::Arc, vec::Vec};
-use core::{cmp, convert::TryFrom as _, fmt, mem, num::NonZeroU64, time::Duration};
+use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
+use core::{cmp, fmt, mem, num::NonZeroU64, time::Duration};
 use hashbrown::HashMap;
 
 mod best_block;
@@ -91,7 +91,10 @@ pub struct Config {
 pub struct NonFinalizedTree<T> {
     /// All fields are wrapped into an `Option` in order to be able to extract the
     /// [`NonFinalizedTree`] and later put it back.
-    inner: Option<NonFinalizedTreeInner<T>>,
+    ///
+    /// A `Box` is used in order to minimize the impact of moving the value around, and to reduce
+    /// the size of the [`NonFinalizedTree`].
+    inner: Option<Box<NonFinalizedTreeInner<T>>>,
 }
 
 impl<T> NonFinalizedTree<T> {
@@ -108,7 +111,7 @@ impl<T> NonFinalizedTree<T> {
         let finalized_block_hash = chain_information.finalized_block_header.hash();
 
         NonFinalizedTree {
-            inner: Some(NonFinalizedTreeInner {
+            inner: Some(Box::new(NonFinalizedTreeInner {
                 finalized_block_header: chain_information.finalized_block_header,
                 finalized_block_hash,
                 finality: match chain_information.finality {
@@ -145,8 +148,12 @@ impl<T> NonFinalizedTree<T> {
                     },
                 },
                 blocks: fork_tree::ForkTree::with_capacity(config.blocks_capacity),
+                blocks_by_hash: hashbrown::HashMap::with_capacity_and_hasher(
+                    config.blocks_capacity,
+                    Default::default(),
+                ),
                 current_best: None,
-            }),
+            })),
         }
     }
 
@@ -154,6 +161,7 @@ impl<T> NonFinalizedTree<T> {
     pub fn clear(&mut self) {
         let mut inner = self.inner.as_mut().unwrap();
         inner.blocks.clear();
+        inner.blocks_by_hash.clear();
         inner.current_best = None;
     }
 
@@ -167,10 +175,9 @@ impl<T> NonFinalizedTree<T> {
         self.inner.as_ref().unwrap().blocks.len()
     }
 
-    /// Returns the header of all known non-finalized blocks in the chain.
-    ///
-    /// The order of the blocks is unspecified.
-    pub fn iter(&'_ self) -> impl Iterator<Item = header::HeaderRef<'_>> + '_ {
+    /// Returns the header of all known non-finalized blocks in the chain without any specific
+    /// order.
+    pub fn iter_unordered(&'_ self) -> impl Iterator<Item = header::HeaderRef<'_>> + '_ {
         self.inner
             .as_ref()
             .unwrap()
@@ -179,14 +186,31 @@ impl<T> NonFinalizedTree<T> {
             .map(|(_, b)| (&b.header).into())
     }
 
+    /// Returns the header of all known non-finalized blocks in the chain.
+    ///
+    /// The returned items are guaranteed to be in an order in which the parents are found before
+    /// their children.
+    pub fn iter_ancestry_order(&'_ self) -> impl Iterator<Item = header::HeaderRef<'_>> + '_ {
+        self.inner
+            .as_ref()
+            .unwrap()
+            .blocks
+            .iter_ancestry_order()
+            .map(|(_, b)| (&b.header).into())
+    }
+
     /// Reserves additional capacity for at least `additional` new blocks without allocating.
     pub fn reserve(&mut self, additional: usize) {
-        self.inner.as_mut().unwrap().blocks.reserve(additional)
+        let inner = self.inner.as_mut().unwrap();
+        inner.blocks_by_hash.reserve(additional);
+        inner.blocks.reserve(additional);
     }
 
     /// Shrink the capacity of the chain as much as possible.
     pub fn shrink_to_fit(&mut self) {
-        self.inner.as_mut().unwrap().blocks.shrink_to_fit()
+        let inner = self.inner.as_mut().unwrap();
+        inner.blocks_by_hash.shrink_to_fit();
+        inner.blocks.shrink_to_fit();
     }
 
     /// Builds a [`chain_information::ChainInformationRef`] struct that might later be used to
@@ -270,20 +294,88 @@ impl<T> NonFinalizedTree<T> {
         }
     }
 
+    /// Returns consensus information about the current best block of the chain.
+    pub fn best_block_consensus(&self) -> chain_information::ChainInformationConsensusRef {
+        let inner = self.inner.as_ref().unwrap();
+        match (
+            &inner.finalized_consensus,
+            inner
+                .current_best
+                .map(|idx| &inner.blocks.get(idx).unwrap().consensus),
+        ) {
+            (FinalizedConsensus::AllAuthorized, _) => {
+                chain_information::ChainInformationConsensusRef::AllAuthorized
+            }
+            (
+                FinalizedConsensus::Aura {
+                    authorities_list,
+                    slot_duration,
+                },
+                None,
+            ) => chain_information::ChainInformationConsensusRef::Aura {
+                finalized_authorities_list: header::AuraAuthoritiesIter::from_slice(
+                    authorities_list,
+                ),
+                slot_duration: *slot_duration,
+            },
+            (
+                FinalizedConsensus::Aura { slot_duration, .. },
+                Some(BlockConsensus::Aura { authorities_list }),
+            ) => chain_information::ChainInformationConsensusRef::Aura {
+                finalized_authorities_list: header::AuraAuthoritiesIter::from_slice(
+                    authorities_list,
+                ),
+                slot_duration: *slot_duration,
+            },
+            (
+                FinalizedConsensus::Babe {
+                    block_epoch_information,
+                    next_epoch_transition,
+                    slots_per_epoch,
+                },
+                None,
+            ) => chain_information::ChainInformationConsensusRef::Babe {
+                slots_per_epoch: *slots_per_epoch,
+                finalized_block_epoch_information: block_epoch_information
+                    .as_ref()
+                    .map(|info| From::from(&**info)),
+                finalized_next_epoch_transition: next_epoch_transition.as_ref().into(),
+            },
+            (
+                FinalizedConsensus::Babe {
+                    slots_per_epoch, ..
+                },
+                Some(BlockConsensus::Babe {
+                    current_epoch,
+                    next_epoch,
+                }),
+            ) => chain_information::ChainInformationConsensusRef::Babe {
+                slots_per_epoch: *slots_per_epoch,
+                finalized_block_epoch_information: current_epoch
+                    .as_ref()
+                    .map(|info| From::from(&**info)),
+                finalized_next_epoch_transition: next_epoch.as_ref().into(),
+            },
+
+            // Any mismatch of consensus engine between the finalized and best block is not
+            // supported at the moment.
+            _ => unreachable!(),
+        }
+    }
+
     /// Returns true if the block with the given hash is in the [`NonFinalizedTree`].
     pub fn contains_non_finalized_block(&self, hash: &[u8; 32]) -> bool {
         self.inner
             .as_ref()
             .unwrap()
-            .blocks
-            .find(|b| b.hash == *hash)
-            .is_some()
+            .blocks_by_hash
+            .contains_key(hash)
     }
 
     /// Gives access to a block stored by the [`NonFinalizedTree`], identified by its hash.
     pub fn non_finalized_block_by_hash(&mut self, hash: &[u8; 32]) -> Option<BlockAccess<T>> {
         let inner = self.inner.as_mut().unwrap();
-        let node_index = inner.blocks.find(|b| b.hash == *hash)?;
+        let node_index = *inner.blocks_by_hash.get(hash)?;
         Some(BlockAccess {
             tree: inner,
             node_index,
@@ -297,12 +389,13 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let inner = self.inner.as_ref().unwrap();
+        // TODO: add the finalized block hash
         f.debug_map()
             .entries(
                 inner
                     .blocks
                     .iter_unordered()
-                    .map(|(_, v)| (&v.hash, &v.user_data)),
+                    .map(|(_, v)| (format!("0x{}", hex::encode(&v.hash)), &v.user_data)),
             )
             .finish()
     }
@@ -322,6 +415,9 @@ struct NonFinalizedTreeInner<T> {
 
     /// Container for non-finalized blocks.
     blocks: fork_tree::ForkTree<Block<T>>,
+    /// For each block hash, the index of this block in [`NonFinalizedTreeInner::blocks`].
+    /// Must always have the same number of entries as [`NonFinalizedTreeInner::blocks`].
+    blocks_by_hash: HashMap<[u8; 32], fork_tree::NodeIndex, fnv::FnvBuildHasher>,
     /// Index within [`NonFinalizedTreeInner::blocks`] of the current best block. `None` if and
     /// only if the fork tree is empty.
     current_best: Option<fork_tree::NodeIndex>,

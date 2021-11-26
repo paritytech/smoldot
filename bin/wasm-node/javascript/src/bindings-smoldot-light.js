@@ -31,9 +31,9 @@ export default (config) => {
     let connections = {};
 
     const bindings = {
-        // Must throw an error. A human-readable message can be found in the WebAssembly memory in
-        // the given buffer.
-        throw: (ptr, len) => {
+        // Must exit with an error. A human-readable message can be found in the WebAssembly
+        // memory in the given buffer.
+        panic: (ptr, len) => {
             ptr >>>= 0;
             len >>>= 0;
 
@@ -98,11 +98,11 @@ export default (config) => {
             addr_len >>>= 0;
             error_ptr_ptr >>>= 0;
 
-            try {
-                if (!!connections[id]) {
-                    throw new Error("internal error: connection already allocated");
-                }
+            if (!!connections[id]) {
+                throw new Error("internal error: connection already allocated");
+            }
 
+            try {
                 const addr = Buffer.from(config.instance.exports.memory.buffer)
                     .toString('utf8', addr_ptr, addr_ptr + addr_len);
 
@@ -120,7 +120,9 @@ export default (config) => {
                         proto = 'ws';
                     }
                     if ((proto == 'ws' && config.forbidWs) || (proto == 'wss' && config.forbidWss)) {
-                        throw new Error('Connection type not allowed');
+                        const error = new Error('Connection type not allowed');
+                        error.isBadAddress = true;
+                        throw error;
                     }
                     if (wsParsed[1] == 'ip6') {
                         connection = new Websocket.w3cwebsocket(proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]);
@@ -150,7 +152,9 @@ export default (config) => {
                 } else if (tcpParsed != null) {
                     // `net` module will be missing when we're not in NodeJS.
                     if (!net || config.forbidTcp) {
-                        throw new Error('TCP connections not available');
+                        const error = new Error('TCP connections not available');
+                        error.isBadAddress = true;
+                        throw error;
                     }
 
                     connection = net.createConnection({
@@ -182,7 +186,9 @@ export default (config) => {
                     });
 
                 } else {
-                    throw new Error('Unrecognized multiaddr format');
+                    const error = new Error('Unrecognized multiaddr format');
+                    error.isBadAddress = true;
+                    throw error;
                 }
 
                 connections[id] = connection;
@@ -196,6 +202,7 @@ export default (config) => {
                 mem.write(errorStr, ptr);
                 mem.writeUInt32LE(ptr, error_ptr_ptr);
                 mem.writeUInt32LE(len, error_ptr_ptr + 4);
+                mem.writeUInt8(!!error.isBadAddress ? 1 : 0, error_ptr_ptr + 8);
                 return 1;
             }
         },

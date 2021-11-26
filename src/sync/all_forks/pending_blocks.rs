@@ -83,11 +83,12 @@
 //! be done manually.
 //!
 
+#![allow(dead_code)] // TODO: remove this after `all.rs` implements full node; right now many methods here are useless because expected to be used only for full node code
+
 use super::{disjoint, sources};
 
 use alloc::{collections::BTreeSet, vec::Vec};
 use core::{
-    convert::TryFrom as _,
     iter,
     num::{NonZeroU32, NonZeroU64},
 };
@@ -299,6 +300,11 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             debug_assert!(self.requests.contains(pending_request_id.0));
             let request = self.requests.remove(pending_request_id.0);
 
+            let _was_in = self
+                .source_occupations
+                .remove(&(source_id, pending_request_id));
+            debug_assert!(_was_in);
+
             let _was_in = self.blocks_requests.remove(&(
                 request.detail.first_block_height,
                 request.detail.first_block_hash,
@@ -315,6 +321,8 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
             pending_requests.push((pending_request_id, request.detail, request.user_data));
         }
+
+        debug_assert_eq!(self.source_occupations.len(), self.requests.len());
 
         (user_data.user_data, pending_requests.into_iter())
     }
@@ -336,6 +344,22 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     pub fn add_known_block(&mut self, source_id: SourceId, height: u64, hash: [u8; 32]) {
         self.sources.add_known_block(source_id, height, hash);
+    }
+
+    /// Un-registers a new block that the source is aware of.
+    ///
+    /// Has no effect if the block wasn't marked as being known to this source.
+    ///
+    /// > **Note**: Use this function if for example a source is unable to serve a block that is
+    /// >           supposed to be known to it.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    pub fn remove_known_block(&mut self, source_id: SourceId, height: u64, hash: &[u8; 32]) {
+        self.sources
+            .source_remove_known_block(source_id, height, hash);
     }
 
     /// Sets the best block of this source.
@@ -361,6 +385,21 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     pub fn source_best_block(&self, source_id: SourceId) -> (u64, &[u8; 32]) {
         self.sources.best_block(source_id)
+    }
+
+    /// Returns the number of ongoing requests that concern this source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
+    pub fn source_num_ongoing_requests(&self, source_id: SourceId) -> usize {
+        self.source_occupations
+            .range(
+                (source_id, RequestId(usize::min_value()))
+                    ..=(source_id, RequestId(usize::max_value())),
+            )
+            .count()
     }
 
     /// Returns the list of sources for which [`PendingBlocks::source_knows_non_finalized_block`]
@@ -654,7 +693,8 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             user_data,
         }));
 
-        self.source_occupations.insert((source_id, request_id));
+        let _was_inserted = self.source_occupations.insert((source_id, request_id));
+        debug_assert!(_was_inserted);
 
         debug_assert_eq!(self.source_occupations.len(), self.requests.len());
 
@@ -902,13 +942,6 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
                         DesiredRequest {
                             source_id,
-                            source_num_existing_requests: self
-                                .source_occupations
-                                .range(
-                                    (source_id, RequestId(usize::min_value()))
-                                        ..=(source_id, RequestId(usize::max_value())),
-                                )
-                                .count(),
                             request_params: RequestParams {
                                 first_block_hash: *unknown_block_hash,
                                 first_block_height: unknown_block_height,
@@ -928,8 +961,6 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 pub struct DesiredRequest {
     /// Source onto which to start this request.
     pub source_id: SourceId,
-    /// Number of requests that the source is already performing.
-    pub source_num_existing_requests: usize,
     /// Details of the request.
     pub request_params: RequestParams,
 }

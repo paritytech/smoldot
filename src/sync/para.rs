@@ -33,10 +33,7 @@
 //! function. The first parameter is a `para_id` found in the chain specification of the
 //! parachain of parathread.
 
-// TODO: at the time of writing of this comment, parachains aren't shipped yet, and everything might still change
-// see https://github.com/paritytech/polkadot/blob/master/primitives/src/v1.rs for the reference version
-
-use core::{convert::TryFrom as _, iter};
+use core::iter;
 
 /// Produces the input to pass to the `ParachainHost_persisted_validation_data` runtime call.
 pub fn persisted_validation_data_parameters(
@@ -73,22 +70,25 @@ impl OccupiedCoreAssumption {
     }
 }
 
-/// Attempt to decode the return value of the  `ParachainHost_persisted_validation_data` runtime
+/// Attempt to decode the return value of the `ParachainHost_persisted_validation_data` runtime
 /// call.
 pub fn decode_persisted_validation_data_return_value(
     scale_encoded: &[u8],
 ) -> Result<Option<PersistedValidationDataRef>, Error> {
-    match nom::combinator::all_consuming(crate::util::nom_option_decode(persisted_validation_data))(
-        scale_encoded,
-    ) {
+    let res: Result<_, nom::Err<nom::error::Error<_>>> = nom::combinator::all_consuming(
+        crate::util::nom_option_decode(persisted_validation_data),
+    )(scale_encoded);
+    match res {
         Ok((_, data)) => Ok(data),
-        Err(err) => Err(Error(err)),
+        Err(nom::Err::Error(err)) | Err(nom::Err::Failure(err)) => Err(Error(err.code)),
+        Err(_) => unreachable!(),
     }
 }
 
 /// Error that can happen during the decoding.
 #[derive(Debug, derive_more::Display)]
-pub struct Error<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
+#[display(fmt = "Error during the persisted validation data decoding")]
+pub struct Error(nom::error::ErrorKind);
 
 /// Decoded persisted validation data.
 // TODO: document and explain
@@ -96,11 +96,13 @@ pub struct Error<'a>(nom::Err<nom::error::Error<&'a [u8]>>);
 pub struct PersistedValidationDataRef<'a> {
     /// Opaque data representing the best block (or similar concept) of the parachain/parathread.
     ///
-    /// The meaning of this data depends on the chain, but most of the time it consists in a
-    /// block hash.
+    /// The meaning of this data depends on the chain, but for chains built on top of Cumulus
+    /// (i.e. the vast majority of chains) this consists in a block header.
     pub parent_head: &'a [u8],
     pub relay_parent_number: u32,
     pub relay_parent_storage_root: &'a [u8; 32],
+
+    /// Maximum legal size of a POV block, in bytes.
     pub max_pov_size: u32,
 }
 

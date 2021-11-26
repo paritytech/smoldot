@@ -18,7 +18,7 @@
 use crate::header;
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom, fmt};
+use core::fmt;
 
 /// Attempt to decode the given SCALE-encoded justification.
 pub fn decode_grandpa(scale_encoded: &[u8]) -> Result<GrandpaJustificationRef, Error> {
@@ -313,7 +313,7 @@ fn precommits(bytes: &[u8]) -> nom::IResult<&[u8], PrecommitsRef> {
                 num_elems,
                 num_elems,
                 precommit,
-                (),
+                || {},
                 |(), _| (),
             ))
         }),
@@ -361,7 +361,7 @@ fn votes_ancestries(bytes: &[u8]) -> nom::IResult<&[u8], VotesAncestriesIter> {
                             ))
                         })
                     },
-                    (),
+                    || {},
                     |(), _| (),
                 )),
                 move |slice| VotesAncestriesIter {

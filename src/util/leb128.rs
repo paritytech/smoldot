@@ -23,7 +23,7 @@
 //! See <https://en.wikipedia.org/wiki/LEB128>.
 
 use alloc::vec::Vec;
-use core::{cmp, convert::TryFrom as _, mem};
+use core::{cmp, mem};
 
 /// Returns an LEB128-encoded integer as a list of bytes.
 ///
@@ -102,7 +102,15 @@ impl FramedInProgress {
     pub fn new(max_len: usize) -> Self {
         FramedInProgress {
             max_len,
-            buffer: Vec::with_capacity(32), // Reserve enough for the length prefix.
+            buffer: Vec::with_capacity({
+                // If the `max_size` is reasonably small, just allocate enough for the message,
+                // otherwise reserve just enough for the length prefix.
+                if max_len <= 32 * 1024 {
+                    max_len
+                } else {
+                    4 * mem::size_of::<usize>()
+                }
+            }),
             inner: FramedInner::Length,
         }
     }
@@ -118,7 +126,15 @@ impl FramedInProgress {
                 };
 
                 if (*byte & 0x80) == 0 {
-                    assert_eq!(n, buffer.len() - 1);
+                    // Note: this assertion holds true because of the implementation of `update`
+                    // below.
+                    debug_assert_eq!(n, buffer.len() - 1);
+
+                    // We want to avoid LEB128 numbers such as `[0x81, 0x0]`.
+                    if n >= 1 && *byte == 0x0 {
+                        return Some(Err(FramedError::NonMinimalLengthPrefix));
+                    }
+
                     return Some(Ok(out));
                 }
             }
@@ -179,6 +195,9 @@ impl FramedInProgress {
 pub enum FramedError {
     /// The variable-length prefix is too large and cannot possibly represent a valid size.
     LengthPrefixTooLarge,
+    /// The variable-length prefix doesn't use the minimum possible LEB128 representation of
+    /// this number.
+    NonMinimalLengthPrefix,
     /// Maximum length of the frame has been exceeded.
     #[display(
         fmt = "Maximum length of the frame ({}) has been exceeded",

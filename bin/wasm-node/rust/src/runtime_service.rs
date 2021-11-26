@@ -39,19 +39,21 @@
 //! this view isn't necessarily the same on both services.
 //!
 //! The main service offered by the runtime service is
-//! [`RuntimeService::recent_best_block_runtime_call`], that performs a runtime call on the latest
+//! [`RuntimeService::recent_best_block_runtime_lock`], that performs a runtime call on the latest
 //! reported best block or more recent.
-
-// TODO: the doc above mentions that you can subscribe to the finalized block, but this is isn't implemented yet ^
 
 use crate::{ffi, lossy_channel, sync_service};
 
 use futures::{
+    channel::mpsc,
     lock::{Mutex, MutexGuard},
     prelude::*,
 };
 use smoldot::{
-    chain_spec, executor, header, metadata,
+    chain::async_tree,
+    chain_spec, executor, header,
+    informant::HashDisplay,
+    metadata,
     network::protocol,
     trie::{self, proof_verify},
 };
@@ -61,8 +63,14 @@ pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 
 /// Configuration for a runtime service.
 pub struct Config<'a> {
+    /// Name of the chain, for logging purposes.
+    ///
+    /// > **Note**: This name will be directly printed out. Any special character should already
+    /// >           have been filtered out from this name.
+    pub log_name: String,
+
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+    pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService>,
@@ -82,18 +90,17 @@ pub struct Config<'a> {
 
 /// See [the module-level documentation](..).
 pub struct RuntimeService {
-    /// See [`Config::tasks_executor`].
-    tasks_executor: Mutex<Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>>,
+    /// Target to use for the logs. See [`Config::log_name`].
+    log_target: String,
 
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService>,
 
-    /// Initially contains the runtime code of the genesis block. Whenever a best block is
-    /// received, updated with the runtime of this new best block.
-    /// If, after a new best block, it isn't possible to determine whether the runtime has changed,
-    /// the content will be left unchanged. However, if an error happens for example when compiling
-    /// the new runtime, then the content will contain an error.
-    latest_known_runtime: Mutex<LatestKnownRuntime>,
+    /// Fields behind a `Mutex`. Should only be locked for short-lived operations.
+    guarded: Arc<Mutex<Guarded>>,
+
+    /// Handle to abort the background task.
+    background_task_abort: future::AbortHandle,
 }
 
 impl RuntimeService {
@@ -101,74 +108,111 @@ impl RuntimeService {
     ///
     /// The future returned by this function is expected to finish relatively quickly and is
     /// necessary only for locking purposes.
-    pub async fn new(config: Config<'_>) -> Arc<Self> {
+    pub async fn new(mut config: Config<'_>) -> Arc<Self> {
+        // Target to use for all the logs of this service.
+        let log_target = format!("runtime-{}", config.log_name);
+
+        let best_near_head_of_chain = config.sync_service.is_near_head_of_chain_heuristic().await;
+
         // Build the runtime of the genesis block.
-        let latest_known_runtime = {
-            let code = config
-                .chain_spec
-                .genesis_storage()
+        let genesis_runtime = if let chain_spec::GenesisStorage::Items(genesis_storage) =
+            config.chain_spec.genesis_storage()
+        {
+            let code = genesis_storage
+                .iter()
                 .find(|(k, _)| k == b":code")
                 .map(|(_, v)| v.to_vec());
-            let heap_pages = config
-                .chain_spec
-                .genesis_storage()
+            let heap_pages = genesis_storage
+                .iter()
                 .find(|(k, _)| k == b":heappages")
                 .map(|(_, v)| v.to_vec());
 
             // Note that in the absolute we don't need to panic in case of a problem, and could
             // simply store an `Err` and continue running.
             // However, in practice, it seems more sane to detect problems in the genesis block.
-            let mut runtime = SuccessfulRuntime::from_params(&code, &heap_pages)
-                .await
-                .expect("invalid runtime at genesis block");
+            let mut runtime = SuccessfulRuntime::from_params(&code, &heap_pages).await;
 
             // As documented in the `metadata` field, we must fill it using the genesis storage.
-            let mut query = metadata::query_metadata(runtime.virtual_machine.take().unwrap());
-            loop {
-                match query {
-                    metadata::Query::Finished(Ok(metadata), vm) => {
-                        runtime.virtual_machine = Some(vm);
-                        runtime.metadata = Some(metadata);
-                        break;
-                    }
-                    metadata::Query::StorageGet(get) => {
-                        let key = get.key_as_vec();
-                        let value = config
-                            .chain_spec
-                            .genesis_storage()
-                            .find(|(k, _)| &**k == key)
-                            .map(|(_, v)| v);
-                        query = get.inject_value(value.map(iter::once));
-                    }
-                    metadata::Query::Finished(Err(err), _) => {
-                        panic!("Unable to generate genesis metadata: {}", err)
+            if let Ok(runtime) = runtime.as_mut() {
+                let mut query = metadata::query_metadata(runtime.virtual_machine.take().unwrap());
+                loop {
+                    match query {
+                        metadata::Query::Finished(Ok(metadata), vm) => {
+                            runtime.virtual_machine = Some(vm);
+                            runtime.metadata = Some(metadata);
+                            break;
+                        }
+                        metadata::Query::StorageGet(get) => {
+                            let key = get.key_as_vec();
+                            let value = genesis_storage
+                                .iter()
+                                .find(|(k, _)| &**k == key)
+                                .map(|(_, v)| v);
+                            query = get.inject_value(value.map(iter::once));
+                        }
+                        metadata::Query::Finished(Err(err), _) => {
+                            panic!("Unable to generate genesis metadata: {}", err)
+                        }
                     }
                 }
             }
 
-            debug_assert!(header::decode(&config.genesis_block_scale_encoded_header).is_ok());
-            LatestKnownRuntime {
-                runtime: Ok(runtime),
+            Some(Runtime {
+                num_references: 1,
+                runtime,
                 runtime_code: code,
                 heap_pages,
-                runtime_block_hash: header::hash_from_scale_encoded_header(
-                    &config.genesis_block_scale_encoded_header,
-                ),
-                runtime_block_header: config.genesis_block_scale_encoded_header,
-                runtime_version_subscriptions: Vec::new(),
-                best_blocks_subscriptions: Vec::new(),
-                best_near_head_of_chain: config
-                    .sync_service
-                    .is_near_head_of_chain_heuristic()
-                    .await,
-            }
+            })
+        } else {
+            None
         };
 
-        let runtime_service = Arc::new(RuntimeService {
-            tasks_executor: Mutex::new(config.tasks_executor),
-            sync_service: config.sync_service,
-            latest_known_runtime: Mutex::new(latest_known_runtime),
-        });
+        let mut runtimes = slab::Slab::with_capacity(2);
+
+        let tree = if let Some(genesis_runtime) = genesis_runtime {
+            let runtime_id = runtimes.insert(genesis_runtime);
+            GuardedInner::FinalizedBlockRuntimeKnown {
+                tree: Some(async_tree::AsyncTree::new(async_tree::Config {
+                    finalized_async_user_data: runtime_id,
+                    retry_after_failed: Duration::from_secs(10),
+                })),
+                finalized_block: Block {
+                    hash: header::hash_from_scale_encoded_header(
+                        &config.genesis_block_scale_encoded_header,
+                    ),
+                    scale_encoded_header: config.genesis_block_scale_encoded_header,
+                },
+            }
+        } else {
+            let mut tree = async_tree::AsyncTree::new(async_tree::Config {
+                finalized_async_user_data: None,
+                retry_after_failed: Duration::from_secs(10),
+            });
+            let node_index = tree.input_insert_block(
+                Block {
+                    hash: header::hash_from_scale_encoded_header(
+                        &config.genesis_block_scale_encoded_header,
+                    ),
+                    scale_encoded_header: config.genesis_block_scale_encoded_header,
+                },
+                None,
+                false,
+                true,
+            );
+            tree.input_finalize(node_index, node_index);
+
+            GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) }
+        };
+
+        let guarded = Arc::new(Mutex::new(Guarded {
+            all_blocks_subscriptions: Vec::new(),
+            finalized_blocks_subscriptions: Vec::new(),
+            best_blocks_subscriptions: Vec::new(),
+            runtime_version_subscriptions: Vec::new(),
+            best_near_head_of_chain,
+            tree,
+            runtimes,
+        }));
 
         // Spawns a task that downloads the runtime code at every block to check whether it has
         // changed.
@@ -176,52 +220,119 @@ impl RuntimeService {
         // This is strictly speaking not necessary as long as there is no active subscription.
         // However, in practice, there is most likely always going to be one. It is way easier to
         // always have a task active rather than create and destroy it.
-        start_background_task(&runtime_service).await;
+        let background_task_abort;
+        (config.tasks_executor)("runtime-download".into(), {
+            let log_target = log_target.clone();
+            let sync_service = config.sync_service.clone();
+            let guarded = guarded.clone();
+            let (abortable, abort) = future::abortable(async move {
+                run_background(log_target, sync_service, guarded).await;
+            });
+            background_task_abort = abort;
+            abortable.map(|_| ()).boxed()
+        });
 
-        runtime_service
+        Arc::new(RuntimeService {
+            log_target,
+            sync_service: config.sync_service,
+            guarded,
+            background_task_abort,
+        })
     }
 
     /// Returns the current runtime version, plus an unlimited stream that produces one item every
     /// time the specs of the runtime of the best block are changed.
     ///
-    /// The stream can generate an `Err(())` if the runtime in the best block is invalid.
+    /// The future returned by this function is expected to finish relatively quickly and is
+    /// necessary only for locking purposes.
+    ///
+    /// The current runtime version can be `None` in case it isn't known yet.
+    ///
+    /// The stream can generate an `Err` if the runtime in the best block is invalid.
     pub async fn subscribe_runtime_version(
         self: &Arc<RuntimeService>,
     ) -> (
-        Result<executor::CoreVersion, RuntimeError>,
+        Option<Result<executor::CoreVersion, RuntimeError>>,
         NotificationsReceiver<Result<executor::CoreVersion, RuntimeError>>,
     ) {
         let (tx, rx) = lossy_channel::channel();
-        let mut latest_known_runtime = self.latest_known_runtime.lock().await;
-        latest_known_runtime.runtime_version_subscriptions.push(tx);
-        let current_version = latest_known_runtime
-            .runtime
-            .as_ref()
-            .map(|r| r.runtime_spec.clone())
-            .map_err(|err| err.clone());
-        (current_version, rx)
+
+        let mut guarded = self.guarded.lock().await;
+        guarded.runtime_version_subscriptions.push(tx);
+
+        let current_version = {
+            let runtime_index = match &guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    tree: Some(tree), ..
+                } => tree
+                    .best_block_index()
+                    .map_or(*tree.finalized_async_user_data(), |(_, rt_idx)| *rt_idx),
+                GuardedInner::FinalizedBlockRuntimeUnknown { .. } => return (None, rx),
+                _ => unreachable!(),
+            };
+
+            guarded.runtimes[runtime_index]
+                .runtime
+                .as_ref()
+                .map(|spec| spec.runtime_spec.clone())
+                .map_err(|err| err.clone())
+        };
+
+        (Some(current_version), rx)
     }
 
     /// Returns the runtime version of the block with the given hash.
+    ///
+    /// The future returned by this function might take a long time.
     pub async fn runtime_version_of_block(
         self: &Arc<RuntimeService>,
         block_hash: &[u8; 32],
-    ) -> Result<executor::CoreVersion, RuntimeVersionOfBlockError> {
+    ) -> Result<executor::CoreVersion, RuntimeCallError> {
         // If the requested block is the best known block, optimize by
         // immediately returning the cached spec.
-        {
-            let latest_known_runtime = self.latest_known_runtime.lock().await;
-            if latest_known_runtime.runtime_block_hash == *block_hash {
-                return latest_known_runtime
+        // TODO: restore
+        /*{
+            let guarded = self.guarded.lock().await;
+            if guarded.tree.as_ref().unwrap().best_block_hash() == block_hash {
+                return guarded
+                    .tree
+                    .as_ref()
+                    .unwrap()
+                    .best_block_runtime()
                     .runtime
                     .as_ref()
                     .map(|r| r.runtime_spec.clone())
-                    .map_err(|err| RuntimeVersionOfBlockError::InvalidRuntime(err.clone()));
+                    .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()));
             }
-        }
+        }*/
 
+        let (_, vm) = self.network_block_info(block_hash).await?;
+
+        let (runtime_spec, _) = match executor::core_version(vm) {
+            (Ok(spec), vm) => (spec, vm),
+            (Err(error), _) => {
+                log::warn!(
+                    target: &self.log_target,
+                    "Failed to call Core_version on runtime: {}",
+                    error
+                );
+                return Err(RuntimeCallError::InvalidRuntime(RuntimeError::CoreVersion(
+                    error,
+                )));
+            }
+        };
+
+        Ok(runtime_spec)
+    }
+
+    /// Downloads from the network the SCALE-encoded header and the runtime of the block with
+    /// the given hash.
+    async fn network_block_info(
+        self: &Arc<RuntimeService>,
+        block_hash: &[u8; 32],
+    ) -> Result<(Vec<u8>, executor::host::HostVmPrototype), RuntimeCallError> {
         // Ask the network for the header of this block, as we need to know the state root.
-        let state_root = {
+        let header = {
             let result = self
                 .sync_service
                 .clone()
@@ -237,178 +348,261 @@ impl RuntimeService {
 
             // Note that the `block_query` method guarantees that the header is present
             // and valid.
-            let header = if let Ok(block) = result {
+            if let Ok(block) = result {
                 block.header.unwrap()
             } else {
-                return Err(RuntimeVersionOfBlockError::NetworkBlockRequest); // TODO: precise error
-            };
-
-            *header::decode(&header)
-                .map_err(RuntimeVersionOfBlockError::InvalidBlockHeader)?
-                .state_root
+                return Err(RuntimeCallError::NetworkBlockRequest); // TODO: precise error
+            }
         };
 
-        // Download the runtime code of this block.
-        let code_query_result = self
-            .sync_service
-            .clone()
-            .storage_query(
-                block_hash,
-                &state_root,
-                iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
-            )
-            .await;
+        let state_root = *header::decode(&header)
+            .map_err(RuntimeCallError::InvalidBlockHeader)?
+            .state_root;
 
+        // Download the runtime code of this block.
         let (code, heap_pages) = {
-            let mut results =
-                code_query_result.map_err(RuntimeVersionOfBlockError::StorageQuery)?;
-            let heap_pages = results.pop().unwrap();
-            let code = results.pop().unwrap();
+            let mut code_query_result = self
+                .sync_service
+                .clone()
+                .storage_query(
+                    block_hash,
+                    &state_root,
+                    iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+                )
+                .await
+                .map_err(RuntimeCallError::StorageQuery)?;
+            let heap_pages = code_query_result.pop().unwrap();
+            let code = code_query_result.pop().unwrap();
             (code, heap_pages)
         };
 
-        SuccessfulRuntime::from_params(&code, &heap_pages)
-            .await
-            .map(|r| r.runtime_spec)
-            .map_err(RuntimeVersionOfBlockError::InvalidRuntime)
+        let vm = match executor::host::HostVmPrototype::new(
+            code.as_ref()
+                .ok_or(RuntimeError::CodeNotFound)
+                .map_err(RuntimeCallError::InvalidRuntime)?,
+            executor::storage_heap_pages_to_value(heap_pages.as_deref())
+                .map_err(RuntimeError::InvalidHeapPages)
+                .map_err(RuntimeCallError::InvalidRuntime)?,
+            executor::vm::ExecHint::CompileAheadOfTime,
+        ) {
+            Ok(vm) => vm,
+            Err(error) => {
+                log::warn!(
+                    target: &self.log_target,
+                    "Failed to compile best block runtime: {}",
+                    error
+                );
+                return Err(RuntimeCallError::InvalidRuntime(RuntimeError::Build(error)));
+            }
+        };
+
+        Ok((header, vm))
     }
 
     /// Returns the runtime version of the current best block.
+    ///
+    /// The future returned by this function might take a long time.
     pub async fn best_block_runtime(
         self: &Arc<RuntimeService>,
     ) -> Result<executor::CoreVersion, RuntimeError> {
-        let latest_known_runtime = self.latest_known_runtime.lock().await;
-        latest_known_runtime
-            .runtime
-            .as_ref()
-            .map(|r| r.runtime_spec.clone())
-            .map_err(|err| err.clone())
+        let (current, mut subscription) = self.subscribe_runtime_version().await;
+        if let Some(current) = current {
+            return current;
+        }
+
+        subscription.next().await.unwrap()
+    }
+
+    /// Returns the SCALE-encoded header of the current finalized block, plus an unlimited stream
+    /// that produces one item every time the finalized block is changed.
+    pub async fn subscribe_finalized(
+        self: &Arc<RuntimeService>,
+    ) -> (Vec<u8>, NotificationsReceiver<Vec<u8>>) {
+        let (tx, rx) = lossy_channel::channel();
+
+        let mut guarded = self.guarded.lock().await;
+        guarded.finalized_blocks_subscriptions.push(tx);
+
+        let header = match &guarded.tree {
+            GuardedInner::FinalizedBlockRuntimeKnown {
+                finalized_block, ..
+            } => finalized_block.scale_encoded_header.clone(),
+            GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                debug_assert_eq!(tree.children(None).count(), 1);
+                tree.block_user_data(tree.children(None).next().unwrap())
+                    .scale_encoded_header
+                    .clone()
+            }
+            _ => unreachable!(),
+        };
+
+        (header, rx)
     }
 
     /// Returns the SCALE-encoded header of the current best block, plus an unlimited stream that
     /// produces one item every time the best block is changed.
     ///
-    /// This function is similar to [`sync_service::SyncService::subscribe_best`], except that
-    /// it is called less often. Additionally, it is guaranteed that when a notification is sent
-    /// out, calling [`RuntimeService::recent_best_block_runtime_call`] will operate on this
-    /// block or more recent. In other words, if you call
-    /// [`RuntimeService::recent_best_block_runtime_call`] and the stream of notifications is
-    /// empty, you are guaranteed that the call has been performed on the best block.
+    /// It is guaranteed that when a notification is sent out, calling
+    /// [`RuntimeService::recent_best_block_runtime_lock`] will operate on this block or more
+    /// recent. In other words, if you call [`RuntimeService::recent_best_block_runtime_lock`] and
+    /// the stream of notifications is empty, you are guaranteed that the call has been performed
+    /// on the best block.
     pub async fn subscribe_best(
         self: &Arc<RuntimeService>,
     ) -> (Vec<u8>, NotificationsReceiver<Vec<u8>>) {
         let (tx, rx) = lossy_channel::channel();
-        let mut latest_known_runtime = self.latest_known_runtime.lock().await;
-        latest_known_runtime.best_blocks_subscriptions.push(tx);
-        drop(latest_known_runtime);
-        let (current, _) = self.sync_service.subscribe_best().await; // TODO: not correct; should load from latest_known_runtime
-        (current, rx)
+        let mut guarded = self.guarded.lock().await;
+        guarded.best_blocks_subscriptions.push(tx);
+        let best_block_header = guarded.best_block_header();
+        (best_block_header.clone(), rx)
+    }
+
+    /// Subscribes to the state of the chain: the current state and the new blocks.
+    ///
+    /// Contrary to [`RuntimeService::subscribe_best`], *all* new blocks are reported. Only up to
+    /// `buffer_size` block notifications are buffered in the channel. If the channel is full
+    /// when a new notification is attempted to be pushed, the channel gets closed.
+    ///
+    /// The channel also gets closed if a gap in the finality happens, such as after a Grandpa
+    /// warp syncing.
+    ///
+    /// See [`sync_service::SubscribeAll`] for information about the return value.
+    pub async fn subscribe_all(
+        self: &Arc<RuntimeService>,
+        buffer_size: usize,
+    ) -> sync_service::SubscribeAll {
+        let (tx, new_blocks) = mpsc::channel(buffer_size);
+        let mut guarded = self.guarded.lock().await;
+        guarded.all_blocks_subscriptions.push(tx);
+
+        let non_finalized_blocks_ancestry_order: Vec<_> = match &guarded.tree {
+            GuardedInner::FinalizedBlockRuntimeKnown {
+                tree: Some(tree),
+                finalized_block: _finalized_block,
+            } => {
+                tree.input_iter_ancestry_order()
+                    .filter(|block| block.async_op_user_data.is_some())
+                    .map(|block| {
+                        let parent_hash = *header::decode(&block.user_data.scale_encoded_header)
+                            .unwrap()
+                            .parent_hash; // TODO: correct? if yes, document
+                        debug_assert!(
+                            parent_hash == _finalized_block.hash
+                                || tree
+                                    .input_iter_ancestry_order()
+                                    .any(|b| parent_hash == b.user_data.hash
+                                        && b.async_op_user_data.is_some())
+                        );
+
+                        sync_service::BlockNotification {
+                            is_new_best: block.is_output_best,
+                            parent_hash,
+                            scale_encoded_header: block.user_data.scale_encoded_header.clone(),
+                        }
+                    })
+                    .collect()
+            }
+            GuardedInner::FinalizedBlockRuntimeUnknown { .. } => Vec::new(),
+            _ => unreachable!(),
+        };
+
+        debug_assert!(matches!(
+            non_finalized_blocks_ancestry_order
+                .iter()
+                .filter(|b| b.is_new_best)
+                .count(),
+            0 | 1
+        ));
+
+        sync_service::SubscribeAll {
+            finalized_block_scale_encoded_header: match &guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    finalized_block, ..
+                } => finalized_block.scale_encoded_header.clone(),
+                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                    debug_assert_eq!(tree.children(None).count(), 1);
+                    tree.block_user_data(tree.children(None).next().unwrap())
+                        .scale_encoded_header
+                        .clone()
+                }
+                _ => unreachable!(),
+            },
+            new_blocks,
+            non_finalized_blocks_ancestry_order,
+        }
     }
 
     // TODO: doc
-    pub fn recent_best_block_runtime_lock<'a: 'b, 'b>(
+    pub async fn recent_best_block_runtime_lock<'a>(
         self: &'a Arc<RuntimeService>,
-    ) -> impl Future<Output = RuntimeLock<'a>> + 'b {
-        async move {
-            let lock = self.latest_known_runtime.lock().await;
-            debug_assert_eq!(
-                lock.runtime_block_hash,
-                header::hash_from_scale_encoded_header(&lock.runtime_block_header)
-            );
+    ) -> RuntimeLock<'a> {
+        // TODO: clean up implementation
+        let (_, mut notifs) = self.subscribe_best().await;
 
-            RuntimeLock {
-                service: self,
-                lock,
-            }
+        let (guarded, block_index) = loop {
+            let guarded = self.guarded.lock().await;
+            match &guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    tree: Some(tree), ..
+                } => {
+                    let index = tree.best_block_index().map(|(idx, _)| idx);
+                    break (guarded, index);
+                }
+                GuardedInner::FinalizedBlockRuntimeUnknown { .. } => {}
+                _ => unreachable!(),
+            };
+
+            // Wait for the best block to change.
+            drop::<MutexGuard<_>>(guarded);
+            let _ = notifs.next().await;
+        };
+
+        RuntimeLock {
+            service: self,
+            inner: if let Some(block_index) = block_index {
+                RuntimeLockInner::InTree {
+                    guarded,
+                    block_index,
+                }
+            } else {
+                RuntimeLockInner::Finalized(guarded)
+            },
         }
     }
 
-    /// Start performing a runtime call using the best block, or a recent best block.
-    ///
-    /// The [`RuntimeService`] maintains the code of the runtime of a recent best block locally,
-    /// but doesn't know anything about the storage, which the runtime might have to access. In
-    /// order to make this work, a "call proof" is performed on the network in order to obtain
-    /// the storage values corresponding to this call.
-    ///
-    /// This method merely starts the runtime call process and returns a lock. While the lock is
-    /// alive, the entire [`RuntimeService`] is frozen. **You are strongly encouraged to not
-    /// perform any asynchronous operation while the lock is active.** The call must be driven
-    /// forward using the methods on the [`RuntimeCallLock`].
-    pub fn recent_best_block_runtime_call<'a: 'b, 'b>(
+    // TODO: should have a LRU cache of slightly older finalized blocks
+    // TODO: doc, especially about which blocks are available
+    // TODO: return error instead
+    pub async fn runtime_lock<'a>(
         self: &'a Arc<RuntimeService>,
-        method: &'b str,
-        parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone + 'b,
-    ) -> impl Future<
-        Output = Result<(RuntimeCallLock<'a>, executor::host::HostVmPrototype), RuntimeCallError>,
-    > + 'b {
-        // An `async move` has to be used because of borrowing issue.
-        async move {
-            // `latest_known_runtime` should be kept locked as little as possible.
-            // In order to handle the possibility a runtime upgrade happening during the operation,
-            // every time `latest_known_runtime` is locked, we compare the runtime version stored in
-            // it with the value previously found. If there is a mismatch, the entire runtime call
-            // is restarted from scratch.
-            loop {
-                // Get `runtime_block_hash`, `runtime_block_height` and `runtime_block_state_root`,
-                // the hash, height, and state trie root of a recent best block that uses this runtime.
-                let (spec_version, runtime_block_hash, runtime_block_header) = {
-                    let lock = self.latest_known_runtime.lock().await;
-                    debug_assert_eq!(
-                        lock.runtime_block_hash,
-                        header::hash_from_scale_encoded_header(&lock.runtime_block_header)
-                    );
+        block_hash: &[u8; 32],
+    ) -> Option<RuntimeLock<'a>> {
+        // TODO: restore
+        //let guarded = self.guarded.lock().await;
+        /*if guarded
+            .tree
+            .as_ref()
+            .unwrap()
+            .block_runtime(block_hash)
+            .is_some()
+        {
+            return Some(RuntimeLock {
+                service: self,
+                inner: RuntimeLockInner::InTree(guarded),
+                block_hash: *block_hash,
+            });
+        }*/
 
-                    (
-                        lock.runtime
-                            .as_ref()
-                            .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?
-                            .runtime_spec
-                            .decode()
-                            .spec_version,
-                        lock.runtime_block_hash,
-                        lock.runtime_block_header.clone(),
-                    )
-                };
-
-                // Perform the call proof request.
-                // Note that `latest_known_runtime` is not locked.
-                // TODO: there's no way to verify that the call proof is actually correct; we have to ban the peer and restart the whole call process if it turns out that it's not
-                // TODO: also, an empty proof will be reported as an error right now, which is weird
-                let call_proof = self
-                    .sync_service
-                    .clone()
-                    .call_proof_query(
-                        header::decode(&runtime_block_header).unwrap().number,
-                        protocol::CallProofRequestConfig {
-                            block_hash: runtime_block_hash,
-                            method,
-                            parameter_vectored: parameter_vectored.clone(),
-                        },
-                    )
-                    .await
-                    .map_err(RuntimeCallError::CallProof);
-
-                // Lock `latest_known_runtime_lock` again. `continue` if the runtime has changed
-                // in-between.
-                let mut latest_known_runtime_lock = self.latest_known_runtime.lock().await;
-                let runtime = latest_known_runtime_lock
-                    .runtime
-                    .as_mut()
-                    .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?;
-                if runtime.runtime_spec.decode().spec_version != spec_version {
-                    continue;
-                }
-
-                let virtual_machine = runtime.virtual_machine.take().unwrap();
-                let lock = RuntimeCallLock {
-                    lock: latest_known_runtime_lock,
-                    runtime_block_header,
-                    call_proof,
-                };
-
-                break Ok((lock, virtual_machine));
-            }
-        }
+        let (scale_encoded_header, virtual_machine) =
+            self.network_block_info(block_hash).await.ok()?;
+        Some(RuntimeLock {
+            service: self,
+            inner: RuntimeLockInner::OutOfTree {
+                hash: *block_hash,
+                scale_encoded_header,
+                virtual_machine,
+            },
+        })
     }
 
     /// Obtain the metadata of the runtime of the current best block.
@@ -416,11 +610,31 @@ impl RuntimeService {
     /// > **Note**: Keep in mind that this function is subject to race conditions. The runtime
     /// >           of the best block can change at any time. This method should ideally be called
     /// >           again after every runtime change.
-    pub async fn metadata(self: Arc<RuntimeService>) -> Result<Vec<u8>, MetadataError> {
+    pub async fn metadata(
+        self: Arc<RuntimeService>,
+        block_hash: &[u8; 32],
+    ) -> Result<Vec<u8>, MetadataError> {
+        self.metadata_inner(Some(block_hash)).await
+    }
+
+    /// Obtain the metadata of the runtime of the current best block.
+    ///
+    /// > **Note**: Keep in mind that this function is subject to race conditions. The runtime
+    /// >           of the best block can change at any time. This method should ideally be called
+    /// >           again after every runtime change.
+    pub async fn best_block_metadata(self: Arc<RuntimeService>) -> Result<Vec<u8>, MetadataError> {
         // First, try the cache.
-        {
-            let latest_known_runtime_lock = self.latest_known_runtime.lock().await;
-            match latest_known_runtime_lock.runtime.as_ref() {
+        // TODO: restore
+        /*{
+            let guarded = self.guarded.lock().await;
+            match guarded
+                .tree
+                .as_ref()
+                .unwrap()
+                .best_block_runtime()
+                .runtime
+                .as_ref()
+            {
                 Ok(runtime) => {
                     if let Some(metadata) = runtime.metadata.as_ref() {
                         return Ok(metadata.clone());
@@ -430,19 +644,42 @@ impl RuntimeService {
                     return Err(MetadataError::InvalidRuntime(err.clone()));
                 }
             }
-        }
+        }*/
 
-        let (mut runtime_call_lock, virtual_machine) = self
-            .recent_best_block_runtime_call("Metadata_metadata", iter::empty::<Vec<u8>>())
-            .await
-            .map_err(MetadataError::CallError)?;
+        self.metadata_inner(None).await
+    }
+
+    async fn metadata_inner(
+        self: Arc<RuntimeService>,
+        block_hash: Option<&[u8; 32]>,
+    ) -> Result<Vec<u8>, MetadataError> {
+        let (runtime_call_lock, virtual_machine) = if let Some(block_hash) = block_hash {
+            self.runtime_lock(block_hash)
+                .await
+                .ok_or(MetadataError::RuntimeFetch)?
+        } else {
+            self.recent_best_block_runtime_lock().await
+        }
+        .start("Metadata_metadata", iter::empty::<Vec<u8>>())
+        .await
+        .map_err(MetadataError::CallError)?;
 
         let mut query = metadata::query_metadata(virtual_machine);
         let (metadata_result, virtual_machine) = loop {
             match query {
                 metadata::Query::Finished(Ok(metadata), virtual_machine) => {
-                    runtime_call_lock.lock.runtime.as_mut().unwrap().metadata =
-                        Some(metadata.clone());
+                    // TODO: restore
+                    /*if let Some(guarded) = &mut runtime_call_lock.guarded {
+                        guarded
+                            .tree
+                            .as_mut()
+                            .unwrap()
+                            .best_block_runtime_mut()
+                            .runtime
+                            .as_mut()
+                            .unwrap()
+                            .metadata = Some(metadata.clone());
+                    }*/
                     break (Ok(metadata), virtual_machine);
                 }
                 metadata::Query::StorageGet(storage_get) => {
@@ -471,66 +708,144 @@ impl RuntimeService {
     /// The way this method is implemented is opaque and cannot be relied on. The return value
     /// should only ever be shown to the user and not used for any meaningful logic.
     pub async fn is_near_head_of_chain_heuristic(&self) -> bool {
-        // The runtime service adds a delay between the moment a best block is reported by the
-        // sync service and the moment it is reported by the runtime service.
-        // Because of this, any "far from head of chain" to "near head of chain" transition
-        // must take that delay into account. The other way around ("near" to "far") is
-        // unaffected.
-
-        // If the sync service is far from the head, the runtime service is also far.
-        if !self.sync_service.is_near_head_of_chain_heuristic().await {
-            return false;
-        }
-
-        // If the sync service is near, report the result of `is_near_head_of_chain_heuristic()`
-        // when called at the latest best block that the runtime service reported through its API,
-        // to make sure that we don't report "near" while having reported only blocks that were
-        // far.
-        self.latest_known_runtime
-            .lock()
-            .await
-            .best_near_head_of_chain
+        is_near_head_of_chain_heuristic(&self.sync_service, &self.guarded).await
     }
+}
+
+impl Drop for RuntimeService {
+    fn drop(&mut self) {
+        self.background_task_abort.abort();
+    }
+}
+
+async fn is_near_head_of_chain_heuristic(
+    sync_service: &sync_service::SyncService,
+    guarded: &Mutex<Guarded>,
+) -> bool {
+    // The runtime service adds a delay between the moment a best block is reported by the
+    // sync service and the moment it is reported by the runtime service.
+    // Because of this, any "far from head of chain" to "near head of chain" transition
+    // must take that delay into account. The other way around ("near" to "far") is
+    // unaffected.
+
+    // If the sync service is far from the head, the runtime service is also far.
+    if !sync_service.is_near_head_of_chain_heuristic().await {
+        return false;
+    }
+
+    // If the sync service is near, report the result of `is_near_head_of_chain_heuristic()`
+    // when called at the latest best block that the runtime service reported through its API,
+    // to make sure that we don't report "near" while having reported only blocks that were
+    // far.
+    guarded.lock().await.best_near_head_of_chain
 }
 
 /// See [`RuntimeService::recent_best_block_runtime_lock`].
 #[must_use]
 pub struct RuntimeLock<'a> {
     service: &'a Arc<RuntimeService>,
-    lock: MutexGuard<'a, LatestKnownRuntime>,
+    inner: RuntimeLockInner<'a>,
+}
+
+enum RuntimeLockInner<'a> {
+    /// Call made against [`GuardedInner::FinalizedBlockRuntimeKnown::finalized_block`].
+    Finalized(MutexGuard<'a, Guarded>),
+    /// Block is found in the tree at the given index.
+    InTree {
+        guarded: MutexGuard<'a, Guarded>,
+        /// Index of the block to make the call against.
+        block_index: async_tree::NodeIndex,
+    },
+    /// Block information directly inlined in this enum.
+    OutOfTree {
+        scale_encoded_header: Vec<u8>,
+        hash: [u8; 32],
+        virtual_machine: executor::host::HostVmPrototype,
+    },
 }
 
 impl<'a> RuntimeLock<'a> {
     /// Returns the SCALE-encoded header of the block the call is being made against.
+    ///
+    /// Guaranteed to always be valid.
     pub fn block_scale_encoded_header(&self) -> &[u8] {
-        &self.lock.runtime_block_header
+        match &self.inner {
+            RuntimeLockInner::Finalized(guarded) => match &guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    finalized_block, ..
+                } => &finalized_block.scale_encoded_header[..],
+                _ => unreachable!(),
+            },
+            RuntimeLockInner::InTree {
+                guarded,
+                block_index,
+            } => match &guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    tree: Some(tree), ..
+                } => &tree.block_user_data(*block_index).scale_encoded_header[..],
+                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                    &tree.block_user_data(*block_index).scale_encoded_header[..]
+                }
+                _ => unreachable!(),
+            },
+            RuntimeLockInner::OutOfTree {
+                scale_encoded_header,
+                ..
+            } => &scale_encoded_header[..],
+        }
     }
 
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
-        &self.lock.runtime_block_hash
-    }
-
-    pub fn runtime(&self) -> &executor::host::HostVmPrototype {
-        // TODO: don't unwrap?
-        self.lock
-            .runtime
-            .as_ref()
-            .unwrap()
-            .virtual_machine
-            .as_ref()
-            .unwrap()
+        match &self.inner {
+            RuntimeLockInner::Finalized(guarded) => match &guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    finalized_block, ..
+                } => &finalized_block.hash,
+                _ => unreachable!(),
+            },
+            RuntimeLockInner::InTree {
+                guarded,
+                block_index,
+            } => match &guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    tree: Some(tree), ..
+                } => &tree.block_user_data(*block_index).hash,
+                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                    &tree.block_user_data(*block_index).hash
+                }
+                _ => unreachable!(),
+            },
+            RuntimeLockInner::OutOfTree { hash, .. } => hash,
+        }
     }
 
     pub async fn start<'b>(
-        mut self,
+        self,
         method: &'b str,
         parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone + 'b,
     ) -> Result<(RuntimeCallLock<'a>, executor::host::HostVmPrototype), RuntimeCallError> {
         // TODO: DRY :-/ this whole thing is messy
 
+        let block_number = header::decode(&self.block_scale_encoded_header())
+            .unwrap()
+            .number;
+        let block_hash = *self.block_hash();
+        let runtime_block_header = self.block_scale_encoded_header().to_owned(); // TODO: cloning :-/
+        let virtual_machine = match self.inner {
+            RuntimeLockInner::Finalized(guarded) | RuntimeLockInner::InTree { guarded, .. } => {
+                // Unlock `guarded` before doing anything that takes a long time, such as the
+                // network request below.
+                drop(guarded);
+                None
+            }
+            RuntimeLockInner::OutOfTree {
+                virtual_machine, ..
+            } => Some(virtual_machine),
+        };
+
         // Perform the call proof request.
-        // Note that `latest_known_runtime` is not locked.
+        // Note that `guarded` is not locked.
         // TODO: there's no way to verify that the call proof is actually correct; we have to ban the peer and restart the whole call process if it turns out that it's not
         // TODO: also, an empty proof will be reported as an error right now, which is weird
         let call_proof = self
@@ -538,11 +853,9 @@ impl<'a> RuntimeLock<'a> {
             .sync_service
             .clone()
             .call_proof_query(
-                header::decode(&self.lock.runtime_block_header)
-                    .unwrap()
-                    .number,
+                block_number,
                 protocol::CallProofRequestConfig {
-                    block_hash: self.lock.runtime_block_hash,
+                    block_hash,
                     method,
                     parameter_vectored: parameter_vectored.clone(),
                 },
@@ -550,16 +863,55 @@ impl<'a> RuntimeLock<'a> {
             .await
             .map_err(RuntimeCallError::CallProof);
 
-        let runtime = self
-            .lock
-            .runtime
-            .as_mut()
-            .map_err(|err| RuntimeCallError::InvalidRuntime(err.clone()))?;
+        let (guarded, virtual_machine) = if let Some(virtual_machine) = virtual_machine {
+            (None, virtual_machine)
+        } else {
+            // Lock `guarded` again now that the call is finished.
+            let mut guarded = self.service.guarded.lock().await;
 
-        let virtual_machine = runtime.virtual_machine.take().unwrap();
-        let runtime_block_header = self.lock.runtime_block_header.clone(); // TODO: clone :-/
+            // It is not guaranteed that the block is still in the tree after the storage proof
+            // has ended.
+            let runtime_index = match &guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    tree: Some(tree),
+                    finalized_block,
+                    ..
+                } => {
+                    if finalized_block.hash == block_hash {
+                        Some(*tree.finalized_async_user_data())
+                    } else {
+                        tree.input_iter_unordered()
+                            .find(|block| block.user_data.hash == block_hash)
+                            .map(|block| *block.async_op_user_data.unwrap())
+                    }
+                }
+                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => tree
+                    .input_iter_unordered()
+                    .find(|block| block.user_data.hash == block_hash)
+                    .map(|block| block.async_op_user_data.unwrap().unwrap()),
+                _ => unreachable!(),
+            };
+
+            match runtime_index {
+                Some(runtime_index) => {
+                    let virtual_machine = match guarded.runtimes[runtime_index].runtime.as_mut() {
+                        Ok(r) => r.virtual_machine.take().unwrap(),
+                        Err(err) => {
+                            return Err(RuntimeCallError::InvalidRuntime(err.clone()));
+                        }
+                    };
+
+                    (Some((guarded, runtime_index)), virtual_machine)
+                }
+                None => {
+                    let (_, virtual_machine) = self.service.network_block_info(&block_hash).await?;
+                    (None, virtual_machine)
+                }
+            }
+        };
+
         let lock = RuntimeCallLock {
-            lock: self.lock,
+            guarded,
             runtime_block_header,
             call_proof,
         };
@@ -568,10 +920,11 @@ impl<'a> RuntimeLock<'a> {
     }
 }
 
-/// See [`RuntimeService::recent_best_block_runtime_call`].
+/// See [`RuntimeService::recent_best_block_runtime_lock`].
 #[must_use]
 pub struct RuntimeCallLock<'a> {
-    lock: MutexGuard<'a, LatestKnownRuntime>,
+    /// If `Some`, the virtual machine must be put back in the runtimes at the given index.
+    guarded: Option<(MutexGuard<'a, Guarded>, usize)>,
     runtime_block_header: Vec<u8>,
     call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
 }
@@ -673,39 +1026,31 @@ impl<'a> RuntimeCallLock<'a> {
     ///
     /// This method **must** be called.
     pub fn unlock(mut self, vm: executor::host::HostVmPrototype) {
-        let store_back = &mut self.lock.runtime.as_mut().unwrap().virtual_machine;
-        debug_assert!(store_back.is_none());
-        *store_back = Some(vm);
+        if let Some((guarded, runtime_index)) = &mut self.guarded {
+            guarded.runtimes[*runtime_index]
+                .runtime
+                .as_mut()
+                .unwrap()
+                .virtual_machine = Some(vm);
+        }
     }
 }
 
 impl<'a> Drop for RuntimeCallLock<'a> {
     fn drop(&mut self) {
-        if self
-            .lock
-            .runtime
-            .as_mut()
-            .unwrap()
-            .virtual_machine
-            .is_none()
-        {
-            // The [`RuntimeCallLock`] has been destroyed without being properly unlocked.
-            panic!()
+        if let Some((guarded, runtime_index)) = &mut self.guarded {
+            let vm = &guarded.runtimes[*runtime_index]
+                .runtime
+                .as_ref()
+                .unwrap()
+                .virtual_machine;
+
+            if vm.is_none() {
+                // The [`RuntimeCallLock`] has been destroyed without being properly unlocked.
+                panic!()
+            }
         }
     }
-}
-
-/// Error when analyzing the runtime.
-#[derive(Debug, derive_more::Display, Clone)]
-pub enum RuntimeError {
-    /// The `:code` key of the storage is empty..
-    CodeNotFound,
-    /// Error while parsing the `:heappages` storage value.
-    InvalidHeapPages(executor::InvalidHeapPagesError),
-    /// Error while compiling the runtime.
-    Build(executor::host::NewErr),
-    /// Error when determining the runtime specification.
-    CoreVersion(executor::CoreVersionError),
 }
 
 /// Error that can happen when calling a runtime function.
@@ -721,6 +1066,14 @@ pub enum RuntimeCallError {
     /// Error while retrieving the call proof from the network.
     #[display(fmt = "Error when retrieving the call proof: {}", _0)]
     CallProof(sync_service::CallProofQueryError),
+    /// Error while performing the block request on the network.
+    NetworkBlockRequest, // TODO: precise error
+    /// Failed to decode the header of the block.
+    #[display(fmt = "Failed to decode header of the block: {}", _0)]
+    InvalidBlockHeader(header::Error),
+    /// Error while querying the storage of the block.
+    #[display(fmt = "Error while querying block storage: {}", _0)]
+    StorageQuery(sync_service::StorageQueryError),
 }
 
 impl RuntimeCallError {
@@ -733,8 +1086,24 @@ impl RuntimeCallError {
             RuntimeCallError::StorageRetrieval(proof_verify::Error::TrieRootNotFound) => true,
             RuntimeCallError::StorageRetrieval(_) => false,
             RuntimeCallError::CallProof(err) => err.is_network_problem(),
+            RuntimeCallError::InvalidBlockHeader(_) => false,
+            RuntimeCallError::NetworkBlockRequest => true,
+            RuntimeCallError::StorageQuery(err) => err.is_network_problem(),
         }
     }
+}
+
+/// Error when analyzing the runtime.
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum RuntimeError {
+    /// The `:code` key of the storage is empty.
+    CodeNotFound,
+    /// Error while parsing the `:heappages` storage value.
+    InvalidHeapPages(executor::InvalidHeapPagesError),
+    /// Error while compiling the runtime.
+    Build(executor::host::NewErr),
+    /// Error when determining the runtime specification.
+    CoreVersion(executor::CoreVersionError),
 }
 
 /// Error that can happen when calling [`RuntimeService::metadata`].
@@ -743,55 +1112,27 @@ pub enum MetadataError {
     /// Error during the runtime call.
     #[display(fmt = "{}", _0)]
     CallError(RuntimeCallError),
-    /// Runtime of the best block isn't valid.
-    #[display(fmt = "Runtime of the best block isn't valid: {}", _0)]
-    InvalidRuntime(RuntimeError),
     /// Error in the metadata-specific runtime API.
     #[display(fmt = "Error in the metadata-specific runtime API: {}", _0)]
     MetadataQuery(metadata::Error),
+    /// Error while fetching the runtime of the desired block.
+    RuntimeFetch,
 }
 
-/// Error that can happen when calling [`RuntimeService::runtime_version_of_block`].
-#[derive(Debug, derive_more::Display)]
-pub enum RuntimeVersionOfBlockError {
-    /// Runtime of the best block isn't valid.
-    #[display(fmt = "Runtime of the best block isn't valid: {}", _0)]
-    InvalidRuntime(RuntimeError),
-    /// Error while performing the block request on the network.
-    NetworkBlockRequest, // TODO: precise error
-    /// Failed to decode the header of the block.
-    #[display(fmt = "Failed to decode header of the block: {}", _0)]
-    InvalidBlockHeader(header::Error),
-    /// Error while querying the storage of the block.
-    #[display(fmt = "Error while querying block storage: {}", _0)]
-    StorageQuery(sync_service::StorageQueryError),
-}
-
-struct LatestKnownRuntime {
-    /// Successfully-compiled runtime and all its information. Can contain an error if an error
-    /// happened, including a problem when obtaining the runtime specs or the metadata. It is
-    /// better to report to the user an error about for example the metadata not being extractable
-    /// compared to returning an obsolete version.
-    runtime: Result<SuccessfulRuntime, RuntimeError>,
-
-    /// Undecoded storage value of `:code` corresponding to the [`LatestKnownRuntime::runtime`]
-    /// field.
-    runtime_code: Option<Vec<u8>>,
-    /// Undecoded storage value of `:heappages` corresponding to the
-    /// [`LatestKnownRuntime::runtime`] field.
-    heap_pages: Option<Vec<u8>>,
-    /// SCALE encoding of the header of the block whose hash is
-    /// [`LatestKnownRuntime::runtime_block_hash`]. Guaranteed to always be a valid header.
-    runtime_block_header: Vec<u8>,
-    /// Hash of the header in [`LatestKnownRuntime::runtime_block_header`].
-    runtime_block_hash: [u8; 32],
-
-    /// List of senders that get notified when the runtime specs of the best block changes.
-    /// Whenever [`LatestKnownRuntime::runtime`] is updated, one should emit an item on each
-    /// sender.
+struct Guarded {
+    /// List of senders that get notified when the runtime spec of the best block changes.
+    /// Whenever the best block runtime is updated, one should emit an item on each sender.
     /// See [`RuntimeService::subscribe_runtime_version`].
     runtime_version_subscriptions:
         Vec<lossy_channel::Sender<Result<executor::CoreVersion, RuntimeError>>>,
+
+    /// List of senders that get notified when new blocks arrive.
+    /// See [`RuntimeService::subscribe_all`].
+    all_blocks_subscriptions: Vec<mpsc::Sender<sync_service::Notification>>,
+
+    /// List of senders that get notified when the finalized block is updated.
+    /// See [`RuntimeService::subscribe_finalized`].
+    finalized_blocks_subscriptions: Vec<lossy_channel::Sender<Vec<u8>>>,
 
     /// List of senders that get notified when the best block is updated.
     /// See [`RuntimeService::subscribe_best`].
@@ -800,6 +1141,813 @@ struct LatestKnownRuntime {
     /// Return value of calling [`sync_service::SyncService::is_near_head_of_chain_heuristic`]
     /// after the latest best block update.
     best_near_head_of_chain: bool,
+
+    /// List of runtimes referenced by the tree in [`GuardedInner`].
+    runtimes: slab::Slab<Runtime>,
+
+    /// Tree of blocks.
+    tree: GuardedInner,
+}
+
+enum GuardedInner {
+    FinalizedBlockRuntimeKnown {
+        /// Tree of blocks. Holds the state of the download of everything. Always `Some` when the
+        /// `Mutex` is being locked. Temporarily switched to `None` during some operations.
+        ///
+        /// The asynchronous operation user data is a `usize` corresponding to the index within
+        /// [`Guarded::runtimes`].
+        // TODO: needs to be Option?
+        tree: Option<async_tree::AsyncTree<ffi::Instant, Block, usize>>,
+
+        /// Finalized block. Outside of the tree.
+        finalized_block: Block,
+    },
+    FinalizedBlockRuntimeUnknown {
+        /// Tree of blocks. Holds the state of the download of everything. Always `Some` when the
+        /// `Mutex` is being locked. Temporarily switched to `None` during some operations.
+        ///
+        /// The finalized block according to the [`async_tree::AsyncTree`] is actually a dummy.
+        /// The "real" finalized block is a non-finalized block within this tree.
+        ///
+        /// The asynchronous operation user data is a `usize` corresponding to the index within
+        /// [`Guarded::runtimes`]. The asynchronous operation user data is `None` for the dummy
+        /// finalized block.
+        // TODO: needs to be Option?
+        // TODO: explain better
+        tree: Option<async_tree::AsyncTree<ffi::Instant, Block, Option<usize>>>,
+    },
+}
+
+impl Guarded {
+    /// Returns the header of the "output" best block found in the tree.
+    fn best_block_header(&self) -> &Vec<u8> {
+        match &self.tree {
+            GuardedInner::FinalizedBlockRuntimeKnown {
+                tree: Some(tree),
+                finalized_block,
+            } => tree
+                .best_block_index()
+                .map_or(&finalized_block.scale_encoded_header, |(idx, _)| {
+                    &tree.block_user_data(idx).scale_encoded_header
+                }),
+
+            GuardedInner::FinalizedBlockRuntimeUnknown {
+                tree: Some(tree), ..
+            } => {
+                debug_assert_eq!(tree.children(None).count(), 1);
+                &tree
+                    .block_user_data(tree.children(None).next().unwrap())
+                    .scale_encoded_header
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Notifies the subscribers about changes to the best and finalized blocks.
+    fn notify_subscribers(
+        &mut self,
+        best_block_updated: bool,
+        best_block_runtime_changed: bool,
+        finalized_block_updated: bool,
+    ) {
+        if best_block_updated {
+            // TODO: unwrap? clarify in API
+            let best_block_header = self.best_block_header().clone();
+
+            // Elements are removed one by one and inserted back if the channel is still open.
+            for index in (0..self.best_blocks_subscriptions.len()).rev() {
+                let mut subscription = self.best_blocks_subscriptions.swap_remove(index);
+                if subscription.send(best_block_header.clone()).is_err() {
+                    continue;
+                }
+
+                self.best_blocks_subscriptions.push(subscription);
+            }
+        }
+
+        if finalized_block_updated {
+            let finalized_block_header = match &mut self.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    finalized_block, ..
+                } => &finalized_block.scale_encoded_header,
+                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                    // TODO: panic here instead?
+                    debug_assert_eq!(tree.children(None).count(), 1);
+                    &tree
+                        .block_user_data(tree.children(None).next().unwrap())
+                        .scale_encoded_header
+                }
+                _ => unreachable!(),
+            };
+
+            // Elements are removed one by one and inserted back if the channel is still open.
+            for index in (0..self.finalized_blocks_subscriptions.len()).rev() {
+                let mut subscription = self.finalized_blocks_subscriptions.swap_remove(index);
+                if subscription.send(finalized_block_header.to_vec()).is_err() {
+                    continue;
+                }
+
+                self.finalized_blocks_subscriptions.push(subscription);
+            }
+        }
+
+        if best_block_runtime_changed {
+            let runtime_version = {
+                let runtime_index = match &self.tree {
+                    GuardedInner::FinalizedBlockRuntimeKnown {
+                        tree: Some(tree), ..
+                    } => tree
+                        .best_block_index()
+                        .map_or(*tree.finalized_async_user_data(), |(_, rt_idx)| *rt_idx),
+                    GuardedInner::FinalizedBlockRuntimeUnknown { .. } => {
+                        panic!() // TODO: clarify in API
+                    }
+                    _ => unreachable!(),
+                };
+
+                self.runtimes[runtime_index].runtime.as_ref()
+            };
+
+            // Elements are removed one by one and inserted back if the channel is still open.
+            for index in (0..self.runtime_version_subscriptions.len()).rev() {
+                let mut subscription = self.runtime_version_subscriptions.swap_remove(index);
+                if subscription
+                    .send(
+                        runtime_version
+                            .map(|v| v.runtime_spec.clone())
+                            .map_err(|e| e.clone()),
+                    )
+                    .is_err()
+                {
+                    continue;
+                }
+
+                self.runtime_version_subscriptions.push(subscription);
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Block {
+    /// Hash of the block in question. Redundant with `header`, but the hash is so often needed
+    /// that it makes sense to cache it.
+    hash: [u8; 32],
+
+    /// Header of the block in question.
+    /// Guaranteed to always be valid for the output best and finalized blocks. Otherwise,
+    /// not guaranteed to be valid.
+    scale_encoded_header: Vec<u8>,
+}
+
+async fn run_background(
+    log_target: String,
+    sync_service: Arc<sync_service::SyncService>,
+    original_guarded: Arc<Mutex<Guarded>>,
+) {
+    loop {
+        // The buffer size should be large enough so that, if the CPU is busy, it doesn't
+        // become full before the execution of the runtime service resumes.
+        let subscription = sync_service.subscribe_all(16).await;
+
+        log::debug!(
+            target: &log_target,
+            "Reinitialized background worker to finalized block {}",
+            HashDisplay(&header::hash_from_scale_encoded_header(
+                &subscription.finalized_block_scale_encoded_header
+            )) // TODO: print block height
+        );
+
+        // In order to bootstrap the new runtime service, a fresh temporary runtime service is
+        // created.
+        // Later, when the `Guarded` contains at least a finalized runtime, it will be written
+        // over the original runtime service.
+        // TODO: if subscription.finalized is equal to current finalized, skip the whole process below?
+        let mut background = Background {
+            log_target: log_target.clone(),
+            sync_service: sync_service.clone(),
+            guarded: Arc::new(Mutex::new(Guarded {
+                all_blocks_subscriptions: Vec::new(),
+                best_blocks_subscriptions: Vec::new(),
+                finalized_blocks_subscriptions: Vec::new(),
+                runtime_version_subscriptions: Vec::new(),
+                best_near_head_of_chain: is_near_head_of_chain_heuristic(
+                    &sync_service,
+                    &original_guarded,
+                )
+                .await,
+                tree: GuardedInner::FinalizedBlockRuntimeUnknown {
+                    tree: Some({
+                        let mut tree = async_tree::AsyncTree::new(async_tree::Config {
+                            finalized_async_user_data: None,
+                            retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
+                        });
+                        let node_index = tree.input_insert_block(
+                            Block {
+                                hash: header::hash_from_scale_encoded_header(
+                                    &subscription.finalized_block_scale_encoded_header,
+                                ),
+                                scale_encoded_header: subscription
+                                    .finalized_block_scale_encoded_header,
+                            },
+                            None,
+                            false,
+                            true,
+                        );
+                        tree.input_finalize(node_index, node_index);
+                        tree
+                    }),
+                },
+                runtimes: slab::Slab::with_capacity(2), // TODO: hardcoded
+            })),
+            blocks_stream: subscription.new_blocks.boxed(),
+            wake_up_new_necessary_download: future::pending().boxed().fuse(),
+            runtime_downloads: stream::FuturesUnordered::new(),
+        };
+
+        for block in subscription.non_finalized_blocks_ancestry_order {
+            match &mut background.guarded.try_lock().unwrap().tree {
+                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                    let parent_index = tree
+                        .input_iter_unordered()
+                        .find(|b| b.user_data.hash == block.parent_hash)
+                        .unwrap()
+                        .id;
+
+                    let same_runtime_as_parent =
+                        same_runtime_as_parent(&block.scale_encoded_header);
+                    let _ = tree.input_insert_block(
+                        Block {
+                            hash: header::hash_from_scale_encoded_header(
+                                &block.scale_encoded_header,
+                            ),
+                            scale_encoded_header: block.scale_encoded_header,
+                        },
+                        Some(parent_index),
+                        same_runtime_as_parent,
+                        block.is_new_best,
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        background.start_necessary_downloads().await;
+
+        // Inner loop. Process incoming events.
+        loop {
+            if !Arc::ptr_eq(&background.guarded, &original_guarded) {
+                // The `Background` object is manipulating a temporary runtime service. Check if
+                // it is possible to write to the original runtime service.
+                let mut temporary_guarded_lock = background.guarded.try_lock().unwrap();
+                let temporary_guarded = &mut *temporary_guarded_lock;
+
+                if let GuardedInner::FinalizedBlockRuntimeKnown {
+                    tree,
+                    finalized_block,
+                    ..
+                } = &mut temporary_guarded.tree
+                {
+                    log::debug!(target: &log_target, "Background worker now in sync");
+
+                    let mut original_guarded_lock = original_guarded.lock().await;
+                    original_guarded_lock.best_near_head_of_chain =
+                        temporary_guarded.best_near_head_of_chain;
+                    original_guarded_lock.tree = GuardedInner::FinalizedBlockRuntimeKnown {
+                        tree: Some(tree.take().unwrap()),
+                        finalized_block: finalized_block.clone(),
+                    };
+                    original_guarded_lock.runtimes = mem::take(&mut temporary_guarded.runtimes);
+
+                    drop(temporary_guarded_lock);
+
+                    original_guarded_lock.all_blocks_subscriptions.clear();
+                    // TODO: correct? especially for the runtime?
+                    original_guarded_lock.notify_subscribers(true, true, true);
+
+                    background.guarded = original_guarded.clone();
+                }
+            }
+
+            futures::select! {
+                _ = &mut background.wake_up_new_necessary_download => {
+                    background.start_necessary_downloads().await;
+                },
+                notification = background.blocks_stream.next().fuse() => {
+                    match notification {
+                        None => break, // Break out of the inner loop in order to reset the background.
+                        Some(sync_service::Notification::Block(new_block)) => {
+                            log::debug!(
+                                target: &log_target,
+                                "New sync service block: hash={}, parent={}, is_new_best={}",
+                                HashDisplay(&header::hash_from_scale_encoded_header(&new_block.scale_encoded_header)),
+                                HashDisplay(&new_block.parent_hash),
+                                new_block.is_new_best
+                            );
+
+                            let near_head_of_chain = background.sync_service.is_near_head_of_chain_heuristic().await;
+
+                            let mut guarded = background.guarded.lock().await;
+                            let mut guarded = &mut *guarded;
+                            // TODO: note that this code is never reached for parachains
+                            if new_block.is_new_best {
+                                guarded.best_near_head_of_chain = near_head_of_chain;
+                            }
+
+                            let same_runtime_as_parent = same_runtime_as_parent(&new_block.scale_encoded_header);
+
+                            match &mut guarded.tree {
+                                GuardedInner::FinalizedBlockRuntimeKnown {
+                                    tree: Some(tree), finalized_block,
+                                } => {
+                                    let parent_index = if new_block.parent_hash == finalized_block.hash {
+                                        if same_runtime_as_parent {
+                                            guarded.runtimes[*tree.finalized_async_user_data()].num_references += 1;
+                                        }
+                                        None
+                                    } else {
+                                        let index = tree.input_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id;
+                                        if same_runtime_as_parent {
+                                            if let Some(runtime_index) = tree.block_async_user_data(index) {
+                                                guarded.runtimes[*runtime_index].num_references += 1;
+                                            }
+                                        }
+                                        Some(index)
+                                    };
+
+                                    tree.input_insert_block(Block {
+                                        hash: header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
+                                        scale_encoded_header: new_block.scale_encoded_header,
+                                    }, parent_index, same_runtime_as_parent, new_block.is_new_best);
+                                }
+                                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                                    let parent_index = tree.input_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id;
+                                    if same_runtime_as_parent {
+                                        if let Some(runtime_index) = tree.block_async_user_data(parent_index) {
+                                            guarded.runtimes[runtime_index.unwrap()].num_references += 1;
+                                        }
+                                    }
+                                    tree.input_insert_block(Block {
+                                        hash: header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
+                                        scale_encoded_header: new_block.scale_encoded_header,
+                                    }, Some(parent_index), same_runtime_as_parent, new_block.is_new_best);
+                                }
+                                _ => unreachable!(),
+                            }
+
+                            background.advance_and_notify_subscribers(guarded);
+                        },
+                        Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {
+                            log::debug!(
+                                target: &log_target,
+                                "New sync service finalization: hash={}, new_best={}",
+                                HashDisplay(&hash), HashDisplay(&best_block_hash)
+                            );
+
+                            background.finalize(hash, best_block_hash).await;
+                        }
+                    };
+
+                    // TODO: process any other pending event from blocks_stream before doing that; otherwise we might start download for blocks that we don't care about because they're immediately overwritten by others
+                    background.start_necessary_downloads().await;
+                },
+                (async_op_id, download_result) = background.runtime_downloads.select_next_some() => {
+                    match download_result {
+                        Ok((storage_code, storage_heap_pages)) => {
+                            log::debug!(
+                                target: &log_target,
+                                "Successfully finished download of id {:?}",
+                                async_op_id
+                            );
+
+                            // TODO: the line below is a complete hack; the code that updates this value is never reached for parachains, and as such the line below is here to update this field
+                            background.guarded.lock().await.best_near_head_of_chain = true;
+
+                            background.runtime_download_finished(async_op_id, storage_code, storage_heap_pages).await;
+                        }
+                        Err(error) => {
+                            log::log!(
+                                target: &log_target,
+                                if error.is_network_problem() {
+                                    log::Level::Debug
+                                } else {
+                                    log::Level::Warn
+                                },
+                                // TODO: better message
+                                "Failed to download :code and :heappages of block: {}",
+                                error
+                            );
+
+                            let mut guarded = background.guarded.lock().await;
+                            match &mut guarded.tree {
+                                GuardedInner::FinalizedBlockRuntimeKnown {
+                                    tree: Some(tree), ..
+                                } => {
+                                    tree.async_op_failure(async_op_id, &ffi::Instant::now());
+                                }
+                                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                                    tree.async_op_failure(async_op_id, &ffi::Instant::now());
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                    }
+
+                    background.start_necessary_downloads().await;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, derive_more::Display)]
+enum RuntimeDownloadError {
+    StorageQuery(sync_service::StorageQueryError),
+    InvalidHeader(header::Error),
+}
+
+impl RuntimeDownloadError {
+    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
+    /// issue.
+    fn is_network_problem(&self) -> bool {
+        match self {
+            RuntimeDownloadError::StorageQuery(err) => err.is_network_problem(),
+            RuntimeDownloadError::InvalidHeader(_) => false,
+        }
+    }
+}
+
+struct Background {
+    log_target: String,
+
+    sync_service: Arc<sync_service::SyncService>,
+
+    guarded: Arc<Mutex<Guarded>>,
+
+    /// Stream of blocks updates coming from the sync service.
+    /// Initially has a dummy value.
+    blocks_stream: Pin<Box<dyn Stream<Item = sync_service::Notification> + Send>>,
+
+    /// List of runtimes currently being downloaded from the network.
+    /// For each item, the download id, storage value of `:code`, and storage value of
+    /// `:heappages`.
+    runtime_downloads: stream::FuturesUnordered<
+        future::BoxFuture<
+            'static,
+            (
+                async_tree::AsyncOpId,
+                Result<(Option<Vec<u8>>, Option<Vec<u8>>), RuntimeDownloadError>,
+            ),
+        >,
+    >,
+
+    /// Future that wakes up when a new download to start is potentially ready.
+    wake_up_new_necessary_download: future::Fuse<future::BoxFuture<'static, ()>>,
+}
+
+impl Background {
+    /// Injects into the state of `self` a completed runtime download.
+    async fn runtime_download_finished(
+        &mut self,
+        async_op_id: async_tree::AsyncOpId,
+        storage_code: Option<Vec<u8>>,
+        storage_heap_pages: Option<Vec<u8>>,
+    ) {
+        let mut guarded = self.guarded.lock().await;
+
+        // Try to find an existing identical runtime.
+        let existing_runtime = guarded
+            .runtimes
+            .iter()
+            .find(|(_, rt)| rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages)
+            .map(|(id, _)| id);
+
+        let runtime_index = if let Some(existing_runtime) = existing_runtime {
+            existing_runtime
+        } else {
+            let runtime = SuccessfulRuntime::from_params(&storage_code, &storage_heap_pages).await;
+            guarded.runtimes.insert(Runtime {
+                num_references: 0, // Incremented below.
+                heap_pages: storage_heap_pages,
+                runtime_code: storage_code,
+                runtime,
+            })
+        };
+
+        let num_blocks = match &mut guarded.tree {
+            GuardedInner::FinalizedBlockRuntimeKnown {
+                tree: Some(tree), ..
+            } => tree.async_op_finished(async_op_id, runtime_index),
+            GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                tree.async_op_finished(async_op_id, Some(runtime_index))
+            }
+            _ => unreachable!(),
+        };
+
+        guarded.runtimes[runtime_index].num_references += num_blocks;
+
+        if num_blocks == 0 {
+            guarded.runtimes.retain(|_, rt| rt.num_references > 0);
+        }
+
+        self.advance_and_notify_subscribers(&mut guarded);
+    }
+
+    fn advance_and_notify_subscribers(&self, guarded: &mut Guarded) {
+        let mut best_block_updated = false;
+        let mut best_block_runtime_changed = false;
+        let mut finalized_block_updated = false;
+
+        loop {
+            let all_blocks_notif = match &mut guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    tree: Some(tree),
+                    finalized_block,
+                } => match tree.try_advance_output() {
+                    None => break,
+                    Some(async_tree::OutputUpdate::Finalized {
+                        user_data: new_finalized,
+                        best_block_index,
+                        pruned_blocks,
+                        former_finalized_async_op_user_data: former_finalized_runtime_index,
+                        ..
+                    }) => {
+                        best_block_updated = true;
+                        finalized_block_updated = true;
+                        best_block_runtime_changed = true; // TODO: ?!
+
+                        *finalized_block = new_finalized;
+                        let best_block_hash = best_block_index
+                            .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash);
+
+                        guarded.runtimes[former_finalized_runtime_index].num_references -= 1;
+                        for (_, _, runtime_index) in pruned_blocks {
+                            if let Some(runtime_index) = runtime_index {
+                                guarded.runtimes[runtime_index].num_references -= 1;
+                            }
+                        }
+
+                        sync_service::Notification::Finalized {
+                            best_block_hash,
+                            hash: finalized_block.hash,
+                        }
+                    }
+                    Some(async_tree::OutputUpdate::Block(block)) => {
+                        let block_index = block.index;
+                        let block_runtime_index = *block.async_op_user_data;
+                        let scale_encoded_header = block.user_data.scale_encoded_header.clone();
+
+                        best_block_updated |= block.is_new_best;
+                        let parent_runtime_index = tree
+                            .parent(block_index)
+                            .map_or(*tree.finalized_async_user_data(), |idx| {
+                                *tree.block_async_user_data(idx).unwrap()
+                            });
+                        best_block_runtime_changed |= parent_runtime_index != block_runtime_index;
+
+                        sync_service::Notification::Block(sync_service::BlockNotification {
+                            parent_hash: tree
+                                .parent(block_index)
+                                .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash),
+                            is_new_best: false,
+                            scale_encoded_header,
+                        })
+                    }
+                },
+                GuardedInner::FinalizedBlockRuntimeUnknown {
+                    tree: tree @ Some(_),
+                } => {
+                    match tree.as_mut().unwrap().try_advance_output() {
+                        None => break,
+                        Some(async_tree::OutputUpdate::Block(_)) => continue,
+                        Some(async_tree::OutputUpdate::Finalized {
+                            user_data: new_finalized,
+                            former_finalized_async_op_user_data,
+                            best_block_index,
+                            pruned_blocks,
+                            ..
+                        }) => {
+                            debug_assert!(former_finalized_async_op_user_data.is_none());
+
+                            best_block_updated = true;
+                            finalized_block_updated = true;
+                            best_block_runtime_changed = true; // TODO: ?!
+
+                            let best_block_hash = best_block_index
+                                .map_or(new_finalized.hash, |idx| {
+                                    tree.as_ref().unwrap().block_user_data(idx).hash
+                                });
+                            let new_finalized_hash = new_finalized.hash;
+
+                            guarded.tree = GuardedInner::FinalizedBlockRuntimeKnown {
+                                tree: Some(tree.take().unwrap().map_async_op_user_data(
+                                    |runtime_index| runtime_index.unwrap(),
+                                )),
+                                finalized_block: new_finalized,
+                            };
+
+                            for (_, _, runtime_index) in pruned_blocks {
+                                if let Some(Some(runtime_index)) = runtime_index {
+                                    guarded.runtimes[runtime_index].num_references -= 1;
+                                }
+                            }
+
+                            sync_service::Notification::Finalized {
+                                best_block_hash,
+                                hash: new_finalized_hash,
+                            }
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            };
+
+            // Elements are removed one by one and inserted back if the channel is still open.
+            for index in (0..guarded.all_blocks_subscriptions.len()).rev() {
+                let mut subscription = guarded.all_blocks_subscriptions.swap_remove(index);
+                if subscription.try_send(all_blocks_notif.clone()).is_err() {
+                    continue;
+                }
+
+                guarded.all_blocks_subscriptions.push(subscription);
+            }
+        }
+
+        guarded.notify_subscribers(
+            best_block_updated,
+            best_block_runtime_changed,
+            finalized_block_updated,
+        );
+    }
+
+    /// Examines the state of `self` and starts downloading runtimes if necessary.
+    async fn start_necessary_downloads(&mut self) {
+        let mut guarded = self.guarded.lock().await;
+        let guarded = &mut *guarded;
+
+        loop {
+            // Don't download more than 2 runtimes at a time.
+            if self.runtime_downloads.len() >= 2 {
+                break;
+            }
+
+            // If there's nothing more to download, break out of the loop.
+            let download_params = {
+                let async_op = match &mut guarded.tree {
+                    GuardedInner::FinalizedBlockRuntimeKnown {
+                        tree: Some(tree), ..
+                    } => tree.next_necessary_async_op(&ffi::Instant::now()),
+                    GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                        tree.next_necessary_async_op(&ffi::Instant::now())
+                    }
+                    _ => unreachable!(),
+                };
+
+                match async_op {
+                    async_tree::NextNecessaryAsyncOp::Ready(dl) => dl,
+                    async_tree::NextNecessaryAsyncOp::NotReady { when } => {
+                        self.wake_up_new_necessary_download = if let Some(when) = when {
+                            ffi::Delay::new_at(when).boxed()
+                        } else {
+                            future::pending().boxed()
+                        }
+                        .fuse();
+                        break;
+                    }
+                }
+            };
+
+            log::debug!(
+                target: &self.log_target,
+                "Starting new download, id={:?}, block={}",
+                download_params.id,
+                HashDisplay(&download_params.block_user_data.hash)
+            );
+
+            // Dispatches a runtime download task to `runtime_downloads`.
+            self.runtime_downloads.push({
+                let download_id = download_params.id;
+
+                // In order to perform the download, we need to known the state root hash of the
+                // block in question, which requires decoding the block. If the decoding fails,
+                // we report that the asynchronous operation has failed with the hope that this
+                // block gets pruned in the future.
+                match header::decode(&download_params.block_user_data.scale_encoded_header) {
+                    Ok(decoded_header) => {
+                        let sync_service = self.sync_service.clone();
+                        let block_hash = download_params.block_user_data.hash;
+                        let state_root = *decoded_header.state_root;
+
+                        Box::pin(async move {
+                            let result = sync_service
+                                .storage_query(
+                                    &block_hash,
+                                    &state_root,
+                                    iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+                                )
+                                .await;
+
+                            let result = match result {
+                                Ok(mut c) => {
+                                    let heap_pages = c.pop().unwrap();
+                                    let code = c.pop().unwrap();
+                                    Ok((code, heap_pages))
+                                }
+                                Err(error) => Err(RuntimeDownloadError::StorageQuery(error)),
+                            };
+
+                            (download_id, result)
+                        })
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            target: &self.log_target,
+                            "Failed to decode header from sync service: {}", error
+                        );
+
+                        Box::pin(async move {
+                            (download_id, Err(RuntimeDownloadError::InvalidHeader(error)))
+                        })
+                    }
+                }
+            });
+        }
+    }
+
+    /// Updates `self` to take into account that the sync service has finalized the given block.
+    async fn finalize(&mut self, hash_to_finalize: [u8; 32], new_best_block_hash: [u8; 32]) {
+        let mut guarded = self.guarded.lock().await;
+
+        match &mut guarded.tree {
+            GuardedInner::FinalizedBlockRuntimeKnown {
+                tree: Some(tree),
+                finalized_block,
+            } => {
+                // TODO: this if is a small hack because the sync service currently sends multiple identical finalized notifications
+                if finalized_block.hash == hash_to_finalize {
+                    return;
+                }
+
+                let node_to_finalize = tree
+                    .input_iter_unordered()
+                    .find(|block| block.user_data.hash == hash_to_finalize)
+                    .unwrap()
+                    .id;
+                let new_best_block = tree
+                    .input_iter_unordered()
+                    .find(|block| block.user_data.hash == new_best_block_hash)
+                    .unwrap()
+                    .id;
+                tree.input_finalize(node_to_finalize, new_best_block);
+            }
+            GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                let node_to_finalize = tree
+                    .input_iter_unordered()
+                    .find(|block| block.user_data.hash == hash_to_finalize)
+                    .unwrap()
+                    .id;
+                let new_best_block = tree
+                    .input_iter_unordered()
+                    .find(|block| block.user_data.hash == new_best_block_hash)
+                    .unwrap()
+                    .id;
+                tree.input_finalize(node_to_finalize, new_best_block);
+            }
+            _ => unreachable!(),
+        }
+
+        self.advance_and_notify_subscribers(&mut guarded);
+
+        // Clean up unused runtimes to free up resources.
+        guarded
+            .runtimes
+            .retain(|_, runtime| runtime.num_references > 0);
+    }
+}
+
+struct Runtime {
+    /// Number of items in [`Guarded::tree`] that reference this runtime.
+    num_references: usize,
+
+    /// Successfully-compiled runtime and all its information. Can contain an error if an error
+    /// happened, including a problem when obtaining the runtime specs.
+    runtime: Result<SuccessfulRuntime, RuntimeError>,
+
+    /// Undecoded storage value of `:code` corresponding to the [`Runtime::runtime`]
+    /// field.
+    ///
+    /// Can be `None` if the storage is empty, in which case the runtime will have failed to
+    /// build.
+    // TODO: consider storing hash instead
+    runtime_code: Option<Vec<u8>>,
+
+    /// Undecoded storage value of `:heappages` corresponding to the
+    /// [`Runtime::runtime`] field.
+    ///
+    /// Can be `None` if the storage is empty, in which case the runtime will have failed to
+    /// build.
+    // TODO: consider storing hash instead
+    heap_pages: Option<Vec<u8>>,
 }
 
 struct SuccessfulRuntime {
@@ -826,8 +1974,7 @@ struct SuccessfulRuntime {
 
     /// Virtual machine itself, to perform additional calls.
     ///
-    /// Always `Some`, except for temporary extractions. Should always be `Some`, when the
-    /// [`SuccessfulRuntime`] is accessed.
+    /// Always `Some`, except for temporary extractions necessary to execute the VM.
     virtual_machine: Option<executor::host::HostVmPrototype>,
 }
 
@@ -848,7 +1995,6 @@ impl SuccessfulRuntime {
         ) {
             Ok(vm) => vm,
             Err(error) => {
-                log::warn!(target: "runtime", "Failed to compile best block runtime: {}", error);
                 return Err(RuntimeError::Build(error));
             }
         };
@@ -860,11 +2006,6 @@ impl SuccessfulRuntime {
         let (runtime_spec, vm) = match executor::core_version(vm) {
             (Ok(spec), vm) => (spec, vm),
             (Err(error), _) => {
-                log::warn!(
-                    target: "runtime",
-                    "Failed to call Core_version on runtime: {}",
-                    error
-                );
                 return Err(RuntimeError::CoreVersion(error));
             }
         };
@@ -877,185 +2018,10 @@ impl SuccessfulRuntime {
     }
 }
 
-/// Starts the background task that updates the [`LatestKnownRuntime`].
-async fn start_background_task(runtime_service: &Arc<RuntimeService>) {
-    (runtime_service.tasks_executor.lock().await)("runtime-download".into(), {
-        let runtime_service = runtime_service.clone();
-        let blocks_stream = {
-            let (best_block_header, best_blocks_subscription) =
-                runtime_service.sync_service.subscribe_best().await;
-            stream::once(future::ready(best_block_header)).chain(best_blocks_subscription)
-        };
-
-        // Set to `true` when we expect the runtime in `latest_known_runtime` to match the runtime
-        // of the best block. Initially `false`, as `latest_known_runtime` uses the genesis
-        // runtime.
-        let mut runtime_matches_best_block = false;
-
-        Box::pin(async move {
-            futures::pin_mut!(blocks_stream);
-
-            loop {
-                // While major-syncing a chain, best blocks are updated continously. In that
-                // situation, the delay below is too short to prevent the runtime code from being
-                // continuously downloaded.
-                // To avoid using too much bandwidth, we force another delay between two runtime
-                // code downloads.
-                // This delay is done at the beginning of the loop because the runtime is built
-                // as part of the initialization of the `RuntimeService`, and in order to make it
-                // possible to use `continue` without accidentally skipping this delay.
-                ffi::Delay::new(Duration::from_secs(3)).await;
-
-                // Wait until a new best block is known.
-                let mut new_best_block = match blocks_stream.next().await {
-                    Some(b) => b,
-                    None => break, // Stream is finished.
-                };
-
-                // While the chain is running, it is often the case that more than one blocks
-                // is generated and announced roughly at the same time.
-                // We would like to avoid a situation where we receive a new best block, start
-                // downloading the runtime code, then a few milliseconds later receive another
-                // block that becomes the new best, and download the runtime code of that new
-                // block as well. This would lead to downloading the runtime code twice (or more,
-                // if more than two blocks are received) in a small time frame, which is usually a
-                // waste of bandwidth.
-                // Instead, whenever a new best block is received, we wait a little bit before
-                // downloading the runtime, in order to see if there isn't any other new best
-                // block already on the way.
-                // This delay needs to be long enough to de-duplicate forks, but it should still
-                // be small, as it adds artifical latency to the detecting runtime upgrades.
-                ffi::Delay::new(Duration::from_millis(500)).await;
-                while let Some(best_update) = blocks_stream.next().now_or_never() {
-                    new_best_block = match best_update {
-                        Some(b) => b,
-                        None => break, // Stream is finished.
-                    };
-                }
-
-                // Download the runtime code of this new best block.
-                // TODO: don't unwrap?
-                let new_best_block_decoded = header::decode(&new_best_block).unwrap();
-                let new_best_block_hash = header::hash_from_scale_encoded_header(&new_best_block);
-                let code_query_result = runtime_service
-                    .sync_service
-                    .clone()
-                    .storage_query(
-                        &new_best_block_hash,
-                        new_best_block_decoded.state_root,
-                        iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
-                    )
-                    .await;
-
-                let best_near_head_of_chain = runtime_service
-                    .sync_service
-                    .is_near_head_of_chain_heuristic()
-                    .await;
-
-                // Only lock `latest_known_runtime` now that everything is synchronous.
-                let mut latest_known_runtime = runtime_service.latest_known_runtime.lock().await;
-                let latest_known_runtime = &mut *latest_known_runtime;
-
-                // Whatever the result of `code_query_result` is, notify the best block
-                // subscriptions. After this, we shouldn't unlock `latest_known_runtime` ever
-                // again to avoid giving the possibility to inspect the runtime in response
-                // to the notification.
-
-                // Elements in `best_blocks_subscriptions` are removed one by one and inserted
-                // back if the channel is still open.
-                for index in (0..latest_known_runtime.best_blocks_subscriptions.len()).rev() {
-                    let mut subscription = latest_known_runtime
-                        .best_blocks_subscriptions
-                        .swap_remove(index);
-                    if subscription.send(new_best_block.clone()).is_ok() {
-                        latest_known_runtime
-                            .best_blocks_subscriptions
-                            .push(subscription);
-                    }
-                }
-
-                latest_known_runtime
-                    .best_blocks_subscriptions
-                    .shrink_to_fit();
-
-                latest_known_runtime.best_near_head_of_chain = best_near_head_of_chain;
-
-                let (new_code, new_heap_pages) = {
-                    let mut results = match code_query_result {
-                        Ok(c) => c,
-                        Err(error) => {
-                            log::log!(
-                                target: "runtime",
-                                if error.is_network_problem() { log::Level::Debug } else { log::Level::Warn },
-                                "Failed to download :code and :heappages of new best block: {}",
-                                error
-                            );
-                            continue;
-                        }
-                    };
-
-                    let new_heap_pages = results.pop().unwrap();
-                    let new_code = results.pop().unwrap();
-                    (new_code, new_heap_pages)
-                };
-
-                // `continue` if there wasn't any change in `:code` and `:heappages`.
-                if new_code == latest_known_runtime.runtime_code
-                    && new_heap_pages == latest_known_runtime.heap_pages
-                {
-                    runtime_matches_best_block = true;
-                    // `runtime_block_hash` is always updated in order to have the most recent
-                    // block possible.
-                    latest_known_runtime.runtime_block_hash = new_best_block_hash;
-                    latest_known_runtime.runtime_block_header = new_best_block.clone();
-                    continue;
-                }
-
-                // Don't notify the user of an upgrade if we didn't expect the runtime to match
-                // the best block in the first place.
-                if runtime_matches_best_block {
-                    log::info!(
-                        target: "runtime",
-                        "Runtime code change detected between block #{} and block #{}",
-                        // TODO: don't unwrap?
-                        header::decode(&latest_known_runtime.runtime_block_header).unwrap().number,
-                        new_best_block_decoded.number
-                    );
-                }
-
-                runtime_matches_best_block = true;
-                latest_known_runtime.runtime_block_hash = new_best_block_hash;
-                latest_known_runtime.runtime_block_header = new_best_block.clone();
-                latest_known_runtime.runtime_code = new_code;
-                latest_known_runtime.heap_pages = new_heap_pages;
-                latest_known_runtime.runtime = SuccessfulRuntime::from_params(
-                    &latest_known_runtime.runtime_code,
-                    &latest_known_runtime.heap_pages,
-                )
-                .await;
-
-                // Elements in `runtime_version_subscriptions` are removed one by one and inserted
-                // back if the channel is still open.
-                for index in (0..latest_known_runtime.runtime_version_subscriptions.len()).rev() {
-                    let mut subscription = latest_known_runtime
-                        .runtime_version_subscriptions
-                        .swap_remove(index);
-                    let to_send = latest_known_runtime
-                        .runtime
-                        .as_ref()
-                        .map(|r| r.runtime_spec.clone())
-                        .map_err(|err| err.clone());
-                    if subscription.send(to_send).is_ok() {
-                        latest_known_runtime
-                            .runtime_version_subscriptions
-                            .push(subscription);
-                    }
-                }
-
-                latest_known_runtime
-                    .runtime_version_subscriptions
-                    .shrink_to_fit();
-            }
-        })
-    });
+/// Returns `true` if the block can be assumed to have the same runtime as its parent.
+fn same_runtime_as_parent(header: &[u8]) -> bool {
+    match header::decode(header) {
+        Ok(h) => !h.digest.has_runtime_environment_updated(),
+        Err(_) => false,
+    }
 }

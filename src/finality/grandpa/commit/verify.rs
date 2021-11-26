@@ -18,7 +18,6 @@
 use crate::finality::grandpa::commit::decode;
 
 use alloc::vec::Vec;
-use core::convert::TryFrom as _;
 
 /// Configuration for a commit verification process.
 #[derive(Debug)]
@@ -90,7 +89,7 @@ impl<C: AsRef<[u8]>> IsAuthority<C> {
     pub fn authority_public_key(&self) -> &[u8; 32] {
         debug_assert!(!self.inner.next_precommit_author_verified);
         let decoded_commit = decode::decode_grandpa_commit(self.inner.commit.as_ref()).unwrap();
-        &decoded_commit.message.auth_data[self.inner.next_precommit_index].1
+        decoded_commit.message.auth_data[self.inner.next_precommit_index].1
     }
 
     /// Resumes the verification process.
@@ -127,7 +126,7 @@ impl<C: AsRef<[u8]>> IsParent<C> {
     pub fn block_hash(&self) -> &[u8; 32] {
         debug_assert!(!self.inner.next_precommit_block_verified);
         let decoded_commit = decode::decode_grandpa_commit(self.inner.commit.as_ref()).unwrap();
-        &decoded_commit.message.precommits[self.inner.next_precommit_index].target_hash
+        decoded_commit.message.precommits[self.inner.next_precommit_index].target_hash
     }
 
     /// Height of the block that must be the ancestor of the block to check.
@@ -188,8 +187,8 @@ struct Verification<C> {
     /// by one.
     /// Note that batched ed25519 verification has some issues. The code below uses a special
     /// flavour of ed25519 where ambiguities are removed.
-    /// See https://docs.rs/ed25519-zebra/2.2.0/ed25519_zebra/batch/index.html and
-    /// https://github.com/zcash/zips/blob/master/zip-0215.rst
+    /// See <https://docs.rs/ed25519-zebra/2.2.0/ed25519_zebra/batch/index.html> and
+    /// <https://github.com/zcash/zips/blob/master/zip-0215.rst>
     signatures_batch: ed25519_zebra::batch::Verifier,
 }
 
@@ -264,7 +263,7 @@ impl<C: AsRef<[u8]>> Verification<C> {
                 // number of authorities.
                 // Duplicate signatures are checked below.
                 // The logic of the check is `actual >= (expected * 2 / 3) + 1`.
-                if decoded_commit.message.precommits.iter().count()
+                if decoded_commit.message.precommits.len()
                     < (usize::try_from(self.num_authorities).unwrap() * 2 / 3) + 1
                 {
                     return InProgress::FinishedUnknown;
@@ -272,8 +271,7 @@ impl<C: AsRef<[u8]>> Verification<C> {
 
                 // Actual signatures verification performed here.
                 // TODO: thread_rng()?!?! what to do here?
-                // TODO: ed25519_zebra depends on rand_core 0.5, which forces us to use an older version of rand; really annoying
-                match self.signatures_batch.verify(rand7::thread_rng()) {
+                match self.signatures_batch.verify(rand::thread_rng()) {
                     Ok(()) => {}
                     Err(_) => return InProgress::Finished(Err(Error::BadSignature)),
                 }

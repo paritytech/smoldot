@@ -62,12 +62,12 @@
 // TODO: review this last sentence, as this API might change after some experience with it
 
 use crate::libp2p::{
-    peer_id::{PeerId, PublicKey},
+    peer_id::{PeerId, PublicKey, SignatureVerifyFailed},
     read_write::ReadWrite,
 };
 
 use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
-use core::{cmp, convert::TryFrom as _, fmt, iter};
+use core::{cmp, fmt, iter};
 use prost::Message as _;
 
 mod payload_proto {
@@ -153,7 +153,7 @@ impl UnsignedNoiseKey {
     }
 
     /// Returns the data that has to be signed.
-    pub fn payload_to_sign<'a>(&'a self) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+    pub fn payload_to_sign(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
         iter::once(&b"noise-libp2p-static-key:"[..]).chain(iter::once(&self.key.public[..]))
     }
 
@@ -631,7 +631,7 @@ impl HandshakeInProgress {
         read_write: &mut ReadWrite<'_, TNow>,
     ) -> Result<NoiseHandshake, HandshakeError> {
         'outer_loop: loop {
-            // Copy data from `self.tx_buffer_encrypted` to `destination`.
+            // Copy data from `self.tx_buffer_encrypted` to `read_write`.
             loop {
                 debug_assert!(
                     !self.tx_buffer_encrypted.as_slices().0.is_empty()
@@ -639,6 +639,10 @@ impl HandshakeInProgress {
                 );
 
                 let to_write = self.tx_buffer_encrypted.as_slices().0;
+                if !to_write.is_empty() && read_write.outgoing_buffer.is_none() {
+                    return Err(HandshakeError::WriteClosed);
+                }
+
                 let to_write_len = cmp::min(to_write.len(), read_write.outgoing_buffer_available());
                 if to_write_len == 0 {
                     break;
@@ -654,6 +658,12 @@ impl HandshakeInProgress {
             // If not, return now without reading anything more.
             if self.rx_messages_remain == 0 {
                 break;
+            }
+
+            // The remaining of the body requires reading from `read_write`. As such, error if
+            // the reading side is closed.
+            if read_write.incoming_buffer.is_none() {
+                return Err(HandshakeError::ReadClosed);
             }
 
             // Handshake message must start with two bytes of length.
@@ -741,15 +751,12 @@ impl HandshakeInProgress {
                 // checked that the payload arrives when it is supposed to, this can never panic.
                 let remote_noise_static = self.inner.get_remote_static().unwrap();
                 // TODO: don't use concat() in order to not allocate a Vec
-                if remote_public_key
+                remote_public_key
                     .verify(
                         &[b"noise-libp2p-static-key:", remote_noise_static].concat(),
                         &handshake_payload.identity_sig,
                     )
-                    .is_err()
-                {
-                    return Err(HandshakeError::SignatureVerificationFailed);
-                }
+                    .map_err(HandshakeError::SignatureVerificationFailed)?;
 
                 self.rx_payload = RxPayload::Received(remote_public_key.into_peer_id());
             } else if !decoded_payload.is_empty() {
@@ -783,6 +790,10 @@ fn noise_params() -> snow::params::NoiseParams {
 /// Potential error during the noise handshake.
 #[derive(Debug, derive_more::Display)]
 pub enum HandshakeError {
+    /// Reading side of the connection is closed. The handshake can't proceeed further.
+    ReadClosed,
+    /// Writing side of the connection is closed. The handshake can't proceeed further.
+    WriteClosed,
     /// Error in the decryption state machine.
     Cipher(CipherError),
     /// Failed to decode the payload as the libp2p-extension-to-noise payload.
@@ -792,7 +803,8 @@ pub enum HandshakeError {
     /// Received a payload as part of a handshake message when none was expected.
     UnexpectedPayload,
     /// Signature of the noise public key by the libp2p key failed.
-    SignatureVerificationFailed,
+    #[display(fmt = "Signature of the noise public key by the libp2p key failed.")]
+    SignatureVerificationFailed(SignatureVerifyFailed),
 }
 
 /// Error while decoding data.

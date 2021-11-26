@@ -94,7 +94,7 @@ mod interpreter;
 mod jit;
 
 use alloc::{string::String, vec::Vec};
-use core::{convert::TryFrom, fmt};
+use core::fmt;
 use smallvec::SmallVec;
 
 /// Compiled Wasm code.

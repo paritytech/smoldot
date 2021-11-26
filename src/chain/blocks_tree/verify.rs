@@ -30,6 +30,7 @@ use crate::{
 
 use super::*;
 
+use alloc::{boxed::Box, collections::BTreeMap};
 use core::cmp::Ordering;
 
 impl<T> NonFinalizedTree<T> {
@@ -113,7 +114,7 @@ impl<T> NonFinalizedTreeInner<T> {
     /// Common implementation for both [`NonFinalizedTree::verify_header`] and
     /// [`NonFinalizedTree::verify_body`].
     fn verify(
-        self,
+        self: Box<Self>,
         scale_encoded_header: Vec<u8>,
         now_from_unix_epoch: Duration,
         full: bool,
@@ -135,7 +136,7 @@ impl<T> NonFinalizedTreeInner<T> {
         let hash = header::hash_from_scale_encoded_header(&scale_encoded_header);
 
         // Check for duplicates.
-        if self.blocks.find(|b| b.hash == hash).is_some() {
+        if self.blocks_by_hash.contains_key(&hash) {
             return if full {
                 VerifyOut::Body(BodyVerifyStep1::Duplicate(NonFinalizedTree {
                     inner: Some(self),
@@ -149,16 +150,13 @@ impl<T> NonFinalizedTreeInner<T> {
         // `Some` with an index of the parent within the tree of unfinalized blocks.
         // `None` means that the parent is the finalized block.
         let parent_tree_index = {
-            let parent_hash = *decoded_header.parent_hash;
-            match self.current_best {
-                // The parent hash is first checked against `self.current_best`, as it is most
-                // likely that new blocks are built on top of the current best.
-                Some(best) if parent_hash == self.blocks.get(best).unwrap().hash => Some(best),
-                _ if parent_hash == self.finalized_block_hash => None,
-                // O(n) search for the parent.
-                _ => match self.blocks.find(|b| b.hash == parent_hash) {
-                    Some(parent) => Some(parent),
+            if *decoded_header.parent_hash == self.finalized_block_hash {
+                None
+            } else {
+                match self.blocks_by_hash.get(decoded_header.parent_hash) {
+                    Some(parent) => Some(*parent),
                     None => {
+                        let parent_hash = *decoded_header.parent_hash;
                         return if full {
                             VerifyOut::Body(BodyVerifyStep1::BadParent {
                                 chain: NonFinalizedTree { inner: Some(self) },
@@ -166,9 +164,9 @@ impl<T> NonFinalizedTreeInner<T> {
                             })
                         } else {
                             VerifyOut::HeaderErr(self, HeaderVerifyError::BadParent { parent_hash })
-                        }
+                        };
                     }
-                },
+                }
             }
         };
 
@@ -282,13 +280,13 @@ impl<T> NonFinalizedTreeInner<T> {
 
 enum VerifyOut<T> {
     HeaderOk(VerifyContext<T>, bool, BlockConsensus),
-    HeaderErr(NonFinalizedTreeInner<T>, HeaderVerifyError),
-    HeaderDuplicate(NonFinalizedTreeInner<T>),
+    HeaderErr(Box<NonFinalizedTreeInner<T>>, HeaderVerifyError),
+    HeaderDuplicate(Box<NonFinalizedTreeInner<T>>),
     Body(BodyVerifyStep1<T>),
 }
 
 struct VerifyContext<T> {
-    chain: NonFinalizedTreeInner<T>,
+    chain: Box<NonFinalizedTreeInner<T>>,
     parent_tree_index: Option<fork_tree::NodeIndex>,
     header: header::Header,
     consensus: VerifyConsensusSpecific,
@@ -697,7 +695,7 @@ pub enum BodyVerifyStep2<T> {
         /// been modified. Contains the new runtime.
         new_runtime: Option<host::HostVmPrototype>,
         /// List of changes to the storage top trie that the block performs.
-        storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+        storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
         /// List of changes to the offchain storage that this block performs.
         offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
         /// Cache of calculation for the storage trie of the best block.
@@ -725,7 +723,7 @@ pub enum BodyVerifyStep2<T> {
     /// A new runtime must be compiled.
     ///
     /// This variant doesn't require any specific input from the user, but is provided in order to
-    /// make it possible to benchmark the time it takes to compile runtimes.
+    /// make it possible to benchmBodyVerifyStep2<ark the time it takes to compile runtimes.
     RuntimeCompilation(RuntimeCompilation<T>),
 }
 
@@ -974,6 +972,11 @@ impl<'c, T> HeaderInsert<'c, T> {
     pub fn insert(mut self, user_data: T) {
         let mut context = self.context.take().unwrap();
 
+        debug_assert_eq!(
+            context.chain.blocks.len(),
+            context.chain.blocks_by_hash.len()
+        );
+
         let new_node_index = context.chain.blocks.insert(
             context.parent_tree_index,
             Block {
@@ -983,6 +986,13 @@ impl<'c, T> HeaderInsert<'c, T> {
                 user_data,
             },
         );
+
+        let _prev_value = context
+            .chain
+            .blocks_by_hash
+            .insert(self.hash, new_node_index);
+        // A bug here would be serious enough that it is worth being an `assert!`
+        assert!(_prev_value.is_none());
 
         if self.is_new_best {
             context.chain.current_best = Some(new_node_index);
@@ -1056,6 +1066,11 @@ impl<T> BodyInsert<T> {
 
     /// Inserts the block with the given user data.
     pub fn insert(mut self, user_data: T) -> NonFinalizedTree<T> {
+        debug_assert_eq!(
+            self.context.chain.blocks.len(),
+            self.context.chain.blocks_by_hash.len()
+        );
+
         let new_node_index = self.context.chain.blocks.insert(
             self.context.parent_tree_index,
             Block {
@@ -1065,6 +1080,14 @@ impl<T> BodyInsert<T> {
                 user_data,
             },
         );
+
+        let _prev_value = self
+            .context
+            .chain
+            .blocks_by_hash
+            .insert(self.hash, new_node_index);
+        // A bug here would be serious enough that it is worth being an `assert!`
+        assert!(_prev_value.is_none());
 
         if self.is_new_best {
             self.context.chain.current_best = Some(new_node_index);

@@ -19,7 +19,7 @@ use super::Error;
 use crate::util;
 
 use alloc::vec::Vec;
-use core::{cmp, convert::TryFrom, fmt, iter, num::NonZeroU64, slice};
+use core::{cmp, fmt, iter, num::NonZeroU64, slice};
 
 /// A consensus log item for GrandPa.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -467,7 +467,7 @@ fn grandpa_scheduled_change_ref<
                             num_authorities,
                             num_authorities,
                             grandpa_authority_ref,
-                            (),
+                            || {},
                             |(), _| (),
                         )),
                         |bytes| {

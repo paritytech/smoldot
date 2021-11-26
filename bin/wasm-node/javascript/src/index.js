@@ -18,13 +18,25 @@
 import { Worker, workerOnError, workerOnMessage } from './compat-nodejs.js';
 export * from './health.js';
 
-export class SmoldotError extends Error {
+export class AlreadyDestroyedError extends Error {
+}
+
+export class AddChainError extends Error {
   constructor(message) {
     super(message);
   }
 }
 
-export async function start(config) {
+export class JsonRpcDisabledError extends Error {
+}
+
+export class CrashError extends Error {
+  constructor(message) {
+    super(message);
+  }
+}
+
+export function start(config) {
   config = config || {};
 
   const logCallback = config.logCallback || ((level, target, message) => {
@@ -44,9 +56,7 @@ export async function start(config) {
   // The actual execution of Smoldot is performed in a worker thread.
   //
   // The line of code below (`new Worker(...)`) is designed to hopefully work across all
-  // platforms. It should work in NodeJS, browsers, webpack
-  // (https://webpack.js.org/guides/web-workers/), and parcel
-  // (https://github.com/parcel-bundler/parcel/pull/5846)
+  // platforms and bundlers. See the README.md for more context.
   const worker = new Worker(new URL('./worker.js', import.meta.url));
   let workerError = null;
 
@@ -74,10 +84,16 @@ export async function start(config) {
       clearTimeout(livenessTimeout);
     livenessTimeout = setTimeout(() => {
       livenessTimeout = null;
-      logCallback(1, 'smoldot', 'Smoldot worker appears unresponsive');
-    }, 7000);
+      console.warn(
+        "Smoldot appears unresponsive. Please open an issue at " +
+        "https://github.com/paritytech/smoldot/issues. If you have a debugger available, " +
+        "please pause execution, generate a stack trace of the thread that isn't the main " +
+        "execution thread, and paste it in the issue. Please also include any other log found " +
+        "in the console or elsewhere."
+      );
+    }, 10000);
   };
-  setTimeout(() => resetLivenessTimeout(), 10000);
+  setTimeout(() => resetLivenessTimeout(), 15000);
 
   // The worker can send us messages whose type is identified through a `kind` field.
   workerOnMessage(worker, (message) => {
@@ -100,16 +116,16 @@ export async function start(config) {
           if (workerError)
             throw workerError;
           if (chainId === null)
-            throw new SmoldotError('Chain has already been removed');
+            throw new AlreadyDestroyedError();
           if (!chainsJsonRpcCallbacks.has(chainId))
-            throw new SmoldotError('Chain isn\'t capable of serving JSON-RPC requests');
+            throw new JsonRpcDisabledError();
           worker.postMessage({ ty: 'request', request, chainId });
         },
         remove: () => {
           if (workerError)
             throw workerError;
           if (chainId === null)
-            throw new SmoldotError('Chain has already been removed');
+            throw new AlreadyDestroyedError();
           pendingConfirmations.push({ ty: 'chainRemoved', chainId });
           worker.postMessage({ ty: 'removeChain', chainId });
           // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
@@ -127,7 +143,7 @@ export async function start(config) {
       const expected = pendingConfirmations.shift();
       // `expected` was pushed by the `addChain` method.
       // Reject the promise that `addChain` returned to the user.
-      expected.reject(message.error);
+      expected.reject(new AddChainError(message.error));
 
     } else if (message.kind == 'chainRemoved') {
       pendingConfirmations.shift();
@@ -146,13 +162,17 @@ export async function start(config) {
   workerOnError(worker, (error) => {
     // A worker error should only happen in case of a critical error as the result of a bug
     // somewhere. Consequently, nothing is really in place to cleanly report the error.
+    console.error(
+      "Smoldot has panicked. This is a bug in smoldot. Please open an issue at " +
+      "https://github.com/paritytech/smoldot/issues with the following message:"
+    );
     console.error(error);
-    workerError = error;
+    workerError = new CrashError(error.toString());
 
     // Reject all promises returned by `addChain`.
     for (var pending of pendingConfirmations) {
       if (pending.ty == 'chainAdded')
-        pending.reject(error);
+        pending.reject(workerError);
     }
     pendingConfirmations = [];
   });
@@ -212,7 +232,7 @@ export async function start(config) {
     terminate: () => {
       worker.terminate();
       if (!workerError)
-        workerError = new Error("terminate() has been called");
+        workerError = new AlreadyDestroyedError();
     }
   }
 }

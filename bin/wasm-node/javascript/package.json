@@ -1,6 +1,6 @@
 {
   "name": "@substrate/smoldot-light",
-  "version": "0.4.3",
+  "version": "0.5.4",
   "description": "Light client that connects to Polkadot and Substrate-based blockchains",
   "author": "Parity Technologies <admin@parity.io>",
   "license": "GPL-3.0-or-later WITH Classpath-exception-2.0",
@@ -19,7 +19,7 @@
     "prepublishOnly": "node prepare.js --release",
     "build": "node prepare.js --release",
     "start": "node prepare.js --debug && node demo/demo.js",
-    "test": "node prepare.js --debug && dtslint src/ && ava"
+    "test": "node prepare.js --debug && dtslint src/ && ava --timeout=2m"
   },
   "browser": {
     "./src/compat-nodejs.js": "./src/compat-browser.js"

@@ -18,6 +18,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use alloc::collections::VecDeque;
 use core::{cmp, mem};
 use futures::future::{self, BoxFuture, Future, FutureExt as _};
 
@@ -115,6 +116,13 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
             .unwrap_or(0)
     }
 
+    /// Shortcut to [`ReadWrite::advance_read`], passing as parameter the value of
+    /// [`ReadWrite::incoming_buffer_available`]. This discards all the incoming data.
+    pub fn discard_all_incoming(&mut self) {
+        let len = self.incoming_buffer_available();
+        self.advance_read(len);
+    }
+
     /// Returns an iterator that pops bytes from [`ReadWrite::incoming_buffer`]. Whenever the
     /// iterator advances, [`ReadWrite::read_bytes`] is increased by 1.
     pub fn incoming_bytes_iter<'b>(&'b mut self) -> IncomingBytes<'a, 'b, TNow> {
@@ -177,6 +185,28 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
         self.advance_write(data.len());
     }
 
+    /// Copies as much as possible from the content of `data` to [`ReadWrite::outgoing_buffer`]
+    /// and increases [`ReadWrite::written_bytes`]. The bytes that have been written are removed
+    /// from `data`.
+    pub fn write_from_vec_deque(&mut self, data: &mut VecDeque<u8>) {
+        let (slice1, slice2) = data.as_slices();
+
+        let outgoing_available = self.outgoing_buffer_available();
+        let to_copy1 = cmp::min(slice1.len(), outgoing_available);
+        let to_copy2 = if to_copy1 == slice1.len() {
+            cmp::min(slice2.len(), outgoing_available - to_copy1)
+        } else {
+            0
+        };
+
+        self.write_out(&slice1[..to_copy1]);
+        self.write_out(&slice2[..to_copy2]);
+
+        for _ in 0..(to_copy1 + to_copy2) {
+            data.pop_front();
+        }
+    }
+
     /// Sets [`ReadWrite::wake_up_after`] to `min(wake_up_after, after)`.
     pub fn wake_up_after(&mut self, after: &TNow)
     where
@@ -202,6 +232,25 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
         self.wake_up_future = Some(
             async move {
                 futures::pin_mut!(when);
+                future::select(current, when).await;
+            }
+            .boxed(),
+        );
+    }
+
+    /// Same as [`ReadWrite::wake_up_when`], but accepts a boxed future as parameter. This is
+    /// slightly faster if your future is already boxed.
+    pub fn wake_up_when_boxed(&mut self, when: future::BoxFuture<'static, ()>) {
+        let current = match self.wake_up_future.take() {
+            Some(f) => f,
+            None => {
+                self.wake_up_future = Some(when);
+                return;
+            }
+        };
+
+        self.wake_up_future = Some(
+            async move {
                 future::select(current, when).await;
             }
             .boxed(),
@@ -234,7 +283,7 @@ impl<'a, 'b, TNow> Iterator for IncomingBytes<'a, 'b, TNow> {
                 self.me.read_bytes += 1;
                 Some(byte)
             }
-            None => return None,
+            None => None,
         }
     }
 
@@ -247,3 +296,159 @@ impl<'a, 'b, TNow> Iterator for IncomingBytes<'a, 'b, TNow> {
 }
 
 impl<'a, 'b, TNow> ExactSizeIterator for IncomingBytes<'a, 'b, TNow> {}
+
+#[cfg(test)]
+mod tests {
+    use super::ReadWrite;
+
+    #[test]
+    fn incoming_bytes_iter() {
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: Some(&[1, 2, 3]),
+            outgoing_buffer: None,
+            read_bytes: 2,
+            written_bytes: 0,
+            wake_up_after: None,
+            wake_up_future: None,
+        };
+
+        let mut iter = rw.incoming_bytes_iter();
+        assert_eq!(iter.len(), 3);
+        assert_eq!(iter.next(), Some(1));
+        assert_eq!(iter.len(), 2);
+
+        assert_eq!(rw.read_bytes, 3);
+
+        let mut iter = rw.incoming_bytes_iter();
+        assert_eq!(iter.len(), 2);
+        assert_eq!(iter.next(), Some(2));
+        assert_eq!(iter.len(), 1);
+        assert_eq!(iter.next(), Some(3));
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next(), None);
+
+        assert_eq!(rw.read_bytes, 5);
+        let mut iter = rw.incoming_bytes_iter();
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn advance_read() {
+        let buf = [1, 2, 3];
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: Some(&buf),
+            outgoing_buffer: None,
+            read_bytes: 5,
+            written_bytes: 0,
+            wake_up_after: None,
+            wake_up_future: None,
+        };
+
+        rw.advance_read(1);
+        assert_eq!(rw.incoming_buffer.as_ref().unwrap(), &[2, 3]);
+        assert_eq!(rw.read_bytes, 6);
+
+        rw.advance_read(2);
+        assert!(rw.incoming_buffer.as_ref().unwrap().is_empty());
+        assert_eq!(rw.read_bytes, 8);
+    }
+
+    #[test]
+    fn advance_write() {
+        let mut buf1 = [1, 2, 3];
+        let mut buf2 = [4, 5];
+
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: None,
+            outgoing_buffer: Some((&mut buf1, &mut buf2)),
+            read_bytes: 0,
+            written_bytes: 5,
+            wake_up_after: None,
+            wake_up_future: None,
+        };
+
+        rw.advance_write(1);
+        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().0, &[2, 3]);
+        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().1, &[4, 5]);
+        assert_eq!(rw.written_bytes, 6);
+
+        rw.advance_write(2);
+        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().0, &[4, 5]);
+        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
+        assert_eq!(rw.written_bytes, 8);
+
+        rw.advance_write(2);
+        assert!(rw.outgoing_buffer.as_ref().unwrap().0.is_empty());
+        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
+        assert_eq!(rw.written_bytes, 10);
+
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: None,
+            outgoing_buffer: Some((&mut buf1, &mut buf2)),
+            read_bytes: 0,
+            written_bytes: 5,
+            wake_up_after: None,
+            wake_up_future: None,
+        };
+
+        rw.advance_write(4);
+        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().0, &[5]);
+        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
+        assert_eq!(rw.written_bytes, 9);
+    }
+
+    #[test]
+    fn write_from_vec_deque_smaller() {
+        let mut buf1 = [0, 0, 0];
+        let mut buf2 = [0, 0];
+        let mut input = [1, 2, 3, 4].iter().cloned().collect();
+
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: None,
+            outgoing_buffer: Some((&mut buf1, &mut buf2)),
+            read_bytes: 0,
+            written_bytes: 5,
+            wake_up_after: None,
+            wake_up_future: None,
+        };
+
+        rw.write_from_vec_deque(&mut input);
+        assert!(input.is_empty());
+        assert_eq!(rw.outgoing_buffer.as_ref().unwrap().0, &[0]);
+        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
+        assert_eq!(rw.written_bytes, 9);
+        assert_eq!(&buf1, &[1, 2, 3]);
+        assert_eq!(&buf2, &[4, 0]);
+    }
+
+    #[test]
+    fn write_from_vec_deque_larger() {
+        let mut buf1 = [0, 0, 0];
+        let mut buf2 = [0, 0];
+        let mut input = [1, 2, 3, 4, 5, 6].iter().cloned().collect();
+
+        let mut rw = ReadWrite {
+            now: 0,
+            incoming_buffer: None,
+            outgoing_buffer: Some((&mut buf1, &mut buf2)),
+            read_bytes: 0,
+            written_bytes: 5,
+            wake_up_after: None,
+            wake_up_future: None,
+        };
+
+        rw.write_from_vec_deque(&mut input);
+        assert_eq!(input.into_iter().collect::<Vec<_>>(), &[6]);
+        assert!(rw.outgoing_buffer.as_ref().unwrap().0.is_empty());
+        assert!(rw.outgoing_buffer.as_ref().unwrap().1.is_empty());
+        assert_eq!(rw.written_bytes, 10);
+        assert_eq!(&buf1, &[1, 2, 3]);
+        assert_eq!(&buf2, &[4, 5]);
+    }
+}

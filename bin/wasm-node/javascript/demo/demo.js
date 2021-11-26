@@ -26,9 +26,11 @@ import * as fs from 'fs';
 // Adjust these chain specs for the chain you want to connect to.
 const westend = fs.readFileSync('../../westend.json', 'utf8');
 const westmint = fs.readFileSync('../../westend-westmint.json', 'utf8');
+const adz = fs.readFileSync('../../westend-adz.json', 'utf8');
 const polkadot = fs.readFileSync('../../polkadot.json', 'utf8');
 const kusama = fs.readFileSync('../../kusama.json', 'utf8');
 const statemine = fs.readFileSync('../../kusama-statemine.json', 'utf8');
+const rococo = fs.readFileSync('../../rococo.json', 'utf8');
 
 const client = smoldot.start({
     maxLogLevel: 3,  // Can be increased for more verbosity
@@ -43,7 +45,7 @@ const client = smoldot.start({
 // By calling it now, we let smoldot start syncing that chain in the background even before a
 // WebSocket connection has been established.
 client
-    .then(client => client.addChain({ chainSpec: westend }))
+    .addChain({ chainSpec: westend })
     .catch((error) => {
         console.error("Error while adding chain: " + error);
         process.exit(1);
@@ -59,9 +61,11 @@ server.listen(9944, function () {
     console.log('Visit one of:');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fwestend');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fwestmint');
+    console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fadz');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fkusama');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fstatemine');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fpolkadot');
+    console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Frococo');
 });
 let wsServer = new websocket.server({
     httpServer: server,
@@ -76,7 +80,7 @@ wsServer.on('request', function (request) {
     // `relay` and `para` are of type `SmoldotChain`.
     let chain;
     if (request.resource == '/westend') {
-        chain = client.then(async client => {
+        chain = (async () => {
             return {
                 relay: await client.addChain({
                     chainSpec: westend,
@@ -85,10 +89,10 @@ wsServer.on('request', function (request) {
                     },
                 })
             };
-        });
+        })();
 
     } else if (request.resource == '/westmint') {
-        chain = client.then(async client => {
+        chain = (async () => {
             const relay = await client.addChain({
                 chainSpec: westend,
             });
@@ -102,9 +106,25 @@ wsServer.on('request', function (request) {
             });
 
             return { relay, para };
-        });
+        })();
+    } else if (request.resource == '/adz') {
+        chain = (async () => {
+            const relay = await client.addChain({
+                chainSpec: westend,
+            });
+
+            const para = await client.addChain({
+                chainSpec: adz,
+                jsonRpcCallback: (resp) => {
+                    connection.sendUTF(resp);
+                },
+                potentialRelayChains: [relay]
+            });
+
+            return { relay, para };
+        })();
     } else if (request.resource == '/kusama') {
-        chain = client.then(async client => {
+        chain = (async () => {
             return {
                 relay: await client.addChain({
                     chainSpec: kusama,
@@ -113,9 +133,9 @@ wsServer.on('request', function (request) {
                     },
                 })
             };
-        });
+        })();
     } else if (request.resource == '/statemine') {
-        chain = client.then(async client => {
+        chain = (async () => {
             const relay = await client.addChain({
                 chainSpec: kusama,
             });
@@ -129,9 +149,9 @@ wsServer.on('request', function (request) {
             });
 
             return { relay, para };
-        });
+        })();
     } else if (request.resource == '/polkadot') {
-        chain = client.then(async client => {
+        chain = (async () => {
             return {
                 relay: await client.addChain({
                     chainSpec: polkadot,
@@ -140,7 +160,18 @@ wsServer.on('request', function (request) {
                     },
                 })
             };
-        });
+        })();
+    } else if (request.resource == '/rococo') {
+        chain = (async () => {
+            return {
+                relay: await client.addChain({
+                    chainSpec: rococo,
+                    jsonRpcCallback: (resp) => {
+                        connection.sendUTF(resp);
+                    },
+                })
+            };
+        })();
     } else {
         request.reject(404);
         return;

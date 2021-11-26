@@ -44,6 +44,8 @@ use crate::{
 };
 
 use alloc::{
+    borrow::ToOwned as _,
+    collections::BTreeMap,
     string::{String, ToString as _},
     vec::Vec,
 };
@@ -68,7 +70,7 @@ pub struct Config<'a, TParams> {
 
     /// Initial state of [`Success::storage_top_trie_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
-    pub storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 
     /// Initial state of [`Success::offchain_storage_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
@@ -103,7 +105,7 @@ pub struct Success {
     /// initialization.
     pub virtual_machine: SuccessVirtualMachine,
     /// List of changes to the storage top trie that the block performs.
-    pub storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     /// List of changes to the offchain storage that this block performs.
     pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     /// Cache used for calculating the top trie root.
@@ -310,66 +312,73 @@ impl PrefixKeys {
     ) -> RuntimeHostVm {
         match self.inner.vm {
             host::HostVm::ExternalStorageClearPrefix(req) => {
-                // TODO: use prefix_remove_update once optimized
+                // TODO: use prefix_remove_update once optimized and fixed to account for removal count limit
                 //top_trie_root_calculation_cache.prefix_remove_update(storage_key);
 
                 // Grab the maximum number of keys to remove, and initialize a counter for the
                 // number of keys removed so far.
-                // While doing `keys.take(...)` would be more simple, we avoid doing so in order
-                // to avoid converting the `u32` to a `usize`.
                 let max_keys_to_remove = req.max_keys_to_remove();
                 let mut keys_removed_so_far = 0u32;
 
-                for key in keys {
+                let mut outside_keys = keys
+                    .filter(|k| !self.inner.top_trie_changes.contains_key(k.as_ref()))
+                    .peekable();
+                let mut inside_keys = self
+                    .inner
+                    .top_trie_changes
+                    .range((req.prefix().as_ref().to_owned())..)
+                    .take_while(|(k, _)| k.starts_with(req.prefix().as_ref()))
+                    .filter(|(_, v)| v.is_some())
+                    .map(|(k, _)| k)
+                    .peekable();
+
+                let mut keys_to_remove = Vec::new(); // TODO: capacity?
+                let some_keys_remain = loop {
+                    let key: Vec<u8> = match (outside_keys.peek(), inside_keys.peek()) {
+                        (Some(_), None) => outside_keys.next().unwrap().as_ref().to_owned(),
+                        (None, Some(_)) => inside_keys.next().unwrap().clone(),
+                        (Some(a), Some(b)) if a.as_ref() < &b[..] => {
+                            outside_keys.next().unwrap().as_ref().to_owned()
+                        }
+                        (Some(a), Some(b)) => {
+                            debug_assert_ne!(a.as_ref(), &b[..]);
+                            inside_keys.next().unwrap().clone()
+                        }
+                        (None, None) => break false,
+                    };
+
                     // Enforce the maximum number of keys to remove.
                     if max_keys_to_remove.map_or(false, |max| keys_removed_so_far >= max) {
-                        break;
+                        break true;
                     }
 
-                    self.inner
-                        .top_trie_root_calculation_cache
-                        .as_mut()
-                        .unwrap()
-                        .storage_value_update(key.as_ref(), false);
-
-                    let previous_value = self
-                        .inner
-                        .top_trie_changes
-                        .insert(key.as_ref().to_vec(), None);
-
-                    if let Some(top_trie_transaction_revert) =
-                        self.inner.top_trie_transaction_revert.as_mut()
-                    {
-                        if let Entry::Vacant(entry) =
-                            top_trie_transaction_revert.entry(key.as_ref().to_vec())
-                        {
-                            entry.insert(previous_value);
-                        }
-                    }
+                    keys_to_remove.push(key);
 
                     // `wrapping_add` is used because the only way `keys_removed_so_far` can be
                     // equal to `u32::max_value()` at this point is when `max_keys_to_remove`
                     // is `None`.
                     keys_removed_so_far = keys_removed_so_far.wrapping_add(1);
-                }
+                };
 
-                // TODO: O(n) complexity here
-                for (key, value) in self.inner.top_trie_changes.iter_mut() {
-                    if !key.starts_with(req.prefix().as_ref()) {
-                        continue;
-                    }
-                    if value.is_none() {
-                        continue;
-                    }
+                for key in keys_to_remove {
                     self.inner
                         .top_trie_root_calculation_cache
                         .as_mut()
                         .unwrap()
-                        .storage_value_update(key, false);
-                    *value = None;
+                        .storage_value_update(&key, false);
+
+                    let previous_value = self.inner.top_trie_changes.insert(key.clone(), None);
+
+                    if let Some(top_trie_transaction_revert) =
+                        self.inner.top_trie_transaction_revert.as_mut()
+                    {
+                        if let Entry::Vacant(entry) = top_trie_transaction_revert.entry(key) {
+                            entry.insert(previous_value);
+                        }
+                    }
                 }
 
-                self.inner.vm = req.resume();
+                self.inner.vm = req.resume(keys_removed_so_far, some_keys_remain);
             }
 
             host::HostVm::ExternalStorageRoot { .. } => {
@@ -457,14 +466,12 @@ impl NextKey {
                 // The next key can be either the one passed by the user or one key in the current
                 // pending storage changes that has been inserted during the execution.
                 // As such, find the "next key" in the list of overlay changes.
-                // TODO: not optimized in terms of searching time ; should really be a BTreeMap or something
                 let in_overlay = self
                     .inner
                     .top_trie_changes
-                    .iter()
-                    .map(|(k, v)| (k, v.is_some()))
-                    .filter(|(k, _)| &***k > requested_key)
-                    .min_by_key(|(k, _)| *k);
+                    .range(requested_key.to_vec()..) // TODO: to_vec() :-/
+                    .find(|(k, _)| &***k > requested_key)
+                    .map(|(k, v)| (k, v.is_some()));
 
                 let outcome = match (key, in_overlay) {
                     (Some(a), Some((b, true))) if a <= &b[..] => Some(a),
@@ -515,7 +522,7 @@ struct Inner {
     vm: host::HostVm,
 
     /// Pending changes to the top storage trie that this execution performs.
-    top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 
     /// `Some` if and only if we're within a storage transaction. When changes are applied to
     /// [`Inner::top_trie_changes`], the reverse operation is added here.
@@ -744,10 +751,18 @@ impl Inner {
                                 let _ = self.top_trie_changes.remove(&key);
                             }
                         }
+
+                        // TODO: very slow; do this properly
+                        self.top_trie_root_calculation_cache = Some(Default::default());
                     }
 
                     self.top_trie_transaction_revert = None;
                     self.vm = resume.resume();
+                }
+
+                host::HostVm::GetMaxLogLevel(resume) => {
+                    // TODO: make configurable?
+                    self.vm = resume.resume(0); // Off
                 }
 
                 host::HostVm::LogEmit(req) => {

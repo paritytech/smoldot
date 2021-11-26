@@ -92,7 +92,8 @@ use core::{num::NonZeroU32, time::Duration};
 
 mod disjoint;
 mod pending_blocks;
-mod sources;
+
+pub mod sources;
 
 pub use pending_blocks::{RequestId, RequestParams, SourceId};
 
@@ -161,6 +162,12 @@ pub struct AllForksSync<TBl, TRq, TSrc> {
 /// Extra fields. In a separate structure in order to be moved around.
 struct Inner<TRq, TSrc> {
     blocks: pending_blocks::PendingBlocks<PendingBlock, TRq, TSrc>,
+
+    /// Justification waiting to be verified.
+    ///
+    /// This justification came with a block header that has been successfully verified in the
+    /// past.
+    pending_justification_verify: Option<Vec<u8>>,
 }
 
 struct PendingBlock {
@@ -199,6 +206,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     verify_bodies: config.full,
                     banned_blocks: Vec::new(), // TODO:
                 }),
+                pending_justification_verify: None,
             },
         }
     }
@@ -241,11 +249,22 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         self.chain.best_block_hash()
     }
 
+    /// Returns the header of all known non-finalized blocks in the chain without any specific
+    /// order.
+    pub fn non_finalized_blocks_unordered(
+        &'_ self,
+    ) -> impl Iterator<Item = header::HeaderRef<'_>> + '_ {
+        self.chain.iter_unordered()
+    }
+
     /// Returns the header of all known non-finalized blocks in the chain.
     ///
-    /// The order of the blocks is unspecified.
-    pub fn non_finalized_blocks(&'_ self) -> impl Iterator<Item = header::HeaderRef<'_>> + '_ {
-        self.chain.iter()
+    /// The returned items are guaranteed to be in an order in which the parents are found before
+    /// their children.
+    pub fn non_finalized_blocks_ancestry_order(
+        &'_ self,
+    ) -> impl Iterator<Item = header::HeaderRef<'_>> + '_ {
+        self.chain.iter_ancestry_order()
     }
 
     /// Inform the [`AllForksSync`] of a new potential source of blocks.
@@ -398,25 +417,40 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         self.inner.blocks.source_user_data_mut(source_id)
     }
 
+    /// Returns the number of ongoing requests that concern this source.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
+    pub fn source_num_ongoing_requests(&self, source_id: SourceId) -> usize {
+        self.inner.blocks.source_num_ongoing_requests(source_id)
+    }
+
     /// Returns the details of a request to start towards a source.
     ///
     /// This method doesn't modify the state machine in any way. [`AllForksSync::add_request`]
     /// must be called in order for the request to actually be marked as started.
-    pub fn desired_requests(&'_ self) -> impl Iterator<Item = (SourceId, RequestParams)> + '_ {
+    pub fn desired_requests(
+        &'_ self,
+    ) -> impl Iterator<Item = (SourceId, &'_ TSrc, RequestParams)> + '_ {
         // TODO: need to periodically query for justifications of non-finalized blocks that change GrandPa authorities
-
-        // TODO: allow multiple requests towards the same source?
 
         self.inner
             .blocks
             .desired_requests()
-            .filter(|rq| rq.source_num_existing_requests == 0)
             .filter(move |rq| {
                 !self
                     .chain
                     .contains_non_finalized_block(&rq.request_params.first_block_hash)
             })
-            .map(|rq| (rq.source_id, rq.request_params))
+            .map(move |rq| {
+                (
+                    rq.source_id,
+                    self.inner.blocks.source_user_data(rq.source_id),
+                    rq.request_params,
+                )
+            })
     }
 
     /// Inserts a new request in the data structure.
@@ -470,7 +504,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             impl Iterator<Item = RequestSuccessBlock<impl AsRef<[u8]>, impl AsRef<[u8]>>>,
             (),
         >,
-    ) -> AncestrySearchResponseOutcome {
+    ) -> (TRq, AncestrySearchResponseOutcome) {
         // Sets the `occupation` of `source_id` back to `AllSync`.
         let (
             pending_blocks::RequestParams {
@@ -479,14 +513,14 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 ..
             },
             source_id,
-            _, // TODO: unused
+            request_user_data,
         ) = self.inner.blocks.finish_request(request_id);
 
         // The body of this function mostly consists in verifying that the received answer is
         // correct.
         // TODO: shouldn't that be done in the networking? ^
 
-        // Set to true below if any block is inserted in `disjoint_headers`.
+        // Set to true below if any block at all have been received.
         let mut any_progress = false;
 
         // The next block in the list of headers should have a hash and height equal to this one.
@@ -533,7 +567,9 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 false,
             ) {
                 HeaderFromSourceOutcome::HeaderVerify => {
-                    return AncestrySearchResponseOutcome::Verify;
+                    // Note: we should normally set `any_progress` to `true` here, but this is
+                    // pointless since we return from the function.
+                    return (request_user_data, AncestrySearchResponseOutcome::Verify);
                 }
                 HeaderFromSourceOutcome::TooOld { .. } => {
                     // Block is below the finalized block number.
@@ -541,6 +577,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     // number. `TooOld` can happen if the source is misbehaving, but also if the
                     // finalized block has been updated between the moment the request was emitted
                     // and the moment the response is received.
+                    any_progress = true;
                     debug_assert_eq!(index_in_response, 0);
                     break;
                 }
@@ -550,16 +587,21 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     // on the finalized chain. It is possible that the finalized block has been
                     // updated between the moment the request was emitted and the moment the
                     // response is received.
-                    return AncestrySearchResponseOutcome::NotFinalizedChain {
+                    let outcome = AncestrySearchResponseOutcome::NotFinalizedChain {
                         discarded_unverified_block_headers: Vec::new(), // TODO:
                     };
+                    return (request_user_data, outcome);
                 }
                 HeaderFromSourceOutcome::AlreadyInChain => {
                     // Block is already in chain. Can happen if a different response or
                     // announcement has arrived and been processed between the moment the request
                     // was emitted and the moment the response is received.
+                    //
+                    // Note: we should normally set `any_progress` to `true` here, but this is
+                    // pointless since we return from the function.
                     debug_assert_eq!(index_in_response, 0);
-                    return AncestrySearchResponseOutcome::AllAlreadyInChain;
+                    let outcome = AncestrySearchResponseOutcome::AllAlreadyInChain;
+                    return (request_user_data, outcome);
                 }
                 HeaderFromSourceOutcome::Disjoint => {
                     // Block of unknown ancestry. Continue looping.
@@ -571,20 +613,23 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             }
         }
 
-        // TODO: restore
-        /*// If this is reached, then the ancestry search was inconclusive. Only disjoint blocks
-        // have been received.
+        // If this is reached, then the ancestry search was inconclusive. None of the blocks the
+        // source has sent back were useful.
         if !any_progress {
-            // TODO: distinguish errors from empty requests?
-            // Avoid sending the same request to the same source over and over again.
-            self.inner
-                .blocks
-                .source_mut(source_id)
-                .unwrap()
-                .remove_known_block(requested_block_height, requested_block_hash);
-        }*/
+            // Assume that the source doesn't know this block, as it is apparently unable to
+            // serve it anyway. This avoids sending the same request to the same source over and
+            // over again.
+            self.inner.blocks.remove_known_block(
+                source_id,
+                requested_block_height,
+                &requested_block_hash,
+            );
+        }
 
-        AncestrySearchResponseOutcome::Inconclusive
+        (
+            request_user_data,
+            AncestrySearchResponseOutcome::Inconclusive,
+        )
     }
 
     /// Update the source with a newly-announced block.
@@ -664,7 +709,14 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// This method takes ownership of the [`AllForksSync`] and starts a verification
     /// process. The [`AllForksSync`] is yielded back at the end of this process.
-    pub fn process_one(self) -> ProcessOne<TBl, TRq, TSrc> {
+    pub fn process_one(mut self) -> ProcessOne<TBl, TRq, TSrc> {
+        if let Some(justification_to_verify) = self.inner.pending_justification_verify.take() {
+            return ProcessOne::JustificationVerify(JustificationVerify {
+                parent: self,
+                justification_to_verify,
+            });
+        }
+
         let block = self.inner.blocks.unverified_leaves().find(|block| {
             block.parent_block_hash == self.chain.finalized_block_hash()
                 || self
@@ -1054,29 +1106,15 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
             None
         };
 
-        let justification_verification = if let Some(justification) = justification {
-            match self.parent.chain.verify_justification(&justification) {
-                Ok(success) => {
-                    let finalized = success
-                        .apply()
-                        .map(|b| (b.header, b.user_data))
-                        .collect::<Vec<_>>();
-                    self.parent
-                        .inner
-                        .blocks
-                        .set_finalized_block_height(finalized.last().unwrap().0.number);
-                    JustificationVerification::NewFinalized(finalized)
-                }
-                Err(err) => JustificationVerification::JustificationVerificationError(err),
-            }
-        } else {
-            JustificationVerification::NoJustification
-        };
+        // Store the justification in `pending_justification_verify`.
+        // A `HeaderVerify` can only exist if `pending_justification_verify` is `None`, meaning
+        // that there's no risk of accidental overwrite.
+        debug_assert!(self.parent.inner.pending_justification_verify.is_none());
+        self.parent.inner.pending_justification_verify = justification;
 
         match result {
             Ok(is_new_best) => HeaderVerifyOutcome::Success {
                 is_new_best,
-                justification_verification,
                 sync: self.parent,
             },
             Err((error, user_data)) => HeaderVerifyOutcome::Error {
@@ -1085,6 +1123,55 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
                 user_data,
             },
         }
+    }
+
+    /// Do not actually proceed with the verification.
+    pub fn cancel(self) -> AllForksSync<TBl, TRq, TSrc> {
+        self.parent
+    }
+}
+
+/// Justification verification to be performed.
+///
+/// Internally holds the [`AllForksSync`].
+pub struct JustificationVerify<TBl, TRq, TSrc> {
+    parent: AllForksSync<TBl, TRq, TSrc>,
+    /// Justification that can be verified.
+    justification_to_verify: Vec<u8>,
+}
+
+impl<TBl, TRq, TSrc> JustificationVerify<TBl, TRq, TSrc> {
+    /// Perform the verification.
+    pub fn perform(
+        mut self,
+    ) -> (
+        AllForksSync<TBl, TRq, TSrc>,
+        JustificationVerifyOutcome<TBl>,
+    ) {
+        let outcome = match self
+            .parent
+            .chain
+            .verify_justification(&self.justification_to_verify)
+        {
+            Ok(success) => {
+                let finalized_blocks_iter = success.apply();
+                let updates_best_block = finalized_blocks_iter.updates_best_block();
+                let finalized_blocks = finalized_blocks_iter
+                    .map(|b| (b.header, b.user_data))
+                    .collect::<Vec<_>>();
+                self.parent
+                    .inner
+                    .blocks
+                    .set_finalized_block_height(finalized_blocks.last().unwrap().0.number);
+                JustificationVerifyOutcome::NewFinalized {
+                    finalized_blocks,
+                    updates_best_block,
+                }
+            }
+            Err(err) => JustificationVerifyOutcome::Error(err),
+        };
+
+        (self.parent, outcome)
     }
 
     /// Do not actually proceed with the verification.
@@ -1107,6 +1194,9 @@ pub enum ProcessOne<TBl, TRq, TSrc> {
 
     /// A header is ready for verification.
     HeaderVerify(HeaderVerify<TBl, TRq, TSrc>),
+
+    /// A justification is ready for verification.
+    JustificationVerify(JustificationVerify<TBl, TRq, TSrc>),
 }
 
 /// Outcome of calling [`HeaderVerify::perform`].
@@ -1115,9 +1205,6 @@ pub enum HeaderVerifyOutcome<TBl, TRq, TSrc> {
     Success {
         /// True if the newly-verified block is considered the new best block.
         is_new_best: bool,
-        /// If a justification was attached to this block, it has also been verified. Contains the
-        /// outcome.
-        justification_verification: JustificationVerification<TBl>,
         /// State machine yielded back. Use to continue the processing.
         sync: AllForksSync<TBl, TRq, TSrc>,
     },
@@ -1142,22 +1229,22 @@ pub enum HeaderVerifyError {
     VerificationFailed(verify::header_only::Error),
 }
 
-/// Information about the verification of a justification that was stored for this block.
+/// Information about the outcome of verifying a justification.
 #[derive(Debug)]
-pub enum JustificationVerification<TBl> {
-    /// No information about finality
-    NoJustification,
-    /// A justification was available for the newly-verified block, but it failed to verify.
-    JustificationVerificationError(blocks_tree::JustificationVerifyError),
+pub enum JustificationVerifyOutcome<TBl> {
     /// Justification verification successful. The block and all its ancestors is now finalized.
-    NewFinalized(Vec<(header::Header, TBl)>),
-}
-
-impl<TBl> JustificationVerification<TBl> {
-    /// Returns `true` for [`JustificationVerification::NewFinalized`].
-    pub fn is_success(&self) -> bool {
-        matches!(self, JustificationVerification::NewFinalized(_))
-    }
+    NewFinalized {
+        /// List of finalized blocks, in decreasing block number.
+        // TODO: use `Vec<u8>` instead of `Header`?
+        finalized_blocks: Vec<(header::Header, TBl)>,
+        // TODO: missing pruned blocks
+        /// If `true`, this operation modifies the best block of the non-finalized chain.
+        /// This can happen if the previous best block isn't a descendant of the now finalized
+        /// block.
+        updates_best_block: bool,
+    },
+    /// Problem while verifying justification.
+    Error(blocks_tree::JustificationVerifyError),
 }
 
 /// State of the processing of blocks.

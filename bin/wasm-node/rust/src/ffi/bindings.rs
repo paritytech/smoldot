@@ -57,8 +57,10 @@
 
 #[link(wasm_import_module = "smoldot")]
 extern "C" {
-    /// Must throw an exception. The message is a UTF-8 string found in the memory of the
-    /// WebAssembly at offset `message_ptr` and with length `message_len`.
+    /// Must stop the execution immediately. The message is a UTF-8 string found in the memory of
+    /// the WebAssembly at offset `message_ptr` and with length `message_len`.
+    ///
+    /// > **Note**: This function is typically implemented using `throw`.
     ///
     /// After this function has been called, no further Wasm functions must be called again on
     /// this Wasm virtual machine. Explanation below.
@@ -72,16 +74,17 @@ extern "C" {
     /// the fact that `std::panic::catch_unwind` will catch this unwinding and let them perform
     /// some additional clean-ups.
     ///
-    /// Calling `throw` is neither `abort`, because the JavaScript could call into the Wasm again
-    /// later, nor `unwind`, because it isn't caught by `std::panic::catch_unwind`. By being
-    /// neither of the two, it breaks the assumptions that some Rust codes might rely on for
-    /// either correctness or safety.
-    /// In order to solve this problem, we enforce that `throw` must behave like `abort`, and
+    /// This function is typically implemented using `throw`. However, "just" throwing a JavaScript
+    /// exception from within the implementation of this function is neither `abort`, because the
+    /// JavaScript could call into the Wasm again later, nor `unwind`, because it isn't caught by
+    /// `std::panic::catch_unwind`. By being neither of the two, it breaks the assumptions that
+    /// some Rust codes might rely on for either correctness or safety.
+    /// In order to solve this problem, we enforce that `panic` must behave like `abort`, and
     /// forbid calling into the Wasm virtual machine again.
     ///
-    /// Beyond the `throw` function itself, any other FFI function that throws must similarly
+    /// Beyond the `panic` function itself, any other FFI function that throws must similarly
     /// behave like `abort` and prevent any further execution.
-    pub fn throw(message_ptr: u32, message_len: u32);
+    pub fn panic(message_ptr: u32, message_len: u32);
 
     /// Client is emitting a response to a previous JSON-RPC request sent using [`json_rpc_send`].
     /// Also used to send subscriptions notifications.
@@ -105,7 +108,7 @@ extern "C" {
     ///
     /// This is typically implemented by calling `Date.now()`.
     ///
-    /// See https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now
+    /// See <https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now>
     ///
     /// > **Note**: Ideally this function isn't needed. The wasi target supports clocks through
     /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses u64s, and
@@ -120,7 +123,7 @@ extern "C" {
     /// value can decrease if the user adjusts their machine's clock, but rather with
     /// `Performance.now()` or similar.
     ///
-    /// See https://developer.mozilla.org/fr/docs/Web/API/Performance/now
+    /// See <https://developer.mozilla.org/fr/docs/Web/API/Performance/now>
     ///
     /// > **Note**: Ideally this function isn't needed. The wasi target supports clocks through
     /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses u64s, and
@@ -152,11 +155,13 @@ extern "C" {
     /// >           keep in mind that exceptions should be caught and turned into an error code.
     ///
     /// The `error_ptr_ptr` parameter should be treated as a pointer to two consecutive
-    /// little-endian 32-bits unsigned numbers. If an error happened, call [`alloc`] to allocate
-    /// memory, write a UTF-8 error message in that given location, then write that location at
-    /// the location indicated by `error_ptr_ptr` and the length of that string at the location
-    /// `error_ptr_ptr + 4`. The buffer is then de-allocated by the client. If no error happens,
-    /// nothing should be written to `error_ptr_ptr`.
+    /// little-endian 32-bits unsigned numbers and a 8-bits unsigned number. If an error happened,
+    /// call [`alloc`] to allocate memory, write a UTF-8 error message in that given location,
+    /// then write that location at the location indicated by `error_ptr_ptr` and the length of
+    /// that string at the location `error_ptr_ptr + 4`. The buffer will be de-allocated by the
+    /// client. Then, write at location `error_ptr_ptr + 8` a `1` if the error is caused by the
+    /// address being forbidden or unsupported, and `0` otherwise. If no error happens, nothing
+    /// should be written to `error_ptr_ptr`.
     ///
     /// At any time, a connection can be in one of the three following states:
     ///
@@ -301,17 +306,17 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
     super::chain_error_ptr(chain_id)
 }
 
-/// Emit a JSON-RPC request towards the given chain previously added using [`add_chain`].
+/// Emit a JSON-RPC request or notification towards the given chain previously added using
+/// [`add_chain`].
 ///
-/// A buffer containing a UTF-8 JSON-RPC request must be passed as parameter. The format of the
-/// JSON-RPC requests is described in
-/// [the standard JSON-RPC 2.0 specification](https://www.jsonrpc.org/specification). A pub-sub
-/// extension is supported.
+/// A buffer containing a UTF-8 JSON-RPC request or notification must be passed as parameter. The
+/// format of the JSON-RPC requests and notifications is described in
+/// [the standard JSON-RPC 2.0 specification](https://www.jsonrpc.org/specification).
 ///
 /// The buffer passed as parameter **must** have been allocated with [`alloc`]. It is freed when
 /// this function is called.
 ///
-/// Responses and subscriptions notifications are sent back using [`json_rpc_respond`].
+/// Responses and notifications are sent back using [`json_rpc_respond`].
 #[no_mangle]
 pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) {
     super::json_rpc_send(text_ptr, text_len, chain_id)

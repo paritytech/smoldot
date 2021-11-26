@@ -84,6 +84,8 @@
 //! mostly depends on the number of modifications that are performed on it, and only a bit on the
 //! size of the trie.
 
+use crate::util;
+
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::{iter, mem};
 
@@ -203,6 +205,70 @@ pub fn empty_trie_merkle_value() -> [u8; 32] {
             }
             calculate_root::RootMerkleValueCalculation::StorageValue(val) => {
                 calculation = val.inject(None::<&[u8]>);
+            }
+        }
+    }
+}
+
+/// Returns the Merkle value of a trie containing the entries passed as parameter. The entries
+/// passed as parameter are `(key, value)`.
+///
+/// The complexity of this method is `O(n²)` where `n` is the number of entries.
+// TODO: improve complexity?
+pub fn trie_root(entries: &[(impl AsRef<[u8]>, impl AsRef<[u8]>)]) -> [u8; 32] {
+    let mut calculation = calculate_root::root_merkle_value(None);
+
+    loop {
+        match calculation {
+            calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => {
+                return hash;
+            }
+            calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
+                calculation =
+                    keys.inject(entries.iter().map(|(k, _)| k.as_ref().into_iter().copied()));
+            }
+            calculate_root::RootMerkleValueCalculation::StorageValue(value) => {
+                let result = entries
+                    .iter()
+                    .find(|(k, _)| k.as_ref().into_iter().copied().eq(value.key()))
+                    .map(|(_, v)| v);
+                calculation = value.inject(result);
+            }
+        }
+    }
+}
+
+/// Returns the Merkle value of a trie containing the entries passed as parameter, where the keys
+/// are the SCALE-codec-encoded indices of these entries.
+///
+/// > **Note**: In isolation, this function seems highly specific. In practice, it is notably used
+/// >           in order to build the trie root of the list of extrinsics of a block.
+pub fn ordered_root(entries: &[impl AsRef<[u8]>]) -> [u8; 32] {
+    const USIZE_COMPACT_BYTES: usize = 1 + (usize::BITS as usize) / 8;
+
+    let mut calculation = calculate_root::root_merkle_value(None);
+
+    loop {
+        match calculation {
+            calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => {
+                return hash;
+            }
+            calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
+                calculation = keys.inject((0..entries.len()).map(|num| {
+                    arrayvec::ArrayVec::<u8, USIZE_COMPACT_BYTES>::try_from(
+                        util::encode_scale_compact_usize(num).as_ref(),
+                    )
+                    .unwrap()
+                    .into_iter()
+                }));
+            }
+            calculate_root::RootMerkleValueCalculation::StorageValue(value) => {
+                let key = value
+                    .key()
+                    .collect::<arrayvec::ArrayVec<u8, USIZE_COMPACT_BYTES>>();
+                let (_, key) =
+                    util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(&key).unwrap();
+                calculation = value.inject(entries.get(key));
             }
         }
     }

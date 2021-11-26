@@ -136,7 +136,10 @@ use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
 pub use super::peer_id::PeerId;
 pub use super::read_write::ReadWrite;
-pub use established::{ConfigRequestResponse, ConfigRequestResponseIn};
+pub use established::{
+    ConfigRequestResponse, ConfigRequestResponseIn, InboundError, NotificationsInClosedErr,
+    NotificationsOutErr, SubstreamId,
+};
 pub use multiaddr::Multiaddr;
 #[doc(inline)]
 pub use parity_multiaddr as multiaddr;
@@ -152,6 +155,10 @@ pub struct Config {
     pub notification_protocols: Vec<NotificationProtocolConfig>,
 
     pub request_response_protocols: Vec<ConfigRequestResponse>,
+
+    /// Amount of time after which a connection handshake is considered to have taken too long
+    /// and must be aborted.
+    pub handshake_timeout: Duration,
 
     /// Name of the ping protocol on the network.
     pub ping_protocol: String,
@@ -198,6 +205,8 @@ pub struct NotificationProtocolConfig {
 }
 
 /// Identifier of a connection spawned by the [`Network`].
+//
+// Identifiers are never reused.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConnectionId(u64);
 
@@ -216,6 +225,9 @@ impl ConnectionId {
 pub struct Network<TConn, TNow> {
     /// Fields behind a mutex.
     guarded: Mutex<Guarded<TConn, TNow>>,
+
+    /// See [`Config::handshake_timeout`].
+    handshake_timeout: Duration,
 
     /// See [`Config::noise_key`].
     noise_key: NoiseKey,
@@ -256,12 +268,11 @@ struct Guarded<TConn, TNow> {
     /// List of all connections.
     connections: slab::Slab<Arc<Mutex<Connection<TConn, TNow>>>>,
 
-    /// Container that holds tuples of `(connection_index, overlay_index, direction)`.
+    /// Container that holds tuples of `(connection_index, direction, substream_id)`.
     ///
     /// While the list of open substreams is also known to the [`Connection`] struct, it is
     /// duplicated here in order to avoid race conditions.
-    connection_overlays:
-        BTreeMap<(usize, usize, SubstreamDirection), (established::SubstreamId, SubstreamState)>,
+    connection_overlays: BTreeMap<(usize, SubstreamDirection, SubstreamId), SubstreamState>,
 
     /// Generator for randomness seeds given to the established connections.
     randomness_seeds: ChaCha20Rng,
@@ -292,18 +303,10 @@ impl SubstreamDirection {
 /// >           hashmap.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 enum SubstreamState {
-    Pending,
+    /// Substream hasn't been accepted or refused yet. Contains the requested overlay network
+    /// index.
+    Pending(usize),
     Open,
-}
-
-impl SubstreamState {
-    fn min_value() -> Self {
-        SubstreamState::Pending
-    }
-
-    fn max_value() -> Self {
-        SubstreamState::Open
-    }
 }
 
 impl<TConn, TNow> Network<TConn, TNow>
@@ -322,6 +325,7 @@ where
             .collect::<Arc<[_]>>();
 
         Network {
+            handshake_timeout: config.handshake_timeout,
             noise_key: config.noise_key,
             notification_protocols,
             request_response_protocols: config.request_response_protocols,
@@ -343,9 +347,17 @@ where
 
     /// Adds a new connection to the collection.
     ///
+    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
+    /// to determine when the handshake timeout expires.
+    ///
     /// `is_initiator` must be `true` if the connection has been initiated locally, or `false` if
     /// it has been initiated by the remote.
-    pub async fn insert(&self, is_initiator: bool, user_data: TConn) -> ConnectionId {
+    pub async fn insert(
+        &self,
+        when_connected: TNow,
+        is_initiator: bool,
+        user_data: TConn,
+    ) -> ConnectionId {
         let mut guarded = self.guarded.lock().await;
         let guarded = &mut *guarded;
 
@@ -356,8 +368,10 @@ where
             connection: ConnectionInner::Handshake {
                 handshake: handshake::HealthyHandshake::new(is_initiator),
                 randomness_seed: guarded.randomness_seeds.gen(),
+                timeout: when_connected + self.handshake_timeout,
             },
             id: connection_id,
+            shutting_down: false,
             pending_event: None,
             waker: None,
             user_data,
@@ -369,6 +383,34 @@ where
         debug_assert!(_previous_value.is_none());
 
         connection_id
+    }
+
+    /// Switches the connection to a state where it will shut down soon.
+    ///
+    /// Has no effect if this connection was already shutting down.
+    ///
+    /// Has no effect if the connection id was invalid, in order to avoid a potential race
+    /// condition with the [`Event::Shutdown`] effect.
+    // TODO: reconsider this "no effect if connection invalid"
+    pub async fn start_shutdown(&self, connection_id: ConnectionId) {
+        let connection = {
+            let mut guarded = self.guarded.lock().await;
+            let guarded = &mut *guarded;
+
+            let connection_index = match guarded.connections_by_id.get(&connection_id) {
+                Some(idx) => *idx,
+                None => return,
+            };
+
+            guarded.connections.get(connection_index).unwrap().clone()
+        };
+
+        {
+            let mut connection = connection.lock().await;
+            connection.shutting_down = true;
+        }
+
+        // TODO: return something?
     }
 
     /// Returns the number of connections in the collection.
@@ -492,7 +534,7 @@ where
         overlay_network_index: usize,
         now: TNow,
         handshake: impl Into<Vec<u8>>,
-    ) -> Result<(), OpenNotificationsSubstreamError> {
+    ) -> Result<SubstreamId, OpenNotificationsSubstreamError> {
         // Because the user can cancel the future at any `await` point, all the asynchronous
         // operations are performed ahead of any state modification.
 
@@ -527,16 +569,6 @@ where
         connection_lock.propagate_pending_event(&mut guarded).await;
         debug_assert!(connection_lock.pending_event.is_none());
 
-        // Verify that the connection doesn't already already have a substream with the same
-        // overlay network index.
-        if guarded.connection_overlays.contains_key(&(
-            connection_index,
-            overlay_network_index,
-            SubstreamDirection::Out,
-        )) {
-            return Err(OpenNotificationsSubstreamError::DuplicateSubstream);
-        }
-
         // Update the state of the inner connection state machine with the new substream.
         let substream_id = match &mut connection_lock.connection {
             ConnectionInner::Established(established) => established.open_notifications_substream(
@@ -548,7 +580,7 @@ where
             ConnectionInner::Handshake { .. } => {
                 return Err(OpenNotificationsSubstreamError::NotEstablished)
             }
-            ConnectionInner::Errored(_) | ConnectionInner::Dead => {
+            ConnectionInner::PendingErrorReport { .. } | ConnectionInner::Dead => {
                 return Err(OpenNotificationsSubstreamError::BadConnection)
             }
             ConnectionInner::Poisoned => unreachable!(),
@@ -563,16 +595,12 @@ where
 
         // Update the state of `guarded`.
         let _prev_value = guarded.connection_overlays.insert(
-            (
-                connection_index,
-                overlay_network_index,
-                SubstreamDirection::Out,
-            ),
-            (substream_id, SubstreamState::Pending),
+            (connection_index, SubstreamDirection::Out, substream_id),
+            SubstreamState::Pending(overlay_network_index),
         );
         debug_assert!(_prev_value.is_none());
 
-        Ok(())
+        Ok(substream_id)
     }
 
     /// Start closing a previously-open notifications substream, or cancels opening a
@@ -581,11 +609,11 @@ where
     /// Calling this method will emit a [`Event::NotificationsOutClose`] if there was indeed a
     /// notifications substream being open or already open.
     ///
-    /// The interaction of this method with [`Event::NotificationsOutAccept`] and
+    /// The interaction of this method with [`Event::NotificationsOutResult`] and
     /// [`Event::NotificationsOutClose`] is non-trivial.
     ///
-    /// It is possible for a [`Event::NotificationsOutAccept`] to be emitted *after* this method
-    /// has been called. In any situation, if a [`Event::NotificationsOutAccept`] regarding this
+    /// It is possible for a [`Event::NotificationsOutResult`] to be emitted *after* this method
+    /// has been called. In any situation, if a [`Event::NotificationsOutResult`] regarding this
     /// notifications protocol is emitted in the past, then a corresponding
     /// [`Event::NotificationsOutClose`] will always be emitted.
     ///
@@ -596,7 +624,7 @@ where
     pub async fn close_notifications_substream(
         &self,
         connection_id: ConnectionId,
-        overlay_network_index: usize,
+        substream_id: SubstreamId,
     ) {
         // Because the user can cancel the future at any `await` point, all the asynchronous
         // operations are performed ahead of any state modification.
@@ -633,30 +661,30 @@ where
         debug_assert!(connection_lock.pending_event.is_none());
 
         // Verify that there is indeed a substream being opened or already open.
-        let (substream_id, substream_state) = match guarded.connection_overlays.remove(&(
-            connection_index,
-            overlay_network_index,
-            SubstreamDirection::Out,
-        )) {
-            Some(v) => v,
-            None => return,
-        };
+        if guarded
+            .connection_overlays
+            .remove(&(connection_index, SubstreamDirection::Out, substream_id))
+            .is_none()
+        {
+            return;
+        }
 
         // Update the state of the inner connection state machine.
         match &mut connection_lock.connection {
             ConnectionInner::Established(established) => {
-                established.close_notifications_substream(substream_id)
-            }
-            ConnectionInner::Handshake { .. }
-            | ConnectionInner::Errored(_)
-            | ConnectionInner::Dead
-            | ConnectionInner::Poisoned => unreachable!(),
-        };
+                established.close_notifications_substream(substream_id);
 
-        // Wake up the task dedicated to this connection in order for the substream to be
-        // effectively closed.
-        if let Some(waker) = connection_lock.waker.take() {
-            let _ = waker.send(());
+                // Wake up the task dedicated to this connection in order for the substream to be
+                // effectively closed.
+                if let Some(waker) = connection_lock.waker.take() {
+                    let _ = waker.send(());
+                }
+            }
+            ConnectionInner::PendingErrorReport { .. } | ConnectionInner::Dead => {
+                // It is possible that the connection has encountered an error or has been shut
+                // down but is still in the state of `Guarded`.
+            }
+            ConnectionInner::Handshake { .. } | ConnectionInner::Poisoned => unreachable!(),
         }
     }
 
@@ -690,12 +718,12 @@ where
     pub async fn queue_notification(
         &self,
         connection: ConnectionId,
-        overlay_network_index: usize,
+        substream_id: SubstreamId,
         notification: impl Into<Vec<u8>>,
     ) -> Result<(), QueueNotificationError> {
         // Find which connection and substream to use to send the notification.
         // Only existing, established, substreams will be used.
-        let (connection_arc, substream_id) = {
+        let connection_arc = {
             // TODO: ideally don't lock
             let guarded = self.guarded.lock().await;
 
@@ -705,22 +733,16 @@ where
                 .ok_or(QueueNotificationError::InvalidConnection)?;
 
             // Find a substream on this connection.
-            let (substream_id, state) = *guarded
+            let state = *guarded
                 .connection_overlays
-                .get(&(
-                    connection_index,
-                    overlay_network_index,
-                    SubstreamDirection::Out,
-                ))
+                .get(&(connection_index, SubstreamDirection::Out, substream_id))
                 .ok_or(QueueNotificationError::NoSubstream)?;
 
             if !matches!(state, SubstreamState::Open) {
                 return Err(QueueNotificationError::NoSubstream);
             }
 
-            let connection_arc = guarded.connections[connection_index].clone();
-
-            (connection_arc, substream_id)
+            guarded.connections[connection_index].clone()
         };
 
         // Lock to the connection. This waits for any other call to `request`,
@@ -749,34 +771,28 @@ where
         Ok(())
     }
 
-    // TODO: user could be tricked into accepting the wrong inbound notification request at the moment; prevent remote from opening more substreams as long as the current inbound hasn't been either accepted or refused
-    // TODO: return Result indicating whether still up to date
+    /// Accepts a request for an inbound notifications substream reported by an
+    /// [`Event::NotificationsInOpen`].
+    ///
+    /// Returns `Ok` if the substream has been successfully accepted (and thus opened), or `Err`
+    /// if the request was obsolete, for example because the connection has been closed.
     pub async fn accept_notifications_in(
         &self,
         connection: ConnectionId,
-        overlay_network_index: usize,
+        substream_id: SubstreamId,
         handshake: Vec<u8>,
-    ) {
+    ) -> Result<(), ()> {
         // Find the connection and substream ID corresponding to the parameters.
-        let (connection_arc, substream_id): (Arc<Mutex<Connection<_, _>>>, _) = {
+        let connection_arc: Arc<Mutex<Connection<_, _>>> = {
             let guarded = self.guarded.lock().await;
 
             // TODO: we use defensive programming here because the concurrency model is still blurry
             let connection_index = match guarded.connections_by_id.get(&connection) {
                 Some(c) => *c,
-                None => return,
+                None => return Err(()),
             };
 
-            let substream_id = match guarded.connection_overlays.get(&(
-                connection_index,
-                overlay_network_index,
-                SubstreamDirection::In,
-            )) {
-                Some((id, SubstreamState::Pending)) => *id,
-                _ => return, // TODO: too defensive
-            };
-
-            (guarded.connections[connection_index].clone(), substream_id)
+            guarded.connections[connection_index].clone()
         };
 
         let mut connection_lock = connection_arc.lock().await;
@@ -793,30 +809,23 @@ where
         // Checks whether the substream is still valid.
         let connection_index = match guarded.connections_by_id.get(&connection) {
             Some(c) => *c,
-            None => return,
-        };
-        // TODO: can it be a different substream?
-        match guarded.connection_overlays.remove(&(
-            connection_index,
-            overlay_network_index,
-            SubstreamDirection::In,
-        )) {
-            Some((id, SubstreamState::Pending)) => id,
-            _ => return, // TODO: too defensive
+            None => return Err(()),
         };
 
-        if let Some(connection) = connection_lock.connection.as_established() {
-            // TODO: must check if substream_id is still valid
-            connection.accept_in_notifications_substream(
-                substream_id,
-                handshake,
-                overlay_network_index,
-            );
-        } else {
-            // The connection no longer exists. This state mismatch is a normal situation. See
-            // the implementations notes at the top of the file for more information.
-            return;
-        }
+        let overlay_network_index = match guarded.connection_overlays.remove(&(
+            connection_index,
+            SubstreamDirection::In,
+            substream_id,
+        )) {
+            Some(SubstreamState::Pending(v)) => v,
+            _ => return Err(()),
+        };
+
+        connection_lock
+            .connection
+            .as_established()
+            .unwrap()
+            .accept_in_notifications_substream(substream_id, handshake, overlay_network_index);
 
         // Wake up the connection in order for the substream confirmation to be sent back to the
         // remote.
@@ -828,14 +837,75 @@ where
         // `Guarded`. If this was instead done through events, the user could observe that the
         // substream hasn't been confirmed yet for as long as the event hasn't been delivered.
         let _previous_value = guarded.connection_overlays.insert(
-            (
-                connection_index,
-                overlay_network_index,
-                SubstreamDirection::In,
-            ),
-            (substream_id, SubstreamState::Open),
+            (connection_index, SubstreamDirection::In, substream_id),
+            SubstreamState::Open,
         );
         debug_assert!(_previous_value.is_none());
+
+        Ok(())
+    }
+
+    /// Rejects a request for an inbound notifications substream reported by an
+    /// [`Event::NotificationsInOpen`].
+    ///
+    /// Returns `Ok` if the substream has been successfully refused, or `Err` if the request was
+    /// obsolete, for example because the connection has been closed.
+    pub async fn reject_notifications_in(
+        &self,
+        connection: ConnectionId,
+        substream_id: SubstreamId,
+    ) -> Result<(), ()> {
+        // Find the connection and substream ID corresponding to the parameters.
+        let connection_arc: Arc<Mutex<Connection<_, _>>> = {
+            let guarded = self.guarded.lock().await;
+
+            // TODO: we use defensive programming here because the concurrency model is still blurry
+            let connection_index = match guarded.connections_by_id.get(&connection) {
+                Some(c) => *c,
+                None => return Err(()),
+            };
+
+            guarded.connections[connection_index].clone()
+        };
+
+        let mut connection_lock = connection_arc.lock().await;
+
+        // Because the user can cancel the future at any `await` point, all the asynchronous
+        // operations are performed ahead of any state modification.
+        let mut guarded = self.guarded.lock().await;
+
+        // In order to guarantee a proper ordering of events, any pending event must first be
+        // delivered.
+        connection_lock.propagate_pending_event(&mut guarded).await;
+        debug_assert!(connection_lock.pending_event.is_none());
+
+        // Checks whether the substream is still valid.
+        let connection_index = match guarded.connections_by_id.get(&connection) {
+            Some(c) => *c,
+            None => return Err(()),
+        };
+
+        match guarded.connection_overlays.remove(&(
+            connection_index,
+            SubstreamDirection::In,
+            substream_id,
+        )) {
+            Some(SubstreamState::Pending(_)) => {}
+            _ => return Err(()),
+        };
+
+        connection_lock
+            .connection
+            .as_established()
+            .unwrap()
+            .reject_in_notifications_substream(substream_id);
+
+        // Wake up the connection in order for the rejection to be sent back to the remote.
+        if let Some(waker) = connection_lock.waker.take() {
+            let _ = waker.send(());
+        }
+
+        Ok(())
     }
 
     /// Responds to an incoming request. Must be called in response to a [`Event::RequestIn`].
@@ -847,7 +917,7 @@ where
     pub async fn respond_in_request(
         &self,
         id: ConnectionId,
-        substream_id: established::SubstreamId,
+        substream_id: SubstreamId,
         response: Result<Vec<u8>, ()>,
     ) {
         // Find the connection corresponding to the parameter.
@@ -906,22 +976,32 @@ where
         events_rx.next().await.unwrap()
     }
 
+    /// Reads data coming from the connection, updates the internal state machine, and writes data
+    /// destined to the connection through the [`ReadWrite`].
+    ///
+    /// If an error is returned, the connection should be destroyed altogether and the
+    /// [`ConnectionId`] is no longer valid. You should continue calling this function until
+    /// an error is returned, even if the [`ReadWrite`] indicates a full shutdown.
     ///
     /// # Panic
     ///
-    /// Panics if `connection_id` isn't a valid connection.
+    /// Panics if the [`ConnectionId`] isn't a valid connection. Once this function returns an
+    /// error, is no longer valid to call this function with this [`ConnectionId`].
     ///
     pub async fn read_write(
         &self,
         connection_id: ConnectionId,
         read_write: &'_ mut ReadWrite<'_, TNow>,
     ) -> Result<(), ConnectionError> {
-        let connection_arc: Arc<Mutex<Connection<_, _>>> = {
+        let (connection_index, connection_arc): (_, Arc<Mutex<Connection<_, _>>>) = {
             // TODO: ideally we wouldn't need to lock `guarded`, to reduce the possibility of lock contention
             let guarded = self.guarded.lock().await;
 
-            let connection_index = *guarded.connections_by_id.get(&connection_id).unwrap(); // TODO: don't unwrap?
-            guarded.connections[connection_index].clone()
+            let connection_index = *guarded.connections_by_id.get(&connection_id).unwrap();
+            (
+                connection_index,
+                guarded.connections[connection_index].clone(),
+            )
         };
 
         let mut connection_lock = connection_arc.lock().await;
@@ -931,25 +1011,116 @@ where
         read_write.wake_up_when(ConnectionReadyFuture(rx));
         connection_lock.waker = Some(tx);
 
-        // TODO: not great to have this exact block of code twice; also, should be a loop normally, but it's complicated because of having to advance buffers
-        if connection_lock.pending_event.is_some() {
-            let mut guarded = self.guarded.lock().await;
-            connection_lock.propagate_pending_event(&mut guarded).await;
-            debug_assert!(connection_lock.pending_event.is_none());
-        }
+        // The code below consists in checking the connection state, calling `read_write`, and
+        // checking the connection state again.
+        // Since the connection state check is the same twice, this is implemented using a `for`
+        // loop that loops twice and only calls `read_write` the first time.
+        for is_first in [true, false] {
+            // Check whether any event remains to be propagated to the API user.
+            if connection_lock.pending_event.is_some() {
+                let mut guarded = self.guarded.lock().await;
+                connection_lock.propagate_pending_event(&mut guarded).await;
+                debug_assert!(connection_lock.pending_event.is_none());
+            }
 
-        connection_lock.read_write(self, read_write)?;
+            // If the connection contains an error, remove it from the state of `guarded` and
+            // propagating this error.
+            // This is done as a separate step for future-cancellation-related reasons.
+            if matches!(
+                connection_lock.connection,
+                ConnectionInner::PendingErrorReport { .. }
+            ) {
+                let mut guarded = self.guarded.lock().await;
+                future::poll_fn(|cx| guarded.events_tx.poll_ready(cx))
+                    .await
+                    .unwrap();
 
-        if connection_lock.pending_event.is_some() {
-            let mut guarded = self.guarded.lock().await;
-            connection_lock.propagate_pending_event(&mut guarded).await;
-            debug_assert!(connection_lock.pending_event.is_none());
+                let substreams = guarded
+                    .connection_overlays
+                    .range(
+                        (
+                            connection_index,
+                            SubstreamDirection::min_value(),
+                            SubstreamId::min_value(),
+                        )
+                            ..=(
+                                connection_index,
+                                SubstreamDirection::max_value(),
+                                SubstreamId::max_value(),
+                            ),
+                    )
+                    .map(|(key, _)| *key)
+                    .collect::<Vec<_>>();
+
+                let out_notification_protocols_indices = Vec::with_capacity(substreams.len());
+                let in_notification_protocols_indices = Vec::with_capacity(substreams.len());
+
+                for (_, direction, substream_id) in substreams {
+                    let state = guarded
+                        .connection_overlays
+                        .remove(&(connection_index, direction, substream_id))
+                        .unwrap();
+
+                    match state {
+                        SubstreamState::Pending(_) => continue,
+                        SubstreamState::Open => {}
+                    };
+
+                    // TODO: this isn't working; find a solution
+                    /*if let Some(established) = established.as_mut() {
+                        let overlay_network_index = *established
+                            .notifications_substream_user_data_mut(substream_id)
+                            .unwrap();
+
+                        match direction {
+                            SubstreamDirection::In => {
+                                in_notification_protocols_indices
+                                    .push(overlay_network_index);
+                            }
+                            SubstreamDirection::Out => {
+                                out_notification_protocols_indices
+                                    .push(overlay_network_index);
+                            }
+                        }
+                    }*/
+                }
+
+                guarded
+                    .events_tx
+                    .try_send(Event::Shutdown {
+                        id: connection_lock.id,
+                        in_notification_protocols_indices,
+                        out_notification_protocols_indices,
+                        user_data: connection_lock.user_data.clone(),
+                    })
+                    .unwrap();
+
+                let _index = guarded.connections_by_id.remove(&connection_id);
+                debug_assert_eq!(_index, Some(connection_index));
+
+                guarded.connections.remove(connection_index);
+                match mem::replace(&mut connection_lock.connection, ConnectionInner::Dead) {
+                    ConnectionInner::PendingErrorReport { error } => {
+                        return Err(error);
+                    }
+                    _ => unreachable!(),
+                };
+            }
+
+            // As explained, we only call `read_write` the first time.
+            if is_first {
+                connection_lock.read_write(self, read_write);
+            }
         }
 
         Ok(())
     }
 
-    fn build_connection_config(&self, randomness_seed: [u8; 32]) -> established::Config {
+    fn build_connection_config(
+        &self,
+        now: &TNow,
+        randomness_seed: [u8; 32],
+    ) -> established::Config<TNow> {
         established::Config {
             notifications_protocols: self
                 .notification_protocols
@@ -971,6 +1142,9 @@ where
             request_protocols: self.request_response_protocols.clone(),
             randomness_seed,
             ping_protocol: self.ping_protocol.clone(), // TODO: cloning :-/
+            ping_interval: Duration::from_secs(20),    // TODO: hardcoded
+            ping_timeout: Duration::from_secs(10),     // TODO: hardcoded
+            first_out_ping: now.clone() + Duration::from_secs(2), // TODO: hardcoded
         }
     }
 }
@@ -1012,33 +1186,50 @@ pub enum Event<TConn> {
         user_data: TConn,
     },
 
+    /// Received an incoming substream, but this substream has produced an error.
+    ///
+    /// > **Note**: This event exists only for diagnostic purposes. No action is expected in
+    /// >           return.
+    InboundError {
+        id: ConnectionId,
+        /// Error that happened.
+        error: InboundError,
+        /// Copy of the user data provided when creating the connection.
+        user_data: TConn,
+    },
+
     /// Received a request from a request-response protocol.
     RequestIn {
         id: ConnectionId,
         /// Substream on which the request has been received. Must be passed back when providing
         /// the response.
-        substream_id: established::SubstreamId,
+        substream_id: SubstreamId,
         protocol_index: usize,
         request_payload: Vec<u8>,
         /// Copy of the user data provided when creating the connection.
         user_data: TConn,
     },
 
-    /// A handshaking outbound substream has been accepted by the remote.
-    NotificationsOutAccept {
+    /// Outcome of trying to open a substream with [`Network::open_notifications_substream`].
+    ///
+    /// If `Ok`, it is now possible to send notifications on this substream.
+    /// If `Err`, the substream no longer exists.
+    NotificationsOutResult {
         id: ConnectionId,
         // TODO: what if fallback?
+        substream_id: SubstreamId,
         notifications_protocol_index: usize,
-        /// Handshake sent in return by the remote.
-        remote_handshake: Vec<u8>,
+        /// If `Ok`, contains the handshake sent back by the remote. Its interpretation is out of
+        /// scope of this module.
+        result: Result<Vec<u8>, NotificationsOutErr>,
         /// Copy of the user data provided when creating the connection.
         user_data: TConn,
     },
 
-    /// A previously open outbound substream has been closed by the remote, or a handshaking
-    /// outbound substream has been denied by the remote.
+    /// A previously open outbound substream has been closed by the remote.
     NotificationsOutClose {
         id: ConnectionId,
+        substream_id: SubstreamId,
         notifications_protocol_index: usize,
         /// Copy of the user data provided when creating the connection.
         user_data: TConn,
@@ -1047,6 +1238,9 @@ pub enum Event<TConn> {
     ///
     NotificationsInOpen {
         id: ConnectionId,
+        /// Substream on which the request has been received. Must be passed back when accepting
+        /// or refusing the substream.
+        substream_id: SubstreamId,
         notifications_protocol_index: usize,
         remote_handshake: Vec<u8>,
         /// Copy of the user data provided when creating the connection.
@@ -1057,6 +1251,7 @@ pub enum Event<TConn> {
     /// Received a notification on a notifications substream of a connection.
     NotificationsIn {
         id: ConnectionId,
+        substream_id: SubstreamId,
         notifications_protocol_index: usize,
         notification: Vec<u8>,
         /// Copy of the user data provided when creating the connection.
@@ -1065,7 +1260,24 @@ pub enum Event<TConn> {
 
     NotificationsInClose {
         id: ConnectionId,
+        substream_id: SubstreamId,
         notifications_protocol_index: usize,
+        outcome: Result<(), NotificationsInClosedErr>,
+        /// Copy of the user data provided when creating the connection.
+        user_data: TConn,
+    },
+
+    /// An outgoing ping has succeeded. This event is generated automatically over time for each
+    /// connection in the collection.
+    PingOutSuccess {
+        id: ConnectionId,
+        /// Copy of the user data provided when creating the connection.
+        user_data: TConn,
+    },
+    /// An outgoing ping has failed. This event is generated automatically over time for each
+    /// connection in the collection.
+    PingOutFailed {
+        id: ConnectionId,
         /// Copy of the user data provided when creating the connection.
         user_data: TConn,
     },
@@ -1077,12 +1289,15 @@ impl<TConn> Event<TConn> {
         match self {
             Event::HandshakeFinished { id, .. } => *id,
             Event::Shutdown { id, .. } => *id,
+            Event::InboundError { id, .. } => *id,
             Event::RequestIn { id, .. } => *id,
-            Event::NotificationsOutAccept { id, .. } => *id,
+            Event::NotificationsOutResult { id, .. } => *id,
             Event::NotificationsOutClose { id, .. } => *id,
             Event::NotificationsInOpen { id, .. } => *id,
             Event::NotificationsIn { id, .. } => *id,
             Event::NotificationsInClose { id, .. } => *id,
+            Event::PingOutSuccess { id, .. } => *id,
+            Event::PingOutFailed { id, .. } => *id,
         }
     }
 
@@ -1091,12 +1306,15 @@ impl<TConn> Event<TConn> {
         match self {
             Event::HandshakeFinished { user_data, .. } => user_data,
             Event::Shutdown { user_data, .. } => user_data,
+            Event::InboundError { user_data, .. } => user_data,
             Event::RequestIn { user_data, .. } => user_data,
-            Event::NotificationsOutAccept { user_data, .. } => user_data,
+            Event::NotificationsOutResult { user_data, .. } => user_data,
             Event::NotificationsOutClose { user_data, .. } => user_data,
             Event::NotificationsInOpen { user_data, .. } => user_data,
             Event::NotificationsIn { user_data, .. } => user_data,
             Event::NotificationsInClose { user_data, .. } => user_data,
+            Event::PingOutSuccess { user_data, .. } => user_data,
+            Event::PingOutFailed { user_data, .. } => user_data,
         }
     }
 }
@@ -1119,15 +1337,31 @@ impl Future for ConnectionReadyFuture {
     }
 }
 
-/// Protocol error within the context of a connection. See [`Network::read_write`].
+/// Error within the context of a connection. See [`Network::read_write`].
 #[derive(Debug, derive_more::Display)]
 pub enum ConnectionError {
     /// Protocol error after the connection has been established.
     #[display(fmt = "{}", _0)]
     Established(established::Error),
-    /// Protocol error during the handshake phase.
+    /// Eror during the handshake phase.
     #[display(fmt = "{}", _0)]
-    Handshake(handshake::HandshakeError),
+    Handshake(HandshakeError),
+    /// Connection was shut down by calling [`Network::start_shutdown`].
+    // TODO: that seems hacky
+    LocalShutdown,
+    /// Connection was gracefully terminated. Can only happen if the connection was established,
+    /// as an EOF during the handshake is an error.
+    Eof,
+}
+
+/// Protocol error within the context of a connection. See [`Network::read_write`].
+#[derive(Debug, derive_more::Display)]
+pub enum HandshakeError {
+    /// The handshake took too long.
+    Timeout,
+    /// Protocol error.
+    #[display(fmt = "{}", _0)]
+    Protocol(handshake::HandshakeError),
 }
 
 /// See [`Network::open_notifications_substream`].
@@ -1143,9 +1377,6 @@ pub enum OpenNotificationsSubstreamError {
 
     /// The connection is still in its handshake phase.
     NotEstablished,
-
-    /// An outgoing substream already exists on that connection and overlay network index.
-    DuplicateSubstream,
 }
 
 /// Data structure holding the state of a single established (i.e. post-handshake) connection.
@@ -1158,6 +1389,9 @@ struct Connection<TConn, TNow> {
 
     /// Copy of the id of the connection.
     id: ConnectionId,
+
+    /// `true` is [`Network::start_shutdown`] has been called.
+    shutting_down: bool,
 
     /// Event that has just happened on the connection, but that the [`Guarded`] isn't yet aware
     /// of. See the implementations note at the top of the file for more information.
@@ -1177,25 +1411,41 @@ where
     TConn: Clone,
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
-    fn read_write<'a>(
-        &mut self,
-        parent: &Network<TConn, TNow>,
-        read_write: &mut ReadWrite<TNow>,
-    ) -> Result<(), ConnectionError> {
+    fn read_write(&mut self, parent: &Network<TConn, TNow>, read_write: &mut ReadWrite<TNow>) {
         debug_assert!(self.pending_event.is_none());
 
         match mem::replace(&mut self.connection, ConnectionInner::Poisoned) {
+            ConnectionInner::Established(_) if self.shutting_down => {
+                // TODO: shut down should be graceful instead of an error
+                debug_assert!(self.pending_event.is_none());
+                self.connection = ConnectionInner::PendingErrorReport {
+                    error: ConnectionError::LocalShutdown,
+                };
+            }
+
+            ConnectionInner::Handshake { .. } if self.shutting_down => {
+                // TODO: shut down should be graceful instead of an error
+                debug_assert!(self.pending_event.is_none());
+                self.connection = ConnectionInner::PendingErrorReport {
+                    error: ConnectionError::LocalShutdown,
+                };
+            }
+
             ConnectionInner::Established(connection) => {
                 let rw_before = (read_write.read_bytes, read_write.written_bytes);
 
                 match connection.read_write(read_write) {
                     Ok((connection, event)) => {
                         if read_write.is_dead() && event.is_none() {
-                            self.connection = ConnectionInner::Dead;
+                            self.connection = ConnectionInner::PendingErrorReport {
+                                error: ConnectionError::Eof,
+                            };
                         } else {
                             self.connection = ConnectionInner::Established(connection);
                         }
 
+                        // If the inner `read_write` has processed some bytes or generated an
+                        // event, we ask the user to call `read_write` again.
                         if rw_before != (read_write.read_bytes, read_write.written_bytes)
                             || event.is_some()
                         {
@@ -1210,43 +1460,39 @@ where
                         }
                     }
                     Err(err) => {
-                        if let Some(waker) = self.waker.take() {
-                            let _ = waker.send(());
-                        }
-
-                        self.connection =
-                            ConnectionInner::Errored(ConnectionError::Established(err));
-                        self.pending_event = Some(PendingEvent::Disconnect);
+                        debug_assert!(self.pending_event.is_none());
+                        self.connection = ConnectionInner::PendingErrorReport {
+                            error: ConnectionError::Established(err),
+                        };
                     }
-                };
-
-                Ok(())
+                }
             }
 
             ConnectionInner::Handshake {
                 mut handshake,
                 randomness_seed,
+                timeout,
             } => {
-                // TODO: check timeout
+                // Check that the handshake isn't taking too long.
+                if timeout < read_write.now {
+                    self.connection = ConnectionInner::PendingErrorReport {
+                        error: ConnectionError::Handshake(HandshakeError::Timeout),
+                    };
+                    return;
+                }
+                read_write.wake_up_after(&timeout);
 
                 loop {
-                    let incoming_buffer = match read_write.incoming_buffer {
-                        Some(b) => b,
-                        None => {
-                            read_write.close_write();
-                            debug_assert!(self.pending_event.is_none());
-                            self.pending_event = Some(PendingEvent::Disconnect);
-                            return Ok(());
-                        }
-                    };
-
                     let (read_before, written_before) =
                         (read_write.read_bytes, read_write.written_bytes);
 
                     let result = match handshake.read_write(read_write) {
                         Ok(rw) => rw,
                         Err(err) => {
-                            return Err(ConnectionError::Handshake(err));
+                            self.connection = ConnectionInner::PendingErrorReport {
+                                error: ConnectionError::Handshake(HandshakeError::Protocol(err)),
+                            };
+                            return;
                         }
                     };
 
@@ -1258,6 +1504,7 @@ where
                             self.connection = ConnectionInner::Handshake {
                                 handshake: updated_handshake,
                                 randomness_seed,
+                                timeout,
                             };
                             break;
                         }
@@ -1271,10 +1518,12 @@ where
                             debug_assert!(self.pending_event.is_none());
                             self.pending_event =
                                 Some(PendingEvent::HandshakeFinished(remote_peer_id));
-                            self.connection =
-                                ConnectionInner::Established(connection.into_connection(
-                                    parent.build_connection_config(randomness_seed),
-                                ));
+                            self.connection = ConnectionInner::Established(
+                                connection.into_connection(
+                                    parent
+                                        .build_connection_config(&read_write.now, randomness_seed),
+                                ),
+                            );
                             break;
                         }
                         handshake::Handshake::NoiseKeyRequired(key) => {
@@ -1282,13 +1531,12 @@ where
                         }
                     }
                 }
-
-                Ok(())
             }
 
-            ConnectionInner::Errored(err) => Err(err),
-            ConnectionInner::Dead => panic!(),
-            ConnectionInner::Poisoned => unreachable!(),
+            // The `read_write` function shouldn't have been called when in this state.
+            ConnectionInner::Dead
+            | ConnectionInner::PendingErrorReport { .. }
+            | ConnectionInner::Poisoned => unreachable!(),
         }
     }
 
@@ -1300,14 +1548,7 @@ where
             return;
         }
 
-        let connection_index = match guarded.connections_by_id.get(&self.id) {
-            Some(idx) => *idx,
-            None => {
-                // TODO: correct?
-                self.pending_event = None;
-                return;
-            }
-        };
+        let connection_index = *guarded.connections_by_id.get(&self.id).unwrap();
 
         // The body of this function consists in two operations: extracting the event from
         // `pending_event`, then sending a corresponding event on `events_tx`. Because sending an
@@ -1332,13 +1573,13 @@ where
                         .range(
                             (
                                 connection_index,
-                                usize::min_value(),
                                 SubstreamDirection::min_value(),
+                                SubstreamId::min_value()
                             )
                                 ..=(
                                     connection_index,
-                                    usize::max_value(),
                                     SubstreamDirection::max_value(),
+                                    SubstreamId::max_value()
                                 )
                         )
                         .count(),
@@ -1350,6 +1591,16 @@ where
                     .try_send(Event::HandshakeFinished {
                         id: self.id,
                         peer_id,
+                        user_data: self.user_data.clone(),
+                    })
+                    .unwrap();
+            }
+            PendingEvent::Inner(established::Event::InboundError(error)) => {
+                guarded
+                    .events_tx
+                    .try_send(Event::InboundError {
+                        id: self.id,
+                        error,
                         user_data: self.user_data.clone(),
                     })
                     .unwrap();
@@ -1378,38 +1629,20 @@ where
                 let _ = send_back.send(response.map_err(RequestError::Connection));
             }
             PendingEvent::Inner(established::Event::NotificationsInOpen {
-                id,
+                id: substream_id,
                 protocol_index: overlay_network_index,
                 handshake,
             }) => {
-                if guarded.connection_overlays.contains_key(&(
-                    connection_index,
-                    overlay_network_index,
-                    SubstreamDirection::In,
-                )) {
-                    // There was already a substream with that protocol. Immediately refuse the
-                    // new one.
-                    // TODO: punish remote? force-close connection?
-                    self.connection
-                        .as_established()
-                        .unwrap() // TODO: is unwrapping correct?
-                        .reject_in_notifications_substream(id);
-                }
-
-                // No substream of that protocol was opened yet.
                 guarded.connection_overlays.insert(
-                    (
-                        connection_index,
-                        overlay_network_index,
-                        SubstreamDirection::In,
-                    ),
-                    (id, SubstreamState::Pending),
+                    (connection_index, SubstreamDirection::In, substream_id),
+                    SubstreamState::Pending(overlay_network_index),
                 );
 
                 guarded
                     .events_tx
                     .try_send(Event::NotificationsInOpen {
                         id: self.id,
+                        substream_id,
                         notifications_protocol_index: overlay_network_index,
                         remote_handshake: handshake,
                         user_data: self.user_data.clone(),
@@ -1417,35 +1650,36 @@ where
                     .unwrap();
             }
             PendingEvent::Inner(established::Event::NotificationsInOpenCancel {
-                id: _substream_id,
+                id: substream_id,
                 protocol_index: overlay_network_index,
             }) => {
                 let _value_in = guarded.connection_overlays.remove(&(
                     connection_index,
-                    overlay_network_index,
                     SubstreamDirection::In,
+                    substream_id,
                 ));
 
-                debug_assert_eq!(_value_in, Some((_substream_id, SubstreamState::Pending)));
+                debug_assert_eq!(
+                    _value_in,
+                    Some(SubstreamState::Pending(overlay_network_index))
+                );
             }
-            PendingEvent::Inner(established::Event::NotificationIn { id, notification }) => {
+            PendingEvent::Inner(established::Event::NotificationIn {
+                id: substream_id,
+                notification,
+            }) => {
                 let overlay_network_index = *self
                     .connection
                     .as_established()
                     .unwrap() // TODO: shouldn't unwrap here
-                    .notifications_substream_user_data_mut(id)
+                    .notifications_substream_user_data_mut(substream_id)
                     .unwrap();
 
                 debug_assert_eq!(
-                    guarded
+                    *guarded
                         .connection_overlays
-                        .get(&(
-                            connection_index,
-                            overlay_network_index,
-                            SubstreamDirection::In,
-                        ))
-                        .unwrap()
-                        .1,
+                        .get(&(connection_index, SubstreamDirection::In, substream_id,))
+                        .unwrap(),
                     SubstreamState::Open,
                 );
 
@@ -1453,66 +1687,75 @@ where
                     .events_tx
                     .try_send(Event::NotificationsIn {
                         id: self.id,
+                        substream_id,
                         notifications_protocol_index: overlay_network_index,
                         notification,
                         user_data: self.user_data.clone(),
                     })
                     .unwrap();
             }
-            PendingEvent::Inner(established::Event::NotificationsOutAccept {
-                id,
-                remote_handshake,
+            PendingEvent::Inner(established::Event::NotificationsInClose {
+                id: substream_id,
+                protocol_index: overlay_network_index,
+                outcome,
             }) => {
-                let overlay_network_index = *self
-                    .connection
-                    .as_established()
-                    .unwrap() // TODO: shouldn't unwrap here
-                    .notifications_substream_user_data_mut(id)
-                    .unwrap();
-
-                let _value_removed = guarded.connection_overlays.remove(&(
+                let _was_in = guarded.connection_overlays.remove(&(
                     connection_index,
-                    overlay_network_index,
-                    SubstreamDirection::Out,
+                    SubstreamDirection::In,
+                    substream_id,
                 ));
-                debug_assert_eq!(_value_removed, Some((id, SubstreamState::Pending)));
-
-                let _prev_value = guarded.connection_overlays.insert(
-                    (
-                        connection_index,
-                        overlay_network_index,
-                        SubstreamDirection::Out,
-                    ),
-                    (id, SubstreamState::Open),
-                );
-                debug_assert_eq!(_prev_value, None);
+                debug_assert_eq!(_was_in, Some(SubstreamState::Open));
 
                 guarded
                     .events_tx
-                    .try_send(Event::NotificationsOutAccept {
+                    .try_send(Event::NotificationsInClose {
                         id: self.id,
+                        substream_id,
                         notifications_protocol_index: overlay_network_index,
-                        remote_handshake,
                         user_data: self.user_data.clone(),
+                        outcome,
                     })
                     .unwrap();
             }
-            PendingEvent::Inner(established::Event::NotificationsOutReject {
-                id,
-                user_data: overlay_network_index,
+            PendingEvent::Inner(established::Event::NotificationsOutResult {
+                id: substream_id,
+                result,
             }) => {
+                let overlay_network_index = match result {
+                    Ok(_) => *self
+                        .connection
+                        .as_established()
+                        .unwrap() // TODO: shouldn't unwrap here
+                        .notifications_substream_user_data_mut(substream_id)
+                        .unwrap(),
+                    Err((_, idx)) => idx,
+                };
+
                 let _value_removed = guarded.connection_overlays.remove(&(
                     connection_index,
-                    overlay_network_index,
                     SubstreamDirection::Out,
+                    substream_id,
                 ));
-                debug_assert_eq!(_value_removed, Some((id, SubstreamState::Pending)));
+                debug_assert_eq!(
+                    _value_removed,
+                    Some(SubstreamState::Pending(overlay_network_index))
+                );
+
+                if result.is_ok() {
+                    let _prev_value = guarded.connection_overlays.insert(
+                        (connection_index, SubstreamDirection::Out, substream_id),
+                        SubstreamState::Open,
+                    );
+                    debug_assert_eq!(_prev_value, None);
+                }
 
                 guarded
                     .events_tx
-                    .try_send(Event::NotificationsOutClose {
+                    .try_send(Event::NotificationsOutResult {
                         id: self.id,
+                        substream_id,
                         notifications_protocol_index: overlay_network_index,
+                        result: result.map_err(|(err, _)| err),
                         user_data: self.user_data.clone(),
                     })
                     .unwrap();
@@ -1521,68 +1764,40 @@ where
                 todo!()
             }
             PendingEvent::Inner(established::Event::NotificationsOutReset {
-                id,
+                id: substream_id,
                 user_data: overlay_network_index,
             }) => {
                 let _value_removed = guarded.connection_overlays.remove(&(
                     connection_index,
-                    overlay_network_index,
                     SubstreamDirection::Out,
+                    substream_id,
                 ));
-                debug_assert_eq!(_value_removed, Some((id, SubstreamState::Open)));
+                debug_assert_eq!(_value_removed, Some(SubstreamState::Open));
 
                 guarded
                     .events_tx
                     .try_send(Event::NotificationsOutClose {
                         id: self.id,
+                        substream_id,
                         notifications_protocol_index: overlay_network_index,
                         user_data: self.user_data.clone(),
                     })
                     .unwrap();
             }
-            PendingEvent::Disconnect => {
-                let substreams = guarded
-                    .connection_overlays
-                    .range(
-                        (
-                            connection_index,
-                            usize::min_value(),
-                            SubstreamDirection::min_value(),
-                        )
-                            ..=(
-                                connection_index,
-                                usize::max_value(),
-                                SubstreamDirection::max_value(),
-                            ),
-                    )
-                    .map(|(key, (_, state))| (*key, *state))
-                    .collect::<Vec<_>>();
-
-                let mut out_overlay_network_indices = Vec::with_capacity(substreams.len());
-                let mut in_overlay_network_indices = Vec::with_capacity(substreams.len());
-
-                for ((_, overlay_network_index, direction), state) in substreams {
-                    match state {
-                        SubstreamState::Pending => continue,
-                        SubstreamState::Open => {}
-                    };
-
-                    match direction {
-                        SubstreamDirection::In => {
-                            in_overlay_network_indices.push(overlay_network_index);
-                        }
-                        SubstreamDirection::Out => {
-                            out_overlay_network_indices.push(overlay_network_index);
-                        }
-                    }
-                }
-
+            PendingEvent::Inner(established::Event::PingOutSuccess) => {
                 guarded
                     .events_tx
-                    .try_send(Event::Shutdown {
+                    .try_send(Event::PingOutSuccess {
                         id: self.id,
-                        in_notification_protocols_indices: in_overlay_network_indices,
-                        out_notification_protocols_indices: out_overlay_network_indices,
+                        user_data: self.user_data.clone(),
+                    })
+                    .unwrap();
+            }
+            PendingEvent::Inner(established::Event::PingOutFailed) => {
+                guarded
+                    .events_tx
+                    .try_send(Event::PingOutFailed {
+                        id: self.id,
                         user_data: self.user_data.clone(),
                     })
                     .unwrap();
@@ -1603,12 +1818,30 @@ enum ConnectionInner<TNow> {
         /// randomness isn't used for anything critical or related to cryptography, but only for
         /// example to avoid hash collision attacks.
         randomness_seed: [u8; 32],
+
+        /// When the handshake times out.
+        timeout: TNow,
     },
     Established(
         established::Established<TNow, oneshot::Sender<Result<Vec<u8>, RequestError>>, usize>,
     ),
-    Errored(ConnectionError),
+
+    /// The connection has generated an error, but this error hasn't been reported to the API
+    /// user yet. The connection is still considered as valid for API purposes. After the error
+    /// has been reported to the user, the connection switches to the [`ConnectionInner::Dead`]
+    /// state.
+    PendingErrorReport { error: ConnectionError },
+
+    /// Connection is no longer valid because an error has happened in the connection
+    /// or because it has been gracefully shut down. It is invalid for the user to call
+    /// `read_write` with this connection again.
+    ///
+    /// This is the state the connection is in after it has been removed from the [`Guarded`] but
+    /// before it is destroyed.
     Dead,
+
+    /// Temporary state. For borrow checking purposes, the state can be transitioned to this state
+    /// then back.
     Poisoned,
 }
 
@@ -1629,7 +1862,6 @@ impl<TNow> ConnectionInner<TNow> {
 enum PendingEvent {
     HandshakeFinished(PeerId),
     Inner(established::Event<oneshot::Sender<Result<Vec<u8>, RequestError>>, usize>),
-    Disconnect,
 }
 
 /// Error potentially returned by [`Network::request`].

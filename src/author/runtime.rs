@@ -54,7 +54,7 @@ use crate::{
     util,
 };
 
-use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
+use alloc::{borrow::ToOwned as _, collections::BTreeMap, string::String, vec::Vec};
 use core::{iter, mem};
 use hashbrown::HashMap;
 
@@ -82,6 +82,10 @@ pub struct Config<'a> {
     /// Optional cache corresponding to the storage trie root hash calculation coming from the
     /// parent block verification.
     pub top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
+
+    /// Capacity to reserve for the number of extrinsics. Should be higher than the approximate
+    /// number of extrinsics that are going to be applied.
+    pub block_body_capacity: usize,
 }
 
 /// Extra configuration depending on the consensus algorithm.
@@ -102,7 +106,7 @@ pub struct Success {
     /// Runtime that was passed by [`Config`].
     pub parent_runtime: host::HostVmPrototype,
     /// List of changes to the storage top trie that the block performs.
-    pub storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     /// List of changes to the offchain storage that this block performs.
     pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     /// Cache used for calculating the top trie root of the new block.
@@ -190,7 +194,7 @@ pub fn build_block(config: Config) -> BlockBuild {
 
     let shared = Shared {
         stage: Stage::InitializeBlock,
-        block_body: Vec::new(), // TODO: with_capacity?
+        block_body: Vec::with_capacity(config.block_body_capacity),
         logs: String::new(),
     };
 
@@ -312,14 +316,7 @@ impl BlockBuild {
                     let init_result = runtime_host::run(runtime_host::Config {
                         virtual_machine: success.virtual_machine.into_prototype(),
                         function_to_call: "BlockBuilder_apply_extrinsic",
-                        parameter: {
-                            // The `BlockBuilder_apply_extrinsic` function expects a SCALE-encoded
-                            // `Vec<u8>`.
-                            let len = util::encode_scale_compact_usize(extrinsic.len());
-                            iter::once(len)
-                                .map(either::Left)
-                                .chain(iter::once(extrinsic).map(either::Right))
-                        },
+                        parameter: iter::once(extrinsic),
                         top_trie_root_calculation_cache: Some(
                             success.top_trie_root_calculation_cache,
                         ),
@@ -377,7 +374,6 @@ impl BlockBuild {
                         Err(err) => return BlockBuild::Finished(Err(err)),
                     }
 
-                    // TODO: probably wrong because of double-SCALE-encoding issue
                     shared.block_body.push(extrinsic);
 
                     inner = Inner::Transition(success);
@@ -395,9 +391,8 @@ impl BlockBuild {
                     };
 
                     if result.is_ok() {
-                        // TODO: probably wrong because of double-SCALE-encoding issue
                         shared.block_body.push(match &mut shared.stage {
-                            Stage::ApplyExtrinsic(ext) => mem::replace(ext, Vec::new()),
+                            Stage::ApplyExtrinsic(ext) => mem::take(ext),
                             _ => unreachable!(),
                         });
                     }
@@ -472,7 +467,7 @@ enum Stage {
 pub struct InherentExtrinsics {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
-    storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     top_trie_root_calculation_cache: calculate_root::CalculationCache,
 }
@@ -482,21 +477,7 @@ impl InherentExtrinsics {
     ///
     /// See the module-level documentation for more information.
     pub fn inject_inherents(self, inherents: InherentData) -> BlockBuild {
-        self.inject_raw_inherents_list(
-            [
-                (*b"timstap0", inherents.timestamp.to_le_bytes()),
-                match inherents.consensus {
-                    InherentDataConsensus::Aura { slot_number } => {
-                        (*b"auraslot", slot_number.to_le_bytes())
-                    }
-                    InherentDataConsensus::Babe { slot_number } => {
-                        (*b"babeslot", slot_number.to_le_bytes())
-                    }
-                },
-            ]
-            .iter()
-            .cloned(),
-        )
+        self.inject_raw_inherents_list(inherents.as_raw_list())
     }
 
     /// Injects a raw list of inherents and resumes execution.
@@ -567,6 +548,27 @@ pub struct InherentData {
     // TODO: parachain-related inherents are missing
 }
 
+impl InherentData {
+    /// Turns this list of inherents into a list that can be passed as parameter to the runtime.
+    pub fn as_raw_list(
+        &'_ self,
+    ) -> impl ExactSizeIterator<Item = ([u8; 8], impl AsRef<[u8]> + Clone + '_)> + Clone + '_ {
+        // Note: we use `IntoIter::new` because of a Rust backwards compatibility issue.
+        // See https://doc.rust-lang.org/std/primitive.array.html#editions
+        core::array::IntoIter::new([
+            (*b"timstap0", self.timestamp.to_le_bytes()),
+            match self.consensus {
+                InherentDataConsensus::Aura { slot_number } => {
+                    (*b"auraslot", slot_number.to_le_bytes())
+                }
+                InherentDataConsensus::Babe { slot_number } => {
+                    (*b"babeslot", slot_number.to_le_bytes())
+                }
+            },
+        ])
+    }
+}
+
 /// Extra consensus-specific items in [`InherentData`].
 #[derive(Debug)]
 pub enum InherentDataConsensus {
@@ -600,7 +602,7 @@ pub enum InherentDataConsensus {
 pub struct ApplyExtrinsic {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
-    storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
     top_trie_root_calculation_cache: calculate_root::CalculationCache,
 }
@@ -613,13 +615,7 @@ impl ApplyExtrinsic {
         let init_result = runtime_host::run(runtime_host::Config {
             virtual_machine: self.parent_runtime,
             function_to_call: "BlockBuilder_apply_extrinsic",
-            parameter: {
-                // The `BlockBuilder_apply_extrinsic` function expects a SCALE-encoded `Vec<u8>`.
-                let len = util::encode_scale_compact_usize(extrinsic.len());
-                iter::once(len)
-                    .map(either::Left)
-                    .chain(iter::once(&extrinsic).map(either::Right))
-            },
+            parameter: iter::once(&extrinsic),
             top_trie_root_calculation_cache: Some(self.top_trie_root_calculation_cache),
             storage_top_trie_changes: self.storage_top_trie_changes,
             offchain_storage_changes: self.offchain_storage_changes,
@@ -721,15 +717,28 @@ impl NextKey {
 
 /// Analyzes the output of a call to `BlockBuilder_inherent_extrinsics`, and returns the resulting
 /// extrinsics.
+// TODO: this method implementation is hacky ; the `BlockBuilder_inherent_extrinsics` function
+//       returns a `Vec<Extrinsic>`, where `Extrinsic` is opaque and depends on the chain. Because
+//       we don't know the type of `Extrinsic`, a `Vec<Extrinsic>` is undecodable. However, most
+//       Substrate chains use `type Extrinsic = OpaqueExtrinsic;` where
+//       `type OpaqueExtrinsic = Vec<u8>;` here, which happens to start with a length prefix
+//       containing its remaining size; this length prefix is fully part of the `Extrinsic` though.
+//       In other words, this function might succeed or fail depending on the Substrate chain.
 fn parse_inherent_extrinsics_output(output: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
     nom::combinator::all_consuming(nom::combinator::flat_map(
         crate::util::nom_scale_compact_usize,
         |num_elems| {
-            nom::multi::many_m_n(num_elems, num_elems, |s| {
-                nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |n| {
-                    nom::combinator::map(nom::bytes::complete::take(n), |v: &[u8]| v.to_vec())
-                })(s)
-            })
+            nom::multi::many_m_n(
+                num_elems,
+                num_elems,
+                nom::combinator::map(
+                    nom::combinator::recognize(nom::combinator::flat_map(
+                        crate::util::nom_scale_compact_usize,
+                        nom::bytes::complete::take,
+                    )),
+                    |v: &[u8]| v.to_vec(),
+                ),
+            )
         },
     ))(output)
     .map(|(_, parse_result)| parse_result)

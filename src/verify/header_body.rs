@@ -24,7 +24,7 @@ use crate::{
     verify::{aura, babe},
 };
 
-use alloc::{string::String, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::{num::NonZeroU64, time::Duration};
 use hashbrown::HashMap;
 
@@ -116,7 +116,7 @@ pub struct Success {
     pub consensus: SuccessConsensus,
 
     /// List of changes to the storage top trie that the block performs.
-    pub storage_top_trie_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 
     /// List of changes to the offchain storage that this block performs.
     pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,

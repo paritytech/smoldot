@@ -2,7 +2,7 @@
 
 This JavaScript library provides a light client for
 [the Polkadot blockchain](https://polkadot.network/) and for chains built
-using [the Substrate blockchain framework](https://substrate.dev/).
+using [the Substrate blockchain framework](https://substrate.io/).
 
 It is an "actual" light client, in the sense that it is byzantine-resilient.
 It does not rely on the presence of an RPC server, but directly connects to
@@ -23,7 +23,7 @@ const chain = await client.addChain({
   chainSpec,
   jsonRpcCallback: (jsonRpcResponse) => {
       // Called whenever the client emits a response to a JSON-RPC request,
-      // or a JSON-RPC pub-sub notification.
+      // or an incoming JSON-RPC notification.
       console.log(jsonRpcResponse)
   }
 });
@@ -70,3 +70,22 @@ If the chain specification passed to `addChain` is a parachain, then the list of
 chains must be passed as parameter to `addChain` as well. For security reasons, it is important
 to not establish a parachain-relay-chain link between two chains that weren't created by the same
 user.
+
+# About the worker
+
+The code in this package uses a web worker (in browsers) or a worker thread (on NodeJS). The
+line of JavaScript that creates the worker is of the following form:
+
+``` js
+new Worker(new URL('./worker.js', import.meta.url));
+```
+
+This format is compatible [with Webpack 5](https://webpack.js.org/guides/web-workers/), meaning
+that Webpack will be able to resolve the imports in `worker.js` and adjust this little snippet.
+
+This format also works in NodeJS without any issue.
+
+However, at the time of writing of this comment, this format doesn't work with Parcel (both 1 and
+2) due to various bugs.
+
+As a general warning, be aware of the fact that this line might cause issues if you use a bundler.

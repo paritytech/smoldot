@@ -18,11 +18,7 @@
 use super::{schema, ProtobufDecodeError};
 
 use alloc::vec::Vec;
-use core::{
-    convert::TryFrom,
-    iter,
-    num::{NonZeroU32, NonZeroU64},
-};
+use core::{iter, num::NonZeroU32};
 use prost::Message as _;
 
 /// Description of a block request that can be sent to a peer.
@@ -63,7 +59,7 @@ pub enum BlocksRequestConfigStart {
     /// Hash of the block.
     Hash([u8; 32]),
     /// Number of the block, where 0 would be the genesis block.
-    Number(NonZeroU64),
+    Number(u64),
 }
 
 /// Builds the bytes corresponding to a block request.
@@ -90,7 +86,7 @@ pub fn build_block_request(config: BlocksRequestConfig) -> impl Iterator<Item = 
                     Some(schema::block_request::FromBlock::Hash(h.to_vec()))
                 }
                 BlocksRequestConfigStart::Number(n) => Some(
-                    schema::block_request::FromBlock::Number(n.get().to_le_bytes().to_vec()),
+                    schema::block_request::FromBlock::Number(n.to_le_bytes().to_vec()),
                 ),
             },
             to_block: Vec::new(),
@@ -99,6 +95,7 @@ pub fn build_block_request(config: BlocksRequestConfig) -> impl Iterator<Item = 
                 BlocksRequestDirection::Descending => schema::Direction::Descending as i32,
             },
             max_blocks: config.desired_count.get(),
+            support_multiple_justifications: false, // TODO: not implemented
         }
     };
 
@@ -109,6 +106,83 @@ pub fn build_block_request(config: BlocksRequestConfig) -> impl Iterator<Item = 
     };
 
     iter::once(request_bytes)
+}
+
+/// Decodes a blocks request.
+// TODO: should have a more zero-cost API, but we're limited by the protobuf library for that
+pub fn decode_block_request(
+    request_bytes: &[u8],
+) -> Result<BlocksRequestConfig, DecodeBlockRequestError> {
+    let request = schema::BlockRequest::decode(request_bytes)
+        .map_err(ProtobufDecodeError)
+        .map_err(DecodeBlockRequestError::ProtobufDecode)?;
+
+    Ok(BlocksRequestConfig {
+        start: match request.from_block {
+            Some(schema::block_request::FromBlock::Hash(h)) => BlocksRequestConfigStart::Hash(
+                <[u8; 32]>::try_from(&h[..])
+                    .map_err(|_| DecodeBlockRequestError::InvalidBlockHashLength)?,
+            ),
+            Some(schema::block_request::FromBlock::Number(n)) => {
+                BlocksRequestConfigStart::Number(u64::from_le_bytes(
+                    <[u8; 8]>::try_from(&n[..])
+                        .map_err(|_| DecodeBlockRequestError::InvalidBlockNumber)?,
+                ))
+            }
+            None => return Err(DecodeBlockRequestError::MissingStartBlock),
+        },
+        desired_count: NonZeroU32::new(request.max_blocks)
+            .ok_or(DecodeBlockRequestError::ZeroBlocksRequested)?,
+        direction: match schema::Direction::from_i32(request.direction)
+            .ok_or(DecodeBlockRequestError::InvalidDirection)?
+        {
+            schema::Direction::Ascending => BlocksRequestDirection::Ascending,
+            schema::Direction::Descending => BlocksRequestDirection::Descending,
+        },
+        // TODO: should detect and error if unknown field bit
+        fields: BlocksRequestFields {
+            header: (request.fields & (1 << 24)) != 0,
+            body: (request.fields & (1 << 25)) != 0,
+            justification: (request.fields & (1 << 28)) != 0,
+        },
+    })
+}
+
+/// Builds the bytes corresponding to a block response.
+pub fn build_block_response(response: Vec<BlockData>) -> impl Iterator<Item = impl AsRef<[u8]>> {
+    // Note: while the API of this function allows for a zero-cost implementation, the protobuf
+    // library doesn't permit to avoid allocations.
+
+    let response = schema::BlockResponse {
+        blocks: response
+            .into_iter()
+            .map(|block| schema::BlockData {
+                hash: block.hash.to_vec(),
+                header: block.header.map_or(Vec::new(), |h| h.to_vec()),
+                body: block.body.map_or(Vec::new(), |b| b.to_vec()),
+                justification: block
+                    .justification
+                    .as_ref()
+                    .map_or(Vec::new(), |j| j.to_vec()),
+                justifications: Vec::new(), // TODO: implement
+                is_empty_justification: block
+                    .justification
+                    .as_ref()
+                    .map_or(false, |j| j.is_empty()),
+                receipt: Vec::new(),
+                message_queue: Vec::new(),
+                indexed_body: Vec::new(),
+            })
+            .collect(),
+    };
+
+    let response_bytes = {
+        let mut buf = Vec::with_capacity(response.encoded_len());
+        response.encode(&mut buf).unwrap();
+        buf
+    };
+
+    iter::once(response_bytes)
 }
 
 /// Decodes a response to a block request.
@@ -126,21 +200,6 @@ pub fn decode_block_response(
             return Err(DecodeBlockResponseError::InvalidHashLength);
         }
 
-        let mut body = Vec::with_capacity(block.body.len());
-        for extrinsic in block.body {
-            // TODO: this encoding really is a bit stupid
-            let parsing: nom::IResult<_, _> = nom::combinator::all_consuming(
-                nom::multi::length_data(crate::util::nom_scale_compact_usize),
-            )(extrinsic.as_ref());
-
-            match parsing {
-                Ok((_, e)) => body.push(e.to_vec()),
-                Err(_) => {
-                    return Err(DecodeBlockResponseError::BodyDecodeError);
-                }
-            }
-        }
-
         blocks.push(BlockData {
             hash: <[u8; 32]>::try_from(&block.hash[..]).unwrap(),
             header: if !block.header.is_empty() {
@@ -149,7 +208,7 @@ pub fn decode_block_response(
                 None
             },
             // TODO: no; we might not have asked for the body
-            body: Some(body),
+            body: Some(block.body),
             justification: if !block.justification.is_empty() {
                 Some(block.justification)
             } else if block.is_empty_justification {
@@ -178,11 +237,34 @@ pub struct BlockData {
     /// SCALE-encoded block header, if requested.
     pub header: Option<Vec<u8>>,
 
-    /// Block body, if requested.
+    /// Block body, if requested. Each item (each `Vec<u8>`) is a SCALE-encoded transaction.
+    /// These transactions aren't decodable, as their meaning depends on the chain.
+    ///
+    /// > **Note**: Be aware that in many chains a transaction is actually a `Vec<u8>`, which
+    /// >           means that you will find, at the beginning of each SCALE-encoded transaction,
+    /// >           a length prefix. Don't get fooled into thinking that this length prefix must
+    /// >           be removed. It is part of the opaque format transaction format.
     pub body: Option<Vec<Vec<u8>>>,
 
-    /// Justification, if requested and available.
+    /// SCALE-encoded justification, if requested and available.
     pub justification: Option<Vec<u8>>,
+}
+
+/// Error potentially returned by [`decode_block_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum DecodeBlockRequestError {
+    /// Error while decoding the protobuf encoding.
+    ProtobufDecode(ProtobufDecodeError),
+    /// Zero blocks requested.
+    ZeroBlocksRequested,
+    /// Value in the direction field is invalid.
+    InvalidDirection,
+    /// Start block field is missing.
+    MissingStartBlock,
+    /// Invalid block number passed.
+    InvalidBlockNumber,
+    /// Block hash length isn't correct.
+    InvalidBlockHashLength,
 }
 
 /// Error potentially returned by [`decode_block_response`].

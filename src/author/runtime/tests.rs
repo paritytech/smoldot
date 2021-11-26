@@ -25,10 +25,11 @@ fn block_building_works() {
         &include_bytes!("example-chain-specs.json")[..],
     )
     .unwrap();
+    let genesis_storage = chain_specs.genesis_storage().into_genesis_items().unwrap();
 
     let parent_runtime = {
-        let code = chain_specs
-            .genesis_storage()
+        let code = genesis_storage
+            .iter()
             .filter(|(k, _)| k == b":code")
             .next()
             .unwrap()
@@ -47,6 +48,7 @@ fn block_building_works() {
         parent_runtime,
         parent_hash: &parent_hash,
         parent_number: 0,
+        block_body_capacity: 0,
         consensus_digest_log_item: super::ConfigPreRuntime::Aura(crate::header::AuraPreDigest {
             slot_number: 1234u64,
         }),
@@ -72,8 +74,8 @@ fn block_building_works() {
             }
             super::BlockBuild::StorageGet(get) => {
                 let key = get.key_as_vec();
-                let value = chain_specs
-                    .genesis_storage()
+                let value = genesis_storage
+                    .iter()
                     .find(|(k, _)| *k == key)
                     .map(|(_, v)| iter::once(v));
                 builder = get.inject_value(value);
@@ -81,8 +83,8 @@ fn block_building_works() {
             super::BlockBuild::NextKey(_) => unimplemented!(), // Not needed for this test.
             super::BlockBuild::PrefixKeys(prefix) => {
                 let p = prefix.prefix().as_ref().to_owned();
-                let list = chain_specs
-                    .genesis_storage()
+                let list = genesis_storage
+                    .iter()
                     .filter(move |(k, _)| k.starts_with(&p))
                     .map(|(k, _)| k);
                 builder = prefix.inject_keys_ordered(list)

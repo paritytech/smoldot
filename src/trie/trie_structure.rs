@@ -23,7 +23,7 @@
 use super::nibble::Nibble;
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
-use core::{convert::TryFrom as _, fmt, iter};
+use core::{fmt, iter};
 use either::Either;
 use slab::Slab;
 

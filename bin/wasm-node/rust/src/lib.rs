@@ -15,31 +15,31 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Contains a light client implementation usable from a browser environment, using the
-//! `wasm-bindgen` library.
+//! Contains a light client implementation usable from a browser environment.
 
 #![recursion_limit = "512"]
-#![deny(broken_intra_doc_links)]
+#![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
 use futures::{channel::mpsc, prelude::*};
 use itertools::Itertools as _;
 use smoldot::{
-    chain, chain_spec,
-    informant::HashDisplay,
+    chain, chain_spec, header,
+    informant::{BytesDisplay, HashDisplay},
     json_rpc::{self, methods},
     libp2p::{connection, multiaddr, peer_id},
 };
 use std::{
     collections::{hash_map::Entry, HashMap},
-    convert::TryFrom as _,
     num::NonZeroU32,
     pin::Pin,
     str,
     sync::Arc,
     task,
+    time::Duration,
 };
 
+mod alloc;
 pub mod ffi;
 
 mod json_rpc_service;
@@ -48,15 +48,6 @@ mod network_service;
 mod runtime_service;
 mod sync_service;
 mod transactions_service;
-
-// Use the default "system" allocator. In the context of Wasm, this uses the `dlmalloc` library.
-// See <https://github.com/rust-lang/rust/tree/1.47.0/library/std/src/sys/wasm>.
-//
-// While the `wee_alloc` crate is usually the recommended choice in WebAssembly, testing has shown
-// that using it makes memory usage explode from ~100MiB to ~2GiB and more (the environment then
-// refuses to allocate 4GiB).
-#[global_allocator]
-static ALLOC: std::alloc::System = std::alloc::System;
 
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
@@ -123,6 +114,7 @@ pub struct Client {
         ChainKey,
         (
             future::MaybeDone<future::Shared<future::RemoteHandle<RunningChain>>>,
+            String,
             NonZeroU32,
         ),
     >,
@@ -137,7 +129,7 @@ impl Client {
         let _ = log::set_boxed_logger(Box::new(ffi::Logger))
             .map(|()| log::set_max_level(max_log_level));
         std::panic::set_hook(Box::new(|info| {
-            ffi::throw(info.to_string());
+            ffi::panic(info.to_string());
         }));
 
         // Fool-proof check to make sure that randomness is properly implemented.
@@ -152,7 +144,8 @@ impl Client {
         // The `new_task_tx` and `new_task_rx` variables are used when spawning a new task is
         // required. Send a task on `new_task_tx` to start running it.
         // TODO: update comment ^
-        let (new_task_tx, mut new_task_rx) = mpsc::unbounded();
+        let (new_task_tx, mut new_task_rx) =
+            mpsc::unbounded::<(String, future::BoxFuture<'static, ()>)>();
 
         // This is the main future that executes the entire client.
         ffi::spawn_background_task(async move {
@@ -170,9 +163,9 @@ impl Client {
                 type Output = F::Output;
                 fn poll(self: Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
                     let this = self.project();
-                    log::trace!("enter: {}", &this.name);
+                    log::trace!(target: "smoldot", "enter: {}", &this.name);
                     let out = this.future.poll(cx);
-                    log::trace!("leave");
+                    log::trace!(target: "smoldot", "leave");
                     out
                 }
             }
@@ -190,6 +183,24 @@ impl Client {
             }
         });
 
+        // Spawn a constantly-running task that periodically prints the total memory usage of
+        // the node.
+        new_task_tx
+            .unbounded_send((
+                "memory-printer".to_owned(),
+                Box::pin(async move {
+                    loop {
+                        ffi::Delay::new(Duration::from_secs(60)).await;
+
+                        // For the unwrap below to fail, the quantity of allocated would have to
+                        // not fit in a `u64`, which as of 2021 is basically impossible.
+                        let mem = u64::try_from(alloc::total_alloc_bytes()).unwrap();
+                        log::info!(target: "smoldot", "Node memory usage: {}", BytesDisplay(mem));
+                    }
+                }),
+            ))
+            .unwrap();
+
         Client {
             new_task_tx,
             public_api_chains: slab::Slab::with_capacity(2),
@@ -202,6 +213,18 @@ impl Client {
         &mut self,
         config: AddChainConfig<'_, impl Iterator<Item = ChainId>>,
     ) -> ChainId {
+        // Fail any new chain initialization if the amount of free memory is too low. This
+        // avoids running into OOM errors. The threshold is completely empirical and should
+        // probably be updated regularly to account for changes in the implementation.
+        if alloc::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
+            return ChainId(
+                self.public_api_chains
+                    .insert(PublicApiChain::Erroneous(format!(
+                        "Wasm node is running low on memory and will prevent any new chain from being added"
+                    ))),
+            );
+        }
+
         // Decode the chain specification.
         let chain_spec =
             match chain_spec::ChainSpec::from_json_bytes(&config.specification) {
@@ -217,8 +240,16 @@ impl Client {
         // present in the chain specs, it is possible to start sync at the finalized block it
         // describes.
         let genesis_chain_information =
-            match chain::chain_information::ValidChainInformation::from_chain_spec(&chain_spec) {
-                Ok(ci) => ci,
+            match chain_spec.as_chain_information() {
+                Ok(ci) => match chain::chain_information::ValidChainInformation::try_from(ci) {
+                    Ok(ci) => Some(ci),
+                    Err(err) => {
+                        return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
+                            format!("Invalid genesis chain information: {}", err),
+                        )));
+                    }
+                },
+                Err(chain_spec::FromGenesisStorageError::UnknownStorageItems) => None,
                 Err(err) => {
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
                         format!("Failed to build genesis chain information: {}", err),
@@ -226,9 +257,41 @@ impl Client {
                 }
             };
         let chain_information = if let Some(light_sync_state) = chain_spec.light_sync_state() {
-            light_sync_state.as_chain_information()
-        } else {
+            match chain::chain_information::ValidChainInformation::try_from(
+                light_sync_state.as_chain_information(),
+            ) {
+                Ok(ci) => ci,
+                Err(err) => {
+                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
+                        format!("Invalid checkpoint in chain specification: {}", err),
+                    )));
+                }
+            }
+        } else if let Some(genesis_chain_information) = &genesis_chain_information {
             genesis_chain_information.clone()
+        } else {
+            // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
+            return ChainId(
+                self.public_api_chains
+                    .insert(PublicApiChain::Erroneous(format!(
+                        "Either a checkpoint or the genesis storage must be provided"
+                    ))),
+            );
+        };
+
+        // TODO: this code is a bit messy
+        let genesis_block_header = match genesis_chain_information {
+            Some(ci) => header::Header::from(ci.as_ref().finalized_block_header),
+            None => match chain_spec.genesis_storage() {
+                chain_spec::GenesisStorage::TrieRootHash(state_root) => header::Header {
+                    parent_hash: [0; 32],
+                    number: 0,
+                    state_root: *state_root,
+                    extrinsics_root: smoldot::trie::empty_trie_merkle_value(),
+                    digest: header::DigestRef::empty().into(),
+                },
+                chain_spec::GenesisStorage::Items(_) => unreachable!(),
+            },
         };
 
         // If the chain specification specifies a parachain, find the corresponding relay chain
@@ -271,6 +334,12 @@ impl Client {
 
         // All the checks are performed above. Adding the chain can't fail anymore at this point.
 
+        // Grab a couple of fields from the chain specification for later, as the chain
+        // specification is consumed below.
+        let chain_spec_chain_id = chain_spec.id().to_owned();
+        let genesis_block_hash = genesis_block_header.hash();
+        let genesis_block_state_root = genesis_block_header.state_root;
+
         // The key generated here uniquely identifies this chain within smoldot. Mutiple chains
         // having the same key will use the same services.
         //
@@ -278,10 +347,7 @@ impl Client {
         // identical chains to be de-duplicated, but security issues would arise if two chains
         // were considered identical while they're in reality not identical.
         let new_chain_key = ChainKey {
-            genesis_block_hash: genesis_chain_information
-                .as_ref()
-                .finalized_block_header
-                .hash(),
+            genesis_block_hash,
             relay_chain: relay_chain_id.map(|ck| {
                 (
                     Box::new(match self.public_api_chains.get(ck.0).unwrap() {
@@ -294,18 +360,6 @@ impl Client {
             protocol_id: chain_spec.protocol_id().to_owned(),
         };
 
-        // Grab a couple of fields from the chain specification for later, as the chain
-        // specification is consumed below.
-        let chain_spec_chain_id = chain_spec.id().to_owned();
-        let genesis_block_hash = genesis_chain_information
-            .as_ref()
-            .finalized_block_header
-            .hash();
-        let genesis_block_state_root = *genesis_chain_information
-            .as_ref()
-            .finalized_block_header
-            .state_root;
-
         // Grab the services of the relay chain.
         //
         // Since the initialization process of a chain is done asynchronously, it is possible that
@@ -314,30 +368,73 @@ impl Client {
         // relay chain services.
         //
         // This could in principle be done later on, but doing so raises borrow checker errors.
-        let relay_chain_ready_future: Option<future::MaybeDone<future::Shared<_>>> = relay_chain_id
-            .map(|relay_chain| {
+        let relay_chain_ready_future: Option<(future::MaybeDone<future::Shared<_>>, String)> =
+            relay_chain_id.map(|relay_chain| {
                 let relay_chain = &self
                     .chains_by_key
                     .get(match self.public_api_chains.get(relay_chain.0).unwrap() {
                         PublicApiChain::Ok { key, .. } => key,
                         _ => unreachable!(),
                     })
-                    .unwrap()
-                    .0;
+                    .unwrap();
 
-                match relay_chain {
+                let future = match &relay_chain.0 {
                     future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
                     future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
                     future::MaybeDone::Gone => unreachable!(),
-                }
+                };
+
+                (future, relay_chain.1.clone())
             });
 
+        // Determinate the name under which the chain will be identified in the logs.
+        // Because the chain spec is untrusted input, we must transform the `id` to remove all
+        // weird characters.
+        //
+        // By default, this log name will be equal to chain's `id`. Since it is possible for
+        // multiple different chains to have the same `id`, we need to look into the list of
+        // existing chains and make sure that there's no conflict, in which case the log name
+        // will have the suffix `-1`, or `-2`, or `-3`, and so on.
+        // This value is ignored if we enter the `Entry::Occupied` block below. Because the
+        // calculation requires accessing the list of existing chains, this block can't be put in
+        // the `Entry::Vacant` block below, even though it would make sense for it to be there.
+        let log_name = {
+            let base = chain_spec
+                .id()
+                .chars()
+                .filter(|c| c.is_ascii_graphic())
+                .collect::<String>();
+            let mut suffix = None;
+
+            loop {
+                let attempt = if let Some(suffix) = suffix {
+                    format!("{}-{}", base, suffix)
+                } else {
+                    base.clone()
+                };
+
+                if !self
+                    .chains_by_key
+                    .values()
+                    .any(|(_, name, _)| *name == attempt)
+                {
+                    break attempt;
+                }
+
+                match &mut suffix {
+                    Some(v) => *v += 1,
+                    v @ None => *v = Some(1),
+                }
+            }
+        };
+
         // Start the services of the chain to add, or grab the services if they already exist.
-        let running_chain_init = match self.chains_by_key.entry(new_chain_key.clone()) {
+        let (running_chain_init, log_name) = match self.chains_by_key.entry(new_chain_key.clone()) {
             Entry::Occupied(mut entry) => {
                 // TODO: must add bootnodes to the existing network service, otherwise the existing chain with the same key might only be using malicious bootnodes
-                entry.get_mut().1 = NonZeroU32::new(entry.get_mut().1.get() + 1).unwrap();
-                &mut entry.into_mut().0
+                entry.get_mut().2 = NonZeroU32::new(entry.get_mut().2.get() + 1).unwrap();
+                let entry = entry.into_mut();
+                (&mut entry.0, &entry.1)
             }
             Entry::Vacant(entry) => {
                 // Key used by the networking. Represents the identity of the node on the
@@ -349,58 +446,71 @@ impl Client {
                 let running_chain_init_future: future::RemoteHandle<RunningChain> = {
                     let new_tasks_tx = self.new_task_tx.clone();
                     let chain_spec = chain_spec.clone(); // TODO: quite expensive
+                    let log_name = log_name.clone();
 
                     let future = async move {
                         // Wait until the relay chain has finished initializing, if necessary.
                         let relay_chain =
-                            if let Some(mut relay_chain_ready_future) = relay_chain_ready_future {
+                            if let Some((mut relay_chain_ready_future, relay_chain_log_name)) =
+                                relay_chain_ready_future
+                            {
                                 (&mut relay_chain_ready_future).await;
-                                Some(
-                                    Pin::new(&mut relay_chain_ready_future)
-                                        .take_output()
-                                        .unwrap(),
-                                )
+                                let running_relay_chain = Pin::new(&mut relay_chain_ready_future)
+                                    .take_output()
+                                    .unwrap();
+                                Some((running_relay_chain, relay_chain_log_name))
                             } else {
                                 None
                             };
 
                         // TODO: avoid cloning here
                         let chain_name = chain_spec.name().to_owned();
-                        let relay_chain_id =
-                            chain_spec.relay_chain().map(|(r, id)| (r.to_owned(), id));
+                        let relay_chain_para_id = chain_spec.relay_chain().map(|(_, id)| id);
                         let starting_block_number =
                             chain_information.as_ref().finalized_block_header.number;
                         let starting_block_hash =
                             chain_information.as_ref().finalized_block_header.hash();
 
                         let running_chain = start_services(
+                            log_name.clone(),
                             new_tasks_tx,
                             chain_information,
-                            genesis_chain_information,
+                            genesis_block_header.scale_encoding_vec(),
                             chain_spec,
-                            relay_chain.as_ref(),
+                            relay_chain.as_ref().map(|(r, _)| r),
                             network_noise_key,
                         )
                         .await;
 
                         // Note that the chain name is printed through the `Debug` trait (rather
                         // than `Display`) because it is an untrusted user input.
-                        if let Some((relay_chain_id, para_id)) = relay_chain_id {
+                        //
+                        // The state root hash is printed in order to make it easy to put it
+                        // in the chain specification.
+                        if let Some((_, relay_chain_log_name)) = relay_chain.as_ref() {
                             log::info!(
-                                "Parachain initialization complete. Name: {:?}. Genesis \
-                                hash: {}. Network identity: {}. Relay chain: {:?} (id: {})",
+                                target: "smoldot",
+                                "Parachain initialization complete for {}. Name: {:?}. Genesis \
+                                hash: {}. State root hash: 0x{}. Network identity: {}. Relay \
+                                chain: {} (id: {})",
+                                log_name,
                                 chain_name,
                                 HashDisplay(&genesis_block_hash),
+                                hex::encode(&genesis_block_state_root),
                                 running_chain.network_identity,
-                                relay_chain_id,
-                                para_id
+                                relay_chain_log_name,
+                                relay_chain_para_id.unwrap(),
                             );
                         } else {
                             log::info!(
-                                "Chain initialization complete. Name: {:?}. Genesis hash: {}. \
-                                Network identity: {}. Starting at block #{} ({})",
+                                target: "smoldot",
+                                "Chain initialization complete for {}. Name: {:?}. Genesis \
+                                hash: {}. State root hash: 0x{}. Network identity: {}. Starting \
+                                at block #{} ({})",
+                                log_name,
                                 chain_name,
                                 HashDisplay(&genesis_block_hash),
+                                hex::encode(&genesis_block_state_root),
                                 running_chain.network_identity,
                                 starting_block_number,
                                 HashDisplay(&starting_block_hash)
@@ -420,12 +530,12 @@ impl Client {
                     output_future
                 };
 
-                &mut entry
-                    .insert((
-                        future::maybe_done(running_chain_init_future.shared()),
-                        NonZeroU32::new(1).unwrap(),
-                    ))
-                    .0
+                let entry = entry.insert((
+                    future::maybe_done(running_chain_init_future.shared()),
+                    log_name,
+                    NonZeroU32::new(1).unwrap(),
+                ));
+                (&mut entry.0, &entry.1)
             }
         };
 
@@ -446,6 +556,7 @@ impl Client {
             // Spawn a background task that initializes the JSON-RPC service.
             let json_rpc_service_init: future::RemoteHandle<Arc<json_rpc_service::JsonRpcService>> = {
                 let new_task_tx = self.new_task_tx.clone();
+                let log_name = log_name.clone();
                 let init_future = async move {
                     // Wait for the chain to finish initializing before starting the JSON-RPC service.
                     (&mut running_chain_init).await;
@@ -453,6 +564,7 @@ impl Client {
 
                     Arc::new(json_rpc_service::JsonRpcService::new(
                         json_rpc_service::Config {
+                            log_name, // TODO: add a way to differentiate multiple different json-rpc services under the same chain
                             tasks_executor: Box::new({
                                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
                             }),
@@ -465,7 +577,7 @@ impl Client {
                             genesis_block_state_root,
                             max_parallel_requests: NonZeroU32::new(24).unwrap(),
                             max_pending_requests: NonZeroU32::new(32).unwrap(),
-                            max_subscriptions: 64,
+                            max_subscriptions: 1024, // Note: the PolkadotJS UI is very heavy in terms of subscriptions.
                         },
                     ))
                 };
@@ -487,11 +599,12 @@ impl Client {
             // background task once the user decides to get rid of this chain.
             let abort_run_task: future::AbortHandle = {
                 let shared_init = json_rpc_service_init.clone();
+                let log_target = format!("json-rpc-{}", log_name);
                 let run_task = async move {
                     let json_rpc_service = shared_init.await;
                     loop {
                         let response = json_rpc_service.next_response().await;
-                        send_back(&response, new_chain_id)
+                        send_back(&response, &log_target, new_chain_id)
                     }
                 };
                 let (run_task, abort_run_task) = future::abortable(run_task);
@@ -558,10 +671,11 @@ impl Client {
                 }
 
                 let running_chain = self.chains_by_key.get_mut(&key).unwrap();
-                if running_chain.1.get() == 1 {
+                if running_chain.2.get() == 1 {
+                    log::info!(target: "smoldot", "Shutting down chain {}", running_chain.1);
                     self.chains_by_key.remove(&key);
                 } else {
-                    running_chain.1 = NonZeroU32::new(running_chain.1.get() - 1).unwrap();
+                    running_chain.2 = NonZeroU32::new(running_chain.2.get() - 1).unwrap();
                 }
             }
             _ => {}
@@ -576,18 +690,42 @@ impl Client {
     /// queued and will be decoded and processed later. An error is returned if, for each
     /// individual chain, the queue of requests is too large.
     ///
-    /// This function doesn't return an error, as errors are yielded using
-    /// [`ffi::emit_json_rpc_response`].
+    /// This function doesn't return an error, as errors are yielded through the FFI layer.
     pub fn json_rpc_request(&mut self, json_rpc_request: impl Into<String>, chain_id: ChainId) {
         self.json_rpc_request_inner(json_rpc_request.into(), chain_id)
     }
 
     fn json_rpc_request_inner(&mut self, json_rpc_request: String, chain_id: ChainId) {
-        log::debug!(
-            target: "json-rpc",
+        let (json_rpc_service, log_target) = match self.public_api_chains.get(chain_id.0) {
+            Some(PublicApiChain::Ok {
+                json_rpc_service,
+                key,
+                ..
+            }) => {
+                let log_name = &self.chains_by_key.get(key).unwrap().1;
+                (Some(json_rpc_service), format!("json-rpc-{}", log_name))
+            }
+            _ => (None, "json-rpc-<unknown>".to_string()),
+        };
+
+        log::log!(
+            target: &log_target,
+            if json_rpc_service.is_some() {
+                log::Level::Debug
+            } else {
+                log::Level::Warn
+            },
             "JSON-RPC => {:?}{}",
-            if json_rpc_request.len() > 100 { &json_rpc_request[..100] } else { &json_rpc_request[..] },
-            if json_rpc_request.len() > 100 { "…" } else { "" }
+            if json_rpc_request.len() > 100 {
+                &json_rpc_request[..100]
+            } else {
+                &json_rpc_request[..]
+            },
+            if json_rpc_request.len() > 100 {
+                "…"
+            } else {
+                ""
+            }
         );
 
         // Check whether the JSON-RPC request is correct, and bail out if it isn't.
@@ -595,25 +733,24 @@ impl Client {
             Ok((rq_id, _)) => rq_id,
             Err(methods::ParseError::Method { request_id, error }) => {
                 log::warn!(
-                    target: "json-rpc",
-                    "Error in JSON-RPC method call: {}", error
+                    target: &log_target,
+                    "Error in JSON-RPC method call: {}",
+                    error
                 );
-                send_back(&error.to_json_error(request_id), chain_id);
+                send_back(&error.to_json_error(request_id), &log_target, chain_id);
                 return;
             }
             Err(error) => {
                 log::warn!(
-                    target: "json-rpc",
-                    "Ignoring malformed JSON-RPC call: {}", error
+                    target: &log_target,
+                    "Ignoring malformed JSON-RPC call: {}",
+                    error
                 );
                 return;
             }
         };
 
-        if let Some(PublicApiChain::Ok {
-            json_rpc_service, ..
-        }) = self.public_api_chains.get(chain_id.0)
-        {
+        if let Some(json_rpc_service) = json_rpc_service {
             if let Some((ref json_rpc_service, _)) = json_rpc_service {
                 let mut json_rpc_service = match json_rpc_service {
                     future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
@@ -626,7 +763,7 @@ impl Client {
                     let json_rpc_service = Pin::new(&mut json_rpc_service).take_output().unwrap();
                     if let Err(err) = json_rpc_service.queue_rpc_request(json_rpc_request).await {
                         if let Some(err) = err.into_json_rpc_error() {
-                            send_back(&err, chain_id);
+                            send_back(&err, &log_target, chain_id);
                         }
                     }
                 };
@@ -648,6 +785,7 @@ impl Client {
                         ),
                         None,
                     ),
+                    &log_target,
                     chain_id,
                 );
             }
@@ -661,6 +799,7 @@ impl Client {
                     ),
                     None,
                 ),
+                &log_target,
                 chain_id,
             );
         }
@@ -685,11 +824,15 @@ enum PublicApiChain {
 ///
 /// > **Note**: This method wraps around [`ffi::emit_json_rpc_response`] and exists primarily
 /// >           in order to print a log message.
-fn send_back(message: &str, chain_id: ChainId) {
+fn send_back(message: &str, log_target: &str, chain_id: ChainId) {
     log::debug!(
-        target: "json-rpc",
+        target: &log_target,
         "JSON-RPC <= {}{}",
-        if message.len() > 100 { &message[..100] } else { &message[..] },
+        if message.len() > 100 {
+            &message[..100]
+        } else {
+            &message[..]
+        },
         if message.len() > 100 { "…" } else { "" }
     );
 
@@ -729,12 +872,13 @@ struct RunningChain {
 /// Returns some of the services that have been started. If these service get shut down, all the
 /// other services will later shut down as well.
 async fn start_services(
+    log_name: String,
     new_task_tx: mpsc::UnboundedSender<(
         String,
         Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
     )>,
     chain_information: chain::chain_information::ValidChainInformation,
-    genesis_chain_information: chain::chain_information::ValidChainInformation,
+    genesis_block_scale_encoded_header: Vec<u8>,
     chain_spec: chain_spec::ChainSpec,
     relay_chain: Option<&RunningChain>,
     network_noise_key: connection::NoiseKey,
@@ -754,6 +898,7 @@ async fn start_services(
             num_events_receivers: 1, // Configures the length of `network_event_receivers`
             noise_key: network_noise_key,
             chains: vec![network_service::ConfigChain {
+                log_name: log_name.clone(),
                 bootstrap_nodes: {
                     let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
                     for node in chain_spec.boot_nodes() {
@@ -768,13 +913,13 @@ async fn start_services(
                     list
                 },
                 has_grandpa_protocol: matches!(
-                    genesis_chain_information.as_ref().finality,
+                    chain_information.as_ref().finality,
                     chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }
                 ),
-                genesis_block_hash: genesis_chain_information
-                    .as_ref()
-                    .finalized_block_header
-                    .hash(),
+                genesis_block_hash: header::hash_from_scale_encoded_header(
+                    &genesis_block_scale_encoded_header,
+                ),
+                finalized_block_height: chain_information.as_ref().finalized_block_header.number,
                 best_block: (
                     chain_information.as_ref().finalized_block_header.number,
                     chain_information.as_ref().finalized_block_header.hash(),
@@ -792,6 +937,7 @@ async fn start_services(
         // chain.
         let sync_service = Arc::new(
             sync_service::SyncService::new(sync_service::Config {
+                log_name: log_name.clone(),
                 chain_information: chain_information.clone(),
                 tasks_executor: Box::new({
                     let new_task_tx = new_task_tx.clone();
@@ -810,16 +956,14 @@ async fn start_services(
         // The runtime service follows the runtime of the best block of the chain,
         // and allows performing runtime calls.
         let runtime_service = runtime_service::RuntimeService::new(runtime_service::Config {
+            log_name: log_name.clone(),
             tasks_executor: Box::new({
                 let new_task_tx = new_task_tx.clone();
                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
             }),
             sync_service: sync_service.clone(),
             chain_spec: &chain_spec,
-            genesis_block_scale_encoded_header: genesis_chain_information
-                .as_ref()
-                .finalized_block_header
-                .scale_encoding_vec(),
+            genesis_block_scale_encoded_header,
         })
         .await;
 
@@ -832,6 +976,7 @@ async fn start_services(
         // chain.
         let sync_service = Arc::new(
             sync_service::SyncService::new(sync_service::Config {
+                log_name: log_name.clone(),
                 chain_information: chain_information.clone(),
                 tasks_executor: Box::new({
                     let new_task_tx = new_task_tx.clone();
@@ -847,16 +992,14 @@ async fn start_services(
         // The runtime service follows the runtime of the best block of the chain,
         // and allows performing runtime calls.
         let runtime_service = runtime_service::RuntimeService::new(runtime_service::Config {
+            log_name: log_name.clone(),
             tasks_executor: Box::new({
                 let new_task_tx = new_task_tx.clone();
                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
             }),
             sync_service: sync_service.clone(),
             chain_spec: &chain_spec,
-            genesis_block_scale_encoded_header: genesis_chain_information
-                .as_ref()
-                .finalized_block_header
-                .scale_encoding_vec(),
+            genesis_block_scale_encoded_header,
         })
         .await;
 
@@ -869,6 +1012,7 @@ async fn start_services(
     // transaction will be submitted, the service itself is pretty low cost.
     let transactions_service = Arc::new(
         transactions_service::TransactionsService::new(transactions_service::Config {
+            log_name,
             tasks_executor: Box::new({
                 let new_task_tx = new_task_tx.clone();
                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()

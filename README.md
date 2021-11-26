@@ -26,44 +26,22 @@ The following list is a best-effort list of packages that must be available on t
 - `pkg-config`
 - `sqlite`
 
+The full client is currently a work in progress and doesn't support many features that the official client supports.
+
 ### Wasm light node
 
 Pre-requisite: in order to run the wasm light node, you must have installed [rustup](https://rustup.rs/).
 
-The wasm light node can be tested with `cd bin/wasm-node/javascript` and `npm start`. This will compile the smoldot wasm light node and start a WebSocket server capable of answering JSON-RPC requests. You can then navigate to <https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944> in order to interact with the Westend chain.
+The wasm light node can be tested with `cd bin/wasm-node/javascript` and `npm install; npm start`. This will compile the smoldot wasm light node and start a WebSocket server capable of answering JSON-RPC requests. You can then navigate to <https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944> in order to interact with the Westend chain.
 
 > Note: The `npm start` command starts a small JavaScript shim, on top of the wasm light node, that hardcodes the chain to Westend and starts the WebSocket server. The wasm light node itself can connect to a variety of different chains (not only Westend) and doesn't start any server.
 
-The Wasm light node is published on NPM: https://www.npmjs.com/package/smoldot
+The Wasm light node is published on NPM: https://www.npmjs.com/package/@substrate/smoldot-light
 
 # Objectives
 
 There exists multiple objectives behind this repository:
 
-- Write a client implementation that is as comprehensive as possible, to make it easier to understand the various components of a Substrate/Polkadot client. A large emphasis is put on documentation, and the documentation of the `main` branch is automatically deployed [here](https://paritytech.github.io/smoldot/smoldot/index.html).
+- Write a client implementation that is as comprehensive as possible, to make it easier to understand the various components of a Substrate/Polkadot client. A large emphasis is put on documentation.
 - Implement a client that is lighter than Substrate, in terms of memory consumption, number of threads, and code size, in order to compile it to WebAssembly and distribute it in webpages.
 - Experiment with a new code architecture, to maybe upstream some components to Substrate and Polkadot.
-
-# Status
-
-As a quick overview, at the time of writing of this README, the following is supported:
-
-- Verifying Babe and Aura blocks.
-- "Executing" blocks, by calling `Core_execute_block`.
-- Verifying GrandPa justifications and GrandPa commit messages.
-- "Optimistic syncing", in other words syncing by assuming that there isn't any fork.
-- Verifying storage trie proofs.
-- The WebSocket JSON-RPC server is in progress, but its design is still changing.
-- An informant.
-- A telemetry client (mostly copy-pasted from Substrate and substrate-telemetry).
-- An unfinished new networking stack.
-- A transaction pool for light clients.
-- A SQLite database for the full client.
-
-The following isn't done yet:
-
-- Authoring blocks isn't supported.
-- Transaction pool for full nodes is non-functional.
-- GrandPa votes gossiping.
-- The changes trie isn't implemented (it is not enabled on Westend, Kusama and Polkadot at the moment).
-- A Prometheus server. While not difficult to implement, it seems a bit overkill to have one at the moment.

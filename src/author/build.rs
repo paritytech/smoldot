@@ -25,7 +25,7 @@ use crate::{
 };
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom as _, num::NonZeroU64, time::Duration};
+use core::{num::NonZeroU64, time::Duration};
 
 /// Configuration for a block generation.
 pub struct Config<'a, TLocAuth> {
@@ -61,16 +61,13 @@ pub enum ConfigConsensus<'a, TLocAuth> {
 #[must_use]
 pub enum Builder {
     /// None of the authorities available locally are allowed to produce a block.
-    AllSync,
+    Idle,
 
     /// Block production is idle, waiting for a slot.
     WaitSlot(WaitSlot),
 
     /// Block production is ready to start.
     Ready(AuthoringStart),
-
-    /// Currently authoring a block.
-    Authoring(BuilderAuthoring),
 }
 
 impl Builder {
@@ -94,7 +91,7 @@ impl Builder {
                     slot_duration,
                 }) {
                     Some(c) => c,
-                    None => return Builder::AllSync,
+                    None => return Builder::Idle,
                 };
 
                 debug_assert!(now_from_unix_epoch < consensus.slot_end_from_unix_epoch);
@@ -192,6 +189,27 @@ pub struct AuthoringStart {
 }
 
 impl AuthoringStart {
+    /// Returns when the authoring slot start, as a UNIX timestamp (i.e. number of seconds since
+    /// the UNIX epoch, ignoring leap seconds).
+    pub fn slot_start_from_unix_epoch(&self) -> Duration {
+        match self.consensus {
+            WaitSlotConsensus::Aura(claim) => claim.slot_start_from_unix_epoch,
+        }
+    }
+
+    /// Returns when the authoring slot ends, as a UNIX timestamp (i.e. number of seconds since
+    /// the UNIX epoch, ignoring leap seconds).
+    ///
+    /// The block should finish being authored before the slot ends.
+    /// However, in order for the network to perform smoothly, the block should have been
+    /// authored **and** propagated throughout the entire peer-to-peer network before the slot
+    /// ends.
+    pub fn slot_end_from_unix_epoch(&self) -> Duration {
+        match self.consensus {
+            WaitSlotConsensus::Aura(claim) => claim.slot_end_from_unix_epoch,
+        }
+    }
+
     /// Start producing the block.
     pub fn start(self, config: AuthoringStartConfig) -> BuilderAuthoring {
         let inner_block_build = runtime::build_block(runtime::Config {
@@ -199,6 +217,7 @@ impl AuthoringStart {
             parent_number: config.parent_number,
             parent_runtime: config.parent_runtime,
             top_trie_root_calculation_cache: config.top_trie_root_calculation_cache,
+            block_body_capacity: config.block_body_capacity,
             consensus_digest_log_item: match self.consensus {
                 WaitSlotConsensus::Aura(slot) => {
                     runtime::ConfigPreRuntime::Aura(header::AuraPreDigest {
@@ -249,6 +268,10 @@ pub struct AuthoringStartConfig<'a> {
     /// Optional cache corresponding to the storage trie root hash calculation coming from the
     /// parent block verification.
     pub top_trie_root_calculation_cache: Option<calculate_root::CalculationCache>,
+
+    /// Capacity to reserve for the number of extrinsics. Should be higher than the approximate
+    /// number of extrinsics that are going to be applied.
+    pub block_body_capacity: usize,
 }
 
 /// More transactions can be added.
@@ -349,9 +372,14 @@ pub struct Seal {
 }
 
 impl Seal {
-    /// Returns the SCALE-encoded header that must be signed.
+    /// Returns the SCALE-encoded header whose hash must be signed.
     pub fn scale_encoded_header(&self) -> &[u8] {
         &self.block.scale_encoded_header
+    }
+
+    /// Returns the data to sign. This is the hash of the SCALE-encoded header of the block.
+    pub fn to_sign(&self) -> [u8; 32] {
+        header::hash_from_scale_encoded_header(&self.block.scale_encoded_header)
     }
 
     /// Returns the index within the list of authorities of the authority that must sign the
@@ -364,7 +392,8 @@ impl Seal {
         }
     }
 
-    /// Injects the sr25519 signature of the SCALE-encoded header from the given authority.
+    /// Injects the sr25519 signature of the hash of the SCALE-encoded header from the given
+    /// authority.
     ///
     /// The method then returns the finished block.
     pub fn inject_sr25519_signature(mut self, signature: [u8; 64]) -> runtime::Success {

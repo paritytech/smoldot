@@ -22,7 +22,6 @@ use crate::{
 
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
-use parity_scale_codec::DecodeAll as _;
 
 /// BABE configuration of a chain, as extracted from the genesis block.
 ///
@@ -69,53 +68,33 @@ impl BabeGenesisConfiguration {
             .map_err(|(err, proto)| FromVmPrototypeError::VmStart(err, proto))?
             .into();
 
-        let (inner, vm_prototype) = loop {
+        loop {
             match vm {
                 host::HostVm::ReadyToRun(r) => vm = r.run(),
                 host::HostVm::Finished(finished) => {
-                    let decoded = OwnedGenesisConfiguration::decode_all(finished.value().as_ref());
-                    break match decoded {
-                        Ok(cfg) => (cfg, finished.into_prototype()),
-                        Err(err) => return Err(FromVmPrototypeError::OutputDecode(err)),
-                    };
+                    let output = finished.value();
+                    let cfg =
+                        nom::combinator::all_consuming(decode_genesis_config)(output.as_ref())
+                            .map(|(_, parse_result)| parse_result)
+                            .map_err(|_| FromVmPrototypeError::OutputDecode)?;
+                    drop(output);
+                    break Ok((cfg, finished.into_prototype()));
                 }
-                host::HostVm::Error { .. } => return Err(FromVmPrototypeError::Trapped),
+                host::HostVm::Error { .. } => break Err(FromVmPrototypeError::Trapped),
 
                 host::HostVm::ExternalStorageGet(req) => {
                     let value = genesis_storage_access(req.key().as_ref());
                     vm = req.resume_full_value(value.as_ref().map(|v| &v[..]));
                 }
 
+                host::HostVm::GetMaxLogLevel(resume) => {
+                    vm = resume.resume(0); // Off
+                }
                 host::HostVm::LogEmit(req) => vm = req.resume(),
 
-                _ => return Err(FromVmPrototypeError::HostFunctionNotAllowed),
+                _ => break Err(FromVmPrototypeError::HostFunctionNotAllowed),
             }
-        };
-
-        let epoch0_information = header::BabeNextEpoch {
-            randomness: inner.randomness,
-            authorities: inner
-                .genesis_authorities
-                .iter()
-                .map(|(public_key, weight)| header::BabeAuthority {
-                    public_key: *public_key,
-                    weight: *weight,
-                })
-                .collect(),
-        };
-
-        let epoch0_configuration = header::BabeNextConfig {
-            c: inner.c,
-            allowed_slots: inner.allowed_slots,
-        };
-
-        let outcome = BabeGenesisConfiguration {
-            slots_per_epoch: inner.epoch_length,
-            epoch0_configuration,
-            epoch0_information,
-        };
-
-        Ok((outcome, vm_prototype))
+        }
     }
 }
 
@@ -153,7 +132,7 @@ pub enum FromVmPrototypeError {
     /// Virtual machine tried to call a host function that isn't valid in this context.
     HostFunctionNotAllowed,
     /// Error while decoding the output of the virtual machine.
-    OutputDecode(parity_scale_codec::Error),
+    OutputDecode,
 }
 
 impl FromVmPrototypeError {
@@ -172,13 +151,57 @@ impl FromVmPrototypeError {
     }
 }
 
-// TODO: don't use scale_codec?
-#[derive(Debug, Clone, PartialEq, Eq, parity_scale_codec::Encode, parity_scale_codec::Decode)]
-struct OwnedGenesisConfiguration {
-    slot_duration: u64,
-    epoch_length: NonZeroU64,
-    c: (u64, u64),
-    genesis_authorities: Vec<([u8; 32], u64)>,
-    randomness: [u8; 32],
-    allowed_slots: header::BabeAllowedSlots,
+fn decode_genesis_config(bytes: &[u8]) -> nom::IResult<&[u8], BabeGenesisConfiguration> {
+    nom::combinator::map(
+        nom::sequence::tuple((
+            nom::number::complete::le_u64,
+            nom::combinator::map_opt(nom::number::complete::le_u64, NonZeroU64::new),
+            nom::number::complete::le_u64,
+            nom::number::complete::le_u64,
+            nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
+                nom::multi::many_m_n(
+                    num_elems,
+                    num_elems,
+                    nom::combinator::map(
+                        nom::sequence::tuple((
+                            nom::bytes::complete::take(32u32),
+                            nom::number::complete::le_u64,
+                        )),
+                        move |(public_key, weight)| header::BabeAuthority {
+                            public_key: <[u8; 32]>::try_from(public_key).unwrap(),
+                            weight,
+                        },
+                    ),
+                )
+            }),
+            nom::combinator::map(nom::bytes::complete::take(32u32), |b| {
+                <[u8; 32]>::try_from(b).unwrap()
+            }),
+            nom::branch::alt((
+                nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+                    header::BabeAllowedSlots::PrimarySlots
+                }),
+                nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+                    header::BabeAllowedSlots::PrimaryAndSecondaryPlainSlots
+                }),
+                nom::combinator::map(nom::bytes::complete::tag(&[2]), |_| {
+                    header::BabeAllowedSlots::PrimaryAndSecondaryVrfSlots
+                }),
+            )),
+        )),
+        |(_slot_duration, slots_per_epoch, c0, c1, authorities, randomness, allowed_slots)| {
+            // Note that the slot duration is unused as it is not modifiable anyway.
+            BabeGenesisConfiguration {
+                slots_per_epoch,
+                epoch0_configuration: header::BabeNextConfig {
+                    c: (c0, c1),
+                    allowed_slots,
+                },
+                epoch0_information: header::BabeNextEpoch {
+                    randomness,
+                    authorities,
+                },
+            }
+        },
+    )(bytes)
 }

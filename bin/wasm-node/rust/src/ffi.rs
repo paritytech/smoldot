@@ -19,7 +19,6 @@
 
 use core::{
     cmp::Ordering,
-    convert::TryFrom as _,
     fmt,
     future::Future,
     marker,
@@ -29,19 +28,22 @@ use core::{
     task::{Context, Poll, Waker},
     time::Duration,
 };
-use futures::{channel::oneshot, prelude::*};
+use futures::prelude::*;
 use std::{
     collections::VecDeque,
     sync::{atomic, Arc, Mutex},
     task,
 };
 
-pub mod bindings;
+pub use timers::Delay;
 
-/// Stops execution, throwing a string exception with the given content.
-pub(crate) fn throw(message: String) -> ! {
+pub mod bindings;
+mod timers;
+
+/// Stops execution, providing a string explaining what happened.
+pub(crate) fn panic(message: String) -> ! {
     unsafe {
-        bindings::throw(
+        bindings::panic(
             u32::try_from(message.as_bytes().as_ptr() as usize).unwrap(),
             u32::try_from(message.as_bytes().len()).unwrap(),
         );
@@ -66,7 +68,7 @@ pub fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static) 
     struct Waker {
         done: atomic::AtomicBool,
         wake_up_registered: atomic::AtomicBool,
-        future: Mutex<Pin<Box<dyn Future<Output = ()> + Send>>>,
+        future: Mutex<future::BoxFuture<'static, ()>>,
     }
 
     impl task::Wake for Waker {
@@ -108,45 +110,14 @@ pub fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static) 
     task::Wake::wake(waker);
 }
 
-/// Uses the environment to invoke `closure` after `duration` has elapsed.
+/// Uses the environment to invoke `closure` after at least `duration` has elapsed.
 fn start_timer_wrap(duration: Duration, closure: impl FnOnce()) {
     let callback: Box<Box<dyn FnOnce()>> = Box::new(Box::new(closure));
     let timer_id = u32::try_from(Box::into_raw(callback) as usize).unwrap();
-    let milliseconds = u64::try_from(duration.as_millis()).unwrap_or(u64::max_value());
-    unsafe { bindings::start_timer(timer_id, (milliseconds as f64).ceil()) }
-}
-
-// TODO: cancel the timer if the `Delay` is destroyed? we create and destroy a lot of `Delay`s
-pub struct Delay {
-    rx: oneshot::Receiver<()>,
-}
-
-impl Delay {
-    pub fn new(when: Duration) -> Self {
-        let (tx, rx) = oneshot::channel();
-        if when == Duration::new(0, 0) {
-            let _ = tx.send(());
-        } else {
-            start_timer_wrap(when, move || {
-                let _ = tx.send(());
-            });
-        }
-        Delay { rx }
-    }
-}
-
-impl Future for Delay {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        Future::poll(Pin::new(&mut self.rx), cx).map(|v| v.unwrap())
-    }
-}
-
-impl future::FusedFuture for Delay {
-    fn is_terminated(&self) -> bool {
-        self.rx.is_terminated()
-    }
+    // Note that ideally `duration` should be rounded up in order to make sure that it is not
+    // truncated, but the precision of an `f64` is so high and the precision of the operating
+    // system generally so low that this is not worth dealing with.
+    unsafe { bindings::start_timer(timer_id, duration.as_secs_f64() * 1000.0) }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -269,9 +240,17 @@ pub struct Connection {
     _pinned: marker::PhantomPinned,
 }
 
+/// Error potentially returned by [`Connection::connect`].
+pub struct ConnectError {
+    /// Human-readable error message.
+    pub message: String,
+    /// `true` if the error is caused by the address to connect to being forbidden or unsupported.
+    pub is_bad_addr: bool,
+}
+
 impl Connection {
     /// Connects to the given URL. Returns a [`Connection`] on success.
-    pub fn connect(url: &str) -> impl Future<Output = Result<Pin<Box<Self>>, String>> {
+    pub fn connect(url: &str) -> impl Future<Output = Result<Pin<Box<Self>>, ConnectError>> {
         let mut pointer = Box::pin(Connection {
             id: None,
             open: false,
@@ -284,14 +263,14 @@ impl Connection {
 
         let id = u32::try_from(&*pointer as *const Connection as usize).unwrap();
 
-        let mut error_ptr = [0u8; 8];
+        let mut error_ptr = [0u8; 9];
 
         let ret_code = unsafe {
             bindings::connection_new(
                 id,
                 u32::try_from(url.as_bytes().as_ptr() as usize).unwrap(),
                 u32::try_from(url.as_bytes().len()).unwrap(),
-                u32::try_from(&mut error_ptr as *mut [u8; 8] as usize).unwrap(),
+                u32::try_from(&mut error_ptr as *mut [u8; 9] as usize).unwrap(),
             )
         };
 
@@ -305,7 +284,11 @@ impl Connection {
                         usize::try_from(len).unwrap(),
                     ))
                 };
-                return Err(str::from_utf8(&error_message).unwrap().to_owned());
+
+                return Err(ConnectError {
+                    message: str::from_utf8(&error_message).unwrap().to_owned(),
+                    is_bad_addr: error_ptr[8] != 0,
+                });
             }
 
             unsafe {
@@ -333,7 +316,10 @@ impl Connection {
                 Ok(pointer)
             } else {
                 debug_assert!(pointer.closed_message.is_some());
-                Err(pointer.closed_message.as_ref().unwrap().clone())
+                Err(ConnectError {
+                    message: pointer.closed_message.as_ref().unwrap().clone(),
+                    is_bad_addr: false,
+                })
             }
         }
     }

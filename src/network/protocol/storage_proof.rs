@@ -89,7 +89,7 @@ pub fn decode_storage_proof_response(
 }
 
 /// Error potentially returned by [`decode_storage_proof_response`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum DecodeStorageProofResponseError {
     /// Error while decoding the protobuf encoding.
     ProtobufDecode(ProtobufDecodeError),

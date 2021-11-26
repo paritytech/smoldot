@@ -24,12 +24,10 @@
 //! after which it will spawn background tasks and use the networking service to stay
 //! synchronized.
 //!
-//! Use [`SyncService::subscribe_best`] and [`SyncService::subscribe_finalized`] to get notified
-//! about updates of the best and finalized blocks.
+//! Use [`SyncService::subscribe_all`] to get notified about updates to the state of the chain.
 
-use crate::{ffi, lossy_channel, network_service, runtime_service};
+use crate::{network_service, runtime_service};
 
-use blake2_rfc::blake2b::blake2b;
 use futures::{
     channel::{mpsc, oneshot},
     lock::Mutex,
@@ -37,32 +35,30 @@ use futures::{
 };
 use smoldot::{
     chain,
-    executor::{host, read_only_runtime_host},
-    header,
-    informant::HashDisplay,
-    libp2p::{self, PeerId},
-    network::{self, protocol, service},
-    sync::{all, para},
+    libp2p::PeerId,
+    network::{protocol, service},
     trie::{self, prefix_proof, proof_verify},
 };
-use std::{
-    collections::HashMap,
-    convert::TryFrom as _,
-    fmt, iter,
-    num::{NonZeroU32, NonZeroU64},
-    pin::Pin,
-    sync::Arc,
-};
+use std::{fmt, num::NonZeroU32, sync::Arc};
 
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 
+mod parachain;
+mod standalone;
+
 /// Configuration for a [`SyncService`].
 pub struct Config {
+    /// Name of the chain, for logging purposes.
+    ///
+    /// > **Note**: This name will be directly printed out. Any special character should already
+    /// >           have been filtered out from this name.
+    pub log_name: String,
+
     /// State of the finalized chain.
     pub chain_information: chain::chain_information::ValidChainInformation,
 
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(String, Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+    pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
     /// Access to the network, and index of the chain to sync from the point of view of the
     /// network service.
@@ -70,7 +66,7 @@ pub struct Config {
 
     /// Receiver for events coming from the network, as returned by
     /// [`network_service::NetworkService::new`].
-    pub network_events_receiver: mpsc::Receiver<network_service::Event>,
+    pub network_events_receiver: stream::BoxStream<'static, network_service::Event>,
 
     /// Extra fields used when the chain is a parachain.
     /// If `None`, this chain is a standalone chain or a relay chain.
@@ -110,28 +106,32 @@ impl SyncService {
     pub async fn new(mut config: Config) -> Self {
         let (to_background, from_foreground) = mpsc::channel(16);
 
+        let log_target = format!("sync-service-{}", config.log_name);
+
         if let Some(config_parachain) = config.parachain {
             (config.tasks_executor)(
-                "sync-relay".into(),
-                Box::pin(start_parachain(
+                "sync-para".into(),
+                Box::pin(parachain::start_parachain(
+                    log_target,
                     config.chain_information,
+                    config_parachain.relay_chain_sync.clone(),
+                    config_parachain.parachain_id,
                     from_foreground,
-                    config_parachain,
+                    config.network_service.1,
+                    config.network_events_receiver,
                 )),
             );
         } else {
             (config.tasks_executor)(
-                "sync-para".into(),
-                Box::pin(
-                    start_relay_chain(
-                        config.chain_information,
-                        from_foreground,
-                        config.network_service.0.clone(),
-                        config.network_service.1,
-                        config.network_events_receiver,
-                    )
-                    .await,
-                ),
+                "sync-relay".into(),
+                Box::pin(standalone::start_standalone_chain(
+                    log_target,
+                    config.chain_information,
+                    from_foreground,
+                    config.network_service.0.clone(),
+                    config.network_service.1,
+                    config.network_events_receiver,
+                )),
             );
         }
 
@@ -142,54 +142,14 @@ impl SyncService {
         }
     }
 
-    /// Returns the SCALE-encoded header of the current finalized block, alongside with a stream
-    /// producing updates of the finalized block.
-    ///
-    /// Not all updates are necessarily reported. In particular, updates that weren't pulled from
-    /// the `Stream` yet might get overwritten by newest updates.
-    ///
-    /// If you have subscribed to new blocks, the finalized blocks reported in this channel are
-    /// guaranteed to have earlier been reported as new blocks.
-    ///
-    /// If you have subscribed to best blocks, the finalized blocks reported in this channel are
-    /// guaranteed to be ancestors of the latest reported best block.
-    // TODO: is this last paragraph true for parachains?
-    pub async fn subscribe_finalized(&self) -> (Vec<u8>, NotificationsReceiver<Vec<u8>>) {
-        let (send_back, rx) = oneshot::channel();
-
-        self.to_background
-            .lock()
-            .await
-            .send(ToBackground::SubscribeFinalized { send_back })
-            .await
-            .unwrap();
-
-        rx.await.unwrap()
-    }
-
-    /// Returns the SCALE-encoded header of the current best block, alongside with a stream
-    /// producing updates of the best block.
-    ///
-    /// Not all updates are necessarily reported. In particular, updates that weren't pulled from
-    /// the `Stream` yet might get overwritten by newest updates.
-    pub async fn subscribe_best(&self) -> (Vec<u8>, NotificationsReceiver<Vec<u8>>) {
-        let (send_back, rx) = oneshot::channel();
-
-        self.to_background
-            .lock()
-            .await
-            .send(ToBackground::SubscribeBest { send_back })
-            .await
-            .unwrap();
-
-        rx.await.unwrap()
-    }
-
     /// Subscribes to the state of the chain: the current state and the new blocks.
     ///
-    /// Contrary to [`SyncService::subscribe_best`], *all* new blocks are reported. Only up to
-    /// `buffer_size` block notifications are buffered in the channel. If the channel is full
-    /// when a new notification is attempted to be pushed, the channel gets closed.
+    /// All new blocks are reported. Only up to `buffer_size` block notifications are buffered
+    /// in the channel. If the channel is full when a new notification is attempted to be pushed,
+    /// the channel gets closed.
+    ///
+    /// The channel also gets closed if a gap in the finality happens, such as after a Grandpa
+    /// warp syncing.
     ///
     /// See [`SubscribeAll`] for information about the return value.
     pub async fn subscribe_all(&self, buffer_size: usize) -> SubscribeAll {
@@ -233,7 +193,9 @@ impl SyncService {
     /// This function is subject to race condition. The list returned by this function can change
     /// at any moment. The return value should only ever be shown to the user and not used for any
     /// meaningful logic
-    pub async fn syncing_peers(&self) -> impl ExactSizeIterator<Item = (PeerId, u64, [u8; 32])> {
+    pub async fn syncing_peers(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (PeerId, protocol::Role, u64, [u8; 32])> {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
@@ -307,43 +269,7 @@ impl SyncService {
                 Err(_) => continue,
             };
 
-            if result.len() != 1 {
-                continue;
-            }
-
-            let result = result.remove(0);
-
-            if result.header.is_none() && fields.header {
-                continue;
-            }
-            if result
-                .header
-                .as_ref()
-                .map_or(false, |h| header::decode(h).is_err())
-            {
-                continue;
-            }
-            if result.body.is_none() && fields.body {
-                continue;
-            }
-            // Note: the presence of a justification isn't checked and can't be checked, as not
-            // all blocks have a justification in the first place.
-            if result.hash != hash {
-                continue;
-            }
-            if result.header.as_ref().map_or(false, |h| {
-                header::hash_from_scale_encoded_header(&h) != result.hash
-            }) {
-                continue;
-            }
-            match (&result.header, &result.body) {
-                (Some(_), Some(_)) => {
-                    // TODO: verify correctness of body
-                }
-                _ => {}
-            }
-
-            return Ok(result);
+            return Ok(result.remove(0));
         }
 
         Err(())
@@ -536,7 +462,7 @@ impl SyncService {
 }
 
 /// Error that can happen when calling [`SyncService::storage_query`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StorageQueryError {
     /// Contains one error per peer that has been contacted. If this list is empty, then we
     /// aren't connected to any node.
@@ -574,7 +500,7 @@ impl fmt::Display for StorageQueryError {
 }
 
 /// See [`StorageQueryError`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum StorageQueryErrorDetail {
     /// Error during the network request.
     #[display(fmt = "{}", _0)]
@@ -618,19 +544,58 @@ impl fmt::Display for CallProofQueryError {
 pub struct SubscribeAll {
     /// SCALE-encoded header of the finalized block at the time of the subscription.
     pub finalized_block_scale_encoded_header: Vec<u8>,
+
     /// List of all known non-finalized blocks at the time of subscription.
     ///
     /// Only one element in this list has [`BlockNotification::is_new_best`] equal to true.
-    pub non_finalized_blocks: Vec<BlockNotification>,
+    ///
+    /// The blocks are guaranteed to be ordered so that parents are always found before their
+    /// children.
+    pub non_finalized_blocks_ancestry_order: Vec<BlockNotification>,
+
     /// Channel onto which new blocks are sent. The channel gets closed if it is full when a new
     /// block needs to be reported.
-    pub new_blocks: mpsc::Receiver<BlockNotification>,
+    pub new_blocks: mpsc::Receiver<Notification>,
+}
+
+/// Notification about a new block or a new finalized block.
+///
+/// See [`SyncService::subscribe_all`].
+#[derive(Debug, Clone)]
+pub enum Notification {
+    /// A non-finalized block has been finalized.
+    Finalized {
+        /// Blake2 hash of the block that has been finalized.
+        ///
+        /// A block with this hash is guaranteed to have earlier been reported in a
+        /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
+        /// or in a [`Notification::Block`].
+        ///
+        /// It is, however, not guaranteed that this block is a child of the previously-finalized
+        /// block. In other words, if multiple blocks are finalized at the same time, only one
+        /// [`Notification::Finalized`] is generated and contains the highest finalized block.
+        hash: [u8; 32],
+
+        /// Hash of the best block after the finalization.
+        ///
+        /// If the newly-finalized block is an ancestor of the current best block, then this field
+        /// contains the hash of this current best block. Otherwise, the best block is now
+        /// the non-finalized block with the given hash.
+        ///
+        /// A block with this hash is guaranteed to have earlier been reported in a
+        /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
+        /// or in a [`Notification::Block`].
+        best_block_hash: [u8; 32],
+    },
+
+    /// A new block has been added to the list of unfinalized blocks.
+    Block(BlockNotification),
 }
 
 /// Notification about a new block.
 ///
 /// See [`SyncService::subscribe_all`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BlockNotification {
     /// True if this block is considered as the best block of the chain.
     pub is_new_best: bool,
@@ -638,7 +603,12 @@ pub struct BlockNotification {
     /// SCALE-encoded header of the block.
     pub scale_encoded_header: Vec<u8>,
 
-    /// Hash of the header of the parent of this block.
+    /// Blake2 hash of the header of the parent of this block.
+    ///
+    ///
+    /// A block with this hash is guaranteed to have earlier been reported in a
+    /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`] or
+    /// in a [`Notification::Block`].
     ///
     /// > **Note**: The header of a block contains the hash of its parent. When it comes to
     /// >           consensus algorithms such as Babe or Aura, the syncing code verifies that this
@@ -652,911 +622,9 @@ pub struct BlockNotification {
     pub parent_hash: [u8; 32],
 }
 
-async fn start_relay_chain(
-    chain_information: chain::chain_information::ValidChainInformation,
-    mut from_foreground: mpsc::Receiver<ToBackground>,
-    network_service: Arc<network_service::NetworkService>,
-    network_chain_index: usize,
-    mut from_network_service: mpsc::Receiver<network_service::Event>,
-) -> impl Future<Output = ()> {
-    // TODO: implicit generics
-    let mut sync = all::AllSync::<(), libp2p::PeerId, ()>::new(all::Config {
-        chain_information,
-        sources_capacity: 32,
-        blocks_capacity: {
-            // This is the maximum number of blocks between two consecutive justifications.
-            1024
-        },
-        max_disjoint_headers: 1024,
-        max_requests_per_block: NonZeroU32::new(3).unwrap(),
-        download_ahead_blocks: {
-            // Verifying a block mostly consists in:
-            //
-            // - Verifying a sr25519 signature for each block, plus a VRF output when the
-            // block is claiming a primary BABE slot.
-            // - Verifying one ed25519 signature per authority for every justification.
-            //
-            // At the time of writing, the speed of these operations hasn't been benchmarked.
-            // It is likely that it varies quite a bit between the various environments (the
-            // different browser engines, and NodeJS).
-            //
-            // Assuming a maximum verification speed of 5k blocks/sec and a 95% latency of one
-            // second, the number of blocks to download ahead of time in order to not block
-            // is 5k.
-            5000
-        },
-        full: None,
-    });
-
-    async move {
-        // TODO: remove
-        let mut peers_source_id_map = HashMap::new();
-
-        // List of block requests currently in progress.
-        let mut pending_block_requests = stream::FuturesUnordered::new();
-        // List of grandpa warp sync requests currently in progress.
-        let mut pending_grandpa_requests = stream::FuturesUnordered::new();
-        // List of storage requests currently in progress.
-        let mut pending_storage_requests = stream::FuturesUnordered::new();
-
-        // TODO: remove; should store the aborthandle in the TRq user data instead
-        let mut pending_requests = HashMap::new();
-
-        let mut finalized_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
-        let mut best_notifications = Vec::<lossy_channel::Sender<Vec<u8>>>::new();
-        let mut all_notifications = Vec::<mpsc::Sender<BlockNotification>>::new();
-
-        let mut has_new_best = false;
-        let mut has_new_finalized = false;
-
-        // Main loop of the syncing logic.
-        loop {
-            // Drain the content of `requests_to_start` to actually start the requests that have
-            // been queued by the previous iteration of the main loop.
-            //
-            // Note that the code below assumes that the `source_id`s found in `requests_to_start`
-            // still exist. This is only guaranteed to be case because we process
-            // `requests_to_start` as soon as an entry is added and before disconnect events can
-            // remove sources from the state machine.
-            loop {
-                let (source_id, request) = match sync.desired_requests().next() {
-                    Some(v) => v,
-                    None => break,
-                };
-
-                let request_id = sync.add_request(source_id, request.clone(), ());
-
-                match request {
-                    all::RequestDetail::BlocksRequest {
-                        first_block_hash,
-                        first_block_height,
-                        ascending,
-                        num_blocks,
-                        request_headers,
-                        request_bodies,
-                        request_justification,
-                    } => {
-                        let peer_id = sync.source_user_data_mut(source_id).clone(); // TODO: why does this require cloning? weird borrow chk issue
-
-                        let block_request = network_service.clone().blocks_request(
-                            peer_id,
-                            network_chain_index,
-                            network::protocol::BlocksRequestConfig {
-                                start: if let Some(first_block_hash) = first_block_hash {
-                                    network::protocol::BlocksRequestConfigStart::Hash(
-                                        first_block_hash,
-                                    )
-                                } else {
-                                    network::protocol::BlocksRequestConfigStart::Number(
-                                        NonZeroU64::new(first_block_height).unwrap(), // TODO: unwrap?
-                                    )
-                                },
-                                desired_count: NonZeroU32::new(
-                                    u32::try_from(num_blocks.get()).unwrap_or(u32::max_value()),
-                                )
-                                .unwrap(),
-                                direction: if ascending {
-                                    network::protocol::BlocksRequestDirection::Ascending
-                                } else {
-                                    network::protocol::BlocksRequestDirection::Descending
-                                },
-                                fields: network::protocol::BlocksRequestFields {
-                                    header: request_headers,
-                                    body: request_bodies,
-                                    justification: request_justification,
-                                },
-                            },
-                        );
-
-                        let (block_request, abort) = future::abortable(block_request);
-                        pending_requests.insert(request_id, abort);
-
-                        pending_block_requests
-                            .push(async move { (request_id, block_request.await) });
-                    }
-                    all::RequestDetail::GrandpaWarpSync {
-                        sync_start_block_hash,
-                    } => {
-                        let peer_id = sync.source_user_data_mut(source_id).clone(); // TODO: why does this require cloning? weird borrow chk issue
-
-                        let grandpa_request = network_service.clone().grandpa_warp_sync_request(
-                            peer_id,
-                            network_chain_index,
-                            sync_start_block_hash,
-                        );
-
-                        let (grandpa_request, abort) = future::abortable(grandpa_request);
-                        pending_requests.insert(request_id, abort);
-
-                        pending_grandpa_requests
-                            .push(async move { (request_id, grandpa_request.await) });
-                    }
-                    all::RequestDetail::StorageGet {
-                        block_hash,
-                        state_trie_root,
-                        keys,
-                    } => {
-                        let peer_id = sync.source_user_data_mut(source_id).clone(); // TODO: why does this require cloning? weird borrow chk issue
-
-                        let storage_request = network_service.clone().storage_proof_request(
-                            network_chain_index,
-                            peer_id,
-                            network::protocol::StorageProofRequestConfig {
-                                block_hash,
-                                keys: keys.clone().into_iter(),
-                            },
-                        );
-
-                        let storage_request = async move {
-                            if let Ok(outcome) = storage_request.await {
-                                // TODO: lots of copying around
-                                // TODO: log what happens
-                                keys.into_iter()
-                                    .map(|key| {
-                                        proof_verify::verify_proof(
-                                            proof_verify::VerifyProofConfig {
-                                                proof: outcome.iter().map(|nv| &nv[..]),
-                                                requested_key: key.as_ref(),
-                                                trie_root_hash: &state_trie_root,
-                                            },
-                                        )
-                                        .map_err(|_| ())
-                                        .map(|v| v.map(|v| v.to_vec()))
-                                    })
-                                    .collect::<Result<Vec<_>, ()>>()
-                            } else {
-                                Err(())
-                            }
-                        };
-
-                        let (storage_request, abort) = future::abortable(storage_request);
-                        pending_requests.insert(request_id, abort);
-
-                        pending_storage_requests
-                            .push(async move { (request_id, storage_request.await) });
-                    }
-                }
-            }
-
-            // TODO: handle obsolete requests
-
-            // The sync state machine can be in a few various states. At the time of writing:
-            // idle, verifying header, verifying block, verifying grandpa warp sync proof,
-            // verifying storage proof.
-            // If the state is one of the "verifying" states, perform the actual verification and
-            // loop again until the sync is in an idle state.
-            loop {
-                match sync.process_one() {
-                    all::ProcessOne::AllSync(idle) => {
-                        sync = idle;
-                        break;
-                    }
-                    all::ProcessOne::VerifyWarpSyncFragment(verify) => {
-                        let sender_peer_id = verify.proof_sender().1.clone(); // TODO: unnecessary cloning most of the time
-
-                        let (sync_out, result) = verify.perform();
-                        sync = sync_out;
-
-                        if let Err(err) = result {
-                            log::warn!(
-                                target: "sync-verify",
-                                "Failed to verify warp sync fragment from {}: {}", sender_peer_id, err
-                            );
-                        }
-
-                        // Verifying a fragment is rather expensive. We yield in order to not
-                        // block the entire node.
-                        super::yield_once().await;
-                    }
-                    all::ProcessOne::VerifyHeader(verify) => {
-                        let verified_hash = verify.hash();
-
-                        // Verifying a block is rather expensive. We yield in order to not
-                        // block the entire node.
-                        super::yield_once().await;
-
-                        match verify.perform(ffi::unix_time(), ()) {
-                            all::HeaderVerifyOutcome::Success {
-                                sync: sync_out,
-                                is_new_best,
-                                is_new_finalized,
-                                ..
-                            } => {
-                                log::debug!(
-                                    target: "sync-verify",
-                                    "Successfully verified header {} (new best: {})",
-                                    HashDisplay(&verified_hash),
-                                    if is_new_best { "yes" } else { "no" }
-                                );
-
-                                if is_new_best {
-                                    has_new_best = true;
-                                }
-                                if is_new_finalized {
-                                    // It is possible that finalizing this new block has modified
-                                    // the best block as well.
-                                    // TODO: ^ this is really a footgun; make it clearer in the syncing API
-                                    has_new_best = true;
-                                    has_new_finalized = true;
-                                }
-
-                                // Elements in `all_notifications` are removed one by one and
-                                // inserted back if the channel is still open.
-                                for index in (0..all_notifications.len()).rev() {
-                                    let mut subscription = all_notifications.swap_remove(index);
-                                    // TODO: the code below is `O(n)` complexity
-                                    let header = sync_out
-                                        .non_finalized_blocks()
-                                        .find(|h| h.hash() == verified_hash)
-                                        .unwrap();
-                                    let notification = BlockNotification {
-                                        is_new_best,
-                                        scale_encoded_header: header.scale_encoding_vec(),
-                                        parent_hash: *header.parent_hash,
-                                    };
-
-                                    if subscription.try_send(notification).is_ok() {
-                                        all_notifications.push(subscription);
-                                    }
-                                }
-
-                                sync = sync_out;
-                                continue;
-                            }
-                            all::HeaderVerifyOutcome::Error {
-                                sync: sync_out,
-                                error,
-                                ..
-                            } => {
-                                log::warn!(
-                                    target: "sync-verify",
-                                    "Error while verifying header {}: {}",
-                                    HashDisplay(&verified_hash),
-                                    error
-                                );
-
-                                sync = sync_out;
-                                continue;
-                            }
-                        }
-                    }
-
-                    // Can't verify header and body in non-full mode.
-                    all::ProcessOne::VerifyBodyHeader(_) => unreachable!(),
-                }
-            }
-
-            // TODO: handle this differently
-            if has_new_best {
-                has_new_best = false;
-
-                let scale_encoded_header = sync.best_block_header().scale_encoding_vec();
-                for index in (0..best_notifications.len()).rev() {
-                    let mut notif = best_notifications.swap_remove(index);
-                    if notif.send(scale_encoded_header.clone()).is_ok() {
-                        best_notifications.push(notif);
-                    }
-                }
-
-                // Since this task is verifying blocks, a heavy CPU-only operation, it is very
-                // much possible for it to take a long time before having to wait for some event.
-                // Since JavaScript/Wasm is single-threaded, this would prevent all the other
-                // tasks in the background from running.
-                // In order to provide a better granularity, we force a yield after each new serie
-                // of verifications.
-                crate::yield_once().await;
-            }
-
-            // TODO: handle this differently
-            if has_new_finalized {
-                has_new_finalized = false;
-
-                // If the chain uses GrandPa, the networking has to be kept up-to-date with the
-                // state of finalization for other peers to send back relevant gossip messages.
-                // (code style) `grandpa_set_id` is extracted first in order to avoid borrowing
-                // checker issues.
-                let grandpa_set_id =
-                    if let chain::chain_information::ChainInformationFinalityRef::Grandpa {
-                        after_finalized_block_authorities_set_id,
-                        ..
-                    } = sync.as_chain_information().as_ref().finality
-                    {
-                        Some(after_finalized_block_authorities_set_id)
-                    } else {
-                        None
-                    };
-                if let Some(set_id) = grandpa_set_id {
-                    let commit_finalized_height =
-                        u32::try_from(sync.finalized_block_header().number).unwrap(); // TODO: unwrap :-/
-                    network_service
-                        .set_local_grandpa_state(
-                            network_chain_index,
-                            network::service::GrandpaState {
-                                set_id,
-                                round_number: 1, // TODO:
-                                commit_finalized_height,
-                            },
-                        )
-                        .await;
-                }
-
-                let scale_encoded_header = sync.finalized_block_header().scale_encoding_vec();
-                for index in (0..finalized_notifications.len()).rev() {
-                    let mut notif = finalized_notifications.swap_remove(index);
-                    if notif.send(scale_encoded_header.clone()).is_ok() {
-                        finalized_notifications.push(notif);
-                    }
-                }
-
-                // Since this task is verifying blocks, a heavy CPU-only operation, it is very
-                // much possible for it to take a long time before having to wait for some event.
-                // Since JavaScript/Wasm is single-threaded, this would prevent all the other
-                // tasks in the background from running.
-                // In order to provide a better granularity, we force a yield after each new serie
-                // of verifications.
-                crate::yield_once().await;
-            }
-
-            // All requests have been started.
-            // Now waiting for some event to happen: a network event, a request from the frontend
-            // of the sync service, or a request being finished.
-            let response_outcome = futures::select! {
-                network_event = from_network_service.next() => {
-                    // Something happened on the network.
-
-                    let network_event = match network_event {
-                        Some(m) => m,
-                        None => {
-                            // The channel from the network service has been closed. Closing the
-                            // sync background task as well.
-                            return
-                        },
-                    };
-
-                    match network_event {
-                        network_service::Event::Connected { peer_id, chain_index, best_block_number, best_block_hash }
-                            if chain_index == network_chain_index =>
-                        {
-                            let id = sync.add_source(peer_id.clone(), best_block_number, best_block_hash);
-                            peers_source_id_map.insert(peer_id, id);
-                        },
-                        network_service::Event::Disconnected { peer_id, chain_index }
-                            if chain_index == network_chain_index =>
-                        {
-                            let id = peers_source_id_map.remove(&peer_id).unwrap();
-                            let (_, requests) = sync.remove_source(id);
-                            for (request_id, _, _) in requests {
-                                pending_requests.remove(&request_id).unwrap().abort();
-                            }
-                        },
-                        network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
-                            if chain_index == network_chain_index =>
-                        {
-                            let id = *peers_source_id_map.get(&peer_id).unwrap();
-                            let decoded = announce.decode();
-                            // TODO: stupid to re-encode header
-                            match sync.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best) {
-                                all::BlockAnnounceOutcome::HeaderVerify |
-                                all::BlockAnnounceOutcome::AlreadyInChain => {
-                                    log::debug!(
-                                        target: "sync-verify",
-                                        "Processed block announce from {}", peer_id
-                                    );
-                                },
-                                all::BlockAnnounceOutcome::Disjoint {} => {
-                                    log::debug!(
-                                        target: "sync-verify",
-                                        "Processed block announce from {} (disjoint)", peer_id
-                                    );
-                                },
-                                all::BlockAnnounceOutcome::TooOld { announce_block_height, .. } => {
-                                    log::warn!(
-                                        target: "sync-verify",
-                                        "Block announce header height (#{}) from {} is below finalized block",
-                                        announce_block_height, peer_id
-                                    );
-                                },
-                                all::BlockAnnounceOutcome::NotFinalizedChain => {
-                                    log::warn!(
-                                        target: "sync-verify",
-                                        "Block announce from {} isn't part of finalized chain",
-                                        peer_id
-                                    );
-                                },
-                                all::BlockAnnounceOutcome::InvalidHeader(err) => {
-                                    log::warn!(
-                                        target: "sync-verify",
-                                        "Failed to decode block announce header from {}: {}",
-                                        peer_id, err
-                                    );
-                                },
-                            }
-                        },
-                        network_service::Event::GrandpaCommitMessage { chain_index, message }
-                            if chain_index == network_chain_index =>
-                        {
-                            match sync.grandpa_commit_message(&message.as_encoded()) {
-                                Ok(()) => {
-                                    has_new_finalized = true;
-                                    has_new_best = true;  // TODO: done in case finality changes the best block; make this clearer in the sync layer
-                                },
-                                Err(err) => {
-                                    log::warn!(
-                                        target: "sync-verify",
-                                        "Error when verifying GrandPa commit message: {}", err
-                                    );
-                                }
-                            }
-                        },
-                        _ => {
-                            // Different chain index.
-                        }
-                    }
-
-                    continue;
-                }
-
-                message = from_foreground.next() => {
-                    // Received message from the front `SyncService`.
-                    let message = match message {
-                        Some(m) => m,
-                        None => {
-                            // The channel with the frontend sync service has been closed.
-                            // Closing the sync background task as a result.
-                            return
-                        },
-                    };
-
-                    match message {
-                        ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
-                            let _ = send_back.send(sync.is_near_head_of_chain_heuristic());
-                        }
-                        ToBackground::SubscribeFinalized { send_back } => {
-                            let (tx, rx) = lossy_channel::channel();
-                            finalized_notifications.push(tx);
-                            let current = sync.finalized_block_header().scale_encoding_vec();
-                            let _ = send_back.send((current, rx));
-                        }
-                        ToBackground::SubscribeBest { send_back } => {
-                            let (tx, rx) = lossy_channel::channel();
-                            best_notifications.push(tx);
-                            let current = sync.best_block_header().scale_encoding_vec();
-                            let _ = send_back.send((current, rx));
-                        }
-                        ToBackground::SubscribeAll { send_back, buffer_size } => {
-                            let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
-                            all_notifications.push(tx);
-                            let _ = send_back.send(SubscribeAll {
-                                finalized_block_scale_encoded_header: sync.finalized_block_header().scale_encoding_vec(),
-                                non_finalized_blocks: {
-                                    let best_hash = sync.best_block_hash();
-                                    sync.non_finalized_blocks().map(|h| {
-                                        let scale_encoding = h.scale_encoding_vec();
-                                        BlockNotification {
-                                            is_new_best: header::hash_from_scale_encoded_header(&scale_encoding) == best_hash,
-                                            scale_encoded_header: scale_encoding,
-                                            parent_hash: *h.parent_hash,
-                                        }
-                                    }).collect()
-                                },
-                                new_blocks,
-                            });
-                        }
-                        ToBackground::PeersAssumedKnowBlock { send_back, block_number, block_hash } => {
-                            let finalized_num = sync.finalized_block_header().number;
-                            let outcome = if block_number <= finalized_num {
-                                sync.sources()
-                                    .filter(|source_id| {
-                                        let source_best = sync.source_best_block(*source_id);
-                                        source_best.0 > block_number ||
-                                            (source_best.0 == block_number && *source_best.1 == block_hash)
-                                    })
-                                    .map(|id| sync.source_user_data(id).clone())
-                                    .collect()
-                            } else {
-                                // As documented, `knows_non_finalized_block` would panic if the
-                                // block height was below the one of the known finalized block.
-                                sync.knows_non_finalized_block(block_number, &block_hash)
-                                    .map(|id| sync.source_user_data(id).clone())
-                                    .collect()
-                            };
-                            let _ = send_back.send(outcome);
-                        }
-                        ToBackground::SyncingPeers { send_back } => {
-                            let out = sync.sources()
-                                .map(|src| {
-                                    let peer_id = sync.source_user_data(src).clone();
-                                    let (height, hash) = sync.source_best_block(src);
-                                    (peer_id, height, *hash)
-                                })
-                                .collect::<Vec<_>>();
-                            let _ = send_back.send(out);
-                        }
-                    };
-
-                    continue;
-                },
-
-                (request_id, result) = pending_block_requests.select_next_some() => {
-                    pending_requests.remove(&request_id);
-
-                    // A block(s) request has been finished.
-                    // `result` is an error if the block request got cancelled by the sync state
-                    // machine.
-                    if let Ok(result) = result {
-                        // Inject the result of the request into the sync state machine.
-                        sync.blocks_request_response(
-                            request_id,
-                            result.map_err(|_| ()).map(|v| {
-                                v.into_iter().filter_map(|block| {
-                                    Some(all::BlockRequestSuccessBlock {
-                                        scale_encoded_header: block.header?,
-                                        scale_encoded_justification: block.justification,
-                                        scale_encoded_extrinsics: Vec::new(),
-                                        user_data: (),
-                                    })
-                                })
-                            })
-                        )
-
-                    } else {
-                        // The sync state machine has emitted a `Action::Cancel` earlier, and is
-                        // thus no longer interested in the response.
-                        continue;
-                    }
-                },
-
-                (request_id, result) = pending_grandpa_requests.select_next_some() => {
-                    pending_requests.remove(&request_id);
-
-                    // A GrandPa warp sync request has been finished.
-                    // `result` is an error if the block request got cancelled by the sync state
-                    // machine.
-                    if let Ok(result) = result {
-                        // Inject the result of the request into the sync state machine.
-                        sync.grandpa_warp_sync_response(
-                            request_id,
-                            result.ok(),
-                        )
-
-                    } else {
-                        // The sync state machine has emitted a `Action::Cancel` earlier, and is
-                        // thus no longer interested in the response.
-                        continue;
-                    }
-                },
-
-                (request_id, result) = pending_storage_requests.select_next_some() => {
-                    pending_requests.remove(&request_id);
-
-                    // A storage request has been finished.
-                    // `result` is an error if the block request got cancelled by the sync state
-                    // machine.
-                    if let Ok(result) = result {
-                        // Inject the result of the request into the sync state machine.
-                        sync.storage_get_response(
-                            request_id,
-                            result.map(|list| list.into_iter()),
-                        )
-
-                    } else {
-                        // The sync state machine has emitted a `Action::Cancel` earlier, and is
-                        // thus no longer interested in the response.
-                        continue;
-                    }
-                },
-            };
-
-            // `response_outcome` represents the way the state machine has changed as a
-            // consequence of the response to a request.
-            match response_outcome {
-                all::ResponseOutcome::Queued
-                | all::ResponseOutcome::NotFinalizedChain { .. }
-                | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
-                all::ResponseOutcome::WarpSyncFinished => {
-                    let finalized_num = sync.finalized_block_header().number;
-                    log::info!(target: "sync-verify", "GrandPa warp sync finished to #{}", finalized_num);
-                    has_new_finalized = true;
-                    has_new_best = true;
-                    // Since there is a gap in the blocks, all active notifications to all blocks
-                    // must be cleared.
-                    all_notifications.clear();
-                }
-            }
-        }
-    }
-}
-
-async fn start_parachain(
-    chain_information: chain::chain_information::ValidChainInformation,
-    mut from_foreground: mpsc::Receiver<ToBackground>,
-    parachain_config: ConfigParachain,
-) {
-    // TODO: handle finality as well; this is semi-complicated because the runtime service needs to provide a way to call a function on the finalized block's runtime
-
-    let relay_best_blocks = {
-        let (relay_best_block_header, relay_best_blocks_subscription) =
-            parachain_config.relay_chain_sync.subscribe_best().await;
-        stream::once(future::ready(relay_best_block_header)).chain(relay_best_blocks_subscription)
-    };
-    futures::pin_mut!(relay_best_blocks);
-
-    let current_finalized_block: header::Header =
-        chain_information.as_ref().finalized_block_header.into(); // TODO: finality not implemented
-    let mut current_best_block = current_finalized_block.clone();
-
-    // List of senders that get notified when the best block is modified.
-    let mut best_subscriptions = Vec::<lossy_channel::Sender<_>>::new();
-
-    // Hash of the head data of the best block of the parachain. `None` if no head data obtained
-    // yet. Used to avoid sending out notifications if the head data hasn't changed.
-    let mut previous_best_head_data_hash = None::<[u8; 32]>;
-
-    loop {
-        futures::select! {
-            message = from_foreground.next().fuse() => {
-                // Terminating the parachain sync task if the foreground has closed.
-                let message = match message {
-                    Some(m) => m,
-                    None => return,
-                };
-
-                // Note that the rest of this `select!` statement can block for a long time,
-                // which means that there might be a big delay for processing the messages here.
-                // At the time of writing, the nature of the messages makes this a non-issue,
-                // but care should be taken about this.
-
-                match message {
-                    ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
-                        // TODO: that doesn't seem totally correct
-                        let _ = send_back.send(previous_best_head_data_hash.is_some());
-                    },
-                    ToBackground::SubscribeFinalized { send_back } => {
-                        let (tx, rx) = lossy_channel::channel();
-                        core::mem::forget(tx); // TODO:
-                        let _ = send_back.send((current_finalized_block.scale_encoding_vec(), rx));
-                    }
-                    ToBackground::SubscribeBest { send_back } => {
-                        let (tx, rx) = lossy_channel::channel();
-                        best_subscriptions.push(tx);
-                        let _ = send_back.send((current_best_block.scale_encoding_vec(), rx));
-                    }
-                    ToBackground::SubscribeAll { send_back, buffer_size } => {
-                        let (_tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
-                        let _ = send_back.send(SubscribeAll {
-                            finalized_block_scale_encoded_header: current_finalized_block.scale_encoding_vec(),
-                            non_finalized_blocks: Vec::new(),  // TODO: wrong /!\
-                            new_blocks,
-                        });
-
-                        // TODO: `_tx` is immediately discarded; the feature isn't actually fully implemented
-                        // TODO: a `mem::forget` is used in order to avoid issues in other parts of the code, but is a complete hack
-                        core::mem::forget(_tx);
-                    }
-                    ToBackground::PeersAssumedKnowBlock { send_back, .. } => {
-                        let _ = send_back.send(Vec::new()); // TODO: implement this somehow /!\
-                    }
-                    ToBackground::SyncingPeers { send_back } => {
-                        let _ = send_back.send(Vec::new()); // TODO: implement this somehow /!\
-                    }
-                }
-            },
-
-            _relay_best_block = relay_best_blocks.next().fuse() => {
-                // This block is triggered on a new best block, but it is only used to detect when
-                // to refresh the local state, and the content of the block itself isn't important.
-                // Purging any other pending block from the best block subscription so as to not
-                // accidentally call this block multiple times.
-                while let Some(_) = relay_best_blocks.next().now_or_never() {}
-
-                // Determine if the call to `recent_best_block_runtime_call` in the `parahead`
-                // function applies to a block that is near the head of the chain.
-                let relay_sync_near_head_of_chain =
-                    parachain_config.relay_chain_sync.is_near_head_of_chain_heuristic().await;
-
-                // Do the actual runtime call to obtain the parahead.
-                // Even if there isn't any bug, the runtime call can likely fail because the relay
-                // chain block has already been pruned from the network. This isn't a severe
-                // error.
-                let encoded_head_data = match parahead(&parachain_config.relay_chain_sync, parachain_config.parachain_id).await {
-                    Ok(v) => v,
-                    Err(err) => {
-                        previous_best_head_data_hash = None;
-                        if err.is_network_problem() {
-                            log::debug!(target: "sync-verify", "Failed to get chain heads: {}", err);
-                        } else {
-                            log::warn!(target: "sync-verify", "Failed to get chain heads: {}", err);
-                        }
-                        continue;
-                    }
-                };
-
-                // Try decode the result of the runtime call.
-                // If this fails, it indicates an incompatibility between smoldot and the relay
-                // chain.
-                let head_data =
-                    match para::decode_persisted_validation_data_return_value(&encoded_head_data) {
-                        Ok(Some(pvd)) => pvd.parent_head,
-                        Ok(None) => {
-                            // `Ok(None)` indicates that the parachain doesn't occupy any core
-                            // on the relay chain at the latest block that the relay chain syncing
-                            // has synced. It might have occupied a core before, or might occupy
-                            // a core in the future, and as such this is not a fatal error.
-                            log::log!(
-                                target: "sync-verify",
-                                if relay_sync_near_head_of_chain { log::Level::Warn }
-                                    else { log::Level::Debug },
-                                "Couldn't find the parachain head from relay chain. \
-                                The parachain likely doesn't occupy a core."
-                            );
-                            continue;
-                        }
-                        Err(error) => {
-                            // Only a debug line is printed if not near the head of the chain,
-                            // to handle chains that have been upgraded later on to support
-                            // parachains later.
-                            log::log!(
-                                target: "sync-verify",
-                                if relay_sync_near_head_of_chain { log::Level::Error }
-                                    else { log::Level::Debug },
-                                "Failed to fetch the parachain head from relay chain: {}",
-                                error
-                            );
-                            continue;
-                        }
-                    };
-
-                // Don't do anything more if the head data matches
-                // `previous_best_head_data_hash`.
-                match (&mut previous_best_head_data_hash, blake2b(32, &[], &head_data)) {
-                    (&mut Some(ref mut h1), h2) if *h1 == h2.as_bytes() => continue,
-                    (h1 @ _, h2) => *h1 = Some(<[u8; 32]>::try_from(h2.as_bytes()).unwrap()),
-                };
-
-                // The meaning of `head_data` depends on the parachain. It can represent
-                // anything. In practice, however, it is most of the time a block header.
-                match header::decode(&head_data) {
-                    Ok(header) => {
-                        current_best_block = header.into();
-
-                        // Elements in `best_subscriptions` are removed one by one and inserted
-                        // back if the channel is still open.
-                        for index in (0..best_subscriptions.len()).rev() {
-                            let mut sender = best_subscriptions.swap_remove(index);
-                            if sender.send(head_data.to_vec()).is_ok() {
-                                best_subscriptions.push(sender);
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        log::warn!(
-                            target: "sync-verify",
-                            "Head data is not a block header. This isn't supported by smoldot."
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-async fn parahead(
-    relay_chain_sync: &Arc<runtime_service::RuntimeService>,
-    parachain_id: u32,
-) -> Result<Vec<u8>, ParaheadError> {
-    // For each relay chain block, call `ParachainHost_persisted_validation_data` in
-    // order to know where the parachains are.
-    let (runtime_call_lock, virtual_machine) = relay_chain_sync
-        .recent_best_block_runtime_call(
-            para::PERSISTED_VALIDATION_FUNCTION_NAME,
-            para::persisted_validation_data_parameters(
-                parachain_id,
-                para::OccupiedCoreAssumption::TimedOut,
-            ),
-        )
-        .await
-        .map_err(ParaheadError::Call)?;
-
-    // TODO: move the logic below in the `para` module
-
-    let mut runtime_call = match read_only_runtime_host::run(read_only_runtime_host::Config {
-        virtual_machine,
-        function_to_call: para::PERSISTED_VALIDATION_FUNCTION_NAME,
-        parameter: para::persisted_validation_data_parameters(
-            parachain_id,
-            para::OccupiedCoreAssumption::TimedOut,
-        ),
-    }) {
-        Ok(vm) => vm,
-        Err((err, prototype)) => {
-            runtime_call_lock.unlock(prototype);
-            return Err(ParaheadError::StartError(err));
-        }
-    };
-
-    loop {
-        match runtime_call {
-            read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                let output = success.virtual_machine.value().as_ref().to_owned();
-                runtime_call_lock.unlock(success.virtual_machine.into_prototype());
-                break Ok(output);
-            }
-            read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
-                runtime_call_lock.unlock(error.prototype);
-                break Err(ParaheadError::ReadOnlyRuntime(error.detail));
-            }
-            read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
-                let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
-                    Ok(v) => v,
-                    Err(err) => {
-                        runtime_call_lock.unlock(
-                            read_only_runtime_host::RuntimeHostVm::StorageGet(get).into_prototype(),
-                        );
-                        return Err(ParaheadError::Call(err));
-                    }
-                };
-                runtime_call = get.inject_value(storage_value.map(iter::once));
-            }
-            read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
-                todo!() // TODO:
-            }
-            read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
-                runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
-            }
-        }
-    }
-}
-
-#[derive(derive_more::Display)]
-enum ParaheadError {
-    Call(runtime_service::RuntimeCallError),
-    StartError(host::StartErr),
-    ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
-}
-
-impl ParaheadError {
-    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
-    /// issue.
-    fn is_network_problem(&self) -> bool {
-        match self {
-            ParaheadError::Call(err) => err.is_network_problem(),
-            ParaheadError::StartError(_) => false,
-            ParaheadError::ReadOnlyRuntime(_) => false,
-        }
-    }
-}
-
 enum ToBackground {
     /// See [`SyncService::is_near_head_of_chain_heuristic`].
     IsNearHeadOfChainHeuristic { send_back: oneshot::Sender<bool> },
-    /// See [`SyncService::subscribe_finalized`].
-    SubscribeFinalized {
-        send_back: oneshot::Sender<(Vec<u8>, lossy_channel::Receiver<Vec<u8>>)>,
-    },
-    /// See [`SyncService::subscribe_best`].
-    SubscribeBest {
-        send_back: oneshot::Sender<(Vec<u8>, lossy_channel::Receiver<Vec<u8>>)>,
-    },
     /// See [`SyncService::subscribe_all`].
     SubscribeAll {
         send_back: oneshot::Sender<SubscribeAll>,
@@ -1570,6 +638,6 @@ enum ToBackground {
     },
     /// See [`SyncService::syncing_peers`].
     SyncingPeers {
-        send_back: oneshot::Sender<Vec<(PeerId, u64, [u8; 32])>>,
+        send_back: oneshot::Sender<Vec<(PeerId, protocol::Role, u64, [u8; 32])>>,
     },
 }

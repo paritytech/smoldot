@@ -21,69 +21,70 @@ on:
   pull_request:
 
 jobs:
-  test:
-    name: Build and test
+  test-64bits:
     runs-on: ubuntu-latest
     container:
       image: rust
     steps:
-    - uses: actions/checkout@v2.3.4
-    - uses: Swatinem/rust-cache@v1
-    - name: Run tests, with all features
-      run: cargo test --locked --workspace --all-features
+    - uses: actions/checkout@v2.4.0
+    - uses: Swatinem/rust-cache@v1   # See also the `cache-fill` workflow.
+    - run: RUSTFLAGS=-Dwarnings cargo test --locked --workspace --all-features
+
+  test-32bits:
+    runs-on: ubuntu-latest
+    container:
+      image: rust
+    steps:
+    - uses: actions/checkout@v2.4.0
+    - run: apt-get update && apt-get install -y libc6-dev-i386
+    - uses: Swatinem/rust-cache@v1   # See also the `cache-fill` workflow.
+    - run: rustup target add i686-unknown-linux-gnu
+    - run: RUSTFLAGS=-Dwarnings cargo test --target i686-unknown-linux-gnu --locked --workspace --all-features
 
   wasm-node-check:
-    name: Check javascript node
     runs-on: ubuntu-latest
     container:
       image: rust
     steps:
-    - uses: actions/checkout@v2.3.4
+    - uses: actions/checkout@v2.4.0
     - uses: Swatinem/rust-cache@v1
-    - uses: actions/setup-node@v2.4.0
+    - uses: actions/setup-node@v2.4.1
       with:
         node-version: '12'
     - run: apt-get update && apt install -y binaryen # For `wasm-opt`
-    - run: cd bin/wasm-node/javascript && npm install-ci-test
+    - run: cd bin/wasm-node/javascript && RUSTFLAGS=-Dwarnings npm install-ci-test
 
   check-features:
-    name: Check that combination of features compiles
     runs-on: ubuntu-latest
     container:
       image: rust
     steps:
-    - uses: actions/checkout@v2.3.4
+    - uses: actions/checkout@v2.4.0
     - uses: Swatinem/rust-cache@v1
-    - run: cargo check --package smoldot --locked --no-default-features
-    - run: cargo check --package smoldot --locked --no-default-features --features database-sqlite
-    - run: cargo check --package smoldot --locked --no-default-features --features std
-    - run: cargo check --package smoldot --locked --no-default-features --features database-sqlite --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features database-sqlite
+    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features database-sqlite --features std
 
   check-rustdoc-links:
-    name: Check rustdoc intra-doc links
     runs-on: ubuntu-latest
     container:
       image: rust
     steps:
-    - uses: actions/checkout@v2.3.4
-    - name: Check rustdoc links
-      run: cargo doc --verbose --workspace --all-features --no-deps --document-private-items
+    - uses: actions/checkout@v2.4.0
+    - run: cargo doc --verbose --workspace --all-features --no-deps --document-private-items
 
   fmt:
-    name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout sources
-        uses: actions/checkout@v2.3.4
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
+      # Checks `rustfmt` formatting
+      - uses: actions/checkout@v2.4.0
+      - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
           override: true
-      - name: Install rustfmt
-        run: rustup component add rustfmt
-      - name: Run cargo fmt
-        uses: actions-rs/cargo@v1
+      - run: rustup component add rustfmt
+      - uses: actions-rs/cargo@v1
         with:
           command: fmt
           args: --all -- --check
@@ -92,7 +93,7 @@ jobs:
   clippy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2.3.4
+      - uses: actions/checkout@v2.4.0
       - uses: actions-rs/toolchain@v1
         with:
             toolchain: nightly
@@ -111,7 +112,7 @@ jobs:
         checks:
           - bans licenses sources
     steps:
-    - uses: actions/checkout@v2.3.4
+    - uses: actions/checkout@v2.4.0
     - uses: EmbarkStudios/cargo-deny-action@v1
       with:
         command: check --config .github/cargo-deny.toml ${{ matrix.checks }}
@@ -120,10 +121,8 @@ jobs:
   wasm-node-versions-match:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout sources
-        uses: actions/checkout@v2.3.4
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v2.4.0
+      - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
           override: true
@@ -140,7 +139,7 @@ jobs:
   all-ci:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [test, wasm-node-check, check-features, check-rustdoc-links, fmt, clippy, cargo-deny, wasm-node-versions-match]
+    needs: [test-64bits, test-32bits, wasm-node-check, check-features, check-rustdoc-links, fmt, clippy, cargo-deny, wasm-node-versions-match]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success

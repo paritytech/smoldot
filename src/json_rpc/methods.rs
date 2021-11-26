@@ -18,7 +18,7 @@
 //! List of requests and how to answer them.
 
 use super::parse;
-use crate::{header, util};
+use crate::header;
 
 use alloc::{
     boxed::Box,
@@ -26,7 +26,6 @@ use alloc::{
     string::{String, ToString as _},
     vec::Vec,
 };
-use core::convert::TryFrom as _;
 
 /// Parses a JSON call (usually received from a JSON-RPC server).
 ///
@@ -142,9 +141,10 @@ pub struct JsonRpcParseError(serde_json::Error);
 #[derive(Debug, derive_more::Display)]
 pub struct InvalidParameterError(serde_json::Error);
 
-/// Generates the [`MethodCall`] and [`Response`] enums based on the list of supported requests.
+/// Generates two enums, one for requests and one for responses, based on the list of supported
+/// requests.
 macro_rules! define_methods {
-    ($(
+    ($rq_name:ident, $rp_name:ident, $(
         $(#[$attrs:meta])*
         $name:ident ($($p_name:ident: $p_ty:ty),*) -> $ret_ty:ty
             $([$($alias:ident),*])*
@@ -152,7 +152,7 @@ macro_rules! define_methods {
     )*) => {
         #[allow(non_camel_case_types)]
         #[derive(Debug, Clone)]
-        pub enum MethodCall<'a> {
+        pub enum $rq_name<'a> {
             $(
                 $(#[$attrs])*
                 $name {
@@ -161,8 +161,8 @@ macro_rules! define_methods {
             )*
         }
 
-        impl<'a> MethodCall<'a> {
-            /// Returns a list of RPC method names of all the methods in the [`MethodCall`] enum.
+        impl<'a> $rq_name<'a> {
+            /// Returns a list of RPC method names of all the methods in the enum.
             pub fn method_names() -> impl ExactSizeIterator<Item = &'static str> {
                 [$(stringify!($name)),*].iter().copied()
             }
@@ -188,7 +188,7 @@ macro_rules! define_methods {
                         }
                         if let Ok(params) = serde_json::from_str(params) {
                             let Params { _dummy: _, $($p_name),* } = params;
-                            return Ok(MethodCall::$name {
+                            return Ok($rq_name::$name {
                                 $($p_name,)*
                             })
                         }
@@ -224,7 +224,7 @@ macro_rules! define_methods {
                                     actual: params.len(),
                                 })
                             }
-                            return Ok(MethodCall::$name {
+                            return Ok($rq_name::$name {
                                 $($p_name,)*
                             })
                         }
@@ -241,13 +241,13 @@ macro_rules! define_methods {
 
         #[allow(non_camel_case_types)]
         #[derive(Debug, Clone)]
-        pub enum Response<'a> {
+        pub enum $rp_name<'a> {
             $(
                 $name($ret_ty),
             )*
         }
 
-        impl<'a> Response<'a> {
+        impl<'a> $rp_name<'a> {
             /// Serializes the response into a JSON string.
             ///
             /// `id_json` must be a valid JSON-formatted request identifier, the same the user
@@ -260,7 +260,7 @@ macro_rules! define_methods {
             pub fn to_json_response(&self, id_json: &str) -> String {
                 match self {
                     $(
-                        Response::$name(out) => {
+                        $rp_name::$name(out) => {
                             let result_json = serde_json::to_string(&out).unwrap();
                             parse::build_success_response(id_json, &result_json)
                         },
@@ -274,6 +274,8 @@ macro_rules! define_methods {
 // TODO: change everything to take parameters by ref when possible
 // TODO: change everything to return values by ref when possible
 define_methods! {
+    MethodCall,
+    Response,
     account_nextIndex() -> (), // TODO:
     author_hasKey() -> (), // TODO:
     author_hasSessionKeys() -> (), // TODO:
@@ -308,7 +310,7 @@ define_methods! {
     state_call() -> () [state_callAt], // TODO:
     state_getKeys() -> (), // TODO:
     state_getKeysPaged(prefix: Option<HexString>, count: u32, start_key: Option<HexString>, hash: Option<HashHexString>) -> Vec<HexString> [state_getKeysPagedAt],
-    state_getMetadata() -> HexString,
+    state_getMetadata(hash: Option<HashHexString>) -> HexString,
     state_getPairs() -> (), // TODO:
     state_getReadProof() -> (), // TODO:
     state_getRuntimeVersion(at: Option<HashHexString>) -> RuntimeVersion [chain_getRuntimeVersion],
@@ -426,13 +428,10 @@ impl<'a> serde::Deserialize<'a> for AccountId {
 
 #[derive(Debug, Clone)]
 pub struct Block {
-    pub extrinsics: Vec<Extrinsic>,
+    pub extrinsics: Vec<HexString>,
     pub header: Header,
     pub justification: Option<HexString>,
 }
-
-#[derive(Debug, Clone)]
-pub struct Extrinsic(pub Vec<u8>);
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Header {
@@ -527,11 +526,21 @@ pub struct SystemHealth {
 pub struct SystemPeer {
     #[serde(rename = "peerId")]
     pub peer_id: String, // Example: "12D3KooWHEQXbvCzLYvc87obHV6HY4rruHz8BJ9Lw1Gg2csVfR6Z"
-    pub roles: String, // "AUTHORITY", "FULL", or "LIGHT"
+    pub roles: SystemPeerRole,
     #[serde(rename = "bestHash")]
     pub best_hash: HashHexString,
     #[serde(rename = "bestNumber")]
     pub best_number: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub enum SystemPeerRole {
+    #[serde(rename = "AUTHORITY")]
+    Authority,
+    #[serde(rename = "FULL")]
+    Full,
+    #[serde(rename = "LIGHT")]
+    Light,
 }
 
 #[derive(Debug, Clone)]
@@ -597,7 +606,7 @@ impl serde::Serialize for Block {
 
         #[derive(serde::Serialize)]
         struct SerdeBlockInner<'a> {
-            extrinsics: &'a [Extrinsic],
+            extrinsics: &'a [HexString],
             header: &'a Header,
             justification: Option<&'a HexString>, // TODO: unsure of the type
         }
@@ -609,21 +618,6 @@ impl serde::Serialize for Block {
                 justification: self.justification.as_ref(),
             },
         }
-        .serialize(serializer)
-    }
-}
-
-impl serde::Serialize for Extrinsic {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let length_prefix = util::encode_scale_compact_usize(self.0.len());
-        format!(
-            "0x{}{}",
-            hex::encode(length_prefix.as_ref()),
-            hex::encode(&self.0[..])
-        )
         .serialize(serializer)
     }
 }

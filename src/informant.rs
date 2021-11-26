@@ -35,6 +35,7 @@
 //!     chain_name: "My chain",
 //!     relay_chain: None,
 //!     max_line_width: 80,
+//!     num_peers: 8,
 //!     num_network_connections: 12,
 //!     best_number: 220,
 //!     finalized_number: 217,
@@ -45,7 +46,7 @@
 //! ```
 
 use alloc::{format, string::String};
-use core::{cmp, convert::TryFrom as _, fmt, iter};
+use core::{cmp, fmt, iter};
 
 /// Values used to build the informant line. Implements the [`core::fmt::Display`] trait.
 // TODO: some fields here aren't printed; remove them once what is printed is final
@@ -62,6 +63,8 @@ pub struct InformantLine<'a> {
     pub relay_chain: Option<RelayChain<'a>>,
     /// Maximum number of characters of the informant line.
     pub max_line_width: u32,
+    /// Number of gossiping substreams open with nodes of the same chain.
+    pub num_peers: u64,
     /// Number of network connections we are having with the rest of the peer-to-peer network.
     pub num_network_connections: u64,
     /// Best block currently being propagated on the peer-to-peer. `None` if unknown.
@@ -127,23 +130,25 @@ impl<'a> fmt::Display for InformantLine<'a> {
 
         // TODO: it's a bit of a clusterfuck to properly align because the emoji eats a whitespace
         let trailer = format!(
-            "] {white_bold}{network_best}{reset} (🌐{white_bold}{connec:>4}{reset})   ",
+            "] {white_bold}{network_best}{reset} (🔗{white_bold}{peers:>3}{reset}) (🌐{white_bold}{connec:>4}{reset})   ",
             network_best = self
                 .network_known_best
                 .map(BlockNumberDisplay)
                 .map(either::Left)
                 .unwrap_or(either::Right("?")),
+            peers = self.num_network_connections,
             connec = self.num_network_connections,
             white_bold = white_bold,
             reset = reset,
         );
         let trailer_len = format!(
-            "] {network_best} (  {connec:>4})   ",
+            "] {network_best} (  {peers:>3}) (  {connec:>4})   ",
             network_best = self
                 .network_known_best
                 .map(BlockNumberDisplay)
                 .map(either::Left)
                 .unwrap_or(either::Right("?")),
+            peers = self.num_network_connections,
             connec = self.num_network_connections,
         )
         .len();
@@ -216,6 +221,44 @@ impl<'a> fmt::Display for HashDisplay<'a> {
             write!(f, "{:04x}", val)?;
         }
         Ok(())
+    }
+}
+
+/// Implements `fmt::Display` and displays a number of bytes in a nice way.
+pub struct BytesDisplay(pub u64);
+
+impl fmt::Display for BytesDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut value = self.0 as f64;
+
+        if value < 1000.0 {
+            return write!(f, "{} B", value);
+        }
+        value /= 1024.0;
+
+        if value < 1000.0 {
+            return write!(f, "{:.1} kiB", value);
+        }
+        value /= 1024.0;
+
+        if value < 1000.0 {
+            return write!(f, "{:.1} MiB", value);
+        }
+        value /= 1024.0;
+
+        if value < 1000.0 {
+            return write!(f, "{:.1} GiB", value);
+        }
+        value /= 1024.0;
+
+        if value < 1000.0 {
+            return write!(f, "{:.1} TiB", value);
+        }
+        value /= 1024.0;
+
+        write!(f, "{:.1}PiB", value)
+
+        // Hopefully we never have to go above petabytes.
     }
 }
 

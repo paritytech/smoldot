@@ -29,7 +29,7 @@
 //! sub-module is [`runtime_host`].
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom as _, fmt, str};
+use core::{fmt, str};
 
 mod allocator; // TODO: make public after refactoring
 pub mod host;
@@ -89,7 +89,7 @@ pub fn core_version(
         match vm {
             host::HostVm::ReadyToRun(r) => vm = r.run(),
             host::HostVm::Finished(finished) => {
-                if decode(&finished.value().as_ref()).is_err() {
+                if decode(finished.value().as_ref()).is_err() {
                     return (Err(CoreVersionError::Decode), finished.into_prototype());
                 }
 
@@ -98,6 +98,9 @@ pub fn core_version(
             }
 
             // Emitted log lines are ignored.
+            host::HostVm::GetMaxLogLevel(resume) => {
+                vm = resume.resume(0); // Off
+            }
             host::HostVm::LogEmit(log) => vm = log.resume(),
 
             host::HostVm::Error { prototype, error } => {
@@ -260,7 +263,7 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
                         num_elems,
                         num_elems,
                         core_version_api,
-                        (),
+                        || {},
                         |(), _| (),
                     ))
                 }),

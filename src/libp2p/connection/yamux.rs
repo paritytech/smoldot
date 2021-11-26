@@ -51,7 +51,7 @@
 // TODO: the code of this module is rather complicated; either simplify it or write a lot of tests, including fuzzing tests
 
 use alloc::vec::Vec;
-use core::{cmp, convert::TryFrom as _, fmt, mem, num::NonZeroU32};
+use core::{cmp, fmt, mem, num::NonZeroU32};
 use hashbrown::hash_map::{Entry, OccupiedEntry};
 
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
@@ -247,6 +247,13 @@ impl<T> Yamux<T> {
         self.substreams
             .iter()
             .map(|(id, s)| (SubstreamId(*id), &s.user_data))
+    }
+
+    /// Returns an iterator to the list of all substream user datas.
+    pub fn user_datas_mut(&mut self) -> impl ExactSizeIterator<Item = (SubstreamId, &mut T)> {
+        self.substreams
+            .iter_mut()
+            .map(|(id, s)| (SubstreamId(*id), &mut s.user_data))
     }
 
     /// Returns a reference to a substream by its ID. Returns `None` if no substream with this ID
@@ -970,6 +977,16 @@ impl<'a, T> SubstreamMut<'a, T> {
             .fold(0, |n, buf| n + buf.len())
     }
 
+    /// Returns `true` if the remote has closed their writing side of this substream.
+    pub fn is_remote_closed(&self) -> bool {
+        self.substream.get().remote_write_closed
+    }
+
+    /// Returns `true` if [`SubstreamMut::close`] has been called on this substream.
+    pub fn is_closed(&self) -> bool {
+        self.substream.get().local_write_closed
+    }
+
     /// Marks the substream as closed. It is no longer possible to write data on it.
     ///
     /// If the remote writing side is still open, this method returns `None` and the remote can
@@ -1036,6 +1053,18 @@ impl AsRef<[u8]> for VecWithOffset {
 /// Identifier of a substream in the context of a connection.
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, derive_more::From)]
 pub struct SubstreamId(NonZeroU32);
+
+impl SubstreamId {
+    /// Returns the value that compares inferior or equal to all possible values.
+    pub fn min_value() -> Self {
+        Self(NonZeroU32::new(1).unwrap())
+    }
+
+    /// Returns the value that compares superior or equal to all possible values.
+    pub fn max_value() -> Self {
+        Self(NonZeroU32::new(u32::max_value()).unwrap())
+    }
+}
 
 #[must_use]
 #[derive(Debug)]

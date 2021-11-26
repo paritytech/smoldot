@@ -38,14 +38,15 @@
 //! They also do not contain the past history of the chain. It is, however, similarly possible to
 //! for instance download the history from other nodes.
 
-use crate::{chain_spec::ChainSpec, finality::grandpa, header};
+use crate::header;
 
-use alloc::{borrow::ToOwned as _, vec::Vec};
-use core::{convert::TryFrom, num::NonZeroU64};
+use alloc::vec::Vec;
+use core::num::NonZeroU64;
 
 pub mod aura_config;
 pub mod babe_config;
 pub mod babe_fetch_epoch;
+pub mod grandpa_config;
 
 /// Information about the latest finalized block and state found in its ancestors.
 ///
@@ -62,15 +63,6 @@ impl From<ValidChainInformation> for ChainInformation {
 }
 
 impl ValidChainInformation {
-    /// Builds the [`ChainInformation`] corresponding to the genesis block contained in the chain
-    /// spec.
-    pub fn from_chain_spec(chain_spec: &ChainSpec) -> Result<Self, FromGenesisStorageError> {
-        let inner = ChainInformation::from_chain_spec(chain_spec)?;
-        #[cfg(debug_assertions)]
-        ChainInformationRef::from(&inner).validate().unwrap();
-        Ok(ValidChainInformation { inner })
-    }
-
     /// Gives access to the information.
     pub fn as_ref(&self) -> ChainInformationRef {
         From::from(&self.inner)
@@ -137,86 +129,6 @@ pub struct ChainInformation {
 
     /// Extra items that depend on the finality engine.
     pub finality: ChainInformationFinality,
-}
-
-impl ChainInformation {
-    /// Builds the [`ChainInformation`] corresponding to the genesis block contained in the chain spec.
-    pub fn from_chain_spec(chain_spec: &ChainSpec) -> Result<Self, FromGenesisStorageError> {
-        let consensus = {
-            let aura_genesis_config =
-                aura_config::AuraGenesisConfiguration::from_genesis_storage(|k| {
-                    chain_spec.genesis_storage_value(k).map(|v| v.to_owned())
-                });
-
-            let babe_genesis_config =
-                babe_config::BabeGenesisConfiguration::from_genesis_storage(|k| {
-                    chain_spec.genesis_storage_value(k).map(|v| v.to_owned())
-                });
-
-            match (aura_genesis_config, babe_genesis_config) {
-                (Ok(aura_genesis_config), Err(err)) if err.is_function_not_found() => {
-                    ChainInformationConsensus::Aura {
-                        finalized_authorities_list: aura_genesis_config.authorities_list,
-                        slot_duration: aura_genesis_config.slot_duration,
-                    }
-                }
-                (Err(err), Ok(babe_genesis_config)) if err.is_function_not_found() => {
-                    ChainInformationConsensus::Babe {
-                        slots_per_epoch: babe_genesis_config.slots_per_epoch,
-                        finalized_block_epoch_information: None,
-                        finalized_next_epoch_transition: BabeEpochInformation {
-                            epoch_index: 0,
-                            start_slot_number: None,
-                            authorities: babe_genesis_config.epoch0_information.authorities,
-                            randomness: babe_genesis_config.epoch0_information.randomness,
-                            c: babe_genesis_config.epoch0_configuration.c,
-                            allowed_slots: babe_genesis_config.epoch0_configuration.allowed_slots,
-                        },
-                    }
-                }
-                (Err(err1), Err(err2))
-                    if err1.is_function_not_found() && err2.is_function_not_found() =>
-                {
-                    // TODO: seems a bit risky to automatically fall back to this?
-                    ChainInformationConsensus::AllAuthorized
-                }
-                (Err(error), _) => {
-                    // Note that Babe might have produced an error as well, which is intentionally
-                    // ignored here in order to not make the API too complicated.
-                    return Err(FromGenesisStorageError::AuraConfigLoad(error));
-                }
-                (_, Err(error)) => {
-                    return Err(FromGenesisStorageError::BabeConfigLoad(error));
-                }
-                (Ok(_), Ok(_)) => {
-                    return Err(FromGenesisStorageError::MultipleConsensusAlgorithms);
-                }
-            }
-        };
-
-        let finality = {
-            let grandpa_genesis_config =
-                grandpa::chain_config::GrandpaGenesisConfiguration::from_genesis_storage(|k| {
-                    chain_spec.genesis_storage_value(k).map(|v| v.to_owned())
-                });
-
-            match grandpa_genesis_config {
-                Ok(grandpa_genesis_config) => ChainInformationFinality::Grandpa {
-                    after_finalized_block_authorities_set_id: 0,
-                    finalized_scheduled_change: None,
-                    finalized_triggered_authorities: grandpa_genesis_config.initial_authorities,
-                },
-                Err(error) if error.is_function_not_found() => ChainInformationFinality::Outsourced,
-                Err(error) => return Err(FromGenesisStorageError::GrandpaConfigLoad(error)),
-            }
-        };
-
-        Ok(ChainInformation {
-            finalized_block_header: crate::calculate_genesis_block_header(chain_spec),
-            consensus,
-            finality,
-        })
-    }
 }
 
 impl<'a> From<ChainInformationRef<'a>> for ChainInformation {
@@ -341,10 +253,21 @@ pub struct BabeEpochInformation {
 
     /// Value of the constant that allows determining the chances of a VRF being generated by a
     /// given slot.
+    ///
+    /// This constant represents a fraction, where the first element of the tuple is the numerator
+    /// and the second element is the denominator. The fraction should always be `<= 1`, meaning
+    /// that the numerator should always be inferior or equal to the denominator.
     pub c: (u64, u64),
 
     /// Types of blocks allowed for this epoch.
     pub allowed_slots: header::BabeAllowedSlots,
+}
+
+impl BabeEpochInformation {
+    /// Checks whether the fields in this struct make sense.
+    pub fn validate(&self) -> Result<(), BabeValidityError> {
+        BabeEpochInformationRef::from(self).validate()
+    }
 }
 
 impl<'a> From<BabeEpochInformationRef<'a>> for BabeEpochInformation {
@@ -402,19 +325,6 @@ pub enum ChainInformationFinality {
     },
 }
 
-/// Error when building the chain information from the genesis storage.
-#[derive(Debug, derive_more::Display)]
-pub enum FromGenesisStorageError {
-    /// Error when retrieving the GrandPa configuration.
-    GrandpaConfigLoad(grandpa::chain_config::FromGenesisStorageError),
-    /// Error when retrieving the Aura algorithm configuration.
-    AuraConfigLoad(aura_config::FromGenesisStorageError),
-    /// Error when retrieving the Babe algorithm configuration.
-    BabeConfigLoad(babe_config::FromGenesisStorageError),
-    /// Multiple consensus algorithms have been detected.
-    MultipleConsensusAlgorithms,
-}
-
 /// Equivalent to a [`ChainInformation`] but referencing an existing structure. Cheap to copy.
 #[derive(Debug, Clone)]
 pub struct ChainInformationRef<'a> {
@@ -437,6 +347,15 @@ impl<'a> ChainInformationRef<'a> {
             ..
         } = &self.consensus
         {
+            if let Err(err) = finalized_next_epoch_transition.validate() {
+                return Err(ValidityError::InvalidBabe(err));
+            }
+            if let Some(finalized_block_epoch_information) = &finalized_block_epoch_information {
+                if let Err(err) = finalized_block_epoch_information.validate() {
+                    return Err(ValidityError::InvalidBabe(err));
+                }
+            }
+
             if let Some(finalized_block_epoch_information) = &finalized_block_epoch_information {
                 if self.finalized_block_header.number == 0 {
                     return Err(ValidityError::UnexpectedBabeFinalizedEpoch);
@@ -460,10 +379,12 @@ impl<'a> ChainInformationRef<'a> {
                 {
                     return Err(ValidityError::NonLinearBabeEpochs);
                 }
-            } else {
-                if self.finalized_block_header.number != 0 {
-                    return Err(ValidityError::NoBabeFinalizedEpoch);
-                }
+            }
+
+            if finalized_block_epoch_information.is_none()
+                && self.finalized_block_header.number != 0
+            {
+                return Err(ValidityError::NoBabeFinalizedEpoch);
             }
         }
 
@@ -478,10 +399,10 @@ impl<'a> ChainInformationRef<'a> {
                     return Err(ValidityError::ScheduledGrandPaChangeBeforeFinalized);
                 }
             }
-            if self.finalized_block_header.number == 0 {
-                if *after_finalized_block_authorities_set_id != 0 {
-                    return Err(ValidityError::FinalizedZeroButNonZeroAuthoritiesSetId);
-                }
+            if self.finalized_block_header.number == 0
+                && *after_finalized_block_authorities_set_id != 0
+            {
+                return Err(ValidityError::FinalizedZeroButNonZeroAuthoritiesSetId);
             }
         }
 
@@ -575,6 +496,17 @@ pub struct BabeEpochInformationRef<'a> {
     pub allowed_slots: header::BabeAllowedSlots,
 }
 
+impl<'a> BabeEpochInformationRef<'a> {
+    /// Checks whether the fields in this struct make sense.
+    pub fn validate(&self) -> Result<(), BabeValidityError> {
+        if self.c.0 > self.c.1 {
+            return Err(BabeValidityError::InvalidConstant);
+        }
+
+        Ok(())
+    }
+}
+
 impl<'a> From<&'a BabeEpochInformation> for BabeEpochInformationRef<'a> {
     fn from(info: &'a BabeEpochInformation) -> BabeEpochInformationRef<'a> {
         BabeEpochInformationRef {
@@ -645,4 +577,14 @@ pub enum ValidityError {
     ScheduledGrandPaChangeBeforeFinalized,
     /// The finalized block is block number 0, but the GrandPa authorities set id is not 0.
     FinalizedZeroButNonZeroAuthoritiesSetId,
+    /// Error in a Babe epoch information.
+    InvalidBabe(BabeValidityError),
+}
+
+/// Error when checking the validity of a Babe epoch.
+#[derive(Debug, derive_more::Display)]
+pub enum BabeValidityError {
+    /// Babe constant should be a fraction where the numerator is inferior or equal to the
+    /// denominator.
+    InvalidConstant,
 }

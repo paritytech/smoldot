@@ -16,10 +16,11 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::chain::chain_information::{ChainInformationFinality, ChainInformationFinalityRef};
+use crate::finality;
 use crate::finality::justification::verify::{
     verify, Config as VerifyConfig, Error as VerifyError,
 };
-use crate::header::{DigestItemRef, GrandpaAuthority, GrandpaConsensusLogRef, Header};
+use crate::header::{self, DigestItemRef, GrandpaAuthority, GrandpaConsensusLogRef};
 use crate::informant::HashDisplay;
 use crate::network::protocol::GrandpaWarpSyncResponseFragment;
 
@@ -36,6 +37,9 @@ pub enum Error {
     },
     NonMinimalProof,
     EmptyProof,
+    InvalidHeader(header::Error),
+    InvalidJustification(finality::justification::decode::Error),
+    WrongChainAlgorithm,
 }
 
 impl fmt::Display for Error {
@@ -60,12 +64,20 @@ impl fmt::Display for Error {
                 "Warp sync proof fragment doesn't contain an authorities list change"
             ),
             Error::EmptyProof => write!(f, "Warp sync proof is empty"),
+            Error::InvalidHeader(_) => write!(f, "Failed to decode header"),
+            Error::InvalidJustification(_) => write!(f, "Failed to decode justification"),
+            Error::WrongChainAlgorithm => {
+                write!(f, "Chain information doesn't use the Grandpa algorithm")
+            }
         }
     }
 }
 
 #[derive(Debug)]
 pub struct Verifier {
+    /// If `true`, the verification should instantly fail with an error.
+    wrong_chain_algorithm: bool,
+
     index: usize,
     authorities_set_id: u64,
     authorities_list: Vec<GrandpaAuthority>,
@@ -79,20 +91,25 @@ impl Verifier {
         warp_sync_response_fragments: Vec<GrandpaWarpSyncResponseFragment>,
         is_proof_complete: bool,
     ) -> Self {
-        let (authorities_list, authorities_set_id) = match start_chain_information_finality {
-            ChainInformationFinalityRef::Grandpa {
-                finalized_triggered_authorities,
-                after_finalized_block_authorities_set_id,
-                ..
-            } => {
-                let authorities_list = finalized_triggered_authorities.iter().cloned().collect();
-                (authorities_list, after_finalized_block_authorities_set_id)
-            }
-            // TODO:
-            _ => unimplemented!(),
-        };
+        let (wrong_chain_algorithm, authorities_list, authorities_set_id) =
+            match start_chain_information_finality {
+                ChainInformationFinalityRef::Grandpa {
+                    finalized_triggered_authorities,
+                    after_finalized_block_authorities_set_id,
+                    ..
+                } => {
+                    let authorities_list = finalized_triggered_authorities.to_vec();
+                    (
+                        false,
+                        authorities_list,
+                        after_finalized_block_authorities_set_id,
+                    )
+                }
+                _ => (true, Vec::new(), 0),
+            };
 
         Self {
+            wrong_chain_algorithm,
             index: 0,
             authorities_set_id,
             authorities_list,
@@ -102,6 +119,10 @@ impl Verifier {
     }
 
     pub fn next(mut self) -> Result<Next, Error> {
+        if self.wrong_chain_algorithm {
+            return Err(Error::WrongChainAlgorithm);
+        }
+
         if self.fragments.is_empty() {
             return Err(Error::EmptyProof);
         }
@@ -109,24 +130,31 @@ impl Verifier {
         debug_assert!(self.fragments.len() > self.index);
         let fragment = &self.fragments[self.index];
 
-        let fragment_header_hash = fragment.header.hash();
-        if fragment.justification.target_hash != fragment_header_hash {
+        let fragment_header_hash =
+            header::hash_from_scale_encoded_header(&fragment.scale_encoded_header);
+        let justification = finality::justification::decode::decode_partial_grandpa(
+            // TODO: don't use decode_partial but decode
+            &fragment.scale_encoded_justification,
+        )
+        .map_err(Error::InvalidJustification)?
+        .0;
+        if *justification.target_hash != fragment_header_hash {
             return Err(Error::TargetHashMismatch {
-                justification_target_hash: fragment.justification.target_hash,
-                justification_target_height: fragment.justification.target_number.into(), // TODO: some u32/u64 mismatch here; figure out
+                justification_target_hash: *justification.target_hash,
+                justification_target_height: justification.target_number.into(), // TODO: some u32/u64 mismatch here; figure out
                 header_hash: fragment_header_hash,
             });
         }
 
         verify(VerifyConfig {
-            justification: (&fragment.justification).into(),
+            justification,
             authorities_list: self.authorities_list.iter().map(|a| &a.public_key),
             authorities_set_id: self.authorities_set_id,
         })
         .map_err(Error::Verify)?;
 
-        let authorities_list = fragment
-            .header
+        let authorities_list = header::decode(&fragment.scale_encoded_header)
+            .map_err(Error::InvalidHeader)?
             .digest
             .logs()
             .filter_map(|log_item| match log_item {
@@ -153,7 +181,7 @@ impl Verifier {
 
         if self.index == self.fragments.len() {
             Ok(Next::Success {
-                header: fragment.header.clone(),
+                scale_encoded_header: fragment.scale_encoded_header.clone(), // TODO: cloning :-/
                 chain_information_finality: ChainInformationFinality::Grandpa {
                     after_finalized_block_authorities_set_id: self.authorities_set_id,
                     finalized_triggered_authorities: self.authorities_list,
@@ -169,7 +197,7 @@ impl Verifier {
 pub enum Next {
     NotFinished(Verifier),
     Success {
-        header: Header,
+        scale_encoded_header: Vec<u8>,
         chain_information_finality: ChainInformationFinality,
     },
 }

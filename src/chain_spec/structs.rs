@@ -35,9 +35,21 @@ pub(super) struct ClientSpec {
     pub(super) id: String,
     #[serde(default)]
     pub(super) chain_type: ChainType,
+
+    /// Each key is a block hash. Values are a hex-encoded runtime code (normally found in the
+    /// `:code` storage key). The descendants of the block with the given hash that share the same
+    /// [`crate::executor::CoreVersionRef::spec_version`] as the Wasm runtime code in the value
+    /// should instead use that Wasm runtime code. In other words, the substitution stops when
+    /// the `spec_version` is modified.
+    /// The block with that hash uses its unmodified runtime code. Only its children can be
+    /// affected.
+    ///
+    /// This can be used in order to substitute faulty runtimes with functioning ones.
+    ///
+    /// See also <https://github.com/paritytech/substrate/pull/8898>.
     #[serde(default)]
     // TODO: make use of this
-    pub(super) code_substitutes: HashMap<String, HexString, fnv::FnvBuildHasher>,
+    pub(super) code_substitutes: HashMap<HexString, HexString, fnv::FnvBuildHasher>,
     pub(super) boot_nodes: Vec<String>,
     pub(super) telemetry_endpoints: Option<Vec<(String, u8)>>,
     pub(super) protocol_id: Option<String>,
@@ -47,6 +59,7 @@ pub(super) struct ClientSpec {
     // TODO: make use of this
     pub(super) bad_blocks: Option<HashSet<HashHexString, FnvBuildHasher>>,
     // Unused but for some reason still part of the chain specs.
+    #[serde(default, skip_serializing)]
     pub(super) consensus_engine: (),
     pub(super) genesis: Genesis,
     pub(super) light_sync_state: Option<LightSyncState>,
@@ -80,6 +93,7 @@ impl Default for ChainType {
 #[serde(deny_unknown_fields)]
 pub(super) enum Genesis {
     Raw(RawGenesis),
+    StateRootHash(HashHexString),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,7 +104,7 @@ pub(super) struct RawGenesis {
     pub(super) children_default: BTreeMap<HexString, ChildRawStorage>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) struct HexString(pub(super) Vec<u8>);
 
 impl core::borrow::Borrow<[u8]> for HexString {

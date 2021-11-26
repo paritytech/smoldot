@@ -44,7 +44,26 @@ pub fn parse_call(call_json: &str) -> Result<Call, ParseError> {
     })
 }
 
-/// Parsed JSON-RPC call.
+/// Builds a JSON call.
+///
+/// `method` must be the name of the method to call. `params_json` must be the JSON-formatted
+/// object or array containing the parameters of the call.
+///
+/// # Panic
+///
+/// Panics if the [`Call::id_json`] or [`Call::params_json`] isn't valid JSON.
+///
+pub fn build_call(call: Call) -> String {
+    serde_json::to_string(&SerdeCall {
+        jsonrpc: SerdeVersion::V2,
+        id: call.id_json.map(|id| serde_json::from_str(id).unwrap()),
+        method: call.method,
+        params: serde_json::from_str(call.params_json).unwrap(),
+    })
+    .unwrap()
+}
+
+/// Decoded JSON-RPC call.
 #[derive(Debug)]
 pub struct Call<'a> {
     /// JSON-formatted identifier of the request. `None` for notifications.
@@ -89,24 +108,25 @@ pub fn build_success_response(id_json: &str, result_json: &str) -> String {
 
 /// Builds a JSON event to a subscription.
 ///
-/// `method` must be the name of the method that was used for the subscription. `id` must
-/// be the identifier of the subscription, as previously attributed by the server and returned to
-/// the client. `result_json` must be the JSON-formatted event.
+/// `method` must be the name of the method to use for the notification. `id` must be the
+/// identifier of the subscription, as previously attributed by the server and returned to the
+/// client. `result_json` must be the JSON-formatted event.
 ///
 /// # Panic
 ///
 /// Panics if `result_json` isn't valid JSON.
 ///
+// TODO: consider removing this function and use `build_notification` instead
 pub fn build_subscription_event(method: &str, id: &str, result_json: &str) -> String {
-    serde_json::to_string(&SerdeSubscriptionEvent {
-        jsonrpc: SerdeVersion::V2,
+    build_call(Call {
+        id_json: None,
         method,
-        params: SerdeSubscriptionEventParams {
+        params_json: &serde_json::to_string(&SerdeSubscriptionEventParams {
             subscription: id,
             result: serde_json::from_str(result_json).expect("invalid result_json"),
-        },
+        })
+        .unwrap(),
     })
-    .unwrap()
 }
 
 /// Builds a JSON response.
@@ -340,4 +360,50 @@ struct SerdeSubscriptionEvent<'a> {
 struct SerdeSubscriptionEventParams<'a> {
     subscription: &'a str,
     result: &'a serde_json::value::RawValue,
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn parse_basic_works() {
+        let call = super::parse_call(
+            r#"{"jsonrpc":"2.0","id":5,"method":"foo","params":[5,true, "hello"]}"#,
+        )
+        .unwrap();
+        assert_eq!(call.id_json.unwrap(), "5");
+        assert_eq!(call.method, "foo");
+        assert_eq!(call.params_json, "[5,true, \"hello\"]");
+    }
+
+    #[test]
+    fn parse_missing_id() {
+        let call = super::parse_call(r#"{"jsonrpc":"2.0","method":"foo","params":[]}"#).unwrap();
+        assert!(call.id_json.is_none());
+        assert_eq!(call.method, "foo");
+        assert_eq!(call.params_json, "[]");
+    }
+
+    #[test]
+    fn parse_id_string() {
+        let call =
+            super::parse_call(r#"{"jsonrpc":"2.0","id":"hello","method":"foo","params":[]}"#)
+                .unwrap();
+        assert_eq!(call.id_json.unwrap(), "\"hello\"");
+        assert_eq!(call.method, "foo");
+        assert_eq!(call.params_json, "[]");
+    }
+
+    #[test]
+    fn parse_wrong_jsonrpc() {
+        assert!(
+            super::parse_call(r#"{"jsonrpc":"2.1","id":5,"method":"foo","params":[]}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn parse_bad_id() {
+        assert!(
+            super::parse_call(r#"{"jsonrpc":"2.0","id":{},"method":"foo","params":[]}"#).is_err()
+        );
+    }
 }

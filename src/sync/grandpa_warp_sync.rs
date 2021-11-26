@@ -65,12 +65,11 @@ use crate::{
         vm::ExecHint,
     },
     finality::grandpa::warp_sync,
-    header::{Header, HeaderRef},
+    header::{self, Header, HeaderRef},
     network::protocol::GrandpaWarpSyncResponse,
 };
 
 use alloc::vec::Vec;
-use core::convert::TryFrom as _;
 
 pub use warp_sync::Error as FragmentError;
 
@@ -119,7 +118,8 @@ pub struct SourceId(usize);
 pub struct Success<TSrc> {
     /// The synced chain information.
     pub chain_information: ValidChainInformation,
-    /// The runtime constructed in `VirtualMachineParamsGet`.
+    /// The runtime constructed in `VirtualMachineParamsGet`. Corresponds to the runtime of the
+    /// finalized block of [`Success::chain_information`].
     pub runtime: HostVmPrototype,
     /// The list of sources that were added to the state machine.
     pub sources: Vec<TSrc>,
@@ -365,10 +365,19 @@ impl<TSrc> InProgressGrandpaWarpSync<TSrc> {
     }
 
     fn warp_sync_request_from_next_source(
-        sources: slab::Slab<Source<TSrc>>,
+        mut sources: slab::Slab<Source<TSrc>>,
         state: PreVerificationState,
         previous_verifier_values: Option<(Header, ChainInformationFinality)>,
     ) -> Self {
+        // It is possible for a source to be banned because of, say, networking errors.
+        // If all sources are "banned", unban them in order to try make progress again with the
+        // hopes that this time it will work.
+        if sources.iter().all(|(_, s)| s.already_tried) {
+            for (_, s) in &mut sources {
+                s.already_tried = false;
+            }
+        }
+
         let next_id = sources
             .iter()
             .find(|(_, s)| !s.already_tried)
@@ -382,6 +391,7 @@ impl<TSrc> InProgressGrandpaWarpSync<TSrc> {
                 previous_verifier_values,
             })
         } else {
+            debug_assert!(sources.is_empty());
             Self::WaitingForSources(WaitingForSources {
                 sources,
                 state,
@@ -496,6 +506,19 @@ impl<TSrc> StorageGet<TSrc> {
             self.inner.inject_value(value),
             self.fetched_current_epoch,
             self.state,
+        )
+    }
+
+    /// Injects a failure to retrieve the storage value.
+    pub fn inject_error(self) -> GrandpaWarpSync<TSrc> {
+        GrandpaWarpSync::InProgress(
+            InProgressGrandpaWarpSync::warp_sync_request_from_next_source(
+                self.state.sources,
+                PreVerificationState {
+                    start_chain_information: self.state.start_chain_information,
+                },
+                None,
+            ),
         )
     }
 }
@@ -623,9 +646,13 @@ impl<TSrc> Verifier<TSrc> {
                 Ok(()),
             ),
             Ok(warp_sync::Next::Success {
-                header,
+                scale_encoded_header,
                 chain_information_finality,
             }) => {
+                // As the verification of the fragment has succeeded, we are sure that the header
+                // is valid and can decode it.
+                let header: Header = header::decode(&scale_encoded_header).unwrap().into();
+
                 if self.final_set_of_fragments {
                     (
                         InProgressGrandpaWarpSync::VirtualMachineParamsGet(
@@ -839,6 +866,19 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
             user_data,
             already_tried: false,
         }))
+    }
+
+    /// Injects a failure to retrieve the parameters.
+    pub fn inject_error(self) -> GrandpaWarpSync<TSrc> {
+        GrandpaWarpSync::InProgress(
+            InProgressGrandpaWarpSync::warp_sync_request_from_next_source(
+                self.state.sources,
+                PreVerificationState {
+                    start_chain_information: self.state.start_chain_information,
+                },
+                None,
+            ),
+        )
     }
 
     /// Set the code and heappages from storage using the keys `:code` and `:heappages`

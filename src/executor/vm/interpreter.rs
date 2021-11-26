@@ -272,16 +272,14 @@ impl InterpreterPrototype {
                     return Err((StartErr::SignatureNotSupported, self));
                 }
 
-                match wasmi::FuncInstance::invoke_resumable(
+                wasmi::FuncInstance::invoke_resumable(
                     &f,
                     params
                         .iter()
                         .map(|v| wasmi::RuntimeValue::from(*v))
                         .collect::<Vec<_>>(),
-                ) {
-                    Ok(e) => e,
-                    Err(err) => unreachable!("{:?}", err), // TODO:
-                }
+                )
+                .map_err(|err| Trap(err.to_string()))
             }
             None => return Err((StartErr::FunctionNotFound, self)),
             _ => return Err((StartErr::NotAFunction, self)),
@@ -302,7 +300,6 @@ impl InterpreterPrototype {
             execution: Some(execution),
             interrupted: false,
             indirect_table: self.indirect_table,
-            is_poisoned: false,
         })
     }
 }
@@ -348,16 +345,15 @@ pub struct Interpreter {
     /// Execution context of this virtual machine. This notably holds the program counter, state
     /// of the stack, and so on.
     ///
-    /// This field is an `Option` because we need to be able to temporarily extract it. It must
-    /// always be `Some`.
-    execution: Option<wasmi::FuncInvocation<'static>>,
+    /// This field is an `Option` because we need to be able to temporarily extract it.
+    /// If `None`, the state machine is in a poisoned state and cannot run any code anymore.
+    /// Can contain an `Err` if the initialization failed, in which case the execution must
+    /// return an error immediately.
+    execution: Option<Result<wasmi::FuncInvocation<'static>, Trap>>,
 
     /// If false, then one must call `execution.start_execution()` instead of `resume_execution()`.
     /// This is a particularity of the Wasm interpreter that we don't want to expose in our API.
     interrupted: bool,
-
-    /// If true, the state machine is in a poisoned state and cannot run any code anymore.
-    is_poisoned: bool,
 }
 
 impl Interpreter {
@@ -392,13 +388,14 @@ impl Interpreter {
         }
         impl wasmi::HostError for Interrupt {}
 
-        if self.is_poisoned {
-            return Err(RunErr::Poisoned);
-        }
-
         let mut execution = match self.execution.take() {
-            Some(e) => e,
-            None => unreachable!(),
+            Some(Ok(e)) => e,
+            Some(Err(err)) => {
+                return Ok(ExecOutcome::Finished {
+                    return_value: Err(err),
+                })
+            }
+            None => return Err(RunErr::Poisoned),
         };
 
         // Since the signature of the function is checked at initialization to be supported, it is
@@ -432,12 +429,9 @@ impl Interpreter {
         };
 
         match result {
-            Ok(return_value) => {
-                self.is_poisoned = true;
-                Ok(ExecOutcome::Finished {
-                    return_value: Ok(return_value.map(|r| WasmValue::try_from(r).unwrap())),
-                })
-            }
+            Ok(return_value) => Ok(ExecOutcome::Finished {
+                return_value: Ok(return_value.map(|r| WasmValue::try_from(r).unwrap())),
+            }),
             Err(wasmi::ResumableError::AlreadyStarted) => unreachable!(),
             Err(wasmi::ResumableError::NotResumable) => unreachable!(),
             Err(wasmi::ResumableError::Trap(ref trap)) if trap.kind().is_host() => {
@@ -448,7 +442,7 @@ impl Interpreter {
                     },
                     _ => unreachable!(),
                 };
-                self.execution = Some(execution);
+                self.execution = Some(Ok(execution));
                 Ok(ExecOutcome::Interrupted {
                     id: interrupt.index,
                     params: interrupt
@@ -460,12 +454,9 @@ impl Interpreter {
                         .unwrap(),
                 })
             }
-            Err(wasmi::ResumableError::Trap(err)) => {
-                self.is_poisoned = true;
-                Ok(ExecOutcome::Finished {
-                    return_value: Err(Trap(err.to_string())),
-                })
-            }
+            Err(wasmi::ResumableError::Trap(err)) => Ok(ExecOutcome::Finished {
+                return_value: Err(Trap(err.to_string())),
+            }),
         }
     }
 

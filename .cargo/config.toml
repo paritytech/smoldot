@@ -1,0 +1,3 @@
+[build]
+# TODO: for some reason, smoldot in particular triggers a lot of incremental compilation issues in the Rust compiler; remove this incremental option at some point in the future
+incremental = false

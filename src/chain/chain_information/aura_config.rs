@@ -21,7 +21,7 @@ use crate::{
 };
 
 use alloc::vec::Vec;
-use core::{convert::TryFrom as _, num::NonZeroU64};
+use core::num::NonZeroU64;
 
 /// Aura configuration of a chain, as extracted from the genesis block.
 ///
@@ -88,6 +88,9 @@ impl AuraGenesisConfiguration {
                     vm = req.resume_full_value(value.as_ref().map(|v| &v[..]));
                 }
 
+                host::HostVm::GetMaxLogLevel(resume) => {
+                    vm = resume.resume(0); // Off
+                }
                 host::HostVm::LogEmit(req) => vm = req.resume(),
 
                 _ => return Err(FromVmPrototypeError::HostFunctionNotAllowed),
@@ -117,6 +120,9 @@ impl AuraGenesisConfiguration {
                     vm = req.resume_full_value(value.as_ref().map(|v| &v[..]));
                 }
 
+                host::HostVm::GetMaxLogLevel(resume) => {
+                    vm = resume.resume(0); // Off
+                }
                 host::HostVm::LogEmit(req) => vm = req.resume(),
 
                 _ => return Err(FromVmPrototypeError::HostFunctionNotAllowed),

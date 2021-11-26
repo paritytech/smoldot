@@ -23,7 +23,7 @@
 //! or the block number, and a variable-sized list of log items.
 //!
 //! The standard format of a block header is the
-//! [SCALE encoding](https://substrate.dev/docs/en/knowledgebase/advanced/codec). It is typically
+//! [SCALE encoding](https://docs.substrate.io/v3/advanced/scale-codec). It is typically
 //! under this encoding that block headers are for example transferred over the network or stored
 //! in the database. Use the [`decode`] function in order to decompose a SCALE-encoded header
 //! into a usable [`HeaderRef`].
@@ -71,10 +71,10 @@
 // TODO: consider rewriting the encoding/decoding into a more legible style
 // TODO: consider nom for decoding
 
-use crate::util;
+use crate::{trie, util};
 
 use alloc::{vec, vec::Vec};
-use core::{convert::TryFrom, fmt, iter, slice};
+use core::{fmt, iter, slice};
 
 mod aura;
 mod babe;
@@ -111,6 +111,12 @@ pub fn hash_from_scale_encoded_header_vectored(
     let mut out = [0; 32];
     out.copy_from_slice(result.as_bytes());
     out
+}
+
+/// Returns the value appropriate for [`Header::extrinsics_root`]. Must be passed the list of
+/// transactions in that block.
+pub fn extrinsics_root(transactions: &[impl AsRef<[u8]>]) -> [u8; 32] {
+    trie::ordered_root(transactions)
 }
 
 /// Attempt to decode the given SCALE-encoded header.
@@ -164,7 +170,7 @@ pub fn decode_partial(mut scale_encoded: &[u8]) -> Result<(HeaderRef, &[u8]), Er
 }
 
 /// Potential error when decoding a header.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum Error {
     /// Header is not long enough.
     TooShort,
@@ -199,6 +205,8 @@ pub enum Error {
     MultipleBabeEpochDescriptors,
     /// There are multiple Babe configuration descriptor digests in the block header.
     MultipleBabeConfigDescriptors,
+    /// There are multiple runtime environment updated digests in the block header.
+    MutipleRuntimeEnvironmentUpdated,
     /// Found a Babe configuration change digest without an epoch change digest.
     UnexpectedBabeConfigDescriptor,
     GrandpaConsensusLogDecodeError,
@@ -222,6 +230,8 @@ pub struct HeaderRef<'a> {
     /// The state trie merkle root
     pub state_root: &'a [u8; 32],
     /// The merkle root of the extrinsics.
+    ///
+    /// You can use the [`extrinsics_root`] function to compute this value.
     pub extrinsics_root: &'a [u8; 32],
     /// List of auxiliary data appended to the block header.
     pub digest: DigestRef<'a>,
@@ -233,12 +243,10 @@ impl<'a> HeaderRef<'a> {
     pub fn scale_encoding(
         &self,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
-        // TODO: don't allocate?
-        let encoded_number =
-            parity_scale_codec::Encode::encode(&parity_scale_codec::Compact(self.number));
-
         iter::once(either::Left(either::Left(&self.parent_hash[..])))
-            .chain(iter::once(either::Left(either::Right(encoded_number))))
+            .chain(iter::once(either::Left(either::Right(
+                util::encode_scale_compact_u64(self.number),
+            ))))
             .chain(iter::once(either::Left(either::Left(&self.state_root[..]))))
             .chain(iter::once(either::Left(either::Left(
                 &self.extrinsics_root[..],
@@ -286,6 +294,8 @@ pub struct Header {
     /// The state trie merkle root
     pub state_root: [u8; 32],
     /// The merkle root of the extrinsics.
+    ///
+    /// You can use the [`extrinsics_root`] function to compute this value.
     pub extrinsics_root: [u8; 32],
     /// List of auxiliary data appended to the block header.
     pub digest: Digest,
@@ -342,6 +352,8 @@ pub struct DigestRef<'a> {
     /// Index of the [`DigestItemRef::BabeConsensus`] item containing a
     /// [`BabeConsensusLogRef::NextConfigData`], if any.
     babe_next_config_data_index: Option<usize>,
+    /// `true` if there is a [`DigestItemRef::RuntimeEnvironmentUpdated`] item.
+    has_runtime_environment_updated: bool,
 }
 
 #[derive(Clone)]
@@ -370,6 +382,7 @@ impl<'a> DigestRef<'a> {
             babe_predigest_index: None,
             babe_next_epoch_data_index: None,
             babe_next_config_data_index: None,
+            has_runtime_environment_updated: false,
         }
     }
 
@@ -469,6 +482,11 @@ impl<'a> DigestRef<'a> {
         }
     }
 
+    /// Returns `true` if there is a [`DigestItemRef::RuntimeEnvironmentUpdated`] item.
+    pub fn has_runtime_environment_updated(&self) -> bool {
+        self.has_runtime_environment_updated
+    }
+
     /// If the last element of the list is a seal, removes it from the [`DigestRef`].
     pub fn pop_seal(&mut self) -> Option<Seal<'a>> {
         let seal_pos = self.babe_seal_index.or(self.aura_seal_index)?;
@@ -566,6 +584,7 @@ impl<'a> DigestRef<'a> {
         let mut babe_predigest_index = None;
         let mut babe_next_epoch_data_index = None;
         let mut babe_next_config_data_index = None;
+        let mut has_runtime_environment_updated = false;
 
         // Iterate through the log items to see if anything is wrong.
         for (item_num, item) in slice.iter().enumerate() {
@@ -609,8 +628,16 @@ impl<'a> DigestRef<'a> {
                     debug_assert!(babe_seal_index.is_none());
                     babe_seal_index = Some(item_num);
                 }
+                DigestItem::RuntimeEnvironmentUpdated if has_runtime_environment_updated => {
+                    return Err(Error::MutipleRuntimeEnvironmentUpdated);
+                }
+                DigestItem::RuntimeEnvironmentUpdated => {
+                    has_runtime_environment_updated = true;
+                }
                 DigestItem::BabeSeal(_) => return Err(Error::SealIsntLastItem),
-                DigestItem::ChangesTrieSignal(_) | DigestItem::Beefy { .. } => {}
+                DigestItem::ChangesTrieSignal(_)
+                | DigestItem::Beefy { .. }
+                | DigestItem::PolkadotParachain { .. } => {}
             }
         }
 
@@ -626,6 +653,7 @@ impl<'a> DigestRef<'a> {
             babe_predigest_index,
             babe_next_epoch_data_index,
             babe_next_config_data_index,
+            has_runtime_environment_updated,
         })
     }
 
@@ -641,6 +669,7 @@ impl<'a> DigestRef<'a> {
         let mut babe_predigest_index = None;
         let mut babe_next_epoch_data_index = None;
         let mut babe_next_config_data_index = None;
+        let mut has_runtime_environment_updated = false;
 
         // Iterate through the log items to see if anything is wrong.
         let mut next_digest = scale_encoded;
@@ -692,8 +721,16 @@ impl<'a> DigestRef<'a> {
                     debug_assert!(babe_seal_index.is_none());
                     babe_seal_index = Some(item_num);
                 }
+                DigestItemRef::RuntimeEnvironmentUpdated if has_runtime_environment_updated => {
+                    return Err(Error::MutipleRuntimeEnvironmentUpdated);
+                }
+                DigestItemRef::RuntimeEnvironmentUpdated => {
+                    has_runtime_environment_updated = true;
+                }
                 DigestItemRef::BabeSeal(_) => return Err(Error::SealIsntLastItem),
-                DigestItemRef::ChangesTrieSignal(_) | DigestItemRef::Beefy { .. } => {}
+                DigestItemRef::ChangesTrieSignal(_)
+                | DigestItemRef::Beefy { .. }
+                | DigestItemRef::PolkadotParachain { .. } => {}
             }
         }
 
@@ -712,6 +749,7 @@ impl<'a> DigestRef<'a> {
             babe_predigest_index,
             babe_next_epoch_data_index,
             babe_next_config_data_index,
+            has_runtime_environment_updated,
         };
 
         Ok((out, next_digest))
@@ -734,6 +772,7 @@ impl<'a> From<&'a Digest> for DigestRef<'a> {
             babe_predigest_index: digest.babe_predigest_index,
             babe_next_epoch_data_index: digest.babe_next_epoch_data_index,
             babe_next_config_data_index: digest.babe_next_config_data_index,
+            has_runtime_environment_updated: digest.has_runtime_environment_updated,
         }
     }
 }
@@ -763,6 +802,8 @@ pub struct Digest {
     /// Index of the [`DigestItemRef::BabeConsensus`] item containing a
     /// [`BabeConsensusLogRef::NextConfigData`], if any.
     babe_next_config_data_index: Option<usize>,
+    /// `true` if there is a [`DigestItemRef::RuntimeEnvironmentUpdated`] item.
+    has_runtime_environment_updated: bool,
 }
 
 impl Digest {
@@ -778,13 +819,13 @@ impl Digest {
 
     /// Pushes an Aura seal at the end of the list. Returns an error if there is already an Aura
     /// seal.
-    pub fn push_aura_seal(&mut self, seal: [u8; 64]) -> Result<(), ()> {
+    pub fn push_aura_seal(&mut self, seal: [u8; 64]) -> Result<(), PushSealError> {
         if self.aura_seal_index.is_none() {
             self.aura_seal_index = Some(self.list.len());
             self.list.push(DigestItem::AuraSeal(seal));
             Ok(())
         } else {
-            Err(())
+            Err(PushSealError())
         }
     }
 
@@ -795,13 +836,13 @@ impl Digest {
 
     /// Pushes a Babe seal at the end of the list. Returns an error if there is already a Babe
     /// seal.
-    pub fn push_babe_seal(&mut self, seal: [u8; 64]) -> Result<(), ()> {
+    pub fn push_babe_seal(&mut self, seal: [u8; 64]) -> Result<(), PushSealError> {
         if self.babe_seal_index.is_none() {
             self.babe_seal_index = Some(self.list.len());
             self.list.push(DigestItem::BabeSeal(seal));
             Ok(())
         } else {
-            Err(())
+            Err(PushSealError())
         }
     }
 
@@ -816,6 +857,11 @@ impl Digest {
     /// present too.
     pub fn babe_epoch_information(&self) -> Option<(BabeNextEpochRef, Option<BabeNextConfig>)> {
         DigestRef::from(self).babe_epoch_information()
+    }
+
+    /// Returns `true` if there is a [`DigestItemRef::RuntimeEnvironmentUpdated`] item.
+    pub fn has_runtime_environment_updated(&self) -> bool {
+        self.has_runtime_environment_updated
     }
 }
 
@@ -837,6 +883,7 @@ impl<'a> From<DigestRef<'a>> for Digest {
             babe_predigest_index: digest.babe_predigest_index,
             babe_next_epoch_data_index: digest.babe_next_epoch_data_index,
             babe_next_config_data_index: digest.babe_next_config_data_index,
+            has_runtime_environment_updated: digest.has_runtime_environment_updated,
         }
     }
 }
@@ -894,6 +941,11 @@ impl<'a> Iterator for LogsIter<'a> {
 
 impl<'a> ExactSizeIterator for LogsIter<'a> {}
 
+/// Error potentially returned when pushing a seal at the end of the digest log items.
+#[derive(Debug, Copy, Clone, derive_more::Display)]
+#[display(fmt = "Seal already exists")]
+pub struct PushSealError();
+
 // TODO: document
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum DigestItemRef<'a> {
@@ -918,6 +970,16 @@ pub enum DigestItemRef<'a> {
         /// Smoldot doesn't interpret the content of the log item at the moment.
         opaque: &'a [u8],
     },
+
+    /// Item related to parachains consensus. Contains information about a parachain.
+    PolkadotParachain {
+        /// Smoldot doesn't interpret the content of the log item at the moment.
+        opaque: &'a [u8],
+    },
+
+    /// Runtime of the chain has been updated in this block. This can include the runtime code or
+    /// the heap pages.
+    RuntimeEnvironmentUpdated,
 }
 
 impl<'a> DigestItemRef<'a> {
@@ -1036,7 +1098,18 @@ impl<'a> DigestItemRef<'a> {
             }
             DigestItemRef::ChangesTrieSignal(ref changes) => {
                 let mut ret = vec![7];
-                ret.extend_from_slice(&parity_scale_codec::Encode::encode(changes));
+                match changes {
+                    ChangesTrieSignal::NewConfiguration(Some(cfg)) => {
+                        ret.extend_from_slice(&[0]);
+                        ret.extend_from_slice(&[1]);
+                        ret.extend_from_slice(&cfg.digest_interval.to_le_bytes());
+                        ret.extend_from_slice(&cfg.digest_levels.to_le_bytes());
+                    }
+                    ChangesTrieSignal::NewConfiguration(None) => {
+                        ret.extend_from_slice(&[0]);
+                        ret.extend_from_slice(&[0]);
+                    }
+                }
                 iter::once(ret)
             }
             DigestItemRef::ChangesTrieRoot(data) => {
@@ -1051,6 +1124,14 @@ impl<'a> DigestItemRef<'a> {
                 ret.extend_from_slice(opaque);
                 iter::once(ret)
             }
+            DigestItemRef::PolkadotParachain { opaque } => {
+                let mut ret = vec![4];
+                ret.extend_from_slice(b"POL1");
+                ret.extend_from_slice(util::encode_scale_compact_usize(opaque.len()).as_ref());
+                ret.extend_from_slice(opaque);
+                iter::once(ret)
+            }
+            DigestItemRef::RuntimeEnvironmentUpdated => iter::once(vec![8]),
         }
     }
 }
@@ -1068,6 +1149,10 @@ impl<'a> From<&'a DigestItem> for DigestItemRef<'a> {
             DigestItem::ChangesTrieRoot(v) => DigestItemRef::ChangesTrieRoot(v),
             DigestItem::ChangesTrieSignal(v) => DigestItemRef::ChangesTrieSignal(v.clone()),
             DigestItem::Beefy { opaque } => DigestItemRef::Beefy { opaque: &*opaque },
+            DigestItem::PolkadotParachain { opaque } => {
+                DigestItemRef::PolkadotParachain { opaque: &*opaque }
+            }
+            DigestItem::RuntimeEnvironmentUpdated => DigestItemRef::RuntimeEnvironmentUpdated,
         }
     }
 }
@@ -1095,6 +1180,16 @@ pub enum DigestItem {
         /// Smoldot doesn't interpret the content of the log item at the moment.
         opaque: Vec<u8>,
     },
+
+    /// See [`DigestItemRef::PolkadotParachain`].
+    PolkadotParachain {
+        /// Smoldot doesn't interpret the content of the log item at the moment.
+        opaque: Vec<u8>,
+    },
+
+    /// Runtime of the chain has been updated in this block. This can include the runtime code or
+    /// the heap pages.
+    RuntimeEnvironmentUpdated,
 }
 
 impl<'a> From<DigestItemRef<'a>> for DigestItem {
@@ -1120,13 +1215,17 @@ impl<'a> From<DigestItemRef<'a>> for DigestItem {
             DigestItemRef::Beefy { opaque } => DigestItem::Beefy {
                 opaque: opaque.to_vec(),
             },
+            DigestItemRef::PolkadotParachain { opaque } => DigestItem::PolkadotParachain {
+                opaque: opaque.to_vec(),
+            },
+            DigestItemRef::RuntimeEnvironmentUpdated => DigestItem::RuntimeEnvironmentUpdated,
         }
     }
 }
 
 /// Available changes trie signals.
 // TODO: review documentation
-#[derive(Debug, PartialEq, Eq, Clone, parity_scale_codec::Encode, parity_scale_codec::Decode)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ChangesTrieSignal {
     /// New changes trie configuration is enacted, starting from **next block**.
     ///
@@ -1144,9 +1243,7 @@ pub enum ChangesTrieSignal {
 
 /// Substrate changes trie configuration.
 // TODO: review documentation
-#[derive(
-    Debug, Clone, PartialEq, Eq, Default, parity_scale_codec::Encode, parity_scale_codec::Decode,
-)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangesTrieConfiguration {
     /// Interval (in blocks) at which level1-digests are created. Digests are not
     /// created when this is less or equal to 1.
@@ -1201,10 +1298,27 @@ fn decode_item(mut slice: &[u8]) -> Result<(DigestItemRef, &[u8]), Error> {
             Ok((DigestItemRef::ChangesTrieRoot(hash), slice))
         }
         7 => {
-            let item = parity_scale_codec::Decode::decode(&mut slice)
-                .map_err(|_| Error::DigestItemDecodeError)?;
+            let (slice, item) = nom::combinator::map(
+                nom::sequence::preceded(
+                    nom::bytes::complete::tag(&[0u8]),
+                    crate::util::nom_option_decode(nom::combinator::map(
+                        nom::sequence::tuple((
+                            nom::number::complete::le_u32,
+                            nom::number::complete::le_u32,
+                        )),
+                        |(digest_interval, digest_levels)| ChangesTrieConfiguration {
+                            digest_interval,
+                            digest_levels,
+                        },
+                    )),
+                ),
+                ChangesTrieSignal::NewConfiguration,
+            )(slice)
+            .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::DigestItemDecodeError)?;
+
             Ok((DigestItemRef::ChangesTrieSignal(item), slice))
         }
+        8 => Ok((DigestItemRef::RuntimeEnvironmentUpdated, slice)),
         ty => Err(Error::UnknownDigestLogType(ty)),
     }
 }
@@ -1217,13 +1331,16 @@ fn decode_item_from_parts<'a>(
 ) -> Result<DigestItemRef<'a>, Error> {
     Ok(match (index, engine_id) {
         (_, b"pow_") => return Err(Error::PowIdeologicallyNotSupported),
+        // 4 = Consensus
         (4, b"aura") => DigestItemRef::AuraConsensus(AuraConsensusLogRef::from_slice(content)?),
         (4, b"BABE") => DigestItemRef::BabeConsensus(BabeConsensusLogRef::from_slice(content)?),
         (4, b"FRNK") => {
             DigestItemRef::GrandpaConsensus(GrandpaConsensusLogRef::from_slice(content)?)
         }
         (4, b"BEEF") => DigestItemRef::Beefy { opaque: content },
+        (4, b"POL1") => DigestItemRef::PolkadotParachain { opaque: content },
         (4, e) => return Err(Error::UnknownConsensusEngine(*e)),
+        // 5 = Seal
         (5, b"aura") => DigestItemRef::AuraSeal({
             TryFrom::try_from(content).map_err(|_| Error::BadAuraSealLength)?
         }),
@@ -1231,6 +1348,7 @@ fn decode_item_from_parts<'a>(
             TryFrom::try_from(content).map_err(|_| Error::BadBabeSealLength)?
         }),
         (5, e) => return Err(Error::UnknownConsensusEngine(*e)),
+        // 6 = PreRuntime
         (6, b"aura") => DigestItemRef::AuraPreDigest(AuraPreDigest::from_slice(content)?),
         (6, b"BABE") => DigestItemRef::BabePreDigest(BabePreDigestRef::from_slice(content)?),
         (6, e) => return Err(Error::UnknownConsensusEngine(*e)),

@@ -22,7 +22,7 @@ use crate::{
     header, util,
 };
 
-use alloc::{borrow::ToOwned as _, vec::Vec};
+use alloc::{borrow::ToOwned as _, collections::BTreeMap, vec::Vec};
 use core::{iter, num::NonZeroU64};
 
 /// Configuration for a transaction validation process.
@@ -35,7 +35,7 @@ pub struct Config<'a, TTx> {
     /// The runtime of this block must be the one in [`Config::runtime`].
     pub scale_encoded_header: &'a [u8],
 
-    /// Double-SCALE-encoded transaction.
+    /// SCALE-encoded transaction.
     pub scale_encoded_transaction: TTx,
 
     /// Source of the transaction.
@@ -176,7 +176,7 @@ pub enum UnknownTransaction {
 }
 
 /// Problem encountered during a call to [`validate_transaction`].
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum Error {
     /// Error while decoding the block header against which to make the call.
     InvalidHeader(header::Error),
@@ -200,7 +200,7 @@ pub enum Error {
 }
 
 /// Error that can happen during the decoding.
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 pub struct DecodeError();
 
 /// Errors that can occur while checking the validity of a transaction.
@@ -322,10 +322,7 @@ pub fn validate_transaction(
                 }
                 .scale_encoding(),
                 top_trie_root_calculation_cache: None,
-                storage_top_trie_changes: hashbrown::HashMap::with_capacity_and_hasher(
-                    64, // Rough estimate.
-                    Default::default(),
-                ),
+                storage_top_trie_changes: BTreeMap::new(),
                 offchain_storage_changes: hashbrown::HashMap::default(),
             });
 
@@ -361,7 +358,7 @@ pub fn validate_transaction(
                     &header::hash_from_scale_encoded_header(config.scale_encoded_header),
                 ),
                 top_trie_root_calculation_cache: None,
-                storage_top_trie_changes: hashbrown::HashMap::default(),
+                storage_top_trie_changes: BTreeMap::default(),
                 offchain_storage_changes: hashbrown::HashMap::default(),
             });
 
@@ -373,12 +370,10 @@ pub fn validate_transaction(
                 },
             }
         }
-        _ => {
-            return Query::Finished {
-                result: Err(Error::UnknownApiVersion),
-                virtual_machine,
-            }
-        }
+        _ => Query::Finished {
+            result: Err(Error::UnknownApiVersion),
+            virtual_machine,
+        },
     }
 }
 

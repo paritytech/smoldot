@@ -54,6 +54,16 @@
 //!
 //! The SQL schema of the database, with explanatory comments, can be found in `open.rs`.
 //!
+//! # About blocking behaviour
+//!
+//! This implementation uses the SQLite library, which isn't Rust-asynchronous-compatible. Many
+//! functions will, with the help of the operating system, put the current thread to sleep while
+//! waiting for an I/O operation to finish. In the context of asynchronous Rust, this is
+//! undesirable.
+//!
+//! For this reason, you are encouraged to isolate the database in its own threads and never
+//! access it directly from an asynchronous context.
+//!
 
 // TODO: better docs
 
@@ -62,12 +72,7 @@
 
 use crate::{chain::chain_information, header, util};
 
-use core::{
-    convert::TryFrom,
-    fmt,
-    iter::{self, FromIterator},
-    num::NonZeroU64,
-};
+use core::{fmt, iter, num::NonZeroU64};
 use parking_lot::Mutex;
 
 pub use open::{open, Config, ConfigTy, DatabaseEmpty, DatabaseOpen};
@@ -608,9 +613,7 @@ impl SqliteFullDatabase {
 
                             let mut statement = connection.prepare("INSERT INTO grandpa_triggered_authorities(idx, public_key, weight) VALUES(?, ?, ?)").unwrap();
                             for (index, item) in change.next_authorities.enumerate() {
-                                statement
-                                    .bind(1, i64::from_ne_bytes(index.to_ne_bytes()))
-                                    .unwrap();
+                                statement.bind(1, i64::try_from(index).unwrap()).unwrap();
                                 statement.bind(2, &item.public_key[..]).unwrap();
                                 statement
                                     .bind(3, i64::from_ne_bytes(item.weight.get().to_ne_bytes()))
@@ -1292,6 +1295,12 @@ fn decode_babe_epoch_information(
     ))(value)
     .map(|(_, v)| v)
     .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| ());
+
+    let result = match result {
+        Ok(r) if r.validate().is_ok() => Ok(r),
+        Ok(_) => Err(()),
+        Err(()) => Err(()),
+    };
 
     result
         .map_err(|()| CorruptedError::InvalidBabeEpochInformation)
