@@ -270,25 +270,31 @@ impl Connection {
             )
         };
 
-        async move {
-            if ret_code != 0 {
-                let ptr = u32::from_le_bytes(<[u8; 4]>::try_from(&error_ptr[0..4]).unwrap());
-                let len = u32::from_le_bytes(<[u8; 4]>::try_from(&error_ptr[4..8]).unwrap());
-                let error_message: Box<[u8]> = unsafe {
-                    Box::from_raw(slice::from_raw_parts_mut(
-                        usize::try_from(ptr).unwrap() as *mut u8,
-                        usize::try_from(len).unwrap(),
-                    ))
-                };
+        let err = if ret_code != 0 {
+            let ptr = u32::from_le_bytes(<[u8; 4]>::try_from(&error_ptr[0..4]).unwrap());
+            let len = u32::from_le_bytes(<[u8; 4]>::try_from(&error_ptr[4..8]).unwrap());
+            let error_message: Box<[u8]> = unsafe {
+                Box::from_raw(slice::from_raw_parts_mut(
+                    usize::try_from(ptr).unwrap() as *mut u8,
+                    usize::try_from(len).unwrap(),
+                ))
+            };
 
-                return Err(ConnectError {
-                    message: str::from_utf8(&error_message).unwrap().to_owned(),
-                    is_bad_addr: error_ptr[8] != 0,
-                });
-            }
-
+            Err(ConnectError {
+                message: str::from_utf8(&error_message).unwrap().to_owned(),
+                is_bad_addr: error_ptr[8] != 0,
+            })
+        } else {
             unsafe {
                 Pin::get_unchecked_mut(pointer.as_mut()).id = Some(id);
+            }
+
+            Ok(())
+        };
+
+        async move {
+            if let Err(err) = err {
+                return Err(err);
             }
 
             loop {
