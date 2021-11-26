@@ -37,7 +37,7 @@ use std::{
     task,
 };
 
-pub use timers::Delay;
+use timers::Delay;
 
 pub mod bindings;
 mod timers;
@@ -58,58 +58,6 @@ pub(crate) fn panic(message: String) -> ! {
         #[cfg(not(target_arch = "wasm32"))]
         unreachable!();
     }
-}
-
-/// Returns the duration elapsed since the UNIX epoch, ignoring leap seconds.
-pub(crate) fn unix_time() -> Duration {
-    Duration::from_secs_f64(unsafe { bindings::unix_time_ms() } / 1000.0)
-}
-
-/// Spawn a background task that runs forever.
-pub fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static) {
-    struct Waker {
-        done: atomic::AtomicBool,
-        wake_up_registered: atomic::AtomicBool,
-        future: Mutex<future::BoxFuture<'static, ()>>,
-    }
-
-    impl task::Wake for Waker {
-        fn wake(self: Arc<Self>) {
-            if self
-                .wake_up_registered
-                .swap(true, atomic::Ordering::Relaxed)
-            {
-                return;
-            }
-
-            start_timer_wrap(Duration::new(0, 0), move || {
-                if self.done.load(atomic::Ordering::SeqCst) {
-                    return;
-                }
-
-                let mut future = self.future.try_lock().unwrap();
-                self.wake_up_registered
-                    .store(false, atomic::Ordering::SeqCst);
-                match Future::poll(
-                    future.as_mut(),
-                    &mut Context::from_waker(&task::Waker::from(self.clone())),
-                ) {
-                    Poll::Ready(()) => {
-                        self.done.store(true, atomic::Ordering::SeqCst);
-                    }
-                    Poll::Pending => {}
-                }
-            })
-        }
-    }
-
-    let waker = Arc::new(Waker {
-        done: false.into(),
-        wake_up_registered: false.into(),
-        future: Mutex::new(Box::pin(future)),
-    });
-
-    task::Wake::wake(waker);
 }
 
 /// Uses the environment to invoke `closure` after at least `duration` has elapsed.
@@ -153,14 +101,6 @@ impl Instant {
         Instant {
             inner: unsafe { bindings::monotonic_clock_ms() },
         }
-    }
-
-    pub fn duration_since(&self, earlier: Instant) -> Duration {
-        *self - earlier
-    }
-
-    pub fn elapsed(&self) -> Duration {
-        Instant::now() - *self
     }
 }
 
@@ -223,7 +163,7 @@ impl log::Log for Logger {
 }
 
 /// Connection connected to a target.
-pub struct Connection {
+struct Connection {
     /// If `Some`, [`bindings::connection_close`] must be called. Set to a value after
     /// [`bindings::connection_new`] returns success.
     id: Option<u32>,
@@ -242,102 +182,6 @@ pub struct Connection {
     wakers: Vec<oneshot::Sender<()>>,
     /// Prevents the [`Connection`] from being unpinned.
     _pinned: marker::PhantomPinned,
-}
-
-impl Connection {
-    /// Connects to the given URL. Returns a [`Connection`] on success.
-    pub fn connect(url: &str) -> impl Future<Output = Result<Pin<Box<Self>>, ConnectError>> {
-        let mut pointer = Box::pin(Connection {
-            id: None,
-            open: false,
-            closed_message: None,
-            messages_queue: VecDeque::with_capacity(32),
-            messages_queue_first_offset: 0,
-            wakers: Vec::with_capacity(1),
-            _pinned: marker::PhantomPinned,
-        });
-
-        let id = u32::try_from(&*pointer as *const Connection as usize).unwrap();
-
-        let mut error_ptr = [0u8; 9];
-
-        let ret_code = unsafe {
-            bindings::connection_new(
-                id,
-                u32::try_from(url.as_bytes().as_ptr() as usize).unwrap(),
-                u32::try_from(url.as_bytes().len()).unwrap(),
-                u32::try_from(&mut error_ptr as *mut [u8; 9] as usize).unwrap(),
-            )
-        };
-
-        let err = if ret_code != 0 {
-            let ptr = u32::from_le_bytes(<[u8; 4]>::try_from(&error_ptr[0..4]).unwrap());
-            let len = u32::from_le_bytes(<[u8; 4]>::try_from(&error_ptr[4..8]).unwrap());
-            let error_message: Box<[u8]> = unsafe {
-                Box::from_raw(slice::from_raw_parts_mut(
-                    usize::try_from(ptr).unwrap() as *mut u8,
-                    usize::try_from(len).unwrap(),
-                ))
-            };
-
-            Err(ConnectError {
-                message: str::from_utf8(&error_message).unwrap().to_owned(),
-                is_bad_addr: error_ptr[8] != 0,
-            })
-        } else {
-            unsafe {
-                Pin::get_unchecked_mut(pointer.as_mut()).id = Some(id);
-            }
-
-            Ok(())
-        };
-
-        async move {
-            if let Err(err) = err {
-                return Err(err);
-            }
-
-            loop {
-                if pointer.closed_message.is_some() || pointer.open {
-                    break;
-                }
-
-                let (tx, rx) = oneshot::channel();
-                unsafe {
-                    Pin::get_unchecked_mut(pointer.as_mut()).wakers.push(tx);
-                }
-                let _ = rx.await;
-            }
-
-            if pointer.open {
-                Ok(pointer)
-            } else {
-                debug_assert!(pointer.closed_message.is_some());
-                Err(ConnectError {
-                    message: pointer.closed_message.as_ref().unwrap().clone(),
-                    is_bad_addr: false,
-                })
-            }
-        }
-    }
-
-    /// Queues the given buffer. For WebSocket connections, queues it as a binary frame.
-    pub fn send(self: &mut Pin<Box<Self>>, data: &[u8]) {
-        unsafe {
-            let this = Pin::get_unchecked_mut(self.as_mut());
-
-            // Connection might have been closed, but API user hasn't detected it yet.
-            if this.closed_message.is_some() {
-                return;
-            }
-
-            bindings::connection_send(
-                this.id.unwrap(),
-                u32::try_from(data.as_ptr() as usize).unwrap(),
-                u32::try_from(data.len()).unwrap(),
-            );
-        }
-    }
 }
 
 impl fmt::Debug for Connection {
@@ -490,11 +334,53 @@ impl super::Platform for Platform {
     type ConnectionDataFuture = future::BoxFuture<'static, ()>;
 
     fn now_from_unix_epoch() -> Duration {
-        unix_time()
+        Duration::from_secs_f64(unsafe { bindings::unix_time_ms() } / 1000.0)
     }
 
     fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static) {
-        spawn_background_task(future)
+        struct Waker {
+            done: atomic::AtomicBool,
+            wake_up_registered: atomic::AtomicBool,
+            future: Mutex<future::BoxFuture<'static, ()>>,
+        }
+
+        impl task::Wake for Waker {
+            fn wake(self: Arc<Self>) {
+                if self
+                    .wake_up_registered
+                    .swap(true, atomic::Ordering::Relaxed)
+                {
+                    return;
+                }
+
+                start_timer_wrap(Duration::new(0, 0), move || {
+                    if self.done.load(atomic::Ordering::SeqCst) {
+                        return;
+                    }
+
+                    let mut future = self.future.try_lock().unwrap();
+                    self.wake_up_registered
+                        .store(false, atomic::Ordering::SeqCst);
+                    match Future::poll(
+                        future.as_mut(),
+                        &mut Context::from_waker(&task::Waker::from(self.clone())),
+                    ) {
+                        Poll::Ready(()) => {
+                            self.done.store(true, atomic::Ordering::SeqCst);
+                        }
+                        Poll::Pending => {}
+                    }
+                })
+            }
+        }
+
+        let waker = Arc::new(Waker {
+            done: false.into(),
+            wake_up_registered: false.into(),
+            future: Mutex::new(Box::pin(future)),
+        });
+
+        task::Wake::wake(waker);
     }
 
     fn now() -> Self::Instant {
@@ -510,7 +396,79 @@ impl super::Platform for Platform {
     }
 
     fn connect(url: &str) -> Self::ConnectFuture {
-        Connection::connect(url).boxed()
+        let mut pointer = Box::pin(Connection {
+            id: None,
+            open: false,
+            closed_message: None,
+            messages_queue: VecDeque::with_capacity(32),
+            messages_queue_first_offset: 0,
+            wakers: Vec::with_capacity(1),
+            _pinned: marker::PhantomPinned,
+        });
+
+        let id = u32::try_from(&*pointer as *const Connection as usize).unwrap();
+
+        let mut error_ptr = [0u8; 9];
+
+        let ret_code = unsafe {
+            bindings::connection_new(
+                id,
+                u32::try_from(url.as_bytes().as_ptr() as usize).unwrap(),
+                u32::try_from(url.as_bytes().len()).unwrap(),
+                u32::try_from(&mut error_ptr as *mut [u8; 9] as usize).unwrap(),
+            )
+        };
+
+        let err = if ret_code != 0 {
+            let ptr = u32::from_le_bytes(<[u8; 4]>::try_from(&error_ptr[0..4]).unwrap());
+            let len = u32::from_le_bytes(<[u8; 4]>::try_from(&error_ptr[4..8]).unwrap());
+            let error_message: Box<[u8]> = unsafe {
+                Box::from_raw(slice::from_raw_parts_mut(
+                    usize::try_from(ptr).unwrap() as *mut u8,
+                    usize::try_from(len).unwrap(),
+                ))
+            };
+
+            Err(ConnectError {
+                message: str::from_utf8(&error_message).unwrap().to_owned(),
+                is_bad_addr: error_ptr[8] != 0,
+            })
+        } else {
+            unsafe {
+                Pin::get_unchecked_mut(pointer.as_mut()).id = Some(id);
+            }
+
+            Ok(())
+        };
+
+        async move {
+            if let Err(err) = err {
+                return Err(err);
+            }
+
+            loop {
+                if pointer.closed_message.is_some() || pointer.open {
+                    break;
+                }
+
+                let (tx, rx) = oneshot::channel();
+                unsafe {
+                    Pin::get_unchecked_mut(pointer.as_mut()).wakers.push(tx);
+                }
+                let _ = rx.await;
+            }
+
+            if pointer.open {
+                Ok(pointer)
+            } else {
+                debug_assert!(pointer.closed_message.is_some());
+                Err(ConnectError {
+                    message: pointer.closed_message.as_ref().unwrap().clone(),
+                    is_bad_addr: false,
+                })
+            }
+        }
+        .boxed()
     }
 
     fn wait_more_data(connection: &mut Self::Connection) -> Self::ConnectionDataFuture {
@@ -554,7 +512,20 @@ impl super::Platform for Platform {
     }
 
     fn send(connection: &mut Self::Connection, data: &[u8]) {
-        connection.send(data)
+        unsafe {
+            let this = Pin::get_unchecked_mut(connection.as_mut());
+
+            // Connection might have been closed, but API user hasn't detected it yet.
+            if this.closed_message.is_some() {
+                return;
+            }
+
+            bindings::connection_send(
+                this.id.unwrap(),
+                u32::try_from(data.as_ptr() as usize).unwrap(),
+                u32::try_from(data.len()).unwrap(),
+            );
+        }
     }
 }
 
