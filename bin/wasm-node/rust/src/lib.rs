@@ -99,8 +99,8 @@ pub struct Client {
     new_task_tx: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
 
     /// List of chains currently running according to the public API. Indices in this container
-    /// are reported through the public API. The values are keys found in
-    /// [`Client::chains_by_key`].
+    /// are reported through the public API. The values are either an error if the chain has failed
+    /// to initialize, or key found in [`Client::chains_by_key`].
     public_api_chains: slab::Slab<PublicApiChain>,
 
     /// De-duplicated list of chains that are *actually* running.
@@ -108,16 +108,83 @@ pub struct Client {
     /// For each key, contains the services running for this chain plus the number of public API
     /// chains that correspond to it.
     ///
-    /// The [`RunningChain`] is within a `MaybeDone`. The variant will be `MaybeDone::Future` if
+    /// The [`ChainServices`] is within a `MaybeDone`. The variant will be `MaybeDone::Future` if
     /// initialization is still in progress.
-    chains_by_key: HashMap<
-        ChainKey,
-        (
-            future::MaybeDone<future::Shared<future::RemoteHandle<RunningChain>>>,
-            String,
-            NonZeroU32,
-        ),
-    >,
+    chains_by_key: HashMap<ChainKey, RunningChain>,
+}
+
+enum PublicApiChain {
+    /// Chain initialization was successful.
+    Ok {
+        /// Index of the underlying chain found in [`Client::chains_by_key`].
+        key: ChainKey,
+
+        /// Identifier of the chain found in its chain spec. Equal to the return value of
+        /// [`chain_spec::ChainSpec::id`]. Used in order to match parachains with relay chains.
+        chain_spec_chain_id: String,
+
+        /// JSON-RPC service that answers incoming requests. `None` iff
+        /// [`AddChainConfig::json_rpc_running`] was `false` when adding the chain.
+        ///
+        /// The JSON-RPC service is wrapped within a `MaybeDone` because its initialization is
+        /// done asynchronously. Note that the JSON-RPC service will only finish initializing
+        /// after the [`RunningChain::services`] of its chain has finished initializing.
+        // TODO: refactor or document this AbortHandle
+        json_rpc_service: Option<(
+            future::MaybeDone<
+                future::Shared<future::RemoteHandle<Arc<json_rpc_service::JsonRpcService>>>,
+            >,
+            future::AbortHandle,
+        )>,
+    },
+
+    /// Chain initialization has failed. Contains a human-readable error message giving the
+    /// reason.
+    Erroneous(String),
+}
+
+/// Identifies a chain, so that multiple identical chains are de-duplicated.
+///
+/// This struct serves as the key in a `HashMap<ChainKey, ChainServices>`. It must contain all the
+/// values that are important to the logic of the fields that are contained in [`ChainServices`].
+/// Failing to include a field in this struct could lead to two different chains using the same
+/// [`ChainServices`], which has security consequences.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ChainKey {
+    /// Hash of the genesis block of the chain.
+    genesis_block_hash: [u8; 32],
+
+    // TODO: what about light checkpoints?
+    // TODO: must also contain forkBlocks, and badBlocks fields
+    /// If the chain is a parachain, contains the relay chain and the "para ID" on this relay
+    /// chain.
+    relay_chain: Option<(Box<ChainKey>, u32)>,
+
+    /// Network protocol id, found in the chain specification.
+    protocol_id: String,
+}
+
+struct RunningChain {
+    /// Services that are dedicated to this chain. Wrapped within a `MaybeDone` because the
+    /// initialization is performed asynchronously.
+    services: future::MaybeDone<future::Shared<future::RemoteHandle<ChainServices>>>,
+
+    /// Name of this chain in the logs. This is not necessarily the same as the identifier of the
+    /// chain in its chain specification.
+    log_name: String,
+
+    /// Number of elements in [`Client::public_api_chains`] that reference this chain. If this
+    /// number reaches `0`, the [`RunningChain`] should be destroyed.
+    num_references: NonZeroU32,
+}
+
+#[derive(Clone)]
+struct ChainServices {
+    network_service: Arc<network_service::NetworkService>,
+    network_identity: peer_id::PeerId,
+    sync_service: Arc<sync_service::SyncService>,
+    runtime_service: Arc<runtime_service::RuntimeService>,
+    transactions_service: Arc<transactions_service::TransactionsService>,
 }
 
 impl Client {
@@ -378,13 +445,13 @@ impl Client {
                     })
                     .unwrap();
 
-                let future = match &relay_chain.0 {
+                let future = match &relay_chain.services {
                     future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
                     future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
                     future::MaybeDone::Gone => unreachable!(),
                 };
 
-                (future, relay_chain.1.clone())
+                (future, relay_chain.log_name.clone())
             });
 
         // Determinate the name under which the chain will be identified in the logs.
@@ -413,11 +480,7 @@ impl Client {
                     base.clone()
                 };
 
-                if !self
-                    .chains_by_key
-                    .values()
-                    .any(|(_, name, _)| *name == attempt)
-                {
+                if !self.chains_by_key.values().any(|c| *c.log_name == attempt) {
                     break attempt;
                 }
 
@@ -429,12 +492,13 @@ impl Client {
         };
 
         // Start the services of the chain to add, or grab the services if they already exist.
-        let (running_chain_init, log_name) = match self.chains_by_key.entry(new_chain_key.clone()) {
+        let (services_init, log_name) = match self.chains_by_key.entry(new_chain_key.clone()) {
             Entry::Occupied(mut entry) => {
                 // TODO: must add bootnodes to the existing network service, otherwise the existing chain with the same key might only be using malicious bootnodes
-                entry.get_mut().2 = NonZeroU32::new(entry.get_mut().2.get() + 1).unwrap();
+                entry.get_mut().num_references =
+                    NonZeroU32::new(entry.get_mut().num_references.get() + 1).unwrap();
                 let entry = entry.into_mut();
-                (&mut entry.0, &entry.1)
+                (&mut entry.services, &entry.log_name)
             }
             Entry::Vacant(entry) => {
                 // Key used by the networking. Represents the identity of the node on the
@@ -442,8 +506,8 @@ impl Client {
                 let network_noise_key = connection::NoiseKey::new(&rand::random());
 
                 // Spawn a background task that initializes the services of the new chain and
-                // yields a `RunningChain`.
-                let running_chain_init_future: future::RemoteHandle<RunningChain> = {
+                // yields a `ChainServices`.
+                let running_chain_init_future: future::RemoteHandle<ChainServices> = {
                     let new_tasks_tx = self.new_task_tx.clone();
                     let chain_spec = chain_spec.clone(); // TODO: quite expensive
                     let log_name = log_name.clone();
@@ -530,12 +594,13 @@ impl Client {
                     output_future
                 };
 
-                let entry = entry.insert((
-                    future::maybe_done(running_chain_init_future.shared()),
+                let entry = entry.insert(RunningChain {
+                    services: future::maybe_done(running_chain_init_future.shared()),
                     log_name,
-                    NonZeroU32::new(1).unwrap(),
-                ));
-                (&mut entry.0, &entry.1)
+                    num_references: NonZeroU32::new(1).unwrap(),
+                });
+
+                (&mut entry.services, &entry.log_name)
             }
         };
 
@@ -547,7 +612,7 @@ impl Client {
         // if a similar chain already existed.
         let json_rpc_service = if config.json_rpc_running {
             // Clone `running_chain_init`.
-            let mut running_chain_init = match running_chain_init {
+            let mut running_chain_init = match services_init {
                 future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
                 future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
                 future::MaybeDone::Gone => unreachable!(),
@@ -671,11 +736,12 @@ impl Client {
                 }
 
                 let running_chain = self.chains_by_key.get_mut(&key).unwrap();
-                if running_chain.2.get() == 1 {
-                    log::info!(target: "smoldot", "Shutting down chain {}", running_chain.1);
+                if running_chain.num_references.get() == 1 {
+                    log::info!(target: "smoldot", "Shutting down chain {}", running_chain.log_name);
                     self.chains_by_key.remove(&key);
                 } else {
-                    running_chain.2 = NonZeroU32::new(running_chain.2.get() - 1).unwrap();
+                    running_chain.num_references =
+                        NonZeroU32::new(running_chain.num_references.get() - 1).unwrap();
                 }
             }
             _ => {}
@@ -702,7 +768,7 @@ impl Client {
                 key,
                 ..
             }) => {
-                let log_name = &self.chains_by_key.get(key).unwrap().1;
+                let log_name = &self.chains_by_key.get(key).unwrap().log_name;
                 (Some(json_rpc_service), format!("json-rpc-{}", log_name))
             }
             _ => (None, "json-rpc-<unknown>".to_string()),
@@ -806,67 +872,6 @@ impl Client {
     }
 }
 
-enum PublicApiChain {
-    Ok {
-        key: ChainKey,
-        chain_spec_chain_id: String,
-        json_rpc_service: Option<(
-            future::MaybeDone<
-                future::Shared<future::RemoteHandle<Arc<json_rpc_service::JsonRpcService>>>,
-            >,
-            future::AbortHandle,
-        )>,
-    },
-    Erroneous(String),
-}
-
-/// Sends back a response or a notification to the JSON-RPC client.
-///
-/// > **Note**: This method wraps around [`ffi::emit_json_rpc_response`] and exists primarily
-/// >           in order to print a log message.
-fn send_back(message: &str, log_target: &str, chain_id: ChainId) {
-    log::debug!(
-        target: &log_target,
-        "JSON-RPC <= {}{}",
-        if message.len() > 100 {
-            &message[..100]
-        } else {
-            &message[..]
-        },
-        if message.len() > 100 { "…" } else { "" }
-    );
-
-    ffi::emit_json_rpc_response(message, chain_id);
-}
-
-/// Identifies a chain, so that multiple identical chains are de-duplicated.
-///
-/// This struct serves as the key in a `HashMap<ChainKey, RunningChain>`. It must contain all the
-/// values that are important to the logic of the fields that are contained in [`RunningChain`].
-/// Failing to include a field in this struct could lead to two different chains using the same
-/// [`RunningChain`], which has security consequences.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ChainKey {
-    /// Hash of the genesis block of the chain.
-    genesis_block_hash: [u8; 32],
-    // TODO: what about light checkpoints?
-    // TODO: must also contain forkBlocks, and badBlocks fields
-    /// If the chain is a parachain, contains the relay chain and the "para ID" on this relay
-    /// chain.
-    relay_chain: Option<(Box<ChainKey>, u32)>,
-    /// Network protocol id, found in the chain specification.
-    protocol_id: String,
-}
-
-#[derive(Clone)]
-struct RunningChain {
-    network_service: Arc<network_service::NetworkService>,
-    network_identity: peer_id::PeerId,
-    sync_service: Arc<sync_service::SyncService>,
-    runtime_service: Arc<runtime_service::RuntimeService>,
-    transactions_service: Arc<transactions_service::TransactionsService>,
-}
-
 /// Starts all the services of the client.
 ///
 /// Returns some of the services that have been started. If these service get shut down, all the
@@ -880,9 +885,9 @@ async fn start_services(
     chain_information: chain::chain_information::ValidChainInformation,
     genesis_block_scale_encoded_header: Vec<u8>,
     chain_spec: chain_spec::ChainSpec,
-    relay_chain: Option<&RunningChain>,
+    relay_chain: Option<&ChainServices>,
     network_noise_key: connection::NoiseKey,
-) -> RunningChain {
+) -> ChainServices {
     // Since `network_noise_key` is moved out below, use it to build the network identity ahead
     // of the network service starting.
     let network_identity =
@@ -1013,9 +1018,8 @@ async fn start_services(
     let transactions_service = Arc::new(
         transactions_service::TransactionsService::new(transactions_service::Config {
             log_name,
-            tasks_executor: Box::new({
-                let new_task_tx = new_task_tx.clone();
-                move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
+            tasks_executor: Box::new(move |name, fut| {
+                new_task_tx.unbounded_send((name, fut)).unwrap()
             }),
             sync_service: sync_service.clone(),
             runtime_service: runtime_service.clone(),
@@ -1027,13 +1031,32 @@ async fn start_services(
         .await,
     );
 
-    RunningChain {
+    ChainServices {
         network_service,
         network_identity,
         runtime_service,
         sync_service,
         transactions_service,
     }
+}
+
+/// Sends back a response or a notification to the JSON-RPC client.
+///
+/// > **Note**: This method wraps around [`ffi::emit_json_rpc_response`] and exists primarily
+/// >           in order to print a log message.
+fn send_back(message: &str, log_target: &str, chain_id: ChainId) {
+    log::debug!(
+        target: &log_target,
+        "JSON-RPC <= {}{}",
+        if message.len() > 100 {
+            &message[..100]
+        } else {
+            &message[..]
+        },
+        if message.len() > 100 { "…" } else { "" }
+    );
+
+    ffi::emit_json_rpc_response(message, chain_id);
 }
 
 /// Use in an asynchronous context to interrupt the current task execution and schedule it back.
