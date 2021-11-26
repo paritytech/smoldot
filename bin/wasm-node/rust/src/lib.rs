@@ -203,18 +203,19 @@ impl Client {
         assert_ne!(rand::random::<u64>(), 0);
         assert_ne!(rand::random::<u64>(), rand::random::<u64>());
 
-        // Starting here, the code below initializes the various "services" that make up the node.
-        // Services need to be able to spawn asynchronous tasks on their own. Since "spawning a
-        // task" isn't really something that a browser or Node environment can do efficiently, we
-        // instead combine all the asynchronous tasks into one `FuturesUnordered` below.
+        // When adding chains, the client will initialize various "services" that connect to
+        // chain. These services need to be able to spawn asynchronous tasks on their own. Since
+        // "spawning a task" isn't really something that a browser or Node environment can do
+        // efficiently, we instead combine all the asynchronous tasks into one `FuturesUnordered`
+        // below.
         //
         // The `new_task_tx` and `new_task_rx` variables are used when spawning a new task is
         // required. Send a task on `new_task_tx` to start running it.
-        // TODO: update comment ^
         let (new_task_tx, mut new_task_rx) =
             mpsc::unbounded::<(String, future::BoxFuture<'static, ()>)>();
 
         // This is the main future that executes the entire client.
+        // It receives new tasks from `new_task_rx` and runs them.
         ffi::spawn_background_task(async move {
             let mut all_tasks = stream::FuturesUnordered::new();
 
@@ -252,6 +253,11 @@ impl Client {
 
         // Spawn a constantly-running task that periodically prints the total memory usage of
         // the node.
+        //
+        // Note that, as a hack, this is done for each `Client`, meaning that it will be printed
+        // multiple times of multiple `Client`s are created. In practice only one `Client` is ever
+        // created.
+        // TODO: ^ solve this hack?
         new_task_tx
             .unbounded_send((
                 "memory-printer".to_owned(),
@@ -268,10 +274,11 @@ impl Client {
             ))
             .unwrap();
 
+        let expected_chains = 8;
         Client {
             new_task_tx,
-            public_api_chains: slab::Slab::with_capacity(2),
-            chains_by_key: HashMap::with_capacity(2),
+            public_api_chains: slab::Slab::with_capacity(expected_chains),
+            chains_by_key: HashMap::with_capacity(expected_chains),
         }
     }
 
@@ -280,9 +287,10 @@ impl Client {
         &mut self,
         config: AddChainConfig<'_, impl Iterator<Item = ChainId>>,
     ) -> ChainId {
-        // Fail any new chain initialization if the amount of free memory is too low. This
-        // avoids running into OOM errors. The threshold is completely empirical and should
-        // probably be updated regularly to account for changes in the implementation.
+        // Fail any new chain initialization if we're running low on memory space, which can
+        // realistically happen as Wasm is a 32 bits platform. This avoids potentially running into
+        // OOM errors. The threshold is completely empirical and should probably be updated
+        // regularly to account for changes in the implementation.
         if alloc::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
             return ChainId(
                 self.public_api_chains
@@ -303,67 +311,59 @@ impl Client {
                 }
             };
 
-        // Load the information about the chain from the chain spec. If a light sync state is
-        // present in the chain specs, it is possible to start sync at the finalized block it
-        // describes.
-        let genesis_chain_information =
-            match chain_spec.as_chain_information() {
-                Ok(ci) => match chain::chain_information::ValidChainInformation::try_from(ci) {
-                    Ok(ci) => Some(ci),
-                    Err(err) => {
-                        return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
-                            format!("Invalid genesis chain information: {}", err),
-                        )));
-                    }
-                },
-                Err(chain_spec::FromGenesisStorageError::UnknownStorageItems) => None,
-                Err(err) => {
+        // Load the information about the chain from the chain spec. If a light sync state (also
+        // known as a checkpoint) is present in the chain spec, it is possible to start syncing at
+        // the finalized block it describes.
+        let chain_information = {
+            match (
+                chain_spec
+                    .as_chain_information()
+                    .map(chain::chain_information::ValidChainInformation::try_from),
+                chain_spec.light_sync_state().map(|s| {
+                    chain::chain_information::ValidChainInformation::try_from(
+                        s.as_chain_information(),
+                    )
+                }),
+            ) {
+                (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None) => {
+                    // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
+                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
+                        format!("Either a checkpoint or the genesis storage must be provided"),
+                    )));
+                }
+
+                (Err(err), _) => {
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
                         format!("Failed to build genesis chain information: {}", err),
                     )));
                 }
-            };
-        let chain_information = if let Some(light_sync_state) = chain_spec.light_sync_state() {
-            match chain::chain_information::ValidChainInformation::try_from(
-                light_sync_state.as_chain_information(),
-            ) {
-                Ok(ci) => ci,
-                Err(err) => {
+
+                (Ok(Err(err)), _) => {
+                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
+                        format!("Invalid genesis chain information: {}", err),
+                    )));
+                }
+
+                (_, Some(Err(err))) => {
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
                         format!("Invalid checkpoint in chain specification: {}", err),
                     )));
                 }
+
+                (_, Some(Ok(ci))) => ci,
+
+                (Ok(Ok(ci)), None) => ci,
             }
-        } else if let Some(genesis_chain_information) = &genesis_chain_information {
-            genesis_chain_information.clone()
-        } else {
-            // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
-            return ChainId(
-                self.public_api_chains
-                    .insert(PublicApiChain::Erroneous(format!(
-                        "Either a checkpoint or the genesis storage must be provided"
-                    ))),
-            );
         };
 
-        // TODO: this code is a bit messy
-        let genesis_block_header = match genesis_chain_information {
-            Some(ci) => header::Header::from(ci.as_ref().finalized_block_header),
-            None => match chain_spec.genesis_storage() {
-                chain_spec::GenesisStorage::TrieRootHash(state_root) => header::Header {
-                    parent_hash: [0; 32],
-                    number: 0,
-                    state_root: *state_root,
-                    extrinsics_root: smoldot::trie::empty_trie_merkle_value(),
-                    digest: header::DigestRef::empty().into(),
-                },
-                chain_spec::GenesisStorage::Items(_) => unreachable!(),
-            },
-        };
+        // Even with a checkpoint, knowing the genesis block header is necessary for various
+        // reasons.
+        let genesis_block_header = smoldot::calculate_genesis_block_header(&chain_spec);
 
         // If the chain specification specifies a parachain, find the corresponding relay chain
         // in the list of potential relay chains passed by the user.
-        // If no relay chain can be found, the chain creation fails.
+        // If no relay chain can be found, the chain creation fails. Exactly one matching relay
+        // chain must be found. If there are multiple ones, the creation fails as well.
         let relay_chain_id = if let Some((relay_chain_id, _para_id)) = chain_spec.relay_chain() {
             let chain = config
                 .potential_relay_chains
@@ -383,9 +383,12 @@ impl Client {
             match chain {
                 Ok(c) => Some(c),
                 Err(mut iter) => {
+                    // `iter` here is identical to the iterator above before `exactly_one` is
+                    // called. This lets us know what failed.
                     let msg = if iter.next().is_none() {
                         "Couldn't find any valid relay chain".to_string()
                     } else {
+                        debug_assert!(iter.next().is_some());
                         "Multiple valid relay chains found".to_string()
                     };
 
@@ -427,7 +430,7 @@ impl Client {
             protocol_id: chain_spec.protocol_id().to_owned(),
         };
 
-        // Grab the services of the relay chain.
+        // If the chain we are adding is a parachain, grab the services of the relay chain.
         //
         // Since the initialization process of a chain is done asynchronously, it is possible that
         // the relay chain is still initializing. For this reason, we don't don't simply grab
@@ -462,6 +465,7 @@ impl Client {
         // multiple different chains to have the same `id`, we need to look into the list of
         // existing chains and make sure that there's no conflict, in which case the log name
         // will have the suffix `-1`, or `-2`, or `-3`, and so on.
+        //
         // This value is ignored if we enter the `Entry::Occupied` block below. Because the
         // calculation requires accessing the list of existing chains, this block can't be put in
         // the `Entry::Vacant` block below, even though it would make sense for it to be there.
@@ -494,6 +498,9 @@ impl Client {
         // Start the services of the chain to add, or grab the services if they already exist.
         let (services_init, log_name) = match self.chains_by_key.entry(new_chain_key.clone()) {
             Entry::Occupied(mut entry) => {
+                // The chain to add always has a corresponding chain running. Simply grab the
+                // existing services and existing log name.
+                // The `log_name` created above is discarded in favour of the existing log name.
                 // TODO: must add bootnodes to the existing network service, otherwise the existing chain with the same key might only be using malicious bootnodes
                 entry.get_mut().num_references =
                     NonZeroU32::new(entry.get_mut().num_references.get() + 1).unwrap();
