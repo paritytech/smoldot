@@ -17,6 +17,8 @@
 
 // TODO: the quality of this module is sub-par
 
+use super::ConnectError;
+
 use core::{
     cmp::Ordering,
     fmt,
@@ -25,10 +27,10 @@ use core::{
     ops::{Add, Sub},
     pin::Pin,
     slice, str,
-    task::{Context, Poll, Waker},
+    task::{Context, Poll},
     time::Duration,
 };
-use futures::prelude::*;
+use futures::{channel::oneshot, prelude::*};
 use std::{
     collections::VecDeque,
     sync::{atomic, Arc, Mutex},
@@ -234,18 +236,12 @@ pub struct Connection {
     messages_queue: VecDeque<Box<[u8]>>,
     /// Position of the read cursor within the first element of [`Connection::messages_queue`].
     messages_queue_first_offset: usize,
-    /// Waker to wake up whenever one of the fields above is modified.
-    waker: Option<Waker>,
+    /// Channels to send a message on whenever one of the fields above is modified.
+    // TODO: SmallVec instead?
+    // TODO: use something better than a `Sender`?
+    wakers: Vec<oneshot::Sender<()>>,
     /// Prevents the [`Connection`] from being unpinned.
     _pinned: marker::PhantomPinned,
-}
-
-/// Error potentially returned by [`Connection::connect`].
-pub struct ConnectError {
-    /// Human-readable error message.
-    pub message: String,
-    /// `true` if the error is caused by the address to connect to being forbidden or unsupported.
-    pub is_bad_addr: bool,
 }
 
 impl Connection {
@@ -257,7 +253,7 @@ impl Connection {
             closed_message: None,
             messages_queue: VecDeque::with_capacity(32),
             messages_queue_first_offset: 0,
-            waker: None,
+            wakers: Vec::with_capacity(1),
             _pinned: marker::PhantomPinned,
         });
 
@@ -295,22 +291,17 @@ impl Connection {
                 Pin::get_unchecked_mut(pointer.as_mut()).id = Some(id);
             }
 
-            future::poll_fn(|cx| {
+            loop {
                 if pointer.closed_message.is_some() || pointer.open {
-                    return Poll::Ready(());
+                    break;
                 }
-                if pointer
-                    .waker
-                    .as_ref()
-                    .map_or(true, |w| !cx.waker().will_wake(w))
-                {
-                    unsafe {
-                        Pin::get_unchecked_mut(pointer.as_mut()).waker = Some(cx.waker().clone());
-                    }
+
+                let (tx, rx) = oneshot::channel();
+                unsafe {
+                    Pin::get_unchecked_mut(pointer.as_mut()).wakers.push(tx);
                 }
-                Poll::Pending
-            })
-            .await;
+                let _ = rx.await;
+            }
 
             if pointer.open {
                 Ok(pointer)
@@ -321,42 +312,6 @@ impl Connection {
                     is_bad_addr: false,
                 })
             }
-        }
-    }
-
-    /// Returns a buffer containing data received on the connection.
-    ///
-    /// Never returns an empty buffer. If no data is available, this function waits until more
-    /// data arrives.
-    ///
-    /// Returns `None` if the connection has been closed.
-    pub async fn read_buffer<'a>(self: &'a mut Pin<Box<Self>>) -> Option<&'a [u8]> {
-        future::poll_fn(|cx| {
-            if !self.messages_queue.is_empty() || self.closed_message.is_some() {
-                return Poll::Ready(());
-            }
-
-            if self
-                .waker
-                .as_ref()
-                .map_or(true, |w| !cx.waker().will_wake(w))
-            {
-                unsafe {
-                    Pin::get_unchecked_mut(self.as_mut()).waker = Some(cx.waker().clone());
-                }
-            }
-            Poll::Pending
-        })
-        .await;
-
-        if let Some(buffer) = self.messages_queue.front() {
-            debug_assert!(!buffer.is_empty());
-            debug_assert!(self.messages_queue_first_offset < buffer.len());
-            Some(&buffer[self.messages_queue_first_offset..])
-        } else if self.closed_message.is_some() {
-            None
-        } else {
-            unreachable!()
         }
     }
 
@@ -540,7 +495,73 @@ fn chain_error_ptr(chain_id: u32) -> u32 {
 }
 
 lazy_static::lazy_static! {
-    static ref CLIENT: Mutex<Option<super::Client>> = Mutex::new(None);
+    static ref CLIENT: Mutex<Option<super::Client<Platform>>> = Mutex::new(None);
+}
+
+struct Platform;
+
+impl super::Platform for Platform {
+    type Delay = Delay;
+    type Instant = Instant;
+    type Connection = Pin<Box<Connection>>;
+    type ConnectFuture = future::BoxFuture<'static, Result<Self::Connection, ConnectError>>;
+    type ConnectionDataFuture = future::BoxFuture<'static, ()>;
+
+    fn now_from_unix_epoch() -> Duration {
+        unix_time()
+    }
+
+    fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static) {
+        spawn_background_task(future)
+    }
+
+    fn now() -> Self::Instant {
+        Instant::now()
+    }
+
+    fn sleep(duration: Duration) -> Self::Delay {
+        Delay::new(duration)
+    }
+
+    fn sleep_until(when: Self::Instant) -> Self::Delay {
+        Delay::new_at(when)
+    }
+
+    fn connect(url: &str) -> Self::ConnectFuture {
+        Connection::connect(url).boxed()
+    }
+
+    fn wait_more_data(connection: &mut Self::Connection) -> Self::ConnectionDataFuture {
+        if !connection.messages_queue.is_empty() || connection.closed_message.is_some() {
+            return future::ready(()).boxed();
+        }
+
+        let (tx, rx) = oneshot::channel();
+        unsafe {
+            Pin::get_unchecked_mut(connection.as_mut()).wakers.push(tx);
+        }
+        rx.map(|_| ()).boxed()
+    }
+
+    fn read_buffer(connection: &mut Self::Connection) -> Option<&[u8]> {
+        if let Some(buffer) = connection.messages_queue.front() {
+            debug_assert!(!buffer.is_empty());
+            debug_assert!(connection.messages_queue_first_offset < buffer.len());
+            Some(&buffer[connection.messages_queue_first_offset..])
+        } else if connection.closed_message.is_some() {
+            None
+        } else {
+            Some(&[])
+        }
+    }
+
+    fn advance_read_cursor(connection: &mut Self::Connection, bytes: usize) {
+        connection.advance_read_cursor(bytes)
+    }
+
+    fn send(connection: &mut Self::Connection, data: &[u8]) {
+        connection.send(data)
+    }
 }
 
 fn json_rpc_send(ptr: u32, len: u32, chain_id: u32) {
@@ -586,8 +607,8 @@ fn timer_finished(timer_id: u32) {
 fn connection_open(id: u32) {
     let connection = unsafe { &mut *(usize::try_from(id).unwrap() as *mut Connection) };
     connection.open = true;
-    if let Some(waker) = connection.waker.take() {
-        waker.wake();
+    for waker in connection.wakers.drain(..) {
+        let _ = waker.send(());
     }
 }
 
@@ -613,8 +634,8 @@ fn connection_message(id: u32, ptr: u32, len: u32) {
 
     connection.messages_queue.push_back(message);
 
-    if let Some(waker) = connection.waker.take() {
-        waker.wake();
+    for waker in connection.wakers.drain(..) {
+        let _ = waker.send(());
     }
 }
 
@@ -629,7 +650,7 @@ fn connection_closed(id: u32, ptr: u32, len: u32) {
         str::from_utf8(&message).unwrap().to_owned()
     });
 
-    if let Some(waker) = connection.waker.take() {
-        waker.wake();
+    for waker in connection.wakers.drain(..) {
+        let _ = waker.send(());
     }
 }

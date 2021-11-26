@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{BlockNotification, Notification, SubscribeAll, ToBackground};
-use crate::{ffi, network_service};
+use crate::{network_service, Platform};
 
 use futures::{channel::mpsc, prelude::*};
 use smoldot::{
@@ -29,16 +29,17 @@ use smoldot::{
 };
 use std::{
     collections::HashMap,
+    marker::PhantomData,
     num::{NonZeroU32, NonZeroU64},
     sync::Arc,
 };
 
 /// Starts a sync service background task to synchronize a standalone chain (relay chain or not).
-pub(super) async fn start_standalone_chain(
+pub(super) async fn start_standalone_chain<TPlat: Platform>(
     log_target: String,
     chain_information: chain::chain_information::ValidChainInformation,
     mut from_foreground: mpsc::Receiver<ToBackground>,
-    network_service: Arc<network_service::NetworkService>,
+    network_service: Arc<network_service::NetworkService<TPlat>>,
     network_chain_index: usize,
     from_network_service: stream::BoxStream<'static, network_service::Event>,
 ) {
@@ -80,6 +81,7 @@ pub(super) async fn start_standalone_chain(
         network_service,
         network_chain_index,
         peers_source_id_map: HashMap::new(),
+        platform: PhantomData,
     };
 
     // Necessary for the `select!` loop below.
@@ -269,7 +271,7 @@ pub(super) async fn start_standalone_chain(
     }
 }
 
-struct Task {
+struct Task<TPlat: Platform> {
     /// Log target to use for all logs that are emitted.
     log_target: String,
 
@@ -294,7 +296,7 @@ struct Task {
     all_notifications: Vec<mpsc::Sender<Notification>>,
 
     /// Network service. Used to send out requests to peers.
-    network_service: Arc<network_service::NetworkService>,
+    network_service: Arc<network_service::NetworkService<TPlat>>,
     /// Index within the network service of the chain we are interested in. Must be indicated to
     /// the network service whenever a request is started.
     network_chain_index: usize,
@@ -340,9 +342,11 @@ struct Task {
             ),
         >,
     >,
+
+    platform: PhantomData<fn() -> TPlat>,
 }
 
-impl Task {
+impl<TPlat: Platform> Task<TPlat> {
     fn start_requests(&mut self) {
         loop {
             // `desired_requests()` returns, in decreasing order of priority, the requests
@@ -523,7 +527,7 @@ impl Task {
                 all::ProcessOne::VerifyHeader(verify) => {
                     // Header to verify.
                     let verified_hash = verify.hash();
-                    match verify.perform(ffi::unix_time(), ()) {
+                    match verify.perform(TPlat::now_from_unix_epoch(), ()) {
                         all::HeaderVerifyOutcome::Success {
                             sync, is_new_best, ..
                         } => {
