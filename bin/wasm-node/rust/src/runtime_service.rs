@@ -1988,7 +1988,7 @@ impl SuccessfulRuntime {
     ) -> Result<Self, RuntimeError> {
         // Since compiling the runtime is a CPU-intensive operation, we yield once before and
         // once after.
-        super::yield_once().await;
+        crate::util::yield_once().await;
 
         let vm = match executor::host::HostVmPrototype::new(
             code.as_ref().ok_or(RuntimeError::CodeNotFound)?,
@@ -2004,7 +2004,7 @@ impl SuccessfulRuntime {
 
         // Since compiling the runtime is a CPU-intensive operation, we yield once before and
         // once after.
-        super::yield_once().await;
+        crate::util::yield_once().await;
 
         let (runtime_spec, vm) = match executor::core_version(vm) {
             (Ok(spec), vm) => (spec, vm),
