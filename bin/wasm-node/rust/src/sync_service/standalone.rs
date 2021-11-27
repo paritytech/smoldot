@@ -496,7 +496,7 @@ impl<TPlat: Platform> Task<TPlat> {
             // for some event. Since JavaScript/Wasm is single-threaded, this would prevent all
             // the other tasks in the background from running.
             // In order to provide a better granularity, we force a yield after each verification.
-            crate::yield_once().await;
+            crate::util::yield_once().await;
 
             // Note that `process_one` moves out of `sync` and provides the value back in its
             // return value.

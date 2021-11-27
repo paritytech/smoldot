@@ -49,6 +49,7 @@ mod network_service;
 mod runtime_service;
 mod sync_service;
 mod transactions_service;
+mod util;
 
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
@@ -1165,22 +1166,4 @@ fn send_back(message: &str, log_target: &str, chain_id: ChainId) {
     );
 
     ffi::emit_json_rpc_response(message, chain_id);
-}
-
-/// Use in an asynchronous context to interrupt the current task execution and schedule it back.
-///
-/// This function is useful in order to guarantee a fine granularity of tasks execution time in
-/// situations where a CPU-heavy task is being performed.
-async fn yield_once() {
-    let mut pending = true;
-    futures::future::poll_fn(move |cx| {
-        if pending {
-            pending = false;
-            cx.waker().wake_by_ref();
-            core::task::Poll::Pending
-        } else {
-            core::task::Poll::Ready(())
-        }
-    })
-    .await
 }
