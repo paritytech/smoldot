@@ -297,22 +297,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     /// the clients can send tasks to run to. The first tuple element is the name of the task used
     /// for debugging purposes.
     pub fn new(
-        max_log_level: log::LevelFilter,
         tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
     ) -> Self {
-        // Try initialize the logging and the panic hook.
-        // Note that `start_client` can theoretically be called multiple times, meaning that these
-        // calls shouldn't panic if reached multiple times.
-        let _ = log::set_boxed_logger(Box::new(ffi::Logger))
-            .map(|()| log::set_max_level(max_log_level));
-        std::panic::set_hook(Box::new(|info| {
-            ffi::panic(info.to_string());
-        }));
-
-        // Fool-proof check to make sure that randomness is properly implemented.
-        assert_ne!(rand::random::<u64>(), 0);
-        assert_ne!(rand::random::<u64>(), rand::random::<u64>());
-
         // Spawn a constantly-running task that periodically prints the total memory usage of
         // the node.
         //

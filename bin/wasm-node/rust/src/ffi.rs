@@ -46,7 +46,7 @@ pub mod bindings;
 mod timers;
 
 /// Stops execution, providing a string explaining what happened.
-pub(crate) fn panic(message: String) -> ! {
+fn panic(message: String) -> ! {
     unsafe {
         bindings::panic(
             u32::try_from(message.as_bytes().as_ptr() as usize).unwrap(),
@@ -140,7 +140,7 @@ impl Sub<Instant> for Instant {
 }
 
 /// Implementation of [`log::Log`] that sends out logs to the FFI.
-pub(crate) struct Logger;
+struct Logger;
 
 impl log::Log for Logger {
     fn enabled(&self, _: &log::Metadata) -> bool {
@@ -262,6 +262,25 @@ fn alloc(len: u32) -> u32 {
 }
 
 fn init(max_log_level: u32) {
+    // Try initialize the logging and the panic hook.
+    let _ = log::set_boxed_logger(Box::new(Logger)).map(|()| {
+        log::set_max_level(match max_log_level {
+            0 => log::LevelFilter::Off,
+            1 => log::LevelFilter::Error,
+            2 => log::LevelFilter::Warn,
+            3 => log::LevelFilter::Info,
+            4 => log::LevelFilter::Debug,
+            _ => log::LevelFilter::Trace,
+        })
+    });
+    std::panic::set_hook(Box::new(|info| {
+        panic(info.to_string());
+    }));
+
+    // Simple fool-proof check to make sure that randomness is properly implemented.
+    assert_ne!(rand::random::<u64>(), 0);
+    assert_ne!(rand::random::<u64>(), rand::random::<u64>());
+
     // A channel needs to be passed to the client in order for it to spawn background tasks.
     // Since "spawning a task" isn't really something that a browser or Node environment can do
     // efficiently, we instead combine all the asynchronous tasks into one `FuturesUnordered`
@@ -306,17 +325,7 @@ fn init(max_log_level: u32) {
         }
     });
 
-    let client = super::Client::new(
-        match max_log_level {
-            0 => log::LevelFilter::Off,
-            1 => log::LevelFilter::Error,
-            2 => log::LevelFilter::Warn,
-            3 => log::LevelFilter::Info,
-            4 => log::LevelFilter::Debug,
-            _ => log::LevelFilter::Trace,
-        },
-        new_task_tx.clone(),
-    );
+    let client = super::Client::new(new_task_tx.clone());
 
     let mut client_lock = CLIENT.lock().unwrap();
     assert!(client_lock.is_none());
