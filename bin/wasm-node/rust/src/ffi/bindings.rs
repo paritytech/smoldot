@@ -242,8 +242,8 @@ pub extern "C" fn alloc(len: u32) -> u32 {
 /// These two buffers **must** have been allocated with [`alloc`]. They are freed when this
 /// function is called, even if an error code is returned.
 ///
-/// If `json_rpc_running` is 0, then no JSON-RPC service will be started and all JSON-RPC requests
-/// targeting this chain will return an error. This can be used to save up resources.
+/// If `json_rpc_running` is 0, then no JSON-RPC service will be started and it is forbidden to
+/// send JSON-RPC requests targeting this chain. This can be used to save up resources.
 ///
 /// If an error happens during the creation of the chain, a chain id will be allocated
 /// nonetheless, and must later be de-allocated by calling [`remove_chain`]. This allocated chain,
@@ -312,11 +312,15 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 /// A buffer containing a UTF-8 JSON-RPC request or notification must be passed as parameter. The
 /// format of the JSON-RPC requests and notifications is described in
 /// [the standard JSON-RPC 2.0 specification](https://www.jsonrpc.org/specification).
+/// Requests that are not valid JSON-RPC are silently ignored.
 ///
 /// The buffer passed as parameter **must** have been allocated with [`alloc`]. It is freed when
 /// this function is called.
 ///
 /// Responses and notifications are sent back using [`json_rpc_respond`].
+///
+/// It is forbidden to call this function on a chain that was created with `json_rpc_running`
+/// equal to 0.
 #[no_mangle]
 pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) {
     super::json_rpc_send(text_ptr, text_len, chain_id)
