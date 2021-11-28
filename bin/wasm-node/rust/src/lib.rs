@@ -52,7 +52,10 @@ mod util;
 
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
-pub struct AddChainConfig<'a, TRelays> {
+pub struct AddChainConfig<'a, TChain, TRelays> {
+    /// Opaque user data that the [`Client`] will hold for this chain.
+    pub user_data: TChain,
+
     /// JSON text containing the specification of the chain (the so-called "chain spec").
     pub specification: &'a str,
 
@@ -177,7 +180,7 @@ impl From<ChainId> for u32 {
     }
 }
 
-pub struct Client<TPlat: Platform> {
+pub struct Client<TChain, TPlat: Platform> {
     /// Tasks can be spawned by sending it on this channel. The first tuple element is the name
     /// of the task used for debugging purposes.
     new_task_tx: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
@@ -185,7 +188,7 @@ pub struct Client<TPlat: Platform> {
     /// List of chains currently running according to the public API. Indices in this container
     /// are reported through the public API. The values are either an error if the chain has failed
     /// to initialize, or key found in [`Client::chains_by_key`].
-    public_api_chains: slab::Slab<PublicApiChain<TPlat>>,
+    public_api_chains: slab::Slab<PublicApiChain<TChain, TPlat>>,
 
     /// De-duplicated list of chains that are *actually* running.
     ///
@@ -197,9 +200,12 @@ pub struct Client<TPlat: Platform> {
     chains_by_key: HashMap<ChainKey, RunningChain<TPlat>>,
 }
 
-enum PublicApiChain<TPlat: Platform> {
+enum PublicApiChain<TChain, TPlat: Platform> {
     /// Chain initialization was successful.
     Ok {
+        /// Opaque user data passed to [`Client::add_chain`].
+        user_data: TChain,
+
         /// Index of the underlying chain found in [`Client::chains_by_key`].
         key: ChainKey,
 
@@ -220,9 +226,13 @@ enum PublicApiChain<TPlat: Platform> {
         >,
     },
 
-    /// Chain initialization has failed. Contains a human-readable error message giving the
-    /// reason.
-    Erroneous(String),
+    /// Chain initialization has failed.
+    Erroneous {
+        /// Opaque user data passed to [`Client::add_chain`].
+        user_data: TChain,
+        /// Human-readable error message giving the reason for the failure.
+        error: String,
+    },
 }
 
 /// Identifies a chain, so that multiple identical chains are de-duplicated.
@@ -280,7 +290,7 @@ impl<TPlat: Platform> Clone for ChainServices<TPlat> {
     }
 }
 
-impl<TPlat: Platform> Client<TPlat> {
+impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     /// Initializes the smoldot Wasm client.
     ///
     /// In order for the client to function, it needs to be able to spawn tasks in the background
@@ -338,7 +348,7 @@ impl<TPlat: Platform> Client<TPlat> {
     /// Adds a new chain to the list of chains smoldot tries to synchronize.
     pub fn add_chain(
         &mut self,
-        config: AddChainConfig<'_, impl Iterator<Item = ChainId>>,
+        config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
     ) -> ChainId {
         // Fail any new chain initialization if we're running low on memory space, which can
         // realistically happen as Wasm is a 32 bits platform. This avoids potentially running into
@@ -347,22 +357,24 @@ impl<TPlat: Platform> Client<TPlat> {
         if alloc::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
             return ChainId(
                 self.public_api_chains
-                    .insert(PublicApiChain::Erroneous(format!(
+                    .insert(PublicApiChain::Erroneous {
+                        user_data: config.user_data,
+                        error: format!(
                         "Wasm node is running low on memory and will prevent any new chain from being added"
-                    ))),
+                    )}),
             );
         }
 
         // Decode the chain specification.
-        let chain_spec =
-            match chain_spec::ChainSpec::from_json_bytes(&config.specification) {
-                Ok(cs) => cs,
-                Err(err) => {
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
-                        format!("Failed to decode chain specification: {}", err),
-                    )));
-                }
-            };
+        let chain_spec = match chain_spec::ChainSpec::from_json_bytes(&config.specification) {
+            Ok(cs) => cs,
+            Err(err) => {
+                return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
+                    user_data: config.user_data,
+                    error: format!("Failed to decode chain specification: {}", err),
+                }));
+            }
+        };
 
         // Load the information about the chain from the chain spec. If a light sync state (also
         // known as a checkpoint) is present in the chain spec, it is possible to start syncing at
@@ -380,27 +392,33 @@ impl<TPlat: Platform> Client<TPlat> {
             ) {
                 (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None) => {
                     // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
-                        format!("Either a checkpoint or the genesis storage must be provided"),
-                    )));
+                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
+                        user_data: config.user_data,
+                        error: format!(
+                            "Either a checkpoint or the genesis storage must be provided"
+                        ),
+                    }));
                 }
 
                 (Err(err), _) => {
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
-                        format!("Failed to build genesis chain information: {}", err),
-                    )));
+                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
+                        user_data: config.user_data,
+                        error: format!("Failed to build genesis chain information: {}", err),
+                    }));
                 }
 
                 (Ok(Err(err)), _) => {
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
-                        format!("Invalid genesis chain information: {}", err),
-                    )));
+                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
+                        user_data: config.user_data,
+                        error: format!("Invalid genesis chain information: {}", err),
+                    }));
                 }
 
                 (_, Some(Err(err))) => {
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
-                        format!("Invalid checkpoint in chain specification: {}", err),
-                    )));
+                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
+                        user_data: config.user_data,
+                        error: format!("Invalid checkpoint in chain specification: {}", err),
+                    }));
                 }
 
                 (_, Some(Ok(ci))) => ci,
@@ -438,17 +456,17 @@ impl<TPlat: Platform> Client<TPlat> {
                 Err(mut iter) => {
                     // `iter` here is identical to the iterator above before `exactly_one` is
                     // called. This lets us know what failed.
-                    let msg = if iter.next().is_none() {
+                    let error = if iter.next().is_none() {
                         "Couldn't find any valid relay chain".to_string()
                     } else {
                         debug_assert!(iter.next().is_some());
                         "Multiple valid relay chains found".to_string()
                     };
 
-                    return ChainId(
-                        self.public_api_chains
-                            .insert(PublicApiChain::Erroneous(msg)),
-                    );
+                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
+                        user_data: config.user_data,
+                        error,
+                    }));
                 }
             }
         } else {
@@ -724,6 +742,7 @@ impl<TPlat: Platform> Client<TPlat> {
 
         // Success!
         public_api_chains_entry.insert(PublicApiChain::Ok {
+            user_data: config.user_data,
             key: new_chain_key,
             chain_spec_chain_id,
             json_rpc_service,
@@ -735,8 +754,8 @@ impl<TPlat: Platform> Client<TPlat> {
     /// message corresponding to it.
     pub fn chain_is_erroneous(&self, id: ChainId) -> Option<&str> {
         if let Some(public_chain) = self.public_api_chains.get(id.0) {
-            if let PublicApiChain::Erroneous(msg) = &public_chain {
-                Some(&msg)
+            if let PublicApiChain::Erroneous { error, .. } = &public_chain {
+                Some(error)
             } else {
                 None
             }
@@ -754,11 +773,13 @@ impl<TPlat: Platform> Client<TPlat> {
     /// While from the API perspective it will look like the chain no longer exists, calling this
     /// function will not actually immediately disconnect from the given chain if it is still used
     /// as the relay chain of a parachain.
-    pub fn remove_chain(&mut self, id: ChainId) {
+    #[must_use]
+    pub fn remove_chain(&mut self, id: ChainId) -> TChain {
         let removed_chain = self.public_api_chains.remove(id.0);
 
-        match removed_chain {
-            PublicApiChain::Ok { key, .. } => {
+        let user_data = match removed_chain {
+            PublicApiChain::Erroneous { user_data, .. } => user_data,
+            PublicApiChain::Ok { key, user_data, .. } => {
                 let running_chain = self.chains_by_key.get_mut(&key).unwrap();
                 if running_chain.num_references.get() == 1 {
                     log::info!(target: "smoldot", "Shutting down chain {}", running_chain.log_name);
@@ -767,11 +788,14 @@ impl<TPlat: Platform> Client<TPlat> {
                     running_chain.num_references =
                         NonZeroU32::new(running_chain.num_references.get() - 1).unwrap();
                 }
+
+                user_data
             }
-            _ => {}
-        }
+        };
 
         self.public_api_chains.shrink_to_fit();
+
+        user_data
     }
 
     /// Enqueues a JSON-RPC request towards the given chain.

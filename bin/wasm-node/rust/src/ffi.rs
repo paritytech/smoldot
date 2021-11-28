@@ -361,11 +361,12 @@ fn add_chain(
 
     let mut client_lock = CLIENT.lock().unwrap();
 
-    let (json_rpc_responses, responses_rx) = if json_rpc_running != 0 {
+    let (json_rpc_responses, responses_rx_and_reg, abort_handle) = if json_rpc_running != 0 {
         let (tx, rx) = mpsc::channel::<String>(64);
-        (Some(tx), Some(rx))
+        let (handle, reg) = future::AbortHandle::new_pair();
+        (Some(tx), Some((rx, reg)), Some(handle))
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     let chain_id = client_lock
@@ -373,18 +374,21 @@ fn add_chain(
         .unwrap()
         .0
         .add_chain(super::AddChainConfig {
+            user_data: abort_handle,
             specification: str::from_utf8(&chain_spec).unwrap(),
             json_rpc_responses,
             potential_relay_chains: potential_relay_chains.into_iter(),
         });
 
-    // TODO: must make abortable and all
-    if let Some(mut responses_rx) = responses_rx {
-        let messages_out_task = async move {
-            while let Some(response) = responses_rx.next().await {
-                emit_json_rpc_response(&response, chain_id);
-            }
-        };
+    if let Some((mut responses_rx, abort_registration)) = responses_rx_and_reg {
+        let messages_out_task = future::Abortable::new(
+            async move {
+                while let Some(response) = responses_rx.next().await {
+                    emit_json_rpc_response(&response, chain_id);
+                }
+            },
+            abort_registration,
+        );
 
         client_lock
             .as_mut()
@@ -402,11 +406,20 @@ fn add_chain(
 
 fn remove_chain(chain_id: u32) {
     let mut client_lock = CLIENT.lock().unwrap();
-    client_lock
+    let abort_handle = client_lock
         .as_mut()
         .unwrap()
         .0
-        .remove_chain(super::ChainId::from(chain_id))
+        .remove_chain(super::ChainId::from(chain_id));
+
+    // Abort the task that polls the channel and sends out the JSON-RPC responses. This prevents
+    // any new JSON-RPC response concerning this chain from ever being sent back, even if some
+    // were still pending.
+    // Note that this only works because Wasm is single-threaded, otherwise the task being aborted
+    // might be in the process of being polled.
+    if let Some(abort_handle) = abort_handle {
+        abort_handle.abort();
+    }
 }
 
 fn chain_is_ok(chain_id: u32) -> u32 {
@@ -449,7 +462,7 @@ fn chain_error_ptr(chain_id: u32) -> u32 {
 }
 
 lazy_static::lazy_static! {
-    static ref CLIENT: Mutex<Option<(super::Client<Platform>, mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>)>> = Mutex::new(None);
+    static ref CLIENT: Mutex<Option<(super::Client<Option<future::AbortHandle>, Platform>, mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>)>> = Mutex::new(None);
 }
 
 struct Platform;
