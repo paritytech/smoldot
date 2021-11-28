@@ -69,9 +69,11 @@ pub struct AddChainConfig<'a, TRelays> {
     /// be wrong to connect to the "kusama" created by user A.
     pub potential_relay_chains: TRelays,
 
-    /// If `false`, then no JSON-RPC service is started for this chain. This saves up a lot of
+    /// Channel to use to send the JSON-RPC responses.
+    ///
+    /// If `None`, then no JSON-RPC service is started for this chain. This saves up a lot of
     /// resources, but will cause all JSON-RPC requests targetting this chain to fail.
-    pub json_rpc_running: bool,
+    pub json_rpc_responses: Option<mpsc::Sender<String>>,
 }
 
 /// Access to a platform's capabilities.
@@ -211,13 +213,11 @@ enum PublicApiChain<TPlat: Platform> {
         /// The JSON-RPC service is wrapped within a `MaybeDone` because its initialization is
         /// done asynchronously. Note that the JSON-RPC service will only finish initializing
         /// after the [`RunningChain::services`] of its chain has finished initializing.
-        // TODO: refactor or document this AbortHandle
-        json_rpc_service: Option<(
+        json_rpc_service: Option<
             future::MaybeDone<
                 future::Shared<future::RemoteHandle<Arc<json_rpc_service::JsonRpcService<TPlat>>>>,
             >,
-            future::AbortHandle,
-        )>,
+        >,
     },
 
     /// Chain initialization has failed. Contains a human-readable error message giving the
@@ -670,7 +670,7 @@ impl<TPlat: Platform> Client<TPlat> {
 
         // JSON-RPC service initialization. This is done every time `add_chain` is called, even
         // if a similar chain already existed.
-        let json_rpc_service = if config.json_rpc_running {
+        let json_rpc_service = if let Some(json_rpc_responses) = config.json_rpc_responses {
             // Clone `running_chain_init`.
             let mut running_chain_init = match services_init {
                 future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
@@ -679,8 +679,8 @@ impl<TPlat: Platform> Client<TPlat> {
             };
 
             // Spawn a background task that initializes the JSON-RPC service.
-            let json_rpc_service_init: future::RemoteHandle<
-                Arc<json_rpc_service::JsonRpcService<TPlat>>,
+            let json_rpc_service_init: future::Shared<
+                future::RemoteHandle<Arc<json_rpc_service::JsonRpcService<TPlat>>>,
             > = {
                 let new_task_tx = self.new_task_tx.clone();
                 let log_name = log_name.clone();
@@ -702,6 +702,7 @@ impl<TPlat: Platform> Client<TPlat> {
                             peer_id: &running_chain.network_identity.clone(),
                             genesis_block_hash,
                             genesis_block_state_root,
+                            responses_sender: json_rpc_responses,
                             max_parallel_requests: NonZeroU32::new(24).unwrap(),
                             max_pending_requests: NonZeroU32::new(32).unwrap(),
                             max_subscriptions: 1024, // Note: the PolkadotJS UI is very heavy in terms of subscriptions.
@@ -713,38 +714,10 @@ impl<TPlat: Platform> Client<TPlat> {
                 self.new_task_tx
                     .unbounded_send(("json-rpc-service-init".to_owned(), background_run.boxed()))
                     .unwrap();
-                output_future
+                output_future.shared()
             };
 
-            // Make `json_rpc_service_init` clonable.
-            let json_rpc_service_init = json_rpc_service_init.shared();
-
-            // Spawn another task that, after the JSON-RPC service has finished initializing,
-            // polls its responses and sends them through the FFI layer.
-            //
-            // The expression is an `AbortHandle` that can be used in order to instantly kill this
-            // background task once the user decides to get rid of this chain.
-            let abort_run_task: future::AbortHandle = {
-                let shared_init = json_rpc_service_init.clone();
-                let log_target = format!("json-rpc-{}", log_name);
-                let run_task = async move {
-                    let json_rpc_service = shared_init.await;
-                    loop {
-                        let response = json_rpc_service.next_response().await;
-                        send_back(&response, &log_target, new_chain_id)
-                    }
-                };
-                let (run_task, abort_run_task) = future::abortable(run_task);
-                self.new_task_tx
-                    .unbounded_send((
-                        "json-rpc-service-messages-out".to_owned(),
-                        run_task.map(|_| ()).boxed(),
-                    ))
-                    .unwrap();
-                abort_run_task
-            };
-
-            Some((future::maybe_done(json_rpc_service_init), abort_run_task))
+            Some(future::maybe_done(json_rpc_service_init))
         } else {
             None
         };
@@ -785,18 +758,7 @@ impl<TPlat: Platform> Client<TPlat> {
         let removed_chain = self.public_api_chains.remove(id.0);
 
         match removed_chain {
-            PublicApiChain::Ok {
-                json_rpc_service,
-                key,
-                ..
-            } => {
-                if let Some((_, abort)) = json_rpc_service {
-                    // Instantly aborts the task that sends back responses.
-                    // This works only because Wasm is single-threaded, otherwise it would be
-                    // possible for another thread to still be polling that task.
-                    abort.abort();
-                }
-
+            PublicApiChain::Ok { key, .. } => {
                 let running_chain = self.chains_by_key.get_mut(&key).unwrap();
                 if running_chain.num_references.get() == 1 {
                     log::info!(target: "smoldot", "Shutting down chain {}", running_chain.log_name);
@@ -879,7 +841,7 @@ impl<TPlat: Platform> Client<TPlat> {
         };
 
         if let Some(json_rpc_service) = json_rpc_service {
-            if let Some((ref json_rpc_service, _)) = json_rpc_service {
+            if let Some(ref json_rpc_service) = json_rpc_service {
                 let mut json_rpc_service = match json_rpc_service {
                     future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
                     future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
