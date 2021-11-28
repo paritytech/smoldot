@@ -345,7 +345,7 @@ fn with_long_time_warning<'a, TPlat: Platform, T: Future + 'a>(
                     if warn_after.is_terminated() {
                         log::info!(
                             "JSON-RPC request has finished after {}ms: {:?}{}",
-                            (now - TPlat::now()).as_millis(),
+                            (TPlat::now() - now).as_millis(),
                             if json_rpc_request.len() > 100 { &json_rpc_request[..100] }
                                 else { &json_rpc_request[..] },
                             if json_rpc_request.len() > 100 { "…" } else { "" }
