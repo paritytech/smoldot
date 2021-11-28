@@ -52,7 +52,10 @@ mod util;
 
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
-pub struct AddChainConfig<'a, TRelays> {
+pub struct AddChainConfig<'a, TChain, TRelays> {
+    /// Opaque user data that the [`Client`] will hold for this chain.
+    pub user_data: TChain,
+
     /// JSON text containing the specification of the chain (the so-called "chain spec").
     pub specification: &'a str,
 
@@ -69,9 +72,11 @@ pub struct AddChainConfig<'a, TRelays> {
     /// be wrong to connect to the "kusama" created by user A.
     pub potential_relay_chains: TRelays,
 
-    /// If `false`, then no JSON-RPC service is started for this chain. This saves up a lot of
+    /// Channel to use to send the JSON-RPC responses.
+    ///
+    /// If `None`, then no JSON-RPC service is started for this chain. This saves up a lot of
     /// resources, but will cause all JSON-RPC requests targetting this chain to fail.
-    pub json_rpc_running: bool,
+    pub json_rpc_responses: Option<mpsc::Sender<String>>,
 }
 
 /// Access to a platform's capabilities.
@@ -175,7 +180,7 @@ impl From<ChainId> for u32 {
     }
 }
 
-pub struct Client<TPlat: Platform> {
+pub struct Client<TChain, TPlat: Platform> {
     /// Tasks can be spawned by sending it on this channel. The first tuple element is the name
     /// of the task used for debugging purposes.
     new_task_tx: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
@@ -183,7 +188,7 @@ pub struct Client<TPlat: Platform> {
     /// List of chains currently running according to the public API. Indices in this container
     /// are reported through the public API. The values are either an error if the chain has failed
     /// to initialize, or key found in [`Client::chains_by_key`].
-    public_api_chains: slab::Slab<PublicApiChain<TPlat>>,
+    public_api_chains: slab::Slab<PublicApiChain<TChain, TPlat>>,
 
     /// De-duplicated list of chains that are *actually* running.
     ///
@@ -195,9 +200,12 @@ pub struct Client<TPlat: Platform> {
     chains_by_key: HashMap<ChainKey, RunningChain<TPlat>>,
 }
 
-enum PublicApiChain<TPlat: Platform> {
+enum PublicApiChain<TChain, TPlat: Platform> {
     /// Chain initialization was successful.
     Ok {
+        /// Opaque user data passed to [`Client::add_chain`].
+        user_data: TChain,
+
         /// Index of the underlying chain found in [`Client::chains_by_key`].
         key: ChainKey,
 
@@ -206,23 +214,25 @@ enum PublicApiChain<TPlat: Platform> {
         chain_spec_chain_id: String,
 
         /// JSON-RPC service that answers incoming requests. `None` iff
-        /// [`AddChainConfig::json_rpc_running`] was `false` when adding the chain.
+        /// [`AddChainConfig::json_rpc_responses`] was `None` when adding the chain.
         ///
         /// The JSON-RPC service is wrapped within a `MaybeDone` because its initialization is
         /// done asynchronously. Note that the JSON-RPC service will only finish initializing
         /// after the [`RunningChain::services`] of its chain has finished initializing.
-        // TODO: refactor or document this AbortHandle
-        json_rpc_service: Option<(
+        json_rpc_service: Option<
             future::MaybeDone<
                 future::Shared<future::RemoteHandle<Arc<json_rpc_service::JsonRpcService<TPlat>>>>,
             >,
-            future::AbortHandle,
-        )>,
+        >,
     },
 
-    /// Chain initialization has failed. Contains a human-readable error message giving the
-    /// reason.
-    Erroneous(String),
+    /// Chain initialization has failed.
+    Erroneous {
+        /// Opaque user data passed to [`Client::add_chain`].
+        user_data: TChain,
+        /// Human-readable error message giving the reason for the failure.
+        error: String,
+    },
 }
 
 /// Identifies a chain, so that multiple identical chains are de-duplicated.
@@ -280,7 +290,7 @@ impl<TPlat: Platform> Clone for ChainServices<TPlat> {
     }
 }
 
-impl<TPlat: Platform> Client<TPlat> {
+impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     /// Initializes the smoldot Wasm client.
     ///
     /// In order for the client to function, it needs to be able to spawn tasks in the background
@@ -338,7 +348,7 @@ impl<TPlat: Platform> Client<TPlat> {
     /// Adds a new chain to the list of chains smoldot tries to synchronize.
     pub fn add_chain(
         &mut self,
-        config: AddChainConfig<'_, impl Iterator<Item = ChainId>>,
+        config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
     ) -> ChainId {
         // Fail any new chain initialization if we're running low on memory space, which can
         // realistically happen as Wasm is a 32 bits platform. This avoids potentially running into
@@ -347,22 +357,24 @@ impl<TPlat: Platform> Client<TPlat> {
         if alloc::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
             return ChainId(
                 self.public_api_chains
-                    .insert(PublicApiChain::Erroneous(format!(
+                    .insert(PublicApiChain::Erroneous {
+                        user_data: config.user_data,
+                        error: format!(
                         "Wasm node is running low on memory and will prevent any new chain from being added"
-                    ))),
+                    )}),
             );
         }
 
         // Decode the chain specification.
-        let chain_spec =
-            match chain_spec::ChainSpec::from_json_bytes(&config.specification) {
-                Ok(cs) => cs,
-                Err(err) => {
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
-                        format!("Failed to decode chain specification: {}", err),
-                    )));
-                }
-            };
+        let chain_spec = match chain_spec::ChainSpec::from_json_bytes(&config.specification) {
+            Ok(cs) => cs,
+            Err(err) => {
+                return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
+                    user_data: config.user_data,
+                    error: format!("Failed to decode chain specification: {}", err),
+                }));
+            }
+        };
 
         // Load the information about the chain from the chain spec. If a light sync state (also
         // known as a checkpoint) is present in the chain spec, it is possible to start syncing at
@@ -380,27 +392,33 @@ impl<TPlat: Platform> Client<TPlat> {
             ) {
                 (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None) => {
                     // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
-                        format!("Either a checkpoint or the genesis storage must be provided"),
-                    )));
+                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
+                        user_data: config.user_data,
+                        error: format!(
+                            "Either a checkpoint or the genesis storage must be provided"
+                        ),
+                    }));
                 }
 
                 (Err(err), _) => {
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
-                        format!("Failed to build genesis chain information: {}", err),
-                    )));
+                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
+                        user_data: config.user_data,
+                        error: format!("Failed to build genesis chain information: {}", err),
+                    }));
                 }
 
                 (Ok(Err(err)), _) => {
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
-                        format!("Invalid genesis chain information: {}", err),
-                    )));
+                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
+                        user_data: config.user_data,
+                        error: format!("Invalid genesis chain information: {}", err),
+                    }));
                 }
 
                 (_, Some(Err(err))) => {
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous(
-                        format!("Invalid checkpoint in chain specification: {}", err),
-                    )));
+                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
+                        user_data: config.user_data,
+                        error: format!("Invalid checkpoint in chain specification: {}", err),
+                    }));
                 }
 
                 (_, Some(Ok(ci))) => ci,
@@ -438,17 +456,17 @@ impl<TPlat: Platform> Client<TPlat> {
                 Err(mut iter) => {
                     // `iter` here is identical to the iterator above before `exactly_one` is
                     // called. This lets us know what failed.
-                    let msg = if iter.next().is_none() {
+                    let error = if iter.next().is_none() {
                         "Couldn't find any valid relay chain".to_string()
                     } else {
                         debug_assert!(iter.next().is_some());
                         "Multiple valid relay chains found".to_string()
                     };
 
-                    return ChainId(
-                        self.public_api_chains
-                            .insert(PublicApiChain::Erroneous(msg)),
-                    );
+                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
+                        user_data: config.user_data,
+                        error,
+                    }));
                 }
             }
         } else {
@@ -670,7 +688,7 @@ impl<TPlat: Platform> Client<TPlat> {
 
         // JSON-RPC service initialization. This is done every time `add_chain` is called, even
         // if a similar chain already existed.
-        let json_rpc_service = if config.json_rpc_running {
+        let json_rpc_service = if let Some(json_rpc_responses) = config.json_rpc_responses {
             // Clone `running_chain_init`.
             let mut running_chain_init = match services_init {
                 future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
@@ -679,8 +697,8 @@ impl<TPlat: Platform> Client<TPlat> {
             };
 
             // Spawn a background task that initializes the JSON-RPC service.
-            let json_rpc_service_init: future::RemoteHandle<
-                Arc<json_rpc_service::JsonRpcService<TPlat>>,
+            let json_rpc_service_init: future::Shared<
+                future::RemoteHandle<Arc<json_rpc_service::JsonRpcService<TPlat>>>,
             > = {
                 let new_task_tx = self.new_task_tx.clone();
                 let log_name = log_name.clone();
@@ -702,6 +720,7 @@ impl<TPlat: Platform> Client<TPlat> {
                             peer_id: &running_chain.network_identity.clone(),
                             genesis_block_hash,
                             genesis_block_state_root,
+                            responses_sender: json_rpc_responses,
                             max_parallel_requests: NonZeroU32::new(24).unwrap(),
                             max_pending_requests: NonZeroU32::new(32).unwrap(),
                             max_subscriptions: 1024, // Note: the PolkadotJS UI is very heavy in terms of subscriptions.
@@ -713,44 +732,17 @@ impl<TPlat: Platform> Client<TPlat> {
                 self.new_task_tx
                     .unbounded_send(("json-rpc-service-init".to_owned(), background_run.boxed()))
                     .unwrap();
-                output_future
+                output_future.shared()
             };
 
-            // Make `json_rpc_service_init` clonable.
-            let json_rpc_service_init = json_rpc_service_init.shared();
-
-            // Spawn another task that, after the JSON-RPC service has finished initializing,
-            // polls its responses and sends them through the FFI layer.
-            //
-            // The expression is an `AbortHandle` that can be used in order to instantly kill this
-            // background task once the user decides to get rid of this chain.
-            let abort_run_task: future::AbortHandle = {
-                let shared_init = json_rpc_service_init.clone();
-                let log_target = format!("json-rpc-{}", log_name);
-                let run_task = async move {
-                    let json_rpc_service = shared_init.await;
-                    loop {
-                        let response = json_rpc_service.next_response().await;
-                        send_back(&response, &log_target, new_chain_id)
-                    }
-                };
-                let (run_task, abort_run_task) = future::abortable(run_task);
-                self.new_task_tx
-                    .unbounded_send((
-                        "json-rpc-service-messages-out".to_owned(),
-                        run_task.map(|_| ()).boxed(),
-                    ))
-                    .unwrap();
-                abort_run_task
-            };
-
-            Some((future::maybe_done(json_rpc_service_init), abort_run_task))
+            Some(future::maybe_done(json_rpc_service_init))
         } else {
             None
         };
 
         // Success!
         public_api_chains_entry.insert(PublicApiChain::Ok {
+            user_data: config.user_data,
             key: new_chain_key,
             chain_spec_chain_id,
             json_rpc_service,
@@ -762,8 +754,8 @@ impl<TPlat: Platform> Client<TPlat> {
     /// message corresponding to it.
     pub fn chain_is_erroneous(&self, id: ChainId) -> Option<&str> {
         if let Some(public_chain) = self.public_api_chains.get(id.0) {
-            if let PublicApiChain::Erroneous(msg) = &public_chain {
-                Some(&msg)
+            if let PublicApiChain::Erroneous { error, .. } = &public_chain {
+                Some(error)
             } else {
                 None
             }
@@ -781,22 +773,13 @@ impl<TPlat: Platform> Client<TPlat> {
     /// While from the API perspective it will look like the chain no longer exists, calling this
     /// function will not actually immediately disconnect from the given chain if it is still used
     /// as the relay chain of a parachain.
-    pub fn remove_chain(&mut self, id: ChainId) {
+    #[must_use]
+    pub fn remove_chain(&mut self, id: ChainId) -> TChain {
         let removed_chain = self.public_api_chains.remove(id.0);
 
-        match removed_chain {
-            PublicApiChain::Ok {
-                json_rpc_service,
-                key,
-                ..
-            } => {
-                if let Some((_, abort)) = json_rpc_service {
-                    // Instantly aborts the task that sends back responses.
-                    // This works only because Wasm is single-threaded, otherwise it would be
-                    // possible for another thread to still be polling that task.
-                    abort.abort();
-                }
-
+        let user_data = match removed_chain {
+            PublicApiChain::Erroneous { user_data, .. } => user_data,
+            PublicApiChain::Ok { key, user_data, .. } => {
                 let running_chain = self.chains_by_key.get_mut(&key).unwrap();
                 if running_chain.num_references.get() == 1 {
                     log::info!(target: "smoldot", "Shutting down chain {}", running_chain.log_name);
@@ -805,11 +788,14 @@ impl<TPlat: Platform> Client<TPlat> {
                     running_chain.num_references =
                         NonZeroU32::new(running_chain.num_references.get() - 1).unwrap();
                 }
+
+                user_data
             }
-            _ => {}
-        }
+        };
 
         self.public_api_chains.shrink_to_fit();
+
+        user_data
     }
 
     /// Enqueues a JSON-RPC request towards the given chain.
@@ -879,7 +865,7 @@ impl<TPlat: Platform> Client<TPlat> {
         };
 
         if let Some(json_rpc_service) = json_rpc_service {
-            if let Some((ref json_rpc_service, _)) = json_rpc_service {
+            if let Some(ref json_rpc_service) = json_rpc_service {
                 let mut json_rpc_service = match json_rpc_service {
                     future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
                     future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),

@@ -315,12 +315,12 @@ fn init(max_log_level: u32) {
             4 => log::LevelFilter::Debug,
             _ => log::LevelFilter::Trace,
         },
-        new_task_tx,
+        new_task_tx.clone(),
     );
 
     let mut client_lock = CLIENT.lock().unwrap();
     assert!(client_lock.is_none());
-    *client_lock = Some(client);
+    *client_lock = Some((client, new_task_tx));
 }
 
 fn add_chain(
@@ -361,23 +361,65 @@ fn add_chain(
 
     let mut client_lock = CLIENT.lock().unwrap();
 
-    client_lock
+    let (json_rpc_responses, responses_rx_and_reg, abort_handle) = if json_rpc_running != 0 {
+        let (tx, rx) = mpsc::channel::<String>(64);
+        let (handle, reg) = future::AbortHandle::new_pair();
+        (Some(tx), Some((rx, reg)), Some(handle))
+    } else {
+        (None, None, None)
+    };
+
+    let chain_id = client_lock
         .as_mut()
         .unwrap()
+        .0
         .add_chain(super::AddChainConfig {
+            user_data: abort_handle,
             specification: str::from_utf8(&chain_spec).unwrap(),
-            json_rpc_running: json_rpc_running != 0,
+            json_rpc_responses,
             potential_relay_chains: potential_relay_chains.into_iter(),
-        })
-        .into()
+        });
+
+    if let Some((mut responses_rx, abort_registration)) = responses_rx_and_reg {
+        let messages_out_task = future::Abortable::new(
+            async move {
+                while let Some(response) = responses_rx.next().await {
+                    emit_json_rpc_response(&response, chain_id);
+                }
+            },
+            abort_registration,
+        );
+
+        client_lock
+            .as_mut()
+            .unwrap()
+            .1
+            .unbounded_send((
+                "json-rpc-service-messages-out".to_owned(),
+                messages_out_task.map(|_| ()).boxed(),
+            ))
+            .unwrap();
+    }
+
+    chain_id.into()
 }
 
 fn remove_chain(chain_id: u32) {
     let mut client_lock = CLIENT.lock().unwrap();
-    client_lock
+    let abort_handle = client_lock
         .as_mut()
         .unwrap()
-        .remove_chain(super::ChainId::from(chain_id))
+        .0
+        .remove_chain(super::ChainId::from(chain_id));
+
+    // Abort the task that polls the channel and sends out the JSON-RPC responses. This prevents
+    // any new JSON-RPC response concerning this chain from ever being sent back, even if some
+    // were still pending.
+    // Note that this only works because Wasm is single-threaded, otherwise the task being aborted
+    // might be in the process of being polled.
+    if let Some(abort_handle) = abort_handle {
+        abort_handle.abort();
+    }
 }
 
 fn chain_is_ok(chain_id: u32) -> u32 {
@@ -385,6 +427,7 @@ fn chain_is_ok(chain_id: u32) -> u32 {
     if client_lock
         .as_mut()
         .unwrap()
+        .0
         .chain_is_erroneous(super::ChainId::from(chain_id))
         .is_some()
     {
@@ -399,6 +442,7 @@ fn chain_error_len(chain_id: u32) -> u32 {
     let len = client_lock
         .as_mut()
         .unwrap()
+        .0
         .chain_is_erroneous(super::ChainId::from(chain_id))
         .map(|msg| msg.as_bytes().len())
         .unwrap_or(0);
@@ -410,6 +454,7 @@ fn chain_error_ptr(chain_id: u32) -> u32 {
     let ptr = client_lock
         .as_mut()
         .unwrap()
+        .0
         .chain_is_erroneous(super::ChainId::from(chain_id))
         .map(|msg| msg.as_bytes().as_ptr() as usize)
         .unwrap_or(0);
@@ -417,7 +462,7 @@ fn chain_error_ptr(chain_id: u32) -> u32 {
 }
 
 lazy_static::lazy_static! {
-    static ref CLIENT: Mutex<Option<super::Client<Platform>>> = Mutex::new(None);
+    static ref CLIENT: Mutex<Option<(super::Client<Option<future::AbortHandle>, Platform>, mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>)>> = Mutex::new(None);
 }
 
 struct Platform;
@@ -595,6 +640,7 @@ fn json_rpc_send(ptr: u32, len: u32, chain_id: u32) {
     client_lock
         .as_mut()
         .unwrap()
+        .0
         .json_rpc_request(json_rpc_request, chain_id);
 }
 

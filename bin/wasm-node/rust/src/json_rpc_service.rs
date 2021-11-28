@@ -24,8 +24,8 @@
 //! requests.
 //!
 //! In order to process a JSON-RPC request, call [`JsonRpcService::queue_rpc_request`]. Later, the
-//! JSON-RPC service can queue a response or, in the case of subscriptions, a notification. Use
-//! [`JsonRpcService::next_response`] in order to pull the next available response.
+//! JSON-RPC service can queue a response or, in the case of subscriptions, a notification on the
+//! channel passed through [`Config::responses_sender`].
 //!
 //! In the situation where an attacker finds a JSON-RPC request that takes a long time to be
 //! processed and continuously submits this same expensive request over and over again, the queue
@@ -70,6 +70,9 @@ pub struct Config<'a, TPlat: Platform> {
     /// > **Note**: This name will be directly printed out. Any special character should already
     /// >           have been filtered out from this name.
     pub log_name: String,
+
+    /// Channel to send the responses to.
+    pub responses_sender: mpsc::Sender<String>,
 
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
@@ -133,9 +136,6 @@ pub struct JsonRpcService<TPlat: Platform> {
     /// Limited to [`Config::max_pending_requests`] elements.
     new_requests_in: Mutex<mpsc::Sender<String>>,
 
-    /// Channel where responses are pushed out.
-    responses_rx: Mutex<mpsc::Receiver<String>>,
-
     platform: PhantomData<fn() -> TPlat>,
 }
 
@@ -148,12 +148,8 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             usize::try_from(config.max_pending_requests.get()).unwrap_or(usize::max_value()) - 1,
         );
 
-        // Channel from the background to the foreground.
-        let (responses_sender, responses_rx) = mpsc::channel(128);
-
         let client = JsonRpcService {
             new_requests_in: Mutex::new(new_requests_in),
-            responses_rx: Mutex::new(responses_rx),
             platform: PhantomData,
         };
 
@@ -163,7 +159,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
         let background = Arc::new(Background {
             log_target: format!("json-rpc-{}", config.log_name),
             new_requests_rx: Mutex::new(new_requests_rx),
-            responses_sender: Mutex::new(responses_sender),
+            responses_sender: Mutex::new(config.responses_sender),
             new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
             max_subscriptions: usize::try_from(config.max_subscriptions)
                 .unwrap_or(usize::max_value()),
@@ -293,9 +289,9 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
     /// request is done in parallel in the background.
     ///
     /// An error is returned if [`Config::max_pending_requests`] is exceeded, which can happen
-    /// if the requests take a long time to process or if [`JsonRpcService::next_response`] isn't
-    /// called often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the JSON-RPC
-    /// response to immediately send back to the user.
+    /// if the requests take a long time to process or if the [`Config::responses_sender`] channel
+    /// isn't polled often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
+    /// JSON-RPC response to immediately send back to the user.
     pub async fn queue_rpc_request(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
         let mut lock = self.new_requests_in.lock().await;
 
@@ -307,15 +303,6 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                 Err(HandleRpcError::Overloaded { json_rpc_request })
             }
         }
-    }
-
-    /// Waits until the JSON-RPC service has generated a response and returns it.
-    pub async fn next_response(&self) -> String {
-        let mut lock = self.responses_rx.lock().await;
-
-        // The sender is stored in the background task, and the background task never ends before
-        // the foreground. We can thus unwrap safely.
-        lock.next().await.unwrap()
     }
 }
 
