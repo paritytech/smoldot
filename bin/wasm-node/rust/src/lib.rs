@@ -214,7 +214,7 @@ enum PublicApiChain<TChain, TPlat: Platform> {
         chain_spec_chain_id: String,
 
         /// JSON-RPC service that answers incoming requests. `None` iff
-        /// [`AddChainConfig::json_rpc_running`] was `false` when adding the chain.
+        /// [`AddChainConfig::json_rpc_responses`] was `None` when adding the chain.
         ///
         /// The JSON-RPC service is wrapped within a `MaybeDone` because its initialization is
         /// done asynchronously. Note that the JSON-RPC service will only finish initializing

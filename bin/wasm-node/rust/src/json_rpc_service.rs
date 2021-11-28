@@ -24,8 +24,8 @@
 //! requests.
 //!
 //! In order to process a JSON-RPC request, call [`JsonRpcService::queue_rpc_request`]. Later, the
-//! JSON-RPC service can queue a response or, in the case of subscriptions, a notification. Use
-//! [`JsonRpcService::next_response`] in order to pull the next available response.
+//! JSON-RPC service can queue a response or, in the case of subscriptions, a notification on the
+//! channel passed through [`Config::responses_sender`].
 //!
 //! In the situation where an attacker finds a JSON-RPC request that takes a long time to be
 //! processed and continuously submits this same expensive request over and over again, the queue
@@ -289,9 +289,9 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
     /// request is done in parallel in the background.
     ///
     /// An error is returned if [`Config::max_pending_requests`] is exceeded, which can happen
-    /// if the requests take a long time to process or if [`JsonRpcService::next_response`] isn't
-    /// called often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the JSON-RPC
-    /// response to immediately send back to the user.
+    /// if the requests take a long time to process or if the [`Config::responses_sender`] channel
+    /// isn't polled often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
+    /// JSON-RPC response to immediately send back to the user.
     pub async fn queue_rpc_request(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
         let mut lock = self.new_requests_in.lock().await;
 
