@@ -26,7 +26,6 @@ use itertools::Itertools as _;
 use smoldot::{
     chain, chain_spec, header,
     informant::{BytesDisplay, HashDisplay},
-    json_rpc::{self, methods},
     libp2p::{connection, multiaddr, peer_id},
 };
 use std::{
@@ -801,10 +800,14 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     /// Enqueues a JSON-RPC request towards the given chain.
     ///
     /// Since most JSON-RPC requests can only be answered asynchronously, the request is only
-    /// queued and will be decoded and processed later. An error is returned if, for each
-    /// individual chain, the queue of requests is too large.
+    /// queued and will be decoded and processed later.
+    /// Requests that are not valid JSON-RPC will be silently ignored.
     ///
-    /// This function doesn't return an error, as errors are yielded through the FFI layer.
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid, or if [`AddChainConfig::json_rpc_responses`] was
+    /// `None` when adding the chain.
+    ///
     pub fn json_rpc_request(&mut self, json_rpc_request: impl Into<String>, chain_id: ChainId) {
         self.json_rpc_request_inner(json_rpc_request.into(), chain_id)
     }
@@ -812,23 +815,19 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     fn json_rpc_request_inner(&mut self, json_rpc_request: String, chain_id: ChainId) {
         let (json_rpc_service, log_target) = match self.public_api_chains.get(chain_id.0) {
             Some(PublicApiChain::Ok {
-                json_rpc_service,
+                json_rpc_service: Some(json_rpc_service),
                 key,
                 ..
             }) => {
                 let log_name = &self.chains_by_key.get(key).unwrap().log_name;
-                (Some(json_rpc_service), format!("json-rpc-{}", log_name))
+                (json_rpc_service, format!("json-rpc-{}", log_name))
             }
-            _ => (None, "json-rpc-<unknown>".to_string()),
+            _ => panic!(),
         };
 
         log::log!(
             target: &log_target,
-            if json_rpc_service.is_some() {
-                log::Level::Debug
-            } else {
-                log::Level::Warn
-            },
+            log::Level::Debug,
             "JSON-RPC => {:?}{}",
             if json_rpc_request.len() > 100 {
                 &json_rpc_request[..100]
@@ -842,81 +841,26 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
             }
         );
 
-        // Check whether the JSON-RPC request is correct, and bail out if it isn't.
-        let request_id = match methods::parse_json_call(&json_rpc_request) {
-            Ok((rq_id, _)) => rq_id,
-            Err(methods::ParseError::Method { request_id, error }) => {
-                log::warn!(
-                    target: &log_target,
-                    "Error in JSON-RPC method call: {}",
-                    error
-                );
-                send_back(&error.to_json_error(request_id), &log_target, chain_id);
-                return;
-            }
-            Err(error) => {
-                log::warn!(
-                    target: &log_target,
-                    "Ignoring malformed JSON-RPC call: {}",
-                    error
-                );
-                return;
+        let mut json_rpc_service = match json_rpc_service {
+            future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
+            future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
+            future::MaybeDone::Gone => unreachable!(),
+        };
+
+        let future = async move {
+            (&mut json_rpc_service).await;
+            let json_rpc_service = Pin::new(&mut json_rpc_service).take_output().unwrap();
+            if let Err(err) = json_rpc_service.queue_rpc_request(json_rpc_request).await {
+                if let Some(err) = err.into_json_rpc_error() {
+                    send_back(&err, &log_target, chain_id);
+                }
             }
         };
 
-        if let Some(json_rpc_service) = json_rpc_service {
-            if let Some(ref json_rpc_service) = json_rpc_service {
-                let mut json_rpc_service = match json_rpc_service {
-                    future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
-                    future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
-                    future::MaybeDone::Gone => unreachable!(),
-                };
-
-                let future = async move {
-                    (&mut json_rpc_service).await;
-                    let json_rpc_service = Pin::new(&mut json_rpc_service).take_output().unwrap();
-                    if let Err(err) = json_rpc_service.queue_rpc_request(json_rpc_request).await {
-                        if let Some(err) = err.into_json_rpc_error() {
-                            send_back(&err, &log_target, chain_id);
-                        }
-                    }
-                };
-
-                // TODO: properly spread resources usage instead of spawning new tasks all the time
-                self.new_task_tx
-                    .unbounded_send(("json-rpc-request".to_owned(), future.boxed()))
-                    .unwrap();
-            } else {
-                send_back(
-                    &json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::ApplicationDefined(
-                            -33000,
-                            &format!(
-                                "A JSON-RPC service has not been started for chain id {:?}",
-                                chain_id
-                            ),
-                        ),
-                        None,
-                    ),
-                    &log_target,
-                    chain_id,
-                );
-            }
-        } else {
-            send_back(
-                &json_rpc::parse::build_error_response(
-                    request_id,
-                    json_rpc::parse::ErrorResponse::ApplicationDefined(
-                        -33000,
-                        &format!("Invalid chain id {:?}", chain_id),
-                    ),
-                    None,
-                ),
-                &log_target,
-                chain_id,
-            );
-        }
+        // TODO: properly spread resources usage instead of spawning new tasks all the time
+        self.new_task_tx
+            .unbounded_send(("json-rpc-request".to_owned(), future.boxed()))
+            .unwrap();
     }
 }
 
