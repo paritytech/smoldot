@@ -30,7 +30,10 @@ use core::{
     task::{Context, Poll},
     time::Duration,
 };
-use futures::{channel::oneshot, prelude::*};
+use futures::{
+    channel::{mpsc, oneshot},
+    prelude::*,
+};
 use std::{
     collections::VecDeque,
     sync::{atomic, Arc, Mutex},
@@ -162,6 +165,52 @@ impl log::Log for Logger {
     fn flush(&self) {}
 }
 
+fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static) {
+    struct Waker {
+        done: atomic::AtomicBool,
+        wake_up_registered: atomic::AtomicBool,
+        future: Mutex<future::BoxFuture<'static, ()>>,
+    }
+
+    impl task::Wake for Waker {
+        fn wake(self: Arc<Self>) {
+            if self
+                .wake_up_registered
+                .swap(true, atomic::Ordering::Relaxed)
+            {
+                return;
+            }
+
+            start_timer_wrap(Duration::new(0, 0), move || {
+                if self.done.load(atomic::Ordering::SeqCst) {
+                    return;
+                }
+
+                let mut future = self.future.try_lock().unwrap();
+                self.wake_up_registered
+                    .store(false, atomic::Ordering::SeqCst);
+                match Future::poll(
+                    future.as_mut(),
+                    &mut Context::from_waker(&task::Waker::from(self.clone())),
+                ) {
+                    Poll::Ready(()) => {
+                        self.done.store(true, atomic::Ordering::SeqCst);
+                    }
+                    Poll::Pending => {}
+                }
+            })
+        }
+    }
+
+    let waker = Arc::new(Waker {
+        done: false.into(),
+        wake_up_registered: false.into(),
+        future: Mutex::new(Box::pin(future)),
+    });
+
+    task::Wake::wake(waker);
+}
+
 /// Connection connected to a target.
 struct Connection {
     /// If `Some`, [`bindings::connection_close`] must be called. Set to a value after
@@ -213,14 +262,61 @@ fn alloc(len: u32) -> u32 {
 }
 
 fn init(max_log_level: u32) {
-    let client = super::Client::new(match max_log_level {
-        0 => log::LevelFilter::Off,
-        1 => log::LevelFilter::Error,
-        2 => log::LevelFilter::Warn,
-        3 => log::LevelFilter::Info,
-        4 => log::LevelFilter::Debug,
-        _ => log::LevelFilter::Trace,
+    // A channel needs to be passed to the client in order for it to spawn background tasks.
+    // Since "spawning a task" isn't really something that a browser or Node environment can do
+    // efficiently, we instead combine all the asynchronous tasks into one `FuturesUnordered`
+    // below.
+    let (new_task_tx, mut new_task_rx) =
+        mpsc::unbounded::<(String, future::BoxFuture<'static, ()>)>();
+
+    // This is the main future that executes the entire client.
+    // It receives new tasks from `new_task_rx` and runs them.
+    spawn_background_task(async move {
+        let mut all_tasks = stream::FuturesUnordered::new();
+
+        // The code below processes tasks that have names.
+        #[pin_project::pin_project]
+        struct FutureAdapter<F> {
+            name: String,
+            #[pin]
+            future: F,
+        }
+
+        impl<F: Future> Future for FutureAdapter<F> {
+            type Output = F::Output;
+            fn poll(self: Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
+                let this = self.project();
+                log::trace!(target: "smoldot", "enter: {}", &this.name);
+                let out = this.future.poll(cx);
+                log::trace!(target: "smoldot", "leave");
+                out
+            }
+        }
+
+        loop {
+            futures::select! {
+                (new_task_name, new_task) = new_task_rx.select_next_some() => {
+                    all_tasks.push(FutureAdapter {
+                        name: new_task_name,
+                        future: new_task,
+                    });
+                },
+                () = all_tasks.select_next_some() => {},
+            }
+        }
     });
+
+    let client = super::Client::new(
+        match max_log_level {
+            0 => log::LevelFilter::Off,
+            1 => log::LevelFilter::Error,
+            2 => log::LevelFilter::Warn,
+            3 => log::LevelFilter::Info,
+            4 => log::LevelFilter::Debug,
+            _ => log::LevelFilter::Trace,
+        },
+        new_task_tx,
+    );
 
     let mut client_lock = CLIENT.lock().unwrap();
     assert!(client_lock.is_none());
@@ -335,52 +431,6 @@ impl super::Platform for Platform {
 
     fn now_from_unix_epoch() -> Duration {
         Duration::from_secs_f64(unsafe { bindings::unix_time_ms() } / 1000.0)
-    }
-
-    fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static) {
-        struct Waker {
-            done: atomic::AtomicBool,
-            wake_up_registered: atomic::AtomicBool,
-            future: Mutex<future::BoxFuture<'static, ()>>,
-        }
-
-        impl task::Wake for Waker {
-            fn wake(self: Arc<Self>) {
-                if self
-                    .wake_up_registered
-                    .swap(true, atomic::Ordering::Relaxed)
-                {
-                    return;
-                }
-
-                start_timer_wrap(Duration::new(0, 0), move || {
-                    if self.done.load(atomic::Ordering::SeqCst) {
-                        return;
-                    }
-
-                    let mut future = self.future.try_lock().unwrap();
-                    self.wake_up_registered
-                        .store(false, atomic::Ordering::SeqCst);
-                    match Future::poll(
-                        future.as_mut(),
-                        &mut Context::from_waker(&task::Waker::from(self.clone())),
-                    ) {
-                        Poll::Ready(()) => {
-                            self.done.store(true, atomic::Ordering::SeqCst);
-                        }
-                        Poll::Pending => {}
-                    }
-                })
-            }
-        }
-
-        let waker = Arc::new(Waker {
-            done: false.into(),
-            wake_up_registered: false.into(),
-            future: Mutex::new(Box::pin(future)),
-        });
-
-        task::Wake::wake(waker);
     }
 
     fn now() -> Self::Instant {

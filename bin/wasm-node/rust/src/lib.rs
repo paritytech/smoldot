@@ -36,7 +36,6 @@ use std::{
     pin::Pin,
     str,
     sync::Arc,
-    task,
     time::Duration,
 };
 
@@ -98,12 +97,6 @@ pub trait Platform: Send + 'static {
     /// Returns the time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time)
     /// (i.e. 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
     fn now_from_unix_epoch() -> Duration;
-
-    /// Spawn a background task that runs forever.
-    ///
-    /// This function is expected to called very rarely. It is fine to implement it for example by
-    /// spawning a thread.
-    fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static);
 
     /// Returns an object that represents "now".
     fn now() -> Self::Instant;
@@ -289,7 +282,15 @@ impl<TPlat: Platform> Clone for ChainServices<TPlat> {
 
 impl<TPlat: Platform> Client<TPlat> {
     /// Initializes the smoldot Wasm client.
-    pub fn new(max_log_level: log::LevelFilter) -> Self {
+    ///
+    /// In order for the client to function, it needs to be able to spawn tasks in the background
+    /// that will run indefinitely. To do so, the `tasks_spawner` channel must be provided and that
+    /// the clients can send tasks to run to. The first tuple element is the name of the task used
+    /// for debugging purposes.
+    pub fn new(
+        max_log_level: log::LevelFilter,
+        tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
+    ) -> Self {
         // Try initialize the logging and the panic hook.
         // Note that `start_client` can theoretically be called multiple times, meaning that these
         // calls shouldn't panic if reached multiple times.
@@ -303,54 +304,6 @@ impl<TPlat: Platform> Client<TPlat> {
         assert_ne!(rand::random::<u64>(), 0);
         assert_ne!(rand::random::<u64>(), rand::random::<u64>());
 
-        // When adding chains, the client will initialize various "services" that connect to
-        // chain. These services need to be able to spawn asynchronous tasks on their own. Since
-        // "spawning a task" isn't really something that a browser or Node environment can do
-        // efficiently, we instead combine all the asynchronous tasks into one `FuturesUnordered`
-        // below.
-        //
-        // The `new_task_tx` and `new_task_rx` variables are used when spawning a new task is
-        // required. Send a task on `new_task_tx` to start running it.
-        let (new_task_tx, mut new_task_rx) =
-            mpsc::unbounded::<(String, future::BoxFuture<'static, ()>)>();
-
-        // This is the main future that executes the entire client.
-        // It receives new tasks from `new_task_rx` and runs them.
-        TPlat::spawn_background_task(async move {
-            let mut all_tasks = stream::FuturesUnordered::new();
-
-            // The code below processes tasks that have names.
-            #[pin_project::pin_project]
-            struct FutureAdapter<F> {
-                name: String,
-                #[pin]
-                future: F,
-            }
-
-            impl<F: Future> Future for FutureAdapter<F> {
-                type Output = F::Output;
-                fn poll(self: Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
-                    let this = self.project();
-                    log::trace!(target: "smoldot", "enter: {}", &this.name);
-                    let out = this.future.poll(cx);
-                    log::trace!(target: "smoldot", "leave");
-                    out
-                }
-            }
-
-            loop {
-                futures::select! {
-                    (new_task_name, new_task) = new_task_rx.select_next_some() => {
-                        all_tasks.push(FutureAdapter {
-                            name: new_task_name,
-                            future: new_task,
-                        });
-                    },
-                    () = all_tasks.select_next_some() => {},
-                }
-            }
-        });
-
         // Spawn a constantly-running task that periodically prints the total memory usage of
         // the node.
         //
@@ -358,7 +311,7 @@ impl<TPlat: Platform> Client<TPlat> {
         // multiple times of multiple `Client`s are created. In practice only one `Client` is ever
         // created.
         // TODO: ^ solve this hack?
-        new_task_tx
+        tasks_spawner
             .unbounded_send((
                 "memory-printer".to_owned(),
                 Box::pin(async move {
@@ -376,7 +329,7 @@ impl<TPlat: Platform> Client<TPlat> {
 
         let expected_chains = 8;
         Client {
-            new_task_tx,
+            new_task_tx: tasks_spawner,
             public_api_chains: slab::Slab::with_capacity(expected_chains),
             chains_by_key: HashMap::with_capacity(expected_chains),
         }
