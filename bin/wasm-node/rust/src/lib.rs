@@ -813,7 +813,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     }
 
     fn json_rpc_request_inner(&mut self, json_rpc_request: String, chain_id: ChainId) {
-        let (json_rpc_service, log_target) = match self.public_api_chains.get(chain_id.0) {
+        let (json_rpc_service, _) = match self.public_api_chains.get(chain_id.0) {
             Some(PublicApiChain::Ok {
                 json_rpc_service: Some(json_rpc_service),
                 key,
@@ -825,22 +825,6 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
             _ => panic!(),
         };
 
-        log::log!(
-            target: &log_target,
-            log::Level::Debug,
-            "JSON-RPC => {:?}{}",
-            if json_rpc_request.len() > 100 {
-                &json_rpc_request[..100]
-            } else {
-                &json_rpc_request[..]
-            },
-            if json_rpc_request.len() > 100 {
-                "…"
-            } else {
-                ""
-            }
-        );
-
         let mut json_rpc_service = match json_rpc_service {
             future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
             future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
@@ -851,8 +835,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
             (&mut json_rpc_service).await;
             let json_rpc_service = Pin::new(&mut json_rpc_service).take_output().unwrap();
             if let Err(err) = json_rpc_service.queue_rpc_request(json_rpc_request).await {
-                if let Some(err) = err.into_json_rpc_error() {
-                    send_back(&err, &log_target, chain_id);
+                if let Some(_) = err.into_json_rpc_error() {
+                    // TODO: somehow handle these errors
                 }
             }
         };
@@ -1030,23 +1014,4 @@ async fn start_services<TPlat: Platform>(
         sync_service,
         transactions_service,
     }
-}
-
-/// Sends back a response or a notification to the JSON-RPC client.
-///
-/// > **Note**: This method wraps around [`ffi::emit_json_rpc_response`] and exists primarily
-/// >           in order to print a log message.
-fn send_back(message: &str, log_target: &str, chain_id: ChainId) {
-    log::debug!(
-        target: &log_target,
-        "JSON-RPC <= {}{}",
-        if message.len() > 100 {
-            &message[..100]
-        } else {
-            &message[..]
-        },
-        if message.len() > 100 { "…" } else { "" }
-    );
-
-    ffi::emit_json_rpc_response(message, chain_id);
 }
