@@ -136,6 +136,10 @@ pub struct JsonRpcService<TPlat: Platform> {
     /// Limited to [`Config::max_pending_requests`] elements.
     new_requests_in: Mutex<mpsc::Sender<String>>,
 
+    /// Target to use when emitting logs.
+    log_target: String,
+
+    /// Pins the `TPlat` generic.
     platform: PhantomData<fn() -> TPlat>,
 }
 
@@ -148,7 +152,9 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             usize::try_from(config.max_pending_requests.get()).unwrap_or(usize::max_value()) - 1,
         );
 
+        let log_target = format!("json-rpc-{}", config.log_name);
         let client = JsonRpcService {
+            log_target: log_target.clone(),
             new_requests_in: Mutex::new(new_requests_in),
             platform: PhantomData,
         };
@@ -157,7 +163,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
         let (new_child_tasks_tx, mut new_child_tasks_rx) = mpsc::unbounded();
 
         let background = Arc::new(Background {
-            log_target: format!("json-rpc-{}", config.log_name),
+            log_target,
             new_requests_rx: Mutex::new(new_requests_rx),
             responses_sender: Mutex::new(config.responses_sender),
             new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
@@ -294,6 +300,22 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
     /// JSON-RPC response to immediately send back to the user.
     pub async fn queue_rpc_request(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
         let mut lock = self.new_requests_in.lock().await;
+
+        log::log!(
+            target: &self.log_target,
+            log::Level::Debug,
+            "JSON-RPC => {:?}{}",
+            if json_rpc_request.len() > 100 {
+                &json_rpc_request[..100]
+            } else {
+                &json_rpc_request[..]
+            },
+            if json_rpc_request.len() > 100 {
+                "…"
+            } else {
+                ""
+            }
+        );
 
         match lock.try_send(json_rpc_request) {
             Ok(()) => Ok(()),
