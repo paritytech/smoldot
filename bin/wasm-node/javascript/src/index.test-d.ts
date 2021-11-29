@@ -1,13 +1,9 @@
-import smoldot, { Smoldot, Client } from 'smoldot';
-
-// Test the export type
-
-// smoldot;  // $ExpectType Smoldot
+import { start, Client } from 'smoldot';
 
 // Test when supplying all options and all params to logCallback
 
 // $ExpectType Client
-let sm = smoldot.start({
+let sm = start({
   maxLogLevel: 3,
   logCallback: (level, target, message) => { },
   forbidTcp: false,
@@ -19,7 +15,7 @@ let sm = smoldot.start({
 
 (async () => {
   // $ExpectType Client
-  sm = smoldot.start();
+  sm = start();
   // $ExpectType Promise<Chain>
   const chain1 = sm.addChain({ chainSpec: '' });
   // $ExpectType Promise<Chain>
