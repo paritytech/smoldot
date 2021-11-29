@@ -80,7 +80,7 @@ export interface Client {
    * @throws {AlreadyDestroyedError} If the client has already been terminated earlier.
    * @throws {CrashError} If the background client has crashed.
    */
-  terminate(): void;
+  terminate(): Promise<void>;
 }
 
 /**

@@ -26,6 +26,6 @@ let sm = start({
   chain2.sendJsonRpc('{"id":8,"jsonrpc":"2.0","method":"system_health","params":[]}');
   // $ExpectType void
   chain2.remove();
-  // $ExpectType void
+  // $ExpectType Promise<void>
   sm.terminate();
 })();
