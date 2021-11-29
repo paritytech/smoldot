@@ -324,21 +324,6 @@ impl serde::Serialize for SerdeErrorCode {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct SerdeSubscriptionEvent<'a> {
-    jsonrpc: SerdeVersion,
-    method: &'a str,
-    params: SerdeSubscriptionEventParams<'a>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct SerdeSubscriptionEventParams<'a> {
-    subscription: &'a str,
-    result: &'a serde_json::value::RawValue,
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
