@@ -685,11 +685,17 @@ fn json_rpc_send(ptr: u32, len: u32, chain_id: u32) {
     let json_rpc_request: String = String::from_utf8(json_rpc_request.into()).unwrap();
 
     let mut client_lock = CLIENT.lock().unwrap();
-    client_lock
+
+    if let Err(err) = client_lock
         .as_mut()
         .unwrap()
         .0
-        .json_rpc_request(json_rpc_request, chain_id);
+        .json_rpc_request(json_rpc_request, chain_id)
+    {
+        if let Some(response) = err.into_json_rpc_error() {
+            emit_json_rpc_response(&response, chain_id);
+        }
+    }
 }
 
 fn emit_json_rpc_response(rpc: &str, chain_id: smoldot_light_base::ChainId) {
