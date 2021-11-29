@@ -22,6 +22,7 @@
 
 // TODO: the quality of this module is sub-par
 
+use smoldot::informant::BytesDisplay;
 use smoldot_light_base::ConnectError;
 
 use core::{
@@ -47,6 +48,7 @@ use std::{
 
 use timers::Delay;
 
+mod alloc;
 pub mod bindings;
 mod timers;
 
@@ -330,6 +332,24 @@ fn init(max_log_level: u32) {
         }
     });
 
+    // Spawn a constantly-running task that periodically prints the total memory usage of
+    // the node.
+    new_task_tx
+        .unbounded_send((
+            "memory-printer".to_owned(),
+            Box::pin(async move {
+                loop {
+                    Delay::new(Duration::from_secs(60)).await;
+
+                    // For the unwrap below to fail, the quantity of allocated would have to
+                    // not fit in a `u64`, which as of 2021 is basically impossible.
+                    let mem = u64::try_from(alloc::total_alloc_bytes()).unwrap();
+                    log::info!(target: "smoldot", "Node memory usage: {}", BytesDisplay(mem));
+                }
+            }),
+        ))
+        .unwrap();
+
     let client = smoldot_light_base::Client::new(new_task_tx.clone());
 
     let mut client_lock = CLIENT.lock().unwrap();
@@ -344,6 +364,22 @@ fn add_chain(
     potential_relay_chains_ptr: u32,
     potential_relay_chains_len: u32,
 ) -> u32 {
+    let mut client_lock = CLIENT.lock().unwrap();
+
+    // Fail any new chain initialization if we're running low on memory space, which can
+    // realistically happen as Wasm is a 32 bits platform. This avoids potentially running into
+    // OOM errors. The threshold is completely empirical and should probably be updated
+    // regularly to account for changes in the implementation.
+    if alloc::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
+        let chain_id = client_lock.as_mut().unwrap().0.add_erroneous_chain(
+            "Wasm node is running low on memory and will prevent any new chain from being added"
+                .into(),
+            None,
+        );
+
+        return chain_id.into();
+    }
+
     let chain_spec: Box<[u8]> = {
         let chain_spec_pointer = usize::try_from(chain_spec_pointer).unwrap();
         let chain_spec_len = usize::try_from(chain_spec_len).unwrap();
@@ -372,8 +408,6 @@ fn add_chain(
             .map(smoldot_light_base::ChainId::from)
             .collect()
     };
-
-    let mut client_lock = CLIENT.lock().unwrap();
 
     let (json_rpc_responses, responses_rx_and_reg, abort_handle) = if json_rpc_running != 0 {
         let (tx, rx) = mpsc::channel::<String>(64);

@@ -2486,6 +2486,7 @@ dependencies = [
  "pin-project",
  "rand 0.8.4",
  "slab",
+ "smoldot",
  "smoldot-light-base",
 ]
 
