@@ -550,7 +550,7 @@ impl NetworkService {
                 let mut connec_tx = connec_tx.clone();
                 let future = async move {
                     loop {
-                        let start_connect = inner.network.next_start_connect(Instant::now()).await;
+                        let start_connect = inner.network.next_start_connect(|| Instant::now()).await;
 
                         let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
                         let _enter = span.enter();

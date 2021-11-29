@@ -371,7 +371,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                         loop {
                             let start_connect = network_service
                                 .network
-                                .next_start_connect(TPlat::now())
+                                .next_start_connect(|| TPlat::now())
                                 .await;
 
                             let is_important_peer = network_service
