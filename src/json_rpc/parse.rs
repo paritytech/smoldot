@@ -200,7 +200,7 @@ pub enum ErrorResponse<'a> {
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct SerdeCall<'a> {
     jsonrpc: SerdeVersion,
-    #[serde(borrow)]
+    #[serde(borrow, skip_serializing_if = "Option::is_none")]
     id: Option<&'a serde_json::value::RawValue>,
     #[serde(borrow)]
     method: &'a str,
