@@ -1949,19 +1949,19 @@ impl<TPlat: Platform> Background<TPlat> {
             match self.alloc_subscription(SubscriptionTy::Follow).await {
                 Ok(v) => v,
                 Err(()) => {
-                    let _ = self
-                        .responses_sender
-                        .lock()
-                        .await
-                        .send(json_rpc::parse::build_error_response(
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        json_rpc::parse::build_error_response(
                             request_id,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
                                 "Too many active subscriptions",
                             ),
                             None,
-                        ))
-                        .await;
+                        ),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -1978,6 +1978,7 @@ impl<TPlat: Platform> Background<TPlat> {
         .to_json_response(request_id);
 
         let mut responses_sender = self.responses_sender.lock().await.clone();
+        let log_target = self.log_target.clone();
 
         // Spawn a separate task for the subscription.
         self.new_child_tasks_tx
@@ -1985,7 +1986,7 @@ impl<TPlat: Platform> Background<TPlat> {
             .await
             .unbounded_send(Box::pin(async move {
                 // Send back to the user the confirmation of the registration.
-                let _ = responses_sender.send(confirmation).await;
+                log_and_respond_no_mutex(&mut responses_sender, &log_target, confirmation).await;
 
                 loop {
                     // Wait for either a new block, or for the subscription to be canceled.
@@ -1993,13 +1994,16 @@ impl<TPlat: Platform> Background<TPlat> {
                     futures::pin_mut!(next_block);
                     match future::select(next_block, &mut unsubscribe_rx).await {
                         future::Either::Left((None, _)) => {
-                            let _ = responses_sender
-                                .send(json_rpc::parse::build_subscription_event(
+                            log_and_respond_no_mutex(
+                                &mut responses_sender,
+                                &log_target,
+                                json_rpc::parse::build_subscription_event(
                                     "chainHead_followEvent_unstable",
                                     &subscription,
                                     &"{\"event\": \"stop\"}",
-                                ))
-                                .await;
+                                ),
+                            )
+                            .await;
                         }
                         future::Either::Left((
                             Some(sync_service::Notification::Finalized {
@@ -2014,20 +2018,24 @@ impl<TPlat: Platform> Background<TPlat> {
                         )) => {
                             let hash =
                                 header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                            let _ = responses_sender
-                                .send(json_rpc::parse::build_subscription_event(
+                            log_and_respond_no_mutex(
+                                &mut responses_sender,
+                                &log_target,
+                                json_rpc::parse::build_subscription_event(
                                     "chainHead_followEvent_unstable",
                                     &subscription,
                                     &"", // TODO:
-                                ))
-                                .await;
+                                ),
+                            )
+                            .await;
 
                             // TODO: handle is_new_best
                         }
                         future::Either::Right((Ok(unsub_request_id), _)) => {
                             let response = methods::Response::chainHead_unfollow_unstable(())
                                 .to_json_response(&unsub_request_id);
-                            let _ = responses_sender.send(response).await;
+                            log_and_respond_no_mutex(&mut responses_sender, &log_target, response)
+                                .await;
                             break;
                         }
                         future::Either::Right((Err(_), _)) => break,
