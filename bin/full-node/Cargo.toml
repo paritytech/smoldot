@@ -17,7 +17,7 @@ path = "src/main.rs"
 async-std = "1.10.0"
 atty = "0.2.14"
 ctrlc = "3.2.1"
-derive_more = "0.99.16"
+derive_more = "0.99.17"
 directories = "4.0.1"
 fnv = { version = "1.0.7", default-features = false }
 futures = { version = "0.3.18", default-features = false, features = ["std", "thread-pool"] }
