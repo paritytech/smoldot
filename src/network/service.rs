@@ -1961,7 +1961,8 @@ where
     ///
     /// If no outgoing connection is desired, the method waits until there is one.
     // TODO: give more control, with number of slots and node choice
-    pub async fn next_start_connect<'a>(&self, now: TNow) -> StartConnect<TNow> {
+    // TODO: this API with now is a bit hacky?
+    pub async fn next_start_connect<'a>(&self, now: impl FnOnce() -> TNow) -> StartConnect<TNow> {
         loop {
             let mut pending_lock = self.ephemeral_guarded.lock().await;
             let pending = &mut *pending_lock; // Prevents borrow checker issues.
@@ -2001,6 +2002,7 @@ where
                     }
                 }
 
+                let now = now();
                 let pending_id = PendingId(pending.pending_ids.insert((
                     entry.key().clone(),
                     multiaddr.clone(),
