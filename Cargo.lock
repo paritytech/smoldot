@@ -2459,7 +2459,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smoldot-light"
+name = "smoldot-light-base"
 version = "0.5.4"
 dependencies = [
  "blake2-rfc",
@@ -2468,14 +2468,25 @@ dependencies = [
  "futures",
  "hex",
  "itertools",
- "lazy_static",
  "log",
  "lru",
- "pin-project",
  "rand 0.8.4",
  "serde_json",
  "slab",
  "smoldot",
+]
+
+[[package]]
+name = "smoldot-light-wasm"
+version = "0.5.4"
+dependencies = [
+ "futures",
+ "lazy_static",
+ "log",
+ "pin-project",
+ "rand 0.8.4",
+ "slab",
+ "smoldot-light-base",
 ]
 
 [[package]]
