@@ -213,7 +213,7 @@ extern "C" {
 /// inferior or equal to the value of `max_log_level` passed here.
 #[no_mangle]
 pub extern "C" fn init(max_log_level: u32) {
-    super::init(max_log_level)
+    crate::init::init(max_log_level)
 }
 
 /// Allocates a buffer of the given length, with an alignment of 1.
@@ -225,7 +225,13 @@ pub extern "C" fn init(max_log_level: u32) {
 /// >           value. See the module-level documentation.
 #[no_mangle]
 pub extern "C" fn alloc(len: u32) -> u32 {
-    super::alloc(len)
+    let len = usize::try_from(len).unwrap();
+    let mut vec = Vec::<u8>::with_capacity(len);
+    unsafe {
+        vec.set_len(len);
+    }
+    let ptr: *mut [u8] = Box::into_raw(vec.into_boxed_slice());
+    u32::try_from(ptr as *mut u8 as usize).unwrap()
 }
 
 /// Adds a chain to the client. The client will try to stay connected and synchronize this chain.
@@ -329,7 +335,7 @@ pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) {
 /// Must be called in response to [`start_timer`] after the given duration has passed.
 #[no_mangle]
 pub extern "C" fn timer_finished(timer_id: u32) {
-    super::timer_finished(timer_id);
+    crate::timers::timer_finished(timer_id);
 }
 
 /// Called by the JavaScript code if the connection switches to the `Open` state. The connection
@@ -340,7 +346,7 @@ pub extern "C" fn timer_finished(timer_id: u32) {
 /// See also [`connection_open`].
 #[no_mangle]
 pub extern "C" fn connection_open(id: u32) {
-    super::connection_open(id);
+    crate::platform::connection_open(id);
 }
 
 /// Notify of a message being received on the connection. The connection must be in the `Open`
@@ -352,7 +358,7 @@ pub extern "C" fn connection_open(id: u32) {
 /// called.
 #[no_mangle]
 pub extern "C" fn connection_message(id: u32, ptr: u32, len: u32) {
-    super::connection_message(id, ptr, len)
+    crate::platform::connection_message(id, ptr, len)
 }
 
 /// Can be called at any point by the JavaScript code if the connection switches to the `Closed`
@@ -366,5 +372,5 @@ pub extern "C" fn connection_message(id: u32, ptr: u32, len: u32) {
 /// See also [`connection_open`].
 #[no_mangle]
 pub extern "C" fn connection_closed(id: u32, ptr: u32, len: u32) {
-    super::connection_closed(id, ptr, len)
+    crate::platform::connection_closed(id, ptr, len)
 }
