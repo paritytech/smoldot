@@ -987,33 +987,35 @@ impl<TPlat: Platform> Background<TPlat> {
                 if let Some(current_specs) = current_specs {
                     let notification = if let Ok(runtime_spec) = current_specs {
                         let runtime_spec = runtime_spec.decode();
-                        serde_json::to_string(&methods::RuntimeVersion {
-                            spec_name: runtime_spec.spec_name.into(),
-                            impl_name: runtime_spec.impl_name.into(),
-                            authoring_version: u64::from(runtime_spec.authoring_version),
-                            spec_version: u64::from(runtime_spec.spec_version),
-                            impl_version: u64::from(runtime_spec.impl_version),
-                            transaction_version: runtime_spec.transaction_version.map(u64::from),
-                            apis: runtime_spec
-                                .apis
-                                .map(|api| (api.name_hash, api.version))
-                                .collect(),
-                        })
-                        .unwrap()
+                        methods::ServerToClient::state_runtimeVersion {
+                            subscription: &subscription,
+                            result: Some(methods::RuntimeVersion {
+                                spec_name: runtime_spec.spec_name.into(),
+                                impl_name: runtime_spec.impl_name.into(),
+                                authoring_version: u64::from(runtime_spec.authoring_version),
+                                spec_version: u64::from(runtime_spec.spec_version),
+                                impl_version: u64::from(runtime_spec.impl_version),
+                                transaction_version: runtime_spec
+                                    .transaction_version
+                                    .map(u64::from),
+                                apis: runtime_spec
+                                    .apis
+                                    .map(|api| {
+                                        (methods::HexString(api.name_hash.to_vec()), api.version)
+                                    })
+                                    .collect(),
+                            }),
+                        }
+                        .to_json_call_object_parameters(None)
                     } else {
-                        "null".to_string()
+                        methods::ServerToClient::state_runtimeVersion {
+                            subscription: &subscription,
+                            result: None,
+                        }
+                        .to_json_call_object_parameters(None)
                     };
 
-                    log_and_respond(
-                        &self.responses_sender,
-                        &self.log_target,
-                        json_rpc::parse::build_subscription_event(
-                            "state_runtimeVersion",
-                            &subscription,
-                            &notification,
-                        ),
-                    )
-                    .await;
+                    log_and_respond(&self.responses_sender, &self.log_target, notification).await;
                 }
 
                 let mut responses_sender = self.responses_sender.lock().await.clone();
@@ -1030,10 +1032,13 @@ impl<TPlat: Platform> Background<TPlat> {
                             futures::pin_mut!(next_change);
                             match future::select(next_change, &mut unsubscribe_rx).await {
                                 future::Either::Left((new_runtime, _)) => {
-                                    let notification_body =
-                                        if let Ok(runtime_spec) = new_runtime.unwrap() {
-                                            let runtime_spec = runtime_spec.decode();
-                                            serde_json::to_string(&methods::RuntimeVersion {
+                                    let notification_body = if let Ok(runtime_spec) =
+                                        new_runtime.unwrap()
+                                    {
+                                        let runtime_spec = runtime_spec.decode();
+                                        methods::ServerToClient::state_runtimeVersion {
+                                            subscription: &subscription,
+                                            result: Some(methods::RuntimeVersion {
                                                 spec_name: runtime_spec.spec_name.into(),
                                                 impl_name: runtime_spec.impl_name.into(),
                                                 authoring_version: u64::from(
@@ -1046,22 +1051,30 @@ impl<TPlat: Platform> Background<TPlat> {
                                                     .map(u64::from),
                                                 apis: runtime_spec
                                                     .apis
-                                                    .map(|api| (api.name_hash, api.version))
+                                                    .map(|api| {
+                                                        (
+                                                            methods::HexString(
+                                                                api.name_hash.to_vec(),
+                                                            ),
+                                                            api.version,
+                                                        )
+                                                    })
                                                     .collect(),
-                                            })
-                                            .unwrap()
-                                        } else {
-                                            "null".to_string()
-                                        };
+                                            }),
+                                        }
+                                        .to_json_call_object_parameters(None)
+                                    } else {
+                                        methods::ServerToClient::state_runtimeVersion {
+                                            subscription: &subscription,
+                                            result: None,
+                                        }
+                                        .to_json_call_object_parameters(None)
+                                    };
 
                                     log_and_respond_no_mutex(
                                         &mut responses_sender,
                                         &log_target,
-                                        json_rpc::parse::build_subscription_event(
-                                            "state_runtimeVersion",
-                                            &subscription,
-                                            &notification_body,
-                                        ),
+                                        notification_body,
                                     )
                                     .await;
                                 }
@@ -1171,7 +1184,9 @@ impl<TPlat: Platform> Background<TPlat> {
                             transaction_version: runtime_spec.transaction_version.map(u64::from),
                             apis: runtime_spec
                                 .apis
-                                .map(|api| (api.name_hash, api.version))
+                                .map(|api| {
+                                    (methods::HexString(api.name_hash.to_vec()), api.version)
+                                })
                                 .collect(),
                         })
                         .to_json_response(request_id)
@@ -1378,10 +1393,10 @@ impl<TPlat: Platform> Background<TPlat> {
                                     )
                                 }
                                 transactions_service::TransactionStatus::InBlock(block) => {
-                                    methods::TransactionStatus::InBlock(block)
+                                    methods::TransactionStatus::InBlock(methods::HashHexString(block))
                                 }
                                 transactions_service::TransactionStatus::Retracted(block) => {
-                                    methods::TransactionStatus::Retracted(block)
+                                    methods::TransactionStatus::Retracted(methods::HashHexString(block))
                                 }
                                 transactions_service::TransactionStatus::GapInChain |
                                 transactions_service::TransactionStatus::MaxPendingTransactionsReached |
@@ -1390,15 +1405,14 @@ impl<TPlat: Platform> Background<TPlat> {
                                     methods::TransactionStatus::Dropped
                                 }
                                 transactions_service::TransactionStatus::Finalized(block) => {
-                                    methods::TransactionStatus::Finalized(block)
+                                    methods::TransactionStatus::Finalized(methods::HashHexString(block))
                                 }
                             };
 
-                            log_and_respond_no_mutex(&mut responses_sender, &log_target, json_rpc::parse::build_subscription_event(
-                                    "author_extrinsicUpdate",
-                                    &subscription,
-                                    &serde_json::to_string(&update).unwrap(),
-                                ))
+                            log_and_respond_no_mutex(&mut responses_sender, &log_target, methods::ServerToClient::author_extrinsicUpdate {
+                                subscription: &subscription,
+                                result: update,
+                            }.to_json_call_object_parameters(None))
                                 .await;
                         }
                         future::Either::Right((Ok(unsub_request_id), _)) => {
@@ -1537,11 +1551,11 @@ impl<TPlat: Platform> Background<TPlat> {
                             log_and_respond_no_mutex(
                                 &mut responses_sender,
                                 &log_target,
-                                json_rpc::parse::build_subscription_event(
-                                    "chain_newHead",
-                                    &subscription,
-                                    &serde_json::to_string(&header).unwrap(),
-                                ),
+                                methods::ServerToClient::chain_newHead {
+                                    subscription: &subscription,
+                                    result: header,
+                                }
+                                .to_json_call_object_parameters(None),
                             )
                             .await;
                         }
@@ -1613,11 +1627,11 @@ impl<TPlat: Platform> Background<TPlat> {
                             log_and_respond_no_mutex(
                                 &mut responses_sender,
                                 &log_target,
-                                json_rpc::parse::build_subscription_event(
-                                    "chain_newHead",
-                                    &subscription,
-                                    &serde_json::to_string(&header).unwrap(),
-                                ),
+                                methods::ServerToClient::chain_newHead {
+                                    subscription: &subscription,
+                                    result: header,
+                                }
+                                .to_json_call_object_parameters(None),
                             )
                             .await;
                         }
@@ -1693,11 +1707,11 @@ impl<TPlat: Platform> Background<TPlat> {
                             log_and_respond_no_mutex(
                                 &mut responses_sender,
                                 &log_target,
-                                json_rpc::parse::build_subscription_event(
-                                    "chain_finalizedHead",
-                                    &subscription,
-                                    &serde_json::to_string(&header).unwrap(),
-                                ),
+                                methods::ServerToClient::chain_finalizedHead {
+                                    subscription: &subscription,
+                                    result: header,
+                                }
+                                .to_json_call_object_parameters(None),
                             )
                             .await;
                         }
@@ -1828,17 +1842,20 @@ impl<TPlat: Platform> Background<TPlat> {
                     let next_block = storage_updates.next();
                     futures::pin_mut!(next_block);
                     match future::select(next_block, &mut unsubscribe_rx).await {
-                        future::Either::Left((changes, _)) => {
+                        future::Either::Left((Some(changes), _)) => {
                             log_and_respond_no_mutex(
                                 &mut responses_sender,
                                 &log_target,
-                                json_rpc::parse::build_subscription_event(
-                                    "state_storage",
-                                    &subscription,
-                                    &serde_json::to_string(&changes).unwrap(),
-                                ),
+                                methods::ServerToClient::state_storage {
+                                    subscription: &subscription,
+                                    result: changes,
+                                }
+                                .to_json_call_object_parameters(None),
                             )
                             .await;
+                        }
+                        future::Either::Left((None, _)) => {
+                            // TODO: do something?
                         }
                         future::Either::Right((Ok(unsub_request_id), _)) => {
                             let response = methods::Response::state_unsubscribeStorage(true)
