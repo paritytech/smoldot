@@ -36,9 +36,9 @@
 //! [`NetworkService::new`]. These channels inform the foreground about updates to the network
 //! connectivity.
 
-use crate::ffi;
+use crate::Platform;
 
-use core::{cmp, num::NonZeroUsize, pin::Pin, task::Poll, time::Duration};
+use core::{cmp, num::NonZeroUsize, task::Poll, time::Duration};
 use futures::{channel::mpsc, prelude::*};
 use itertools::Itertools as _;
 use smoldot::{
@@ -102,16 +102,16 @@ pub struct ConfigChain {
     pub has_grandpa_protocol: bool,
 }
 
-pub struct NetworkService {
-    inner: Arc<NetworkServiceInner>,
+pub struct NetworkService<TPlat: Platform> {
+    inner: Arc<NetworkServiceInner<TPlat>>,
 
     /// List of handles that abort all the background tasks.
     abort_handles: Vec<future::AbortHandle>,
 }
 
-struct NetworkServiceInner {
+struct NetworkServiceInner<TPlat: Platform> {
     /// Data structure holding the entire state of the networking.
-    network: service::ChainNetwork<ffi::Instant>,
+    network: service::ChainNetwork<TPlat::Instant>,
 
     /// List of nodes that are considered as important for logging purposes.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
@@ -122,7 +122,7 @@ struct NetworkServiceInner {
     log_chain_names: Vec<String>,
 }
 
-impl NetworkService {
+impl<TPlat: Platform> NetworkService<TPlat> {
     /// Initializes the network service with the given configuration.
     ///
     /// Returns the networking service, plus a list of receivers on which events are pushed.
@@ -181,7 +181,7 @@ impl NetworkService {
 
         let network_service = Arc::new(NetworkServiceInner {
             network: service::ChainNetwork::new(service::Config {
-                now: ffi::Instant::now(),
+                now: TPlat::now(),
                 chains,
                 known_nodes,
                 connections_capacity: 32,
@@ -204,11 +204,7 @@ impl NetworkService {
                 let future = async move {
                     loop {
                         let event = loop {
-                            match network_service
-                                .network
-                                .next_event(ffi::Instant::now())
-                                .await
-                            {
+                            match network_service.network.next_event(TPlat::now()).await {
                                 service::Event::Connected(peer_id) => {
                                     log::info!(target: "network", "Connected to {}", peer_id);
                                 }
@@ -375,7 +371,7 @@ impl NetworkService {
                         loop {
                             let start_connect = network_service
                                 .network
-                                .next_start_connect(ffi::Instant::now())
+                                .next_start_connect(TPlat::now())
                                 .await;
 
                             let is_important_peer = network_service
@@ -391,14 +387,14 @@ impl NetworkService {
                                     start_connect.id, start_connect.expected_peer_id,
                                     start_connect.multiaddr
                                 );
-                                ffi::Connection::connect(&start_connect.multiaddr.to_string())
+                                TPlat::connect(&start_connect.multiaddr.to_string())
                             };
 
                             // Perform the connection process.
                             let socket = {
                                 let socket = socket.fuse();
                                 futures::pin_mut!(socket);
-                                let mut timeout = ffi::Delay::new_at(start_connect.timeout);
+                                let mut timeout = TPlat::sleep_until(start_connect.timeout).fuse();
 
                                 let result = futures::select! {
                                     _ = timeout => Err(None),
@@ -453,7 +449,7 @@ impl NetworkService {
 
                                         // After a failed connection attempt, wait for a bit
                                         // before trying again.
-                                        ffi::Delay::new(Duration::from_millis(500)).await;
+                                        TPlat::sleep(Duration::from_millis(500)).await;
                                         continue;
                                     }
                                 }
@@ -530,12 +526,12 @@ impl NetworkService {
                         let mut next_discovery = Duration::from_secs(5);
 
                         loop {
-                            ffi::Delay::new(next_discovery).await;
+                            TPlat::sleep(next_discovery).await;
                             next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
 
                             match network_service
                                 .network
-                                .kademlia_discovery_round(ffi::Instant::now(), chain_index)
+                                .kademlia_discovery_round(TPlat::now(), chain_index)
                                 .await
                             {
                                 Ok(insert) => {
@@ -545,7 +541,7 @@ impl NetworkService {
                                         insert.discovered().map(|(p, _)| p.to_string()).join(", ")
                                     );
 
-                                    insert.insert(&ffi::Instant::now()).await;
+                                    insert.insert(&TPlat::now()).await;
                                 }
                                 Err(error) => {
                                     log::warn!(
@@ -584,7 +580,7 @@ impl NetworkService {
                                 );*/
                             }
 
-                            ffi::Delay::new(next_round).await;
+                            TPlat::sleep(next_round).await;
                             next_round = cmp::min(next_round * 2, Duration::from_secs(5));
                         }
                     };
@@ -631,7 +627,7 @@ impl NetworkService {
         let result = self
             .inner
             .network
-            .blocks_request(ffi::Instant::now(), &target, chain_index, config)
+            .blocks_request(TPlat::now(), &target, chain_index, config)
             .await;
 
         log::debug!(
@@ -674,7 +670,7 @@ impl NetworkService {
         let result = self
             .inner
             .network
-            .grandpa_warp_sync_request(ffi::Instant::now(), &target, chain_index, begin_hash)
+            .grandpa_warp_sync_request(TPlat::now(), &target, chain_index, begin_hash)
             .await;
 
         if let Ok(response) = result.as_ref() {
@@ -749,7 +745,7 @@ impl NetworkService {
         let result = self
             .inner
             .network
-            .storage_proof_request(ffi::Instant::now(), &target, chain_index, config)
+            .storage_proof_request(TPlat::now(), &target, chain_index, config)
             .await;
 
         log::debug!(
@@ -783,7 +779,7 @@ impl NetworkService {
         let result = self
             .inner
             .network
-            .call_proof_request(ffi::Instant::now(), &target, chain_index, config)
+            .call_proof_request(TPlat::now(), &target, chain_index, config)
             .await;
 
         log::debug!(
@@ -836,7 +832,7 @@ impl NetworkService {
     }
 }
 
-impl Drop for NetworkService {
+impl<TPlat: Platform> Drop for NetworkService<TPlat> {
     fn drop(&mut self) {
         for abort in &self.abort_handles {
             abort.abort();
@@ -873,9 +869,9 @@ pub enum Event {
 /// Asynchronous task managing a specific connection.
 ///
 /// `is_important_peer` controls the log level used for problems that happen on this connection.
-async fn connection_task(
-    mut websocket: Pin<Box<ffi::Connection>>,
-    network_service: Arc<NetworkServiceInner>,
+async fn connection_task<TPlat: Platform>(
+    mut websocket: TPlat::Connection,
+    network_service: Arc<NetworkServiceInner<TPlat>>,
     id: service::ConnectionId,
     expected_peer_id: PeerId,
     attemped_multiaddr: Multiaddr,
@@ -884,13 +880,11 @@ async fn connection_task(
     let mut write_buffer = vec![0; 4096];
 
     loop {
-        let now = ffi::Instant::now();
+        let now = TPlat::now();
 
         let mut read_write = ReadWrite {
-            now,
-            // `read_buffer()` isn't ready immediately if no data is available. If the reading
-            // side is closed, then it will instantly produce `None`.
-            incoming_buffer: websocket.read_buffer().now_or_never().unwrap_or(Some(&[])),
+            now: now.clone(),
+            incoming_buffer: TPlat::read_buffer(&mut websocket),
             outgoing_buffer: Some((&mut write_buffer, &mut [])), // TODO: this should be None if a previous read_write() produced None
             read_bytes: 0,
             written_bytes: 0,
@@ -943,7 +937,7 @@ async fn connection_task(
         let read_buffer_closed = read_write.incoming_buffer.is_none();
         let read_bytes = read_write.read_bytes;
         let written_bytes = read_write.written_bytes;
-        let wake_up_after = read_write.wake_up_after;
+        let wake_up_after = read_write.wake_up_after.clone();
 
         let wake_up_future = if let Some(wake_up_future) = read_write.wake_up_future.take() {
             future::Either::Left(wake_up_future)
@@ -954,10 +948,10 @@ async fn connection_task(
         drop(read_write);
 
         if written_bytes != 0 {
-            websocket.send(&write_buffer[..written_bytes]);
+            TPlat::send(&mut websocket, &write_buffer[..written_bytes]);
         }
 
-        websocket.advance_read_cursor(read_bytes);
+        TPlat::advance_read_cursor(&mut websocket, read_bytes);
 
         // Starting from here, we block (or not) the current task until more processing needs
         // to happen.
@@ -966,7 +960,7 @@ async fn connection_task(
         let poll_after = if let Some(wake_up) = wake_up_after {
             if wake_up > now {
                 let dur = wake_up - now;
-                future::Either::Left(ffi::Delay::new(dur))
+                future::Either::Left(TPlat::sleep(dur))
             } else {
                 continue;
             }
@@ -978,7 +972,7 @@ async fn connection_task(
         // Future that is woken up when new data is ready on the socket.
         let read_buffer_ready = if !(read_buffer_has_data && read_bytes == 0) && !read_buffer_closed
         {
-            future::Either::Left(websocket.read_buffer())
+            future::Either::Left(TPlat::wait_more_data(&mut websocket))
         } else {
             future::Either::Right(future::pending())
         };

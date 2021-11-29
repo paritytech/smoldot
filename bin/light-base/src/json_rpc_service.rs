@@ -24,8 +24,8 @@
 //! requests.
 //!
 //! In order to process a JSON-RPC request, call [`JsonRpcService::queue_rpc_request`]. Later, the
-//! JSON-RPC service can queue a response or, in the case of subscriptions, a notification. Use
-//! [`JsonRpcService::next_response`] in order to pull the next available response.
+//! JSON-RPC service can queue a response or, in the case of subscriptions, a notification on the
+//! channel passed through [`Config::responses_sender`].
 //!
 //! In the situation where an attacker finds a JSON-RPC request that takes a long time to be
 //! processed and continuously submits this same expensive request over and over again, the queue
@@ -37,7 +37,7 @@
 // TODO: doc
 // TODO: re-review this once finished
 
-use crate::{ffi, runtime_service, sync_service, transactions_service};
+use crate::{runtime_service, sync_service, transactions_service, Platform};
 
 use futures::{
     channel::{mpsc, oneshot},
@@ -56,6 +56,7 @@ use smoldot::{
 use std::{
     collections::HashMap,
     iter,
+    marker::PhantomData,
     num::NonZeroU32,
     str,
     sync::{atomic, Arc},
@@ -63,24 +64,27 @@ use std::{
 };
 
 /// Configuration for a JSON-RPC service.
-pub struct Config<'a> {
+pub struct Config<'a, TPlat: Platform> {
     /// Name of the chain, for logging purposes.
     ///
     /// > **Note**: This name will be directly printed out. Any special character should already
     /// >           have been filtered out from this name.
     pub log_name: String,
 
+    /// Channel to send the responses to.
+    pub responses_sender: mpsc::Sender<String>,
+
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
     /// Service responsible for synchronizing the chain.
-    pub sync_service: Arc<sync_service::SyncService>,
+    pub sync_service: Arc<sync_service::SyncService<TPlat>>,
 
     /// Service responsible for emitting transactions and tracking their state.
-    pub transactions_service: Arc<transactions_service::TransactionsService>,
+    pub transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
     /// Service that provides a ready-to-be-called runtime for the current best block.
-    pub runtime_service: Arc<runtime_service::RuntimeService>,
+    pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
 
     /// Specification of the chain.
     pub chain_spec: &'a chain_spec::ChainSpec,
@@ -126,40 +130,42 @@ pub struct Config<'a> {
     pub max_subscriptions: u32,
 }
 
-pub struct JsonRpcService {
+pub struct JsonRpcService<TPlat: Platform> {
     /// Channel to send JSON-RPC requests to the background task.
     ///
     /// Limited to [`Config::max_pending_requests`] elements.
     new_requests_in: Mutex<mpsc::Sender<String>>,
 
-    /// Channel where responses are pushed out.
-    responses_rx: Mutex<mpsc::Receiver<String>>,
+    /// Target to use when emitting logs.
+    log_target: String,
+
+    /// Pins the `TPlat` generic.
+    platform: PhantomData<fn() -> TPlat>,
 }
 
-impl JsonRpcService {
+impl<TPlat: Platform> JsonRpcService<TPlat> {
     /// Creates a new JSON-RPC service with the given configuration.
-    pub fn new(mut config: Config<'_>) -> JsonRpcService {
+    pub fn new(mut config: Config<'_, TPlat>) -> JsonRpcService<TPlat> {
         // Channel from the foreground to the background.
         // Requests are dropped if the channel is full.
         let (new_requests_in, new_requests_rx) = mpsc::channel(
             usize::try_from(config.max_pending_requests.get()).unwrap_or(usize::max_value()) - 1,
         );
 
-        // Channel from the background to the foreground.
-        let (responses_sender, responses_rx) = mpsc::channel(128);
-
+        let log_target = format!("json-rpc-{}", config.log_name);
         let client = JsonRpcService {
+            log_target: log_target.clone(),
             new_requests_in: Mutex::new(new_requests_in),
-            responses_rx: Mutex::new(responses_rx),
+            platform: PhantomData,
         };
 
         // Channel used in the background in order to spawn new tasks scoped to the background.
         let (new_child_tasks_tx, mut new_child_tasks_rx) = mpsc::unbounded();
 
         let background = Arc::new(Background {
-            log_target: format!("json-rpc-{}", config.log_name),
+            log_target,
             new_requests_rx: Mutex::new(new_requests_rx),
-            responses_sender: Mutex::new(responses_sender),
+            responses_sender: Mutex::new(config.responses_sender),
             new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
             max_subscriptions: usize::try_from(config.max_subscriptions)
                 .unwrap_or(usize::max_value()),
@@ -221,8 +227,11 @@ impl JsonRpcService {
                                 // awaiting on `handle_request`.
                                 match message {
                                     Some(m) => {
-                                        with_long_time_warning(background.handle_request(&m), &m)
-                                            .await
+                                        with_long_time_warning::<TPlat, _>(
+                                            background.handle_request(&m),
+                                            &m,
+                                        )
+                                        .await
                                     }
                                     None => return, // Foreground is closed.
                                 }
@@ -286,11 +295,27 @@ impl JsonRpcService {
     /// request is done in parallel in the background.
     ///
     /// An error is returned if [`Config::max_pending_requests`] is exceeded, which can happen
-    /// if the requests take a long time to process or if [`JsonRpcService::next_response`] isn't
-    /// called often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the JSON-RPC
-    /// response to immediately send back to the user.
+    /// if the requests take a long time to process or if the [`Config::responses_sender`] channel
+    /// isn't polled often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
+    /// JSON-RPC response to immediately send back to the user.
     pub async fn queue_rpc_request(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
         let mut lock = self.new_requests_in.lock().await;
+
+        log::log!(
+            target: &self.log_target,
+            log::Level::Debug,
+            "JSON-RPC => {:?}{}",
+            if json_rpc_request.len() > 100 {
+                &json_rpc_request[..100]
+            } else {
+                &json_rpc_request[..]
+            },
+            if json_rpc_request.len() > 100 {
+                "…"
+            } else {
+                ""
+            }
+        );
 
         match lock.try_send(json_rpc_request) {
             Ok(()) => Ok(()),
@@ -301,24 +326,15 @@ impl JsonRpcService {
             }
         }
     }
-
-    /// Waits until the JSON-RPC service has generated a response and returns it.
-    pub async fn next_response(&self) -> String {
-        let mut lock = self.responses_rx.lock().await;
-
-        // The sender is stored in the background task, and the background task never ends before
-        // the foreground. We can thus unwrap safely.
-        lock.next().await.unwrap()
-    }
 }
 
 /// Runs a future but prints a warning if it takes a long time to complete.
-fn with_long_time_warning<'a, T: Future + 'a>(
+fn with_long_time_warning<'a, TPlat: Platform, T: Future + 'a>(
     future: T,
     json_rpc_request: &'a str,
 ) -> impl Future<Output = T::Output> + 'a {
-    let now = ffi::Instant::now();
-    let mut warn_after = ffi::Delay::new(Duration::from_secs(1)).fuse();
+    let now = TPlat::now();
+    let mut warn_after = TPlat::sleep(Duration::from_secs(1)).fuse();
 
     async move {
         let future = future.fuse();
@@ -338,7 +354,7 @@ fn with_long_time_warning<'a, T: Future + 'a>(
                     if warn_after.is_terminated() {
                         log::info!(
                             "JSON-RPC request has finished after {}ms: {:?}{}",
-                            now.elapsed().as_millis(),
+                            (TPlat::now() - now).as_millis(),
                             if json_rpc_request.len() > 100 { &json_rpc_request[..100] }
                                 else { &json_rpc_request[..] },
                             if json_rpc_request.len() > 100 { "…" } else { "" }
@@ -384,7 +400,7 @@ impl HandleRpcError {
 }
 
 /// Fields used to process JSON-RPC requests in the background.
-struct Background {
+struct Background<TPlat: Platform> {
     /// Target to use for all the logs.
     log_target: String,
 
@@ -413,11 +429,11 @@ struct Background {
     peer_id_base58: String,
 
     /// See [`Config::sync_service`].
-    sync_service: Arc<sync_service::SyncService>,
+    sync_service: Arc<sync_service::SyncService<TPlat>>,
     /// See [`Config::runtime_service`].
-    runtime_service: Arc<runtime_service::RuntimeService>,
+    runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     /// See [`Config::transactions_service`].
-    transactions_service: Arc<transactions_service::TransactionsService>,
+    transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
     /// Blocks that are temporarily saved in order to serve JSON-RPC requests.
     // TODO: move somewhere else?
@@ -460,7 +476,49 @@ struct Blocks {
     finalized_block: [u8; 32],
 }
 
-impl Background {
+fn log_and_respond<'a>(
+    responses_sender: &'a Mutex<mpsc::Sender<String>>,
+    log_target: &str,
+    message: String,
+) -> impl Future<Output = ()> + 'a {
+    log::debug!(
+        target: log_target,
+        "JSON-RPC <= {}{}",
+        if message.len() > 100 {
+            &message[..100]
+        } else {
+            &message[..]
+        },
+        if message.len() > 100 { "…" } else { "" }
+    );
+
+    async move {
+        let _ = responses_sender.lock().await.send(message).await;
+    }
+}
+
+fn log_and_respond_no_mutex<'a>(
+    responses_sender: &'a mut mpsc::Sender<String>,
+    log_target: &str,
+    message: String,
+) -> impl Future<Output = ()> + 'a {
+    log::debug!(
+        target: log_target,
+        "JSON-RPC <= {}{}",
+        if message.len() > 100 {
+            &message[..100]
+        } else {
+            &message[..]
+        },
+        if message.len() > 100 { "…" } else { "" }
+    );
+
+    async move {
+        let _ = responses_sender.send(message).await;
+    }
+}
+
+impl<TPlat: Platform> Background<TPlat> {
     async fn handle_request(&self, json_rpc_request: &str) {
         // Check whether the JSON-RPC request is correct, and bail out if it isn't.
         let (request_id, call) = match methods::parse_json_call(json_rpc_request) {
@@ -470,12 +528,12 @@ impl Background {
                     target: &self.log_target,
                     "Error in JSON-RPC method call: {}", error
                 );
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(error.to_json_error(request_id))
-                    .await;
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    error.to_json_error(request_id),
+                )
+                .await;
                 return;
             }
             Err(error) => {
@@ -492,15 +550,13 @@ impl Background {
         match call {
             methods::MethodCall::author_pendingExtrinsics {} => {
                 // TODO: ask transactions service
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(
-                        methods::Response::author_pendingExtrinsics(Vec::new())
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    methods::Response::author_pendingExtrinsics(Vec::new())
+                        .to_json_response(request_id),
+                )
+                .await;
             }
             methods::MethodCall::author_submitExtrinsic { transaction } => {
                 // In Substrate, `author_submitExtrinsic` returns the hash of the extrinsic. It
@@ -519,17 +575,15 @@ impl Background {
                     .submit_extrinsic(transaction.0)
                     .await;
 
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(
-                        methods::Response::author_submitExtrinsic(methods::HashHexString(
-                            transaction_hash,
-                        ))
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    methods::Response::author_submitExtrinsic(methods::HashHexString(
+                        transaction_hash,
+                    ))
+                    .to_json_response(request_id),
+                )
+                .await;
             }
             methods::MethodCall::author_submitAndWatchExtrinsic { transaction } => {
                 self.submit_and_watch_extrinsic(request_id, transaction)
@@ -551,15 +605,13 @@ impl Background {
                 };
 
                 if invalid {
-                    let _ = self
-                        .responses_sender
-                        .lock()
-                        .await
-                        .send(
-                            methods::Response::author_unwatchExtrinsic(false)
-                                .to_json_response(request_id),
-                        )
-                        .await;
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        methods::Response::author_unwatchExtrinsic(false)
+                            .to_json_response(request_id),
+                    )
+                    .await;
                 } else {
                 }
             }
@@ -604,7 +656,7 @@ impl Background {
                     json_rpc::parse::build_success_response(request_id, "null")
                 };
 
-                let _ = self.responses_sender.lock().await.send(response).await;
+                log_and_respond(&self.responses_sender, &self.log_target, response).await;
             }
             methods::MethodCall::chain_getBlockHash { height } => {
                 self.get_block_hash(request_id, height).await;
@@ -615,7 +667,7 @@ impl Background {
                 ))
                 .to_json_response(request_id);
 
-                let _ = self.responses_sender.lock().await.send(response).await;
+                log_and_respond(&self.responses_sender, &self.log_target, response).await;
             }
             methods::MethodCall::chain_getHeader { hash } => {
                 let hash = match hash {
@@ -650,7 +702,7 @@ impl Background {
                     }
                 };
 
-                let _ = self.responses_sender.lock().await.send(response).await;
+                log_and_respond(&self.responses_sender, &self.log_target, response).await;
             }
             methods::MethodCall::chain_subscribeAllHeads {} => {
                 self.subscribe_all_heads(request_id).await;
@@ -674,15 +726,13 @@ impl Background {
                 };
 
                 if invalid {
-                    let _ = self
-                        .responses_sender
-                        .lock()
-                        .await
-                        .send(
-                            methods::Response::chain_unsubscribeAllHeads(false)
-                                .to_json_response(request_id),
-                        )
-                        .await;
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        methods::Response::chain_unsubscribeAllHeads(false)
+                            .to_json_response(request_id),
+                    )
+                    .await;
                 }
             }
             methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
@@ -698,15 +748,13 @@ impl Background {
                 };
 
                 if invalid {
-                    let _ = self
-                        .responses_sender
-                        .lock()
-                        .await
-                        .send(
-                            methods::Response::chain_unsubscribeFinalizedHeads(false)
-                                .to_json_response(request_id),
-                        )
-                        .await;
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        methods::Response::chain_unsubscribeFinalizedHeads(false)
+                            .to_json_response(request_id),
+                    )
+                    .await;
                 }
             }
             methods::MethodCall::chain_unsubscribeNewHeads { subscription } => {
@@ -722,15 +770,13 @@ impl Background {
                 };
 
                 if invalid {
-                    let _ = self
-                        .responses_sender
-                        .lock()
-                        .await
-                        .send(
-                            methods::Response::chain_unsubscribeNewHeads(false)
-                                .to_json_response(request_id),
-                        )
-                        .await;
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        methods::Response::chain_unsubscribeNewHeads(false)
+                            .to_json_response(request_id),
+                    )
+                    .await;
                 }
             }
             methods::MethodCall::payment_queryInfo { extrinsic, hash } => {
@@ -747,23 +793,21 @@ impl Background {
                     ),
                 };
 
-                let _ = self.responses_sender.lock().await.send(response).await;
+                log_and_respond(&self.responses_sender, &self.log_target, response).await;
             }
             methods::MethodCall::rpc_methods {} => {
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(
-                        methods::Response::rpc_methods(methods::RpcMethods {
-                            version: 1,
-                            methods: methods::MethodCall::method_names()
-                                .map(|n| n.into())
-                                .collect(),
-                        })
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    methods::Response::rpc_methods(methods::RpcMethods {
+                        version: 1,
+                        methods: methods::MethodCall::method_names()
+                            .map(|n| n.into())
+                            .collect(),
+                    })
+                    .to_json_response(request_id),
+                )
+                .await;
             }
             methods::MethodCall::state_getKeysPaged {
                 prefix,
@@ -805,11 +849,10 @@ impl Background {
                     )
                     .await;
 
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(match outcome {
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    match outcome {
                         Ok(keys) => {
                             // TODO: instead of requesting all keys with that prefix from the network, pass `start_key` to the network service
                             let out = keys
@@ -825,8 +868,9 @@ impl Background {
                             json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
                             None,
                         ),
-                    })
-                    .await;
+                    },
+                )
+                .await;
             }
             methods::MethodCall::state_queryStorageAt { keys, at } => {
                 let blocks = self.blocks.lock().await;
@@ -849,15 +893,12 @@ impl Background {
                     }
                 }
 
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(
-                        methods::Response::state_queryStorageAt(vec![out])
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    methods::Response::state_queryStorageAt(vec![out]).to_json_response(request_id),
+                )
+                .await;
             }
             methods::MethodCall::state_getMetadata { hash } => {
                 let result = if let Some(hash) = hash {
@@ -886,7 +927,7 @@ impl Background {
                     }
                 };
 
-                let _ = self.responses_sender.lock().await.send(response).await;
+                log_and_respond(&self.responses_sender, &self.log_target, response).await;
             }
             methods::MethodCall::state_getStorage { key, hash } => {
                 let hash = hash
@@ -909,26 +950,26 @@ impl Background {
                     ),
                 };
 
-                let _ = self.responses_sender.lock().await.send(response).await;
+                log_and_respond(&self.responses_sender, &self.log_target, response).await;
             }
             methods::MethodCall::state_subscribeRuntimeVersion {} => {
                 let (subscription, mut unsubscribe_rx) =
                     match self.alloc_subscription(SubscriptionTy::RuntimeSpec).await {
                         Ok(v) => v,
                         Err(()) => {
-                            let _ = self
-                                .responses_sender
-                                .lock()
-                                .await
-                                .send(json_rpc::parse::build_error_response(
+                            log_and_respond(
+                                &self.responses_sender,
+                                &self.log_target,
+                                json_rpc::parse::build_error_response(
                                     request_id,
                                     json_rpc::parse::ErrorResponse::ServerError(
                                         -32000,
                                         "Too many active subscriptions",
                                     ),
                                     None,
-                                ))
-                                .await;
+                                ),
+                            )
+                            .await;
                             return;
                         }
                     };
@@ -936,15 +977,13 @@ impl Background {
                 let (current_specs, spec_changes) =
                     self.runtime_service.subscribe_runtime_version().await;
 
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(
-                        methods::Response::state_subscribeRuntimeVersion(&subscription)
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    methods::Response::state_subscribeRuntimeVersion(&subscription)
+                        .to_json_response(request_id),
+                )
+                .await;
 
                 if let Some(current_specs) = current_specs {
                     let notification = if let Ok(runtime_spec) = current_specs {
@@ -966,19 +1005,20 @@ impl Background {
                         "null".to_string()
                     };
 
-                    let _ = self
-                        .responses_sender
-                        .lock()
-                        .await
-                        .send(json_rpc::parse::build_subscription_event(
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        json_rpc::parse::build_subscription_event(
                             "state_runtimeVersion",
                             &subscription,
                             &notification,
-                        ))
-                        .await;
+                        ),
+                    )
+                    .await;
                 }
 
                 let mut responses_sender = self.responses_sender.lock().await.clone();
+                let log_target = self.log_target.clone();
                 self.new_child_tasks_tx
                     .lock()
                     .await
@@ -1015,19 +1055,27 @@ impl Background {
                                             "null".to_string()
                                         };
 
-                                    let _ = responses_sender
-                                        .send(json_rpc::parse::build_subscription_event(
+                                    log_and_respond_no_mutex(
+                                        &mut responses_sender,
+                                        &log_target,
+                                        json_rpc::parse::build_subscription_event(
                                             "state_runtimeVersion",
                                             &subscription,
                                             &notification_body,
-                                        ))
-                                        .await;
+                                        ),
+                                    )
+                                    .await;
                                 }
                                 future::Either::Right((Ok(unsub_request_id), _)) => {
                                     let response =
                                         methods::Response::state_unsubscribeRuntimeVersion(true)
                                             .to_json_response(&unsub_request_id);
-                                    let _ = responses_sender.send(response).await;
+                                    log_and_respond_no_mutex(
+                                        &mut responses_sender,
+                                        &log_target,
+                                        response,
+                                    )
+                                    .await;
                                     break;
                                 }
                                 future::Either::Right((Err(_), _)) => break,
@@ -1049,15 +1097,13 @@ impl Background {
                 };
 
                 if invalid {
-                    let _ = self
-                        .responses_sender
-                        .lock()
-                        .await
-                        .send(
-                            methods::Response::state_unsubscribeRuntimeVersion(false)
-                                .to_json_response(request_id),
-                        )
-                        .await;
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        methods::Response::state_unsubscribeRuntimeVersion(false)
+                            .to_json_response(request_id),
+                    )
+                    .await;
                 }
             }
             methods::MethodCall::state_subscribeStorage { list } => {
@@ -1065,19 +1111,19 @@ impl Background {
                     // When the list of keys is empty, that means we want to subscribe to *all*
                     // storage changes. It is not possible to reasonably implement this in a
                     // light client.
-                    let _ = self
-                        .responses_sender
-                        .lock()
-                        .await
-                        .send(json_rpc::parse::build_error_response(
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        json_rpc::parse::build_error_response(
                             request_id,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
                                 "Subscribing to all storage changes isn't supported",
                             ),
                             None,
-                        ))
-                        .await;
+                        ),
+                    )
+                    .await;
                 } else {
                     self.subscribe_storage(request_id, list).await;
                 }
@@ -1095,15 +1141,13 @@ impl Background {
                 };
 
                 if invalid {
-                    let _ = self
-                        .responses_sender
-                        .lock()
-                        .await
-                        .send(
-                            methods::Response::state_unsubscribeStorage(false)
-                                .to_json_response(request_id),
-                        )
-                        .await;
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        methods::Response::state_unsubscribeStorage(false)
+                            .to_json_response(request_id),
+                    )
+                    .await;
                 }
             }
             methods::MethodCall::state_getRuntimeVersion { at } => {
@@ -1140,7 +1184,7 @@ impl Background {
                     ),
                 };
 
-                let _ = self.responses_sender.lock().await.send(response).await;
+                log_and_respond(&self.responses_sender, &self.log_target, response).await;
             }
             methods::MethodCall::system_accountNextIndex { account } => {
                 let response = match account_nonce(&self.runtime_service, account).await {
@@ -1158,29 +1202,24 @@ impl Background {
                     ),
                 };
 
-                let _ = self.responses_sender.lock().await.send(response).await;
+                log_and_respond(&self.responses_sender, &self.log_target, response).await;
             }
             methods::MethodCall::system_chain {} => {
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(
-                        methods::Response::system_chain(&self.chain_name)
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    methods::Response::system_chain(&self.chain_name).to_json_response(request_id),
+                )
+                .await;
             }
             methods::MethodCall::system_chainType {} => {
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(
-                        methods::Response::system_chainType(&self.chain_ty)
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    methods::Response::system_chainType(&self.chain_ty)
+                        .to_json_response(request_id),
+                )
+                .await;
             }
             methods::MethodCall::system_health {} => {
                 let response = methods::Response::system_health(methods::SystemHealth {
@@ -1194,41 +1233,34 @@ impl Background {
                 })
                 .to_json_response(request_id);
 
-                let _ = self.responses_sender.lock().await.send(response).await;
+                log_and_respond(&self.responses_sender, &self.log_target, response).await;
             }
             methods::MethodCall::system_localListenAddresses {} => {
                 // Wasm node never listens on any address.
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(
-                        methods::Response::system_localListenAddresses(Vec::new())
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    methods::Response::system_localListenAddresses(Vec::new())
+                        .to_json_response(request_id),
+                )
+                .await;
             }
             methods::MethodCall::system_localPeerId {} => {
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(
-                        methods::Response::system_localPeerId(&self.peer_id_base58)
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    methods::Response::system_localPeerId(&self.peer_id_base58)
+                        .to_json_response(request_id),
+                )
+                .await;
             }
             methods::MethodCall::system_name {} => {
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(
-                        methods::Response::system_name(env!("CARGO_PKG_NAME"))
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    methods::Response::system_name("smoldot-light").to_json_response(request_id),
+                )
+                .await;
             }
             methods::MethodCall::system_peers {} => {
                 let response = methods::Response::system_peers(
@@ -1251,31 +1283,27 @@ impl Background {
                 )
                 .to_json_response(request_id);
 
-                let _ = self.responses_sender.lock().await.send(response).await;
+                log_and_respond(&self.responses_sender, &self.log_target, response).await;
             }
             methods::MethodCall::system_properties {} => {
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(
-                        methods::Response::system_properties(
-                            serde_json::from_str(&self.chain_properties_json).unwrap(),
-                        )
-                        .to_json_response(request_id),
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    methods::Response::system_properties(
+                        serde_json::from_str(&self.chain_properties_json).unwrap(),
                     )
-                    .await;
+                    .to_json_response(request_id),
+                )
+                .await;
             }
             methods::MethodCall::system_version {} => {
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(
-                        methods::Response::system_version(env!("CARGO_PKG_VERSION"))
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    methods::Response::system_version(env!("CARGO_PKG_VERSION"))
+                        .to_json_response(request_id),
+                )
+                .await;
             }
 
             methods::MethodCall::chainHead_follow_unstable { runtimeUpdates } => {
@@ -1297,19 +1325,19 @@ impl Background {
 
             _method => {
                 log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(json_rpc::parse::build_error_response(
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    json_rpc::parse::build_error_response(
                         request_id,
                         json_rpc::parse::ErrorResponse::ServerError(
                             -32000,
                             "Not implemented in smoldot yet",
                         ),
                         None,
-                    ))
-                    .await;
+                    ),
+                )
+                .await;
             }
         }
     }
@@ -1320,19 +1348,19 @@ impl Background {
             match self.alloc_subscription(SubscriptionTy::Transaction).await {
                 Ok(v) => v,
                 Err(()) => {
-                    let _ = self
-                        .responses_sender
-                        .lock()
-                        .await
-                        .send(json_rpc::parse::build_error_response(
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        json_rpc::parse::build_error_response(
                             request_id,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
                                 "Too many active subscriptions",
                             ),
                             None,
-                        ))
-                        .await;
+                        ),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -1347,12 +1375,13 @@ impl Background {
 
         // Spawn a separate task for the transaction updates.
         let mut responses_sender = self.responses_sender.lock().await.clone();
+        let log_target = self.log_target.clone();
         self.new_child_tasks_tx
             .lock()
             .await
             .unbounded_send(Box::pin(async move {
                 // Send back to the user the confirmation of the registration.
-                let _ = responses_sender.send(confirmation).await;
+                log_and_respond_no_mutex(&mut responses_sender, &log_target, confirmation).await;
 
                 loop {
                     // Wait for either a status update block, or for the subscription to
@@ -1384,8 +1413,7 @@ impl Background {
                                 }
                             };
 
-                            let _ = responses_sender
-                                .send(json_rpc::parse::build_subscription_event(
+                            log_and_respond_no_mutex(&mut responses_sender, &log_target, json_rpc::parse::build_subscription_event(
                                     "author_extrinsicUpdate",
                                     &subscription,
                                     &serde_json::to_string(&update).unwrap(),
@@ -1395,7 +1423,7 @@ impl Background {
                         future::Either::Right((Ok(unsub_request_id), _)) => {
                             let response = methods::Response::chain_unsubscribeNewHeads(true)
                                 .to_json_response(&unsub_request_id);
-                            let _ = responses_sender.send(response).await;
+                            log_and_respond_no_mutex(&mut responses_sender, &log_target, response).await;
                             break;
                         }
                         future::Either::Left((None, _)) => {
@@ -1462,7 +1490,7 @@ impl Background {
             }
         };
 
-        let _ = self.responses_sender.lock().await.send(response).await;
+        log_and_respond(&self.responses_sender, &self.log_target, response).await;
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeAllHeads`].
@@ -1471,19 +1499,19 @@ impl Background {
             match self.alloc_subscription(SubscriptionTy::AllHeads).await {
                 Ok(v) => v,
                 Err(()) => {
-                    let _ = self
-                        .responses_sender
-                        .lock()
-                        .await
-                        .send(json_rpc::parse::build_error_response(
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        json_rpc::parse::build_error_response(
                             request_id,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
                                 "Too many active subscriptions",
                             ),
                             None,
-                        ))
-                        .await;
+                        ),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -1505,6 +1533,7 @@ impl Background {
             methods::Response::chain_subscribeAllHeads(&subscription).to_json_response(request_id);
 
         let mut responses_sender = self.responses_sender.lock().await.clone();
+        let log_target = self.log_target.clone();
 
         // Spawn a separate task for the subscription.
         self.new_child_tasks_tx
@@ -1512,7 +1541,7 @@ impl Background {
             .await
             .unbounded_send(Box::pin(async move {
                 // Send back to the user the confirmation of the registration.
-                let _ = responses_sender.send(confirmation).await;
+                log_and_respond_no_mutex(&mut responses_sender, &log_target, confirmation).await;
 
                 loop {
                     // Wait for either a new block, or for the subscription to be canceled.
@@ -1524,18 +1553,22 @@ impl Background {
                             let header =
                                 methods::Header::from_scale_encoded_header(&block.unwrap())
                                     .unwrap();
-                            let _ = responses_sender
-                                .send(json_rpc::parse::build_subscription_event(
+                            log_and_respond_no_mutex(
+                                &mut responses_sender,
+                                &log_target,
+                                json_rpc::parse::build_subscription_event(
                                     "chain_newHead",
                                     &subscription,
                                     &serde_json::to_string(&header).unwrap(),
-                                ))
-                                .await;
+                                ),
+                            )
+                            .await;
                         }
                         future::Either::Right((Ok(unsub_request_id), _)) => {
                             let response = methods::Response::chain_unsubscribeAllHeads(true)
                                 .to_json_response(&unsub_request_id);
-                            let _ = responses_sender.send(response).await;
+                            log_and_respond_no_mutex(&mut responses_sender, &log_target, response)
+                                .await;
                             break;
                         }
                         future::Either::Right((Err(_), _)) => break,
@@ -1551,19 +1584,19 @@ impl Background {
             match self.alloc_subscription(SubscriptionTy::NewHeads).await {
                 Ok(v) => v,
                 Err(()) => {
-                    let _ = self
-                        .responses_sender
-                        .lock()
-                        .await
-                        .send(json_rpc::parse::build_error_response(
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        json_rpc::parse::build_error_response(
                             request_id,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
                                 "Too many active subscriptions",
                             ),
                             None,
-                        ))
-                        .await;
+                        ),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -1577,6 +1610,7 @@ impl Background {
             methods::Response::chain_subscribeNewHeads(&subscription).to_json_response(request_id);
 
         let mut responses_sender = self.responses_sender.lock().await.clone();
+        let log_target = self.log_target.clone();
 
         // Spawn a separate task for the subscription.
         self.new_child_tasks_tx
@@ -1584,7 +1618,7 @@ impl Background {
             .await
             .unbounded_send(Box::pin(async move {
                 // Send back to the user the confirmation of the registration.
-                let _ = responses_sender.send(confirmation).await;
+                log_and_respond_no_mutex(&mut responses_sender, &log_target, confirmation).await;
 
                 loop {
                     // Wait for either a new block, or for the subscription to be canceled.
@@ -1595,18 +1629,22 @@ impl Background {
                             let header =
                                 methods::Header::from_scale_encoded_header(&block.unwrap())
                                     .unwrap();
-                            let _ = responses_sender
-                                .send(json_rpc::parse::build_subscription_event(
+                            log_and_respond_no_mutex(
+                                &mut responses_sender,
+                                &log_target,
+                                json_rpc::parse::build_subscription_event(
                                     "chain_newHead",
                                     &subscription,
                                     &serde_json::to_string(&header).unwrap(),
-                                ))
-                                .await;
+                                ),
+                            )
+                            .await;
                         }
                         future::Either::Right((Ok(unsub_request_id), _)) => {
                             let response = methods::Response::chain_unsubscribeNewHeads(true)
                                 .to_json_response(&unsub_request_id);
-                            let _ = responses_sender.send(response).await;
+                            log_and_respond_no_mutex(&mut responses_sender, &log_target, response)
+                                .await;
                             break;
                         }
                         future::Either::Right((Err(_), _)) => break,
@@ -1624,19 +1662,19 @@ impl Background {
         {
             Ok(v) => v,
             Err(()) => {
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(json_rpc::parse::build_error_response(
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    json_rpc::parse::build_error_response(
                         request_id,
                         json_rpc::parse::ErrorResponse::ServerError(
                             -32000,
                             "Too many active subscriptions",
                         ),
                         None,
-                    ))
-                    .await;
+                    ),
+                )
+                .await;
                 return;
             }
         };
@@ -1651,6 +1689,7 @@ impl Background {
             .to_json_response(request_id);
 
         let mut responses_sender = self.responses_sender.lock().await.clone();
+        let log_target = self.log_target.clone();
 
         // Spawn a separate task for the subscription.
         self.new_child_tasks_tx
@@ -1658,7 +1697,7 @@ impl Background {
             .await
             .unbounded_send(Box::pin(async move {
                 // Send back to the user the confirmation of the registration.
-                let _ = responses_sender.send(confirmation).await;
+                log_and_respond_no_mutex(&mut responses_sender, &log_target, confirmation).await;
 
                 loop {
                     // Wait for either a new block, or for the subscription to be canceled.
@@ -1670,18 +1709,22 @@ impl Background {
                                 methods::Header::from_scale_encoded_header(&block.unwrap())
                                     .unwrap();
 
-                            let _ = responses_sender
-                                .send(json_rpc::parse::build_subscription_event(
+                            log_and_respond_no_mutex(
+                                &mut responses_sender,
+                                &log_target,
+                                json_rpc::parse::build_subscription_event(
                                     "chain_finalizedHead",
                                     &subscription,
                                     &serde_json::to_string(&header).unwrap(),
-                                ))
-                                .await;
+                                ),
+                            )
+                            .await;
                         }
                         future::Either::Right((Ok(unsub_request_id), _)) => {
                             let response = methods::Response::chain_unsubscribeFinalizedHeads(true)
                                 .to_json_response(&unsub_request_id);
-                            let _ = responses_sender.send(response).await;
+                            log_and_respond_no_mutex(&mut responses_sender, &log_target, response)
+                                .await;
                             break;
                         }
                         future::Either::Right((Err(_), _)) => break,
@@ -1697,19 +1740,19 @@ impl Background {
             match self.alloc_subscription(SubscriptionTy::Storage).await {
                 Ok(v) => v,
                 Err(()) => {
-                    let _ = self
-                        .responses_sender
-                        .lock()
-                        .await
-                        .send(json_rpc::parse::build_error_response(
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        json_rpc::parse::build_error_response(
                             request_id,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
                                 "Too many active subscriptions",
                             ),
                             None,
-                        ))
-                        .await;
+                        ),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -1787,6 +1830,7 @@ impl Background {
             methods::Response::state_subscribeStorage(&subscription).to_json_response(request_id);
 
         let mut responses_sender = self.responses_sender.lock().await.clone();
+        let log_target = self.log_target.clone();
 
         // Spawn a separate task for the subscription.
         self.new_child_tasks_tx
@@ -1796,7 +1840,7 @@ impl Background {
                 futures::pin_mut!(storage_updates);
 
                 // Send back to the user the confirmation of the registration.
-                let _ = responses_sender.send(confirmation).await;
+                log_and_respond_no_mutex(&mut responses_sender, &log_target, confirmation).await;
 
                 loop {
                     // Wait for either a new storage update, or for the subscription to be canceled.
@@ -1804,18 +1848,22 @@ impl Background {
                     futures::pin_mut!(next_block);
                     match future::select(next_block, &mut unsubscribe_rx).await {
                         future::Either::Left((changes, _)) => {
-                            let _ = responses_sender
-                                .send(json_rpc::parse::build_subscription_event(
+                            log_and_respond_no_mutex(
+                                &mut responses_sender,
+                                &log_target,
+                                json_rpc::parse::build_subscription_event(
                                     "state_storage",
                                     &subscription,
                                     &serde_json::to_string(&changes).unwrap(),
-                                ))
-                                .await;
+                                ),
+                            )
+                            .await;
                         }
                         future::Either::Right((Ok(unsub_request_id), _)) => {
                             let response = methods::Response::state_unsubscribeStorage(true)
                                 .to_json_response(&unsub_request_id);
-                            let _ = responses_sender.send(response).await;
+                            log_and_respond_no_mutex(&mut responses_sender, &log_target, response)
+                                .await;
                             break;
                         }
                         future::Either::Right((Err(_), _)) => break,
@@ -2021,8 +2069,8 @@ enum StorageQueryError {
     StorageRetrieval(sync_service::StorageQueryError),
 }
 
-async fn account_nonce(
-    relay_chain_sync: &Arc<runtime_service::RuntimeService>,
+async fn account_nonce<TPlat: Platform>(
+    relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
     account: methods::AccountId,
 ) -> Result<Vec<u8>, AnnounceNonceError> {
     // For each relay chain block, call `ParachainHost_persisted_validation_data` in
@@ -2088,8 +2136,8 @@ enum AnnounceNonceError {
     ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
 }
 
-async fn payment_query_info(
-    relay_chain_sync: &Arc<runtime_service::RuntimeService>,
+async fn payment_query_info<TPlat: Platform>(
+    relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
     extrinsic: &[u8],
 ) -> Result<methods::RuntimeDispatchInfo, PaymentQueryInfoError> {
     // For each relay chain block, call `ParachainHost_persisted_validation_data` in

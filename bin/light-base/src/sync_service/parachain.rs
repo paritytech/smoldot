@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{BlockNotification, Notification, SubscribeAll, ToBackground};
-use crate::{ffi, network_service, runtime_service};
+use crate::{network_service, runtime_service, Platform};
 
 use futures::{channel::mpsc, prelude::*};
 use itertools::Itertools as _;
@@ -32,10 +32,10 @@ use smoldot::{
 use std::{collections::HashMap, iter, sync::Arc, time::Duration};
 
 /// Starts a sync service background task to synchronize a parachain.
-pub(super) async fn start_parachain(
+pub(super) async fn start_parachain<TPlat: Platform>(
     log_target: String,
     chain_information: chain::chain_information::ValidChainInformation,
-    relay_chain_sync: Arc<runtime_service::RuntimeService>,
+    relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
     parachain_id: u32,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     network_chain_index: usize,
@@ -90,7 +90,7 @@ pub(super) async fn start_parachain(
         // fetched yet.
         let mut async_tree = {
             let mut async_tree =
-                async_tree::AsyncTree::<ffi::Instant, [u8; 32], _>::new(async_tree::Config {
+                async_tree::AsyncTree::<TPlat::Instant, [u8; 32], _>::new(async_tree::Config {
                     finalized_async_user_data: None,
                     retry_after_failed: Duration::from_secs(5),
                 });
@@ -124,9 +124,9 @@ pub(super) async fn start_parachain(
         loop {
             // Start fetching paraheads of new blocks whose parahead needs to be fetched.
             while in_progress_paraheads.len() < 4 {
-                match async_tree.next_necessary_async_op(&ffi::Instant::now()) {
+                match async_tree.next_necessary_async_op(&TPlat::now()) {
                     async_tree::NextNecessaryAsyncOp::NotReady { when: Some(when) } => {
-                        wakeup_deadline = future::Either::Left(ffi::Delay::new_at(when));
+                        wakeup_deadline = future::Either::Left(TPlat::sleep_until(when).fuse());
                         break;
                     }
                     async_tree::NextNecessaryAsyncOp::NotReady { when: None } => {
@@ -332,7 +332,7 @@ pub(super) async fn start_parachain(
                                 error
                             );
 
-                            async_tree.async_op_failure(async_op_id, &ffi::Instant::now());
+                            async_tree.async_op_failure(async_op_id, &TPlat::now());
                         }
                     }
                 }
@@ -444,8 +444,8 @@ pub(super) async fn start_parachain(
     }
 }
 
-async fn parahead(
-    relay_chain_sync: &Arc<runtime_service::RuntimeService>,
+async fn parahead<TPlat: Platform>(
+    relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
     parachain_id: u32,
     block_hash: &[u8; 32],
 ) -> Result<Vec<u8>, ParaheadError> {

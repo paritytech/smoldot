@@ -61,7 +61,7 @@ child_process.execSync(
 // The important step in this script is running `cargo build --target wasm32-wasi` on the Rust
 // code. This generates a `wasm` file in `target/wasm32-wasi`.
 child_process.execSync(
-    "cargo +" + rust_version + " build --package smoldot-light --target wasm32-wasi --no-default-features"
+    "cargo +" + rust_version + " build --package smoldot-light-wasm --target wasm32-wasi --no-default-features"
     + (build_profile == 'debug' ? '' : ' --' + build_profile),
     { 'stdio': 'inherit' }
 );
@@ -74,7 +74,7 @@ try {
     if (build_profile == 'release') {
         child_process.execSync(
             "wasm-opt -o src/autogen/tmp.wasm -Os --strip-debug --vacuum --dce "
-            + "../../../target/wasm32-wasi/" + build_profile + "/smoldot_light.wasm",
+            + "../../../target/wasm32-wasi/" + build_profile + "/smoldot_light_wasm.wasm",
             { 'stdio': 'inherit' }
         );
     } else {
@@ -86,7 +86,7 @@ try {
     fallback_copy = true;
 }
 if (fallback_copy) {
-    fs.copyFileSync("../../../target/wasm32-wasi/" + build_profile + "/smoldot_light.wasm", "./src/autogen/tmp.wasm");
+    fs.copyFileSync("../../../target/wasm32-wasi/" + build_profile + "/smoldot_light_wasm.wasm", "./src/autogen/tmp.wasm");
 }
 
 // We then base64-encode the `.wasm` file, and put this base64 string as a constant in

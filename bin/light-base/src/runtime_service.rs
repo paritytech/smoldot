@@ -42,7 +42,7 @@
 //! [`RuntimeService::recent_best_block_runtime_lock`], that performs a runtime call on the latest
 //! reported best block or more recent.
 
-use crate::{ffi, lossy_channel, sync_service};
+use crate::{lossy_channel, sync_service, Platform};
 
 use futures::{
     channel::mpsc,
@@ -62,7 +62,7 @@ use std::{iter, mem, pin::Pin, sync::Arc, time::Duration};
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 
 /// Configuration for a runtime service.
-pub struct Config<'a> {
+pub struct Config<'a, TPlat: Platform> {
     /// Name of the chain, for logging purposes.
     ///
     /// > **Note**: This name will be directly printed out. Any special character should already
@@ -73,7 +73,7 @@ pub struct Config<'a> {
     pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
     /// Service responsible for synchronizing the chain.
-    pub sync_service: Arc<sync_service::SyncService>,
+    pub sync_service: Arc<sync_service::SyncService<TPlat>>,
 
     /// Specification of the chain.
     pub chain_spec: &'a chain_spec::ChainSpec,
@@ -89,26 +89,26 @@ pub struct Config<'a> {
 }
 
 /// See [the module-level documentation](..).
-pub struct RuntimeService {
+pub struct RuntimeService<TPlat: Platform> {
     /// Target to use for the logs. See [`Config::log_name`].
     log_target: String,
 
     /// See [`Config::sync_service`].
-    sync_service: Arc<sync_service::SyncService>,
+    sync_service: Arc<sync_service::SyncService<TPlat>>,
 
     /// Fields behind a `Mutex`. Should only be locked for short-lived operations.
-    guarded: Arc<Mutex<Guarded>>,
+    guarded: Arc<Mutex<Guarded<TPlat>>>,
 
     /// Handle to abort the background task.
     background_task_abort: future::AbortHandle,
 }
 
-impl RuntimeService {
+impl<TPlat: Platform> RuntimeService<TPlat> {
     /// Initializes a new runtime service.
     ///
     /// The future returned by this function is expected to finish relatively quickly and is
     /// necessary only for locking purposes.
-    pub async fn new(mut config: Config<'_>) -> Arc<Self> {
+    pub async fn new(mut config: Config<'_, TPlat>) -> Arc<Self> {
         // Target to use for all the logs of this service.
         let log_target = format!("runtime-{}", config.log_name);
 
@@ -250,7 +250,7 @@ impl RuntimeService {
     ///
     /// The stream can generate an `Err` if the runtime in the best block is invalid.
     pub async fn subscribe_runtime_version(
-        self: &Arc<RuntimeService>,
+        self: &Arc<RuntimeService<TPlat>>,
     ) -> (
         Option<Result<executor::CoreVersion, RuntimeError>>,
         NotificationsReceiver<Result<executor::CoreVersion, RuntimeError>>,
@@ -285,7 +285,7 @@ impl RuntimeService {
     ///
     /// The future returned by this function might take a long time.
     pub async fn runtime_version_of_block(
-        self: &Arc<RuntimeService>,
+        self: &Arc<RuntimeService<TPlat>>,
         block_hash: &[u8; 32],
     ) -> Result<executor::CoreVersion, RuntimeCallError> {
         // If the requested block is the best known block, optimize by
@@ -328,7 +328,7 @@ impl RuntimeService {
     /// Downloads from the network the SCALE-encoded header and the runtime of the block with
     /// the given hash.
     async fn network_block_info(
-        self: &Arc<RuntimeService>,
+        self: &Arc<RuntimeService<TPlat>>,
         block_hash: &[u8; 32],
     ) -> Result<(Vec<u8>, executor::host::HostVmPrototype), RuntimeCallError> {
         // Ask the network for the header of this block, as we need to know the state root.
@@ -403,7 +403,7 @@ impl RuntimeService {
     ///
     /// The future returned by this function might take a long time.
     pub async fn best_block_runtime(
-        self: &Arc<RuntimeService>,
+        self: &Arc<RuntimeService<TPlat>>,
     ) -> Result<executor::CoreVersion, RuntimeError> {
         let (current, mut subscription) = self.subscribe_runtime_version().await;
         if let Some(current) = current {
@@ -416,7 +416,7 @@ impl RuntimeService {
     /// Returns the SCALE-encoded header of the current finalized block, plus an unlimited stream
     /// that produces one item every time the finalized block is changed.
     pub async fn subscribe_finalized(
-        self: &Arc<RuntimeService>,
+        self: &Arc<RuntimeService<TPlat>>,
     ) -> (Vec<u8>, NotificationsReceiver<Vec<u8>>) {
         let (tx, rx) = lossy_channel::channel();
 
@@ -448,7 +448,7 @@ impl RuntimeService {
     /// the stream of notifications is empty, you are guaranteed that the call has been performed
     /// on the best block.
     pub async fn subscribe_best(
-        self: &Arc<RuntimeService>,
+        self: &Arc<RuntimeService<TPlat>>,
     ) -> (Vec<u8>, NotificationsReceiver<Vec<u8>>) {
         let (tx, rx) = lossy_channel::channel();
         let mut guarded = self.guarded.lock().await;
@@ -468,7 +468,7 @@ impl RuntimeService {
     ///
     /// See [`sync_service::SubscribeAll`] for information about the return value.
     pub async fn subscribe_all(
-        self: &Arc<RuntimeService>,
+        self: &Arc<RuntimeService<TPlat>>,
         buffer_size: usize,
     ) -> sync_service::SubscribeAll {
         let (tx, new_blocks) = mpsc::channel(buffer_size);
@@ -534,8 +534,8 @@ impl RuntimeService {
 
     // TODO: doc
     pub async fn recent_best_block_runtime_lock<'a>(
-        self: &'a Arc<RuntimeService>,
-    ) -> RuntimeLock<'a> {
+        self: &'a Arc<RuntimeService<TPlat>>,
+    ) -> RuntimeLock<'a, TPlat> {
         // TODO: clean up implementation
         let (_, mut notifs) = self.subscribe_best().await;
 
@@ -574,9 +574,9 @@ impl RuntimeService {
     // TODO: doc, especially about which blocks are available
     // TODO: return error instead
     pub async fn runtime_lock<'a>(
-        self: &'a Arc<RuntimeService>,
+        self: &'a Arc<RuntimeService<TPlat>>,
         block_hash: &[u8; 32],
-    ) -> Option<RuntimeLock<'a>> {
+    ) -> Option<RuntimeLock<'a, TPlat>> {
         // TODO: restore
         //let guarded = self.guarded.lock().await;
         /*if guarded
@@ -611,7 +611,7 @@ impl RuntimeService {
     /// >           of the best block can change at any time. This method should ideally be called
     /// >           again after every runtime change.
     pub async fn metadata(
-        self: Arc<RuntimeService>,
+        self: Arc<RuntimeService<TPlat>>,
         block_hash: &[u8; 32],
     ) -> Result<Vec<u8>, MetadataError> {
         self.metadata_inner(Some(block_hash)).await
@@ -622,7 +622,9 @@ impl RuntimeService {
     /// > **Note**: Keep in mind that this function is subject to race conditions. The runtime
     /// >           of the best block can change at any time. This method should ideally be called
     /// >           again after every runtime change.
-    pub async fn best_block_metadata(self: Arc<RuntimeService>) -> Result<Vec<u8>, MetadataError> {
+    pub async fn best_block_metadata(
+        self: Arc<RuntimeService<TPlat>>,
+    ) -> Result<Vec<u8>, MetadataError> {
         // First, try the cache.
         // TODO: restore
         /*{
@@ -650,7 +652,7 @@ impl RuntimeService {
     }
 
     async fn metadata_inner(
-        self: Arc<RuntimeService>,
+        self: Arc<RuntimeService<TPlat>>,
         block_hash: Option<&[u8; 32]>,
     ) -> Result<Vec<u8>, MetadataError> {
         let (runtime_call_lock, virtual_machine) = if let Some(block_hash) = block_hash {
@@ -712,15 +714,15 @@ impl RuntimeService {
     }
 }
 
-impl Drop for RuntimeService {
+impl<TPlat: Platform> Drop for RuntimeService<TPlat> {
     fn drop(&mut self) {
         self.background_task_abort.abort();
     }
 }
 
-async fn is_near_head_of_chain_heuristic(
-    sync_service: &sync_service::SyncService,
-    guarded: &Mutex<Guarded>,
+async fn is_near_head_of_chain_heuristic<TPlat: Platform>(
+    sync_service: &sync_service::SyncService<TPlat>,
+    guarded: &Mutex<Guarded<TPlat>>,
 ) -> bool {
     // The runtime service adds a delay between the moment a best block is reported by the
     // sync service and the moment it is reported by the runtime service.
@@ -742,17 +744,17 @@ async fn is_near_head_of_chain_heuristic(
 
 /// See [`RuntimeService::recent_best_block_runtime_lock`].
 #[must_use]
-pub struct RuntimeLock<'a> {
-    service: &'a Arc<RuntimeService>,
-    inner: RuntimeLockInner<'a>,
+pub struct RuntimeLock<'a, TPlat: Platform> {
+    service: &'a Arc<RuntimeService<TPlat>>,
+    inner: RuntimeLockInner<'a, TPlat>,
 }
 
-enum RuntimeLockInner<'a> {
+enum RuntimeLockInner<'a, TPlat: Platform> {
     /// Call made against [`GuardedInner::FinalizedBlockRuntimeKnown::finalized_block`].
-    Finalized(MutexGuard<'a, Guarded>),
+    Finalized(MutexGuard<'a, Guarded<TPlat>>),
     /// Block is found in the tree at the given index.
     InTree {
-        guarded: MutexGuard<'a, Guarded>,
+        guarded: MutexGuard<'a, Guarded<TPlat>>,
         /// Index of the block to make the call against.
         block_index: async_tree::NodeIndex,
     },
@@ -764,7 +766,7 @@ enum RuntimeLockInner<'a> {
     },
 }
 
-impl<'a> RuntimeLock<'a> {
+impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
     /// Returns the SCALE-encoded header of the block the call is being made against.
     ///
     /// Guaranteed to always be valid.
@@ -824,7 +826,8 @@ impl<'a> RuntimeLock<'a> {
         self,
         method: &'b str,
         parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone + 'b,
-    ) -> Result<(RuntimeCallLock<'a>, executor::host::HostVmPrototype), RuntimeCallError> {
+    ) -> Result<(RuntimeCallLock<'a, TPlat>, executor::host::HostVmPrototype), RuntimeCallError>
+    {
         // TODO: DRY :-/ this whole thing is messy
 
         let block_number = header::decode(&self.block_scale_encoded_header())
@@ -922,14 +925,14 @@ impl<'a> RuntimeLock<'a> {
 
 /// See [`RuntimeService::recent_best_block_runtime_lock`].
 #[must_use]
-pub struct RuntimeCallLock<'a> {
+pub struct RuntimeCallLock<'a, TPlat: Platform> {
     /// If `Some`, the virtual machine must be put back in the runtimes at the given index.
-    guarded: Option<(MutexGuard<'a, Guarded>, usize)>,
+    guarded: Option<(MutexGuard<'a, Guarded<TPlat>>, usize)>,
     runtime_block_header: Vec<u8>,
     call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
 }
 
-impl<'a> RuntimeCallLock<'a> {
+impl<'a, TPlat: Platform> RuntimeCallLock<'a, TPlat> {
     /// Returns the SCALE-encoded header of the block the call is being made against.
     pub fn block_scale_encoded_header(&self) -> &[u8] {
         &self.runtime_block_header
@@ -1036,7 +1039,7 @@ impl<'a> RuntimeCallLock<'a> {
     }
 }
 
-impl<'a> Drop for RuntimeCallLock<'a> {
+impl<'a, TPlat: Platform> Drop for RuntimeCallLock<'a, TPlat> {
     fn drop(&mut self) {
         if let Some((guarded, runtime_index)) = &mut self.guarded {
             let vm = &guarded.runtimes[*runtime_index]
@@ -1119,7 +1122,7 @@ pub enum MetadataError {
     RuntimeFetch,
 }
 
-struct Guarded {
+struct Guarded<TPlat: Platform> {
     /// List of senders that get notified when the runtime spec of the best block changes.
     /// Whenever the best block runtime is updated, one should emit an item on each sender.
     /// See [`RuntimeService::subscribe_runtime_version`].
@@ -1146,10 +1149,10 @@ struct Guarded {
     runtimes: slab::Slab<Runtime>,
 
     /// Tree of blocks.
-    tree: GuardedInner,
+    tree: GuardedInner<TPlat>,
 }
 
-enum GuardedInner {
+enum GuardedInner<TPlat: Platform> {
     FinalizedBlockRuntimeKnown {
         /// Tree of blocks. Holds the state of the download of everything. Always `Some` when the
         /// `Mutex` is being locked. Temporarily switched to `None` during some operations.
@@ -1157,7 +1160,7 @@ enum GuardedInner {
         /// The asynchronous operation user data is a `usize` corresponding to the index within
         /// [`Guarded::runtimes`].
         // TODO: needs to be Option?
-        tree: Option<async_tree::AsyncTree<ffi::Instant, Block, usize>>,
+        tree: Option<async_tree::AsyncTree<TPlat::Instant, Block, usize>>,
 
         /// Finalized block. Outside of the tree.
         finalized_block: Block,
@@ -1174,11 +1177,11 @@ enum GuardedInner {
         /// finalized block.
         // TODO: needs to be Option?
         // TODO: explain better
-        tree: Option<async_tree::AsyncTree<ffi::Instant, Block, Option<usize>>>,
+        tree: Option<async_tree::AsyncTree<TPlat::Instant, Block, Option<usize>>>,
     },
 }
 
-impl Guarded {
+impl<TPlat: Platform> Guarded<TPlat> {
     /// Returns the header of the "output" best block found in the tree.
     fn best_block_header(&self) -> &Vec<u8> {
         match &self.tree {
@@ -1300,10 +1303,10 @@ struct Block {
     scale_encoded_header: Vec<u8>,
 }
 
-async fn run_background(
+async fn run_background<TPlat: Platform>(
     log_target: String,
-    sync_service: Arc<sync_service::SyncService>,
-    original_guarded: Arc<Mutex<Guarded>>,
+    sync_service: Arc<sync_service::SyncService<TPlat>>,
+    original_guarded: Arc<Mutex<Guarded<TPlat>>>,
 ) {
     loop {
         // The buffer size should be large enough so that, if the CPU is busy, it doesn't
@@ -1543,10 +1546,10 @@ async fn run_background(
                                 GuardedInner::FinalizedBlockRuntimeKnown {
                                     tree: Some(tree), ..
                                 } => {
-                                    tree.async_op_failure(async_op_id, &ffi::Instant::now());
+                                    tree.async_op_failure(async_op_id, &TPlat::now());
                                 }
                                 GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
-                                    tree.async_op_failure(async_op_id, &ffi::Instant::now());
+                                    tree.async_op_failure(async_op_id, &TPlat::now());
                                 }
                                 _ => unreachable!(),
                             }
@@ -1577,12 +1580,12 @@ impl RuntimeDownloadError {
     }
 }
 
-struct Background {
+struct Background<TPlat: Platform> {
     log_target: String,
 
-    sync_service: Arc<sync_service::SyncService>,
+    sync_service: Arc<sync_service::SyncService<TPlat>>,
 
-    guarded: Arc<Mutex<Guarded>>,
+    guarded: Arc<Mutex<Guarded<TPlat>>>,
 
     /// Stream of blocks updates coming from the sync service.
     /// Initially has a dummy value.
@@ -1605,7 +1608,7 @@ struct Background {
     wake_up_new_necessary_download: future::Fuse<future::BoxFuture<'static, ()>>,
 }
 
-impl Background {
+impl<TPlat: Platform> Background<TPlat> {
     /// Injects into the state of `self` a completed runtime download.
     async fn runtime_download_finished(
         &mut self,
@@ -1653,7 +1656,7 @@ impl Background {
         self.advance_and_notify_subscribers(&mut guarded);
     }
 
-    fn advance_and_notify_subscribers(&self, guarded: &mut Guarded) {
+    fn advance_and_notify_subscribers(&self, guarded: &mut Guarded<TPlat>) {
         let mut best_block_updated = false;
         let mut best_block_runtime_changed = false;
         let mut finalized_block_updated = false;
@@ -1796,9 +1799,9 @@ impl Background {
                 let async_op = match &mut guarded.tree {
                     GuardedInner::FinalizedBlockRuntimeKnown {
                         tree: Some(tree), ..
-                    } => tree.next_necessary_async_op(&ffi::Instant::now()),
+                    } => tree.next_necessary_async_op(&TPlat::now()),
                     GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
-                        tree.next_necessary_async_op(&ffi::Instant::now())
+                        tree.next_necessary_async_op(&TPlat::now())
                     }
                     _ => unreachable!(),
                 };
@@ -1807,7 +1810,7 @@ impl Background {
                     async_tree::NextNecessaryAsyncOp::Ready(dl) => dl,
                     async_tree::NextNecessaryAsyncOp::NotReady { when } => {
                         self.wake_up_new_necessary_download = if let Some(when) = when {
-                            ffi::Delay::new_at(when).boxed()
+                            TPlat::sleep_until(when).boxed()
                         } else {
                             future::pending().boxed()
                         }
@@ -1985,7 +1988,7 @@ impl SuccessfulRuntime {
     ) -> Result<Self, RuntimeError> {
         // Since compiling the runtime is a CPU-intensive operation, we yield once before and
         // once after.
-        super::yield_once().await;
+        crate::util::yield_once().await;
 
         let vm = match executor::host::HostVmPrototype::new(
             code.as_ref().ok_or(RuntimeError::CodeNotFound)?,
@@ -2001,7 +2004,7 @@ impl SuccessfulRuntime {
 
         // Since compiling the runtime is a CPU-intensive operation, we yield once before and
         // once after.
-        super::yield_once().await;
+        crate::util::yield_once().await;
 
         let (runtime_spec, vm) = match executor::core_version(vm) {
             (Ok(spec), vm) => (spec, vm),

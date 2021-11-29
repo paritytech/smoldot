@@ -67,7 +67,7 @@
 //! transaction.
 //!
 
-use crate::{ffi, network_service, runtime_service, sync_service};
+use crate::{network_service, runtime_service, sync_service, Platform};
 
 use futures::{channel::mpsc, lock::Mutex, prelude::*, stream::FuturesUnordered};
 use smoldot::{
@@ -77,10 +77,10 @@ use smoldot::{
     network::protocol,
     transactions::{light_pool, validate},
 };
-use std::{cmp, iter, num::NonZeroU32, sync::Arc, time::Duration};
+use std::{cmp, iter, marker::PhantomData, num::NonZeroU32, sync::Arc, time::Duration};
 
 /// Configuration for a [`TransactionsService`].
-pub struct Config {
+pub struct Config<TPlat: Platform> {
     /// Name of the chain, for logging purposes.
     ///
     /// > **Note**: This name will be directly printed out. Any special character should already
@@ -91,14 +91,14 @@ pub struct Config {
     pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
     /// Service responsible for synchronizing the chain.
-    pub sync_service: Arc<sync_service::SyncService>,
+    pub sync_service: Arc<sync_service::SyncService<TPlat>>,
 
     /// Service responsible for synchronizing the chain.
-    pub runtime_service: Arc<runtime_service::RuntimeService>,
+    pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
 
     /// Access to the network, and index of the chain to use to gossip transactions from the point
     /// of view of the network service.
-    pub network_service: (Arc<network_service::NetworkService>, usize),
+    pub network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
 
     /// Maximum number of pending transactions allowed in the service.
     ///
@@ -116,19 +116,21 @@ pub struct Config {
 }
 
 /// See [the module-level documentation](..).
-pub struct TransactionsService {
+pub struct TransactionsService<TPlat> {
     /// Sending messages to the background task.
     to_background: Mutex<mpsc::Sender<ToBackground>>,
+
+    platform: PhantomData<fn() -> TPlat>,
 }
 
-impl TransactionsService {
+impl<TPlat: Platform> TransactionsService<TPlat> {
     /// Builds a new service.
-    pub async fn new(mut config: Config) -> Self {
+    pub async fn new(mut config: Config<TPlat>) -> Self {
         let (to_background, from_foreground) = mpsc::channel(8);
 
         (config.tasks_executor)(
             "transactions-service".into(),
-            Box::pin(background_task(
+            Box::pin(background_task::<TPlat>(
                 config.log_name,
                 config.sync_service,
                 config.runtime_service,
@@ -146,6 +148,7 @@ impl TransactionsService {
 
         TransactionsService {
             to_background: Mutex::new(to_background),
+            platform: PhantomData,
         }
     }
 
@@ -258,11 +261,11 @@ enum ToBackground {
 }
 
 /// Background task running in parallel of the front service.
-async fn background_task(
+async fn background_task<TPlat: Platform>(
     log_name: String,
-    sync_service: Arc<sync_service::SyncService>,
-    runtime_service: Arc<runtime_service::RuntimeService>,
-    network_service: Arc<network_service::NetworkService>,
+    sync_service: Arc<sync_service::SyncService<TPlat>>,
+    runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
+    network_service: Arc<network_service::NetworkService<TPlat>>,
     network_chain_index: usize,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     max_concurrent_downloads: usize,
@@ -559,7 +562,7 @@ async fn background_task(
                         continue;
                     }
 
-                    let now = ffi::Instant::now();
+                    let now = TPlat::now();
                     let tx = worker.pending_transactions.transaction_user_data_mut(maybe_reannounce_tx_id).unwrap();
                     if tx.when_reannounce > now {
                         continue;
@@ -570,7 +573,7 @@ async fn background_task(
                     // Update transaction state for the next re-announce.
                     tx.when_reannounce = now + Duration::from_secs(5);
                     worker.next_reannounce.push(async move {
-                        ffi::Delay::new(Duration::from_secs(5)).await;
+                        TPlat::sleep(Duration::from_secs(5)).await;
                         maybe_reannounce_tx_id
                     }.boxed());
 
@@ -715,7 +718,7 @@ async fn background_task(
                             worker
                                 .pending_transactions
                                 .add_unvalidated(transaction_bytes, PendingTransaction {
-                                    when_reannounce: ffi::Instant::now(),
+                                    when_reannounce: TPlat::now(),
                                     status_update: {
                                         let mut vec = Vec::with_capacity(1);
                                         if let Some(updates_report) = updates_report {
@@ -735,15 +738,15 @@ async fn background_task(
 }
 
 /// Background worker running in parallel of the front service.
-struct Worker {
+struct Worker<TPlat: Platform> {
     // How to download the bodies of blocks and synchronize the chain.
-    sync_service: Arc<sync_service::SyncService>,
+    sync_service: Arc<sync_service::SyncService<TPlat>>,
 
     /// How to validate transactions.
-    runtime_service: Arc<runtime_service::RuntimeService>,
+    runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
 
     /// How to gossip transactions.
-    network_service: Arc<network_service::NetworkService>,
+    network_service: Arc<network_service::NetworkService<TPlat>>,
 
     /// Which chain to use in combination with the [`Worker::network_service`].
     network_chain_index: usize,
@@ -757,7 +760,7 @@ struct Worker {
     /// network. It is normal to find entries where the status report channel is close, as they
     /// still represent transactions that we're trying to include but whose status isn't
     /// interesting us.
-    pending_transactions: light_pool::LightPool<PendingTransaction, Block>,
+    pending_transactions: light_pool::LightPool<PendingTransaction<TPlat>, Block>,
 
     /// See [`Config::max_pending_transactions`].
     max_pending_transactions: usize,
@@ -789,7 +792,7 @@ struct Worker {
     max_concurrent_downloads: usize,
 }
 
-impl Worker {
+impl<TPlat: Platform> Worker<TPlat> {
     /// Update the best block. Must have been previously inserted with
     /// [`light_pool::LightPool::add_block`].
     fn set_best_block(&mut self, new_best_block_hash: &[u8; 32]) {
@@ -829,7 +832,7 @@ struct Block {
     downloading: bool,
 }
 
-struct PendingTransaction {
+struct PendingTransaction<TPlat: Platform> {
     /// Earliest moment when to gossip the transaction on the network again.
     ///
     /// This should be interpreted as the moment before which to not reannounce, rather than the
@@ -837,7 +840,7 @@ struct PendingTransaction {
     ///
     /// In particular, this value might be long in the past, in case for example of a transaction
     /// that is not validated.
-    when_reannounce: ffi::Instant,
+    when_reannounce: TPlat::Instant,
 
     /// List of channels that should receive changes to the transaction status.
     status_update: Vec<mpsc::Sender<TransactionStatus>>,
@@ -860,7 +863,7 @@ struct PendingTransaction {
     >,
 }
 
-impl PendingTransaction {
+impl<TPlat: Platform> PendingTransaction<TPlat> {
     fn add_status_update(&mut self, mut channel: mpsc::Sender<TransactionStatus>) {
         if let Some(latest_status) = &self.latest_status {
             if channel.try_send(latest_status.clone()).is_err() {
@@ -887,9 +890,9 @@ impl PendingTransaction {
 /// of the [`runtime_service::RuntimeService`].
 ///
 /// Returns the result of the validation, and the hash of the block it was validated against.
-async fn validate_transaction(
+async fn validate_transaction<TPlat: Platform>(
     log_target: &str,
-    relay_chain_sync: &Arc<runtime_service::RuntimeService>,
+    relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
     scale_encoded_transaction: impl AsRef<[u8]> + Clone,
     source: validate::TransactionSource,
 ) -> Result<

@@ -26,7 +26,7 @@
 //!
 //! Use [`SyncService::subscribe_all`] to get notified about updates to the state of the chain.
 
-use crate::{network_service, runtime_service};
+use crate::{network_service, runtime_service, Platform};
 
 use futures::{
     channel::{mpsc, oneshot},
@@ -47,7 +47,7 @@ mod parachain;
 mod standalone;
 
 /// Configuration for a [`SyncService`].
-pub struct Config {
+pub struct Config<TPlat: Platform> {
     /// Name of the chain, for logging purposes.
     ///
     /// > **Note**: This name will be directly printed out. Any special character should already
@@ -62,7 +62,7 @@ pub struct Config {
 
     /// Access to the network, and index of the chain to sync from the point of view of the
     /// network service.
-    pub network_service: (Arc<network_service::NetworkService>, usize),
+    pub network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
 
     /// Receiver for events coming from the network, as returned by
     /// [`network_service::NetworkService::new`].
@@ -70,13 +70,13 @@ pub struct Config {
 
     /// Extra fields used when the chain is a parachain.
     /// If `None`, this chain is a standalone chain or a relay chain.
-    pub parachain: Option<ConfigParachain>,
+    pub parachain: Option<ConfigParachain<TPlat>>,
 }
 
 /// See [`Config::parachain`].
-pub struct ConfigParachain {
+pub struct ConfigParachain<TPlat: Platform> {
     /// Runtime service that synchronizes the relay chain of this parachain.
-    pub relay_chain_sync: Arc<runtime_service::RuntimeService>,
+    pub relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
 
     /// Id of the parachain within the relay chain.
     ///
@@ -92,18 +92,18 @@ pub struct ConfigParachain {
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct BlocksRequestId(usize);
 
-pub struct SyncService {
+pub struct SyncService<TPlat: Platform> {
     /// Sender of messages towards the background task.
     to_background: Mutex<mpsc::Sender<ToBackground>>,
 
     /// See [`Config::network_service`].
-    network_service: Arc<network_service::NetworkService>,
+    network_service: Arc<network_service::NetworkService<TPlat>>,
     /// See [`Config::network_service`].
     network_chain_index: usize,
 }
 
-impl SyncService {
-    pub async fn new(mut config: Config) -> Self {
+impl<TPlat: Platform> SyncService<TPlat> {
+    pub async fn new(mut config: Config<TPlat>) -> Self {
         let (to_background, from_foreground) = mpsc::channel(16);
 
         let log_target = format!("sync-service-{}", config.log_name);
