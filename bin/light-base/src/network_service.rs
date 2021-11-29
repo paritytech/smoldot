@@ -206,13 +206,13 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                         let event = loop {
                             match network_service.network.next_event(TPlat::now()).await {
                                 service::Event::Connected(peer_id) => {
-                                    log::info!(target: "network", "Connected to {}", peer_id);
+                                    log::debug!(target: "network", "Connected({})", peer_id);
                                 }
                                 service::Event::Disconnected {
                                     peer_id,
                                     chain_indices,
                                 } => {
-                                    log::info!(target: "network", "Disconnected from {} (chains: {:?})", peer_id, chain_indices);
+                                    log::debug!(target: "network", "Disconnected({})", peer_id);
                                     if !chain_indices.is_empty() {
                                         // TODO: properly implement when multiple chains
                                         if chain_indices.len() == 1 {
@@ -899,10 +899,17 @@ async fn connection_task<TPlat: Platform>(
         {
             Ok(rw) => rw,
             Err(err) if is_important_peer => {
-                log::warn!(
-                    target: "connections", "Error in connection with {}: {}",
-                    expected_peer_id, err
-                );
+                match err {
+                    // Ungraceful termination.
+                    ConnectionError::Established(_) | ConnectionError::Handshake(_) => {
+                        log::warn!(
+                            target: "connections", "Error in connection with {}: {}",
+                            expected_peer_id, err
+                        );
+                    }
+                    // Graceful termination.
+                    ConnectionError::LocalShutdown | ConnectionError::Eof => {}
+                }
 
                 // For any handshake error other than "no protocol in common has been found",
                 // it is likely that the cause is connecting to a port that isn't serving the
