@@ -23,7 +23,7 @@ use futures::{channel::mpsc, prelude::*};
 use itertools::Itertools as _;
 use smoldot::{
     chain, chain_spec, header,
-    informant::{BytesDisplay, HashDisplay},
+    informant::HashDisplay,
     libp2p::{connection, multiaddr, peer_id},
 };
 use std::{
@@ -35,8 +35,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-
-mod alloc;
 
 mod json_rpc_service;
 mod lossy_channel;
@@ -296,29 +294,6 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     pub fn new(
         tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
     ) -> Self {
-        // Spawn a constantly-running task that periodically prints the total memory usage of
-        // the node.
-        //
-        // Note that, as a hack, this is done for each `Client`, meaning that it will be printed
-        // multiple times of multiple `Client`s are created. In practice only one `Client` is ever
-        // created.
-        // TODO: ^ solve this hack?
-        tasks_spawner
-            .unbounded_send((
-                "memory-printer".to_owned(),
-                Box::pin(async move {
-                    loop {
-                        TPlat::sleep(Duration::from_secs(60)).await;
-
-                        // For the unwrap below to fail, the quantity of allocated would have to
-                        // not fit in a `u64`, which as of 2021 is basically impossible.
-                        let mem = u64::try_from(alloc::total_alloc_bytes()).unwrap();
-                        log::info!(target: "smoldot", "Node memory usage: {}", BytesDisplay(mem));
-                    }
-                }),
-            ))
-            .unwrap();
-
         let expected_chains = 8;
         Client {
             new_task_tx: tasks_spawner,
@@ -332,21 +307,6 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
         &mut self,
         config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
     ) -> ChainId {
-        // Fail any new chain initialization if we're running low on memory space, which can
-        // realistically happen as Wasm is a 32 bits platform. This avoids potentially running into
-        // OOM errors. The threshold is completely empirical and should probably be updated
-        // regularly to account for changes in the implementation.
-        if alloc::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
-            return ChainId(
-                self.public_api_chains
-                    .insert(PublicApiChain::Erroneous {
-                        user_data: config.user_data,
-                        error: format!(
-                        "Wasm node is running low on memory and will prevent any new chain from being added"
-                    )}),
-            );
-        }
-
         // Decode the chain specification.
         let chain_spec = match chain_spec::ChainSpec::from_json_bytes(&config.specification) {
             Ok(cs) => cs,
@@ -730,6 +690,17 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
             json_rpc_service,
         });
         new_chain_id
+    }
+
+    /// Adds a new dummy chain to the list of chains.
+    ///
+    /// The [`Client::chain_is_erroneous`] function for this chain returns `Some` with the given
+    /// error message.
+    pub fn add_erroneous_chain(&mut self, error_message: String, user_data: TChain) -> ChainId {
+        ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
+            user_data,
+            error: error_message,
+        }))
     }
 
     /// If [`Client::add_chain`] encountered an error when creating this chain, returns the error
