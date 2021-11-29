@@ -32,6 +32,15 @@ use core::{
 use futures::{lock::Mutex, prelude::*};
 use std::collections::BinaryHeap;
 
+pub(crate) fn timer_finished(timer_id: u32) {
+    let callback = {
+        let ptr = timer_id as *mut Box<dyn FnOnce()>;
+        unsafe { Box::from_raw(ptr) }
+    };
+
+    callback();
+}
+
 use super::Instant;
 
 /// `Future` that automatically wakes up after a certain amount of time has elapsed.
