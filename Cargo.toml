@@ -15,6 +15,7 @@ default-members = [".", "bin/full-node"]
 members = [
     ".",
     "bin/full-node",
+    "bin/light-base",
     "bin/wasm-node/rust",
 ]
 

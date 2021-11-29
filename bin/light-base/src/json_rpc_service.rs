@@ -1257,8 +1257,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 log_and_respond(
                     &self.responses_sender,
                     &self.log_target,
-                    methods::Response::system_name(env!("CARGO_PKG_NAME"))
-                        .to_json_response(request_id),
+                    methods::Response::system_name("smoldot-light").to_json_response(request_id),
                 )
                 .await;
             }
