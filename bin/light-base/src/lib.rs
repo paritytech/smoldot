@@ -836,10 +836,6 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     }
 }
 
-pub enum JsonRpcRequestError {
-    Full,
-}
-
 /// Starts all the services of the client.
 ///
 /// Returns some of the services that have been started. If these service get shut down, all the
