@@ -134,7 +134,7 @@ pub struct JsonRpcService<TPlat: Platform> {
     /// Channel to send JSON-RPC requests to the background task.
     ///
     /// Limited to [`Config::max_pending_requests`] elements.
-    new_requests_in: Mutex<mpsc::Sender<String>>,
+    new_requests_in: mpsc::Sender<String>,
 
     /// Target to use when emitting logs.
     log_target: String,
@@ -155,7 +155,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
         let log_target = format!("json-rpc-{}", config.log_name);
         let client = JsonRpcService {
             log_target: log_target.clone(),
-            new_requests_in: Mutex::new(new_requests_in),
+            new_requests_in,
             platform: PhantomData,
         };
 
@@ -291,16 +291,11 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
 
     /// Queues the given JSON-RPC request to be processed in the background.
     ///
-    /// This method is `async`, but it is expected to finish very quickly. The processing of the
-    /// request is done in parallel in the background.
-    ///
     /// An error is returned if [`Config::max_pending_requests`] is exceeded, which can happen
     /// if the requests take a long time to process or if the [`Config::responses_sender`] channel
     /// isn't polled often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
     /// JSON-RPC response to immediately send back to the user.
-    pub async fn queue_rpc_request(&self, json_rpc_request: String) -> Result<(), HandleRpcError> {
-        let mut lock = self.new_requests_in.lock().await;
-
+    pub fn queue_rpc_request(&mut self, json_rpc_request: String) -> Result<(), HandleRpcError> {
         log::log!(
             target: &self.log_target,
             log::Level::Debug,
@@ -317,7 +312,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             }
         );
 
-        match lock.try_send(json_rpc_request) {
+        match self.new_requests_in.try_send(json_rpc_request) {
             Ok(()) => Ok(()),
             Err(err) => {
                 assert!(err.is_full());
@@ -382,6 +377,9 @@ pub enum HandleRpcError {
 
 impl HandleRpcError {
     /// Builds the JSON-RPC error string corresponding to this error.
+    ///
+    /// Returns `None` if the JSON-RPC requests isn't valid JSON-RPC or if the call was a
+    /// notification.
     pub fn into_json_rpc_error(self) -> Option<String> {
         let HandleRpcError::Overloaded { json_rpc_request } = self;
 
