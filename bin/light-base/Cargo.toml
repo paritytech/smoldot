@@ -1,6 +1,6 @@
 [package]
 name = "smoldot-light-base"
-version = "0.5.4"
+version = "0.1.0"
 authors = ["Parity Technologies <admin@parity.io>", "Pierre Krieger <pierre.krieger1708@gmail.com>"]
 description = "Browser bindings to a light client for Substrate-based blockchains"
 repository = "https://github.com/paritytech/smoldot"
