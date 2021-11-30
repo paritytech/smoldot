@@ -20,7 +20,7 @@ use crate::{bindings, timers::Delay};
 use smoldot_light_base::ConnectError;
 
 use core::{fmt, marker, pin::Pin, slice, str, time::Duration};
-use futures::{channel::oneshot, prelude::*};
+use futures::prelude::*;
 use std::collections::VecDeque;
 
 pub(crate) struct Platform;
@@ -55,7 +55,7 @@ impl smoldot_light_base::Platform for Platform {
             closed_message: None,
             messages_queue: VecDeque::with_capacity(32),
             messages_queue_first_offset: 0,
-            wakers: Vec::with_capacity(1),
+            something_happened: event_listener::Event::new(),
             _pinned: marker::PhantomPinned,
         });
 
@@ -104,11 +104,13 @@ impl smoldot_light_base::Platform for Platform {
                     break;
                 }
 
-                let (tx, rx) = oneshot::channel();
-                unsafe {
-                    Pin::get_unchecked_mut(pointer.as_mut()).wakers.push(tx);
-                }
-                let _ = rx.await;
+                let listener = unsafe {
+                    Pin::get_unchecked_mut(pointer.as_mut())
+                        .something_happened
+                        .listen()
+                };
+
+                listener.await;
             }
 
             if pointer.open {
@@ -129,11 +131,13 @@ impl smoldot_light_base::Platform for Platform {
             return future::ready(()).boxed();
         }
 
-        let (tx, rx) = oneshot::channel();
-        unsafe {
-            Pin::get_unchecked_mut(connection.as_mut()).wakers.push(tx);
-        }
-        rx.map(|_| ()).boxed()
+        let listener = unsafe {
+            Pin::get_unchecked_mut(connection.as_mut())
+                .something_happened
+                .listen()
+        };
+
+        listener.boxed()
     }
 
     fn read_buffer(connection: &mut Self::Connection) -> Option<&[u8]> {
@@ -196,10 +200,8 @@ pub(crate) struct Connection {
     messages_queue: VecDeque<Box<[u8]>>,
     /// Position of the read cursor within the first element of [`Connection::messages_queue`].
     messages_queue_first_offset: usize,
-    /// Channels to send a message on whenever one of the fields above is modified.
-    // TODO: SmallVec instead?
-    // TODO: use something better than a `Sender`?
-    wakers: Vec<oneshot::Sender<()>>,
+    /// Event notified whenever one of the fields above is modified.
+    something_happened: event_listener::Event,
     /// Prevents the [`Connection`] from being unpinned.
     _pinned: marker::PhantomPinned,
 }
@@ -225,9 +227,7 @@ impl Drop for Connection {
 pub(crate) fn connection_open(id: u32) {
     let connection = unsafe { &mut *(usize::try_from(id).unwrap() as *mut Connection) };
     connection.open = true;
-    for waker in connection.wakers.drain(..) {
-        let _ = waker.send(());
-    }
+    connection.something_happened.notify(usize::max_value());
 }
 
 pub(crate) fn connection_message(id: u32, ptr: u32, len: u32) {
@@ -251,10 +251,7 @@ pub(crate) fn connection_message(id: u32, ptr: u32, len: u32) {
     // TODO: add some limit to `messages_queue`, to avoid DoS attacks?
 
     connection.messages_queue.push_back(message);
-
-    for waker in connection.wakers.drain(..) {
-        let _ = waker.send(());
-    }
+    connection.something_happened.notify(usize::max_value());
 }
 
 pub(crate) fn connection_closed(id: u32, ptr: u32, len: u32) {
@@ -268,7 +265,5 @@ pub(crate) fn connection_closed(id: u32, ptr: u32, len: u32) {
         str::from_utf8(&message).unwrap().to_owned()
     });
 
-    for waker in connection.wakers.drain(..) {
-        let _ = waker.send(());
-    }
+    connection.something_happened.notify(usize::max_value());
 }
