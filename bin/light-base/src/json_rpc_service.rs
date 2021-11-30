@@ -474,6 +474,8 @@ struct FollowSubscription {
 
     /// If the user unsubscribes, send the unsubscription request ID of the channel in order to
     /// stop the subscription.
+    ///
+    /// If the channel is disjoint, this means that the subscription is "dead".
     cancel: oneshot::Sender<String>,
 }
 
@@ -1372,20 +1374,27 @@ impl<TPlat: Platform> Background<TPlat> {
                 let response = {
                     let lock = self.subscriptions.lock().await;
                     if let Some(subscription) = lock.chain_head_follow.get(followSubscriptionId) {
-                        subscription.pinned_blocks_headers.get(&hash.0).cloned()
+                        if subscription.cancel.is_canceled() {
+                            Some(None)
+                        } else {
+                            subscription
+                                .pinned_blocks_headers
+                                .get(&hash.0)
+                                .cloned()
+                                .map(Some)
+                        }
                     } else {
                         None
                     }
                 };
 
                 if let Some(response) = response {
-                    // TODO: should return None if subscription is dead
                     log_and_respond(
                         &self.responses_sender,
                         &self.log_target,
-                        methods::Response::chainHead_unstable_header(Some(methods::HexString(
-                            response,
-                        )))
+                        methods::Response::chainHead_unstable_header(
+                            response.map(methods::HexString),
+                        )
                         .to_json_response(request_id),
                     )
                     .await;
@@ -1406,52 +1415,18 @@ impl<TPlat: Platform> Background<TPlat> {
                 followSubscriptionId,
                 hash,
             } => {
-                let response = {
-                    let lock = self.subscriptions.lock().await;
-                    if let Some(subscription) = lock.chain_head_follow.get(followSubscriptionId) {
-                        subscription.pinned_blocks_headers.remove(&hash.0).is_some()
+                let invalid = {
+                    let mut lock = self.subscriptions.lock().await;
+                    if let Some(subscription) = lock.chain_head_follow.get_mut(followSubscriptionId)
+                    {
+                        if subscription.cancel.is_canceled() {
+                            false
+                        } else {
+                            subscription.pinned_blocks_headers.remove(&hash.0).is_some()
+                        }
                     } else {
-                        None
+                        true
                     }
-                };
-
-                if let Some(response) = response {
-                    // TODO: should return None if subscription is dead
-                    log_and_respond(
-                        &self.responses_sender,
-                        &self.log_target,
-                        methods::Response::chainHead_unstable_header(Some(methods::HexString(
-                            response,
-                        )))
-                        .to_json_response(request_id),
-                    )
-                    .await;
-                } else {
-                    log_and_respond(
-                        &self.responses_sender,
-                        &self.log_target,
-                        json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::InvalidParams,
-                            None,
-                        ),
-                    )
-                    .await;
-                }
-            }
-            methods::MethodCall::chainHead_unstable_unfollow {
-                followSubscriptionId,
-            } => {
-                let invalid = if let Some(subscription) = self
-                    .subscriptions
-                    .lock()
-                    .await
-                    .chain_head_follow
-                    .remove(followSubscriptionId)
-                {
-                    subscription.cancel.send(request_id.to_owned()).is_err()
-                } else {
-                    true
                 };
 
                 if invalid {
@@ -1465,7 +1440,56 @@ impl<TPlat: Platform> Background<TPlat> {
                         ),
                     )
                     .await;
+                } else {
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        methods::Response::chainHead_unstable_unpin(())
+                            .to_json_response(request_id),
+                    )
+                    .await;
                 }
+            }
+            methods::MethodCall::chainHead_unstable_unfollow {
+                followSubscriptionId,
+            } => {
+                if let Some(subscription) = self
+                    .subscriptions
+                    .lock()
+                    .await
+                    .chain_head_follow
+                    .remove(followSubscriptionId)
+                {
+                    if subscription.cancel.send(request_id.to_owned()).is_err() {
+                        log_and_respond(
+                            &self.responses_sender,
+                            &self.log_target,
+                            methods::Response::chainHead_unstable_unfollow(())
+                                .to_json_response(request_id),
+                        )
+                        .await;
+                    }
+                } else {
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::InvalidParams,
+                            None,
+                        ),
+                    )
+                    .await;
+                }
+            }
+            methods::MethodCall::sudo_unstable_version {} => {
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    methods::Response::sudo_unstable_version("smoldot v0.1") // TODO:
+                        .to_json_response(request_id),
+                )
+                .await;
             }
 
             _method => {
@@ -2169,6 +2193,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 .to_json_call_object_parameters(None),
                             )
                             .await;
+                            break;
                         }
                         future::Either::Left((
                             Some(sync_service::Notification::Finalized {

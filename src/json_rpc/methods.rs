@@ -410,6 +410,7 @@ define_methods! {
     chainHead_unstable_storageEnd(subscriptionId: &'a str) -> (),
     chainHead_unstable_unfollow(followSubscriptionId: &'a str) -> (),
     chainHead_unstable_unpin(followSubscriptionId: &'a str, hash: HashHexString) -> (),
+    sudo_unstable_version() -> &'a str,
 }
 
 define_methods! {
