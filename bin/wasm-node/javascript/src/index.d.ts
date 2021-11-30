@@ -93,7 +93,9 @@ export interface Chain {
    * The response will be sent back using the callback passed when adding the chain.
    *
    * See <https://www.jsonrpc.org/specification> for a specification of the JSON-RPC format. Only
-   * version 2 is supported. In addition, an (unspecified) "notifications" extension is supported.
+   * version 2 is supported.
+   * Be aware that some requests will cause notifications to be sent back using the same callback
+   * as the responses.
    *
    * No response is generated if the request isn't a valid JSON-RPC request. The request is
    * silently discarded.
