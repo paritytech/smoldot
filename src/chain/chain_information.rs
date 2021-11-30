@@ -43,10 +43,10 @@ use crate::header;
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
-pub mod aura_config;
-pub mod babe_config;
+pub mod aura_genesis_config;
 pub mod babe_fetch_epoch;
-pub mod grandpa_config;
+pub mod babe_genesis_config;
+pub mod grandpa_genesis_config;
 
 /// Information about the latest finalized block and state found in its ancestors.
 ///
@@ -205,7 +205,7 @@ pub enum ChainInformationConsensus {
         ///
         /// If the finalized block belongs to epoch #0, which starts at block #1, then this must
         /// contain the information about the epoch #0, which can be found by calling
-        /// [`babe_config::BabeGenesisConfiguration::from_genesis_storage`].
+        /// [`babe_genesis_config::BabeGenesisConfiguration::from_genesis_storage`].
         ///
         /// Must be `None` if and only if the finalized block is block #0.
         ///
@@ -225,7 +225,7 @@ pub enum ChainInformationConsensus {
         ///
         /// If the finalized block is block #0, then this must contain the information about the
         /// epoch #0, which can be found by calling
-        /// [`babe_config::BabeGenesisConfiguration::from_genesis_storage`].
+        /// [`babe_genesis_config::BabeGenesisConfiguration::from_genesis_storage`].
         finalized_next_epoch_transition: BabeEpochInformation,
     },
 }
