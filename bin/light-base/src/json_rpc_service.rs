@@ -1319,21 +1319,19 @@ impl<TPlat: Platform> Background<TPlat> {
                 .await;
             }
 
-            methods::MethodCall::chainHead_follow_unstable { runtimeUpdates } => {
+            methods::MethodCall::chainHead_unstable_follow { runtimeUpdates } => {
                 self.chain_head_follow(request_id, runtimeUpdates).await;
             }
-            methods::MethodCall::chainHead_genesisHash_unstable {} => {
-                let _ = self
-                    .responses_sender
-                    .lock()
-                    .await
-                    .send(
-                        methods::Response::chainHead_genesisHash_unstable(methods::HashHexString(
-                            self.genesis_block,
-                        ))
-                        .to_json_response(request_id),
-                    )
-                    .await;
+            methods::MethodCall::chainHead_unstable_genesisHash {} => {
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    methods::Response::chainHead_unstable_genesisHash(methods::HashHexString(
+                        self.genesis_block,
+                    ))
+                    .to_json_response(request_id),
+                )
+                .await;
             }
 
             _method => {
@@ -1956,7 +1954,7 @@ impl<TPlat: Platform> Background<TPlat> {
         }
     }
 
-    /// Handles a call to [`methods::MethodCall::chainHead_follow_unstable`].
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_follow`].
     async fn chain_head_follow(&self, request_id: &str, runtime_updates: bool) {
         assert!(!runtime_updates); // TODO: not supported yet
 
@@ -1983,7 +1981,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
         let mut subscribe_all = self.sync_service.subscribe_all(32).await;
 
-        let confirmation = methods::Response::chainHead_follow_unstable(methods::FollowResult {
+        let confirmation = methods::Response::chainHead_unstable_follow(methods::FollowResult {
             subscription_id: subscription.clone(),
             finalized_block_hash: methods::HashHexString(header::hash_from_scale_encoded_header(
                 &subscribe_all.finalized_block_scale_encoded_header[..],
@@ -2012,11 +2010,11 @@ impl<TPlat: Platform> Background<TPlat> {
                             log_and_respond_no_mutex(
                                 &mut responses_sender,
                                 &log_target,
-                                json_rpc::parse::build_subscription_event(
-                                    "chainHead_followEvent_unstable",
-                                    &subscription,
-                                    &"{\"event\": \"stop\"}",
-                                ),
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: &subscription,
+                                    result: methods::FollowEvent::Stop {},
+                                }
+                                .to_json_call_object_parameters(None),
                             )
                             .await;
                         }
@@ -2026,28 +2024,64 @@ impl<TPlat: Platform> Background<TPlat> {
                                 best_block_hash,
                             }),
                             _,
-                        )) => {}
+                        )) => {
+                            // TODO: don't always generate
+                            log_and_respond_no_mutex(
+                                &mut responses_sender,
+                                &log_target,
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: &subscription,
+                                    result: methods::FollowEvent::BestBlockChanged {
+                                        best_block_hash: methods::HashHexString(best_block_hash),
+                                    },
+                                }
+                                .to_json_call_object_parameters(None),
+                            )
+                            .await;
+
+                            // TODO: finalized event
+                        }
                         future::Either::Left((
                             Some(sync_service::Notification::Block(block)),
                             _,
                         )) => {
                             let hash =
                                 header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+
                             log_and_respond_no_mutex(
                                 &mut responses_sender,
                                 &log_target,
-                                json_rpc::parse::build_subscription_event(
-                                    "chainHead_followEvent_unstable",
-                                    &subscription,
-                                    &"", // TODO:
-                                ),
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: &subscription,
+                                    result: methods::FollowEvent::NewBlock {
+                                        block_hash: methods::HashHexString(hash),
+                                        parent_block_hash: methods::HashHexString(
+                                            block.parent_hash,
+                                        ),
+                                        new_runtime: None, // TODO:
+                                    },
+                                }
+                                .to_json_call_object_parameters(None),
                             )
                             .await;
 
-                            // TODO: handle is_new_best
+                            if block.is_new_best {
+                                log_and_respond_no_mutex(
+                                    &mut responses_sender,
+                                    &log_target,
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                        subscription: &subscription,
+                                        result: methods::FollowEvent::BestBlockChanged {
+                                            best_block_hash: methods::HashHexString(hash),
+                                        },
+                                    }
+                                    .to_json_call_object_parameters(None),
+                                )
+                                .await;
+                            }
                         }
                         future::Either::Right((Ok(unsub_request_id), _)) => {
-                            let response = methods::Response::chainHead_unfollow_unstable(())
+                            let response = methods::Response::chainHead_unstable_unfollow(())
                                 .to_json_response(&unsub_request_id);
                             log_and_respond_no_mutex(&mut responses_sender, &log_target, response)
                                 .await;

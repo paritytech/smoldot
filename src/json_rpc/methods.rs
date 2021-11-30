@@ -399,17 +399,17 @@ define_methods! {
     system_version() -> &'a str,
 
     // The functions below are experimental and are defined in the document https://hackmd.io/@JF-CdHdTQdSl-2XgOR4SnA/rJ8SaI5Pt
-    chainHead_body_unstable(followSubscriptionId: &'a str, hash: HashHexString, networkConfig: Option<NetworkConfig>) -> &'a str,
-    chainHead_bodyEnd_unstable(subscriptionId: &'a str) -> (),
-    chainHead_call_unstable(followSubscriptionId: &'a str, hash: HashHexString, function: &'a str, callParameters: Vec<HexString>, networkConfig: Option<NetworkConfig>) -> &'a str,
-    chainHead_callEnd_unstable(subscriptionId: &'a str) -> (),
-    chainHead_follow_unstable(runtimeUpdates: bool) -> FollowResult<'a>,
-    chainHead_genesisHash_unstable() -> HashHexString,
-    chainHead_header_unstable(followSubscriptionId: &'a str, hash: HashHexString) -> Option<&'a str>,
-    chainHead_storage_unstable(followSubscriptionId: &'a str, hash: HashHexString, key: HexString, childKey: Option<HexString>, r#type: StorageQueryType, networkConfig: Option<NetworkConfig>) -> &'a str,
-    chainHead_storageEnd_unstable(subscriptionId: &'a str) -> (),
-    chainHead_unfollow_unstable(followSubscriptionId: &'a str) -> (),
-    chainHead_unpin_unstable(followSubscriptionId: &'a str, hash: HashHexString) -> (),
+    chainHead_unstable_body(followSubscriptionId: &'a str, hash: HashHexString, networkConfig: Option<NetworkConfig>) -> &'a str,
+    chainHead_unstable_bodyEnd(subscriptionId: &'a str) -> (),
+    chainHead_unstable_call(followSubscriptionId: &'a str, hash: HashHexString, function: &'a str, callParameters: Vec<HexString>, networkConfig: Option<NetworkConfig>) -> &'a str,
+    chainHead_unstable_callEnd(subscriptionId: &'a str) -> (),
+    chainHead_unstable_follow(runtimeUpdates: bool) -> FollowResult<'a>,
+    chainHead_unstable_genesisHash() -> HashHexString,
+    chainHead_unstable_header(followSubscriptionId: &'a str, hash: HashHexString) -> Option<&'a str>,
+    chainHead_unstable_storage(followSubscriptionId: &'a str, hash: HashHexString, key: HexString, childKey: Option<HexString>, r#type: StorageQueryType, networkConfig: Option<NetworkConfig>) -> &'a str,
+    chainHead_unstable_storageEnd(subscriptionId: &'a str) -> (),
+    chainHead_unstable_unfollow(followSubscriptionId: &'a str) -> (),
+    chainHead_unstable_unpin(followSubscriptionId: &'a str, hash: HashHexString) -> (),
 }
 
 define_methods! {
@@ -420,6 +420,9 @@ define_methods! {
     chain_newHead(subscription: &'a str, result: Header) -> (),
     state_runtimeVersion(subscription: &'a str, result: Option<RuntimeVersion<'a>>) -> (), // TODO: the Option is a custom addition
     state_storage(subscription: &'a str, result: StorageChangeSet) -> (),
+
+    // The functions below are experimental and are defined in the document https://hackmd.io/@JF-CdHdTQdSl-2XgOR4SnA/rJ8SaI5Pt
+    chainHead_unstable_followEvent(subscription: &'a str, result: FollowEvent<'a>) -> (),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -521,6 +524,34 @@ pub struct Block {
     pub justification: Option<HexString>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event")]
+pub enum FollowEvent<'a> {
+    #[serde(rename = "newBlock")]
+    NewBlock {
+        #[serde(rename = "blockHash")]
+        block_hash: HashHexString,
+        #[serde(rename = "parentBlockHash")]
+        parent_block_hash: HashHexString,
+        #[serde(rename = "newRuntime", borrow)]
+        new_runtime: Option<MaybeRuntimeSpec<'a>>,
+    },
+    #[serde(rename = "bestBlockChanged")]
+    BestBlockChanged {
+        #[serde(rename = "bestBlockHash")]
+        best_block_hash: HashHexString,
+    },
+    #[serde(rename = "finalized")]
+    Finalized {
+        #[serde(rename = "finalizedBlocksHashes")]
+        finalized_blocks_hashes: Vec<HashHexString>,
+        #[serde(rename = "prunedBlocksHashes")]
+        pruned_blocks_hashes: Vec<HashHexString>,
+    },
+    #[serde(rename = "stop")]
+    Stop {},
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FollowResult<'a> {
     #[serde(rename = "subscriptionId")]
@@ -595,12 +626,16 @@ pub struct RpcMethods {
     pub methods: Vec<String>,
 }
 
-// TODO: more strongly typed
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct MaybeRuntimeSpec<'a> {
-    pub r#type: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub spec: Option<RuntimeSpec<'a>>,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
+pub enum MaybeRuntimeSpec<'a> {
+    #[serde(rename = "valid")]
+    Valid {
+        #[serde(borrow)]
+        spec: RuntimeSpec<'a>,
+    },
+    #[serde(rename = "invalid")]
+    Invalid { error: &'a str },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -658,7 +693,7 @@ pub struct StorageChangeSet {
     pub changes: Vec<(HexString, Option<HexString>)>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum StorageQueryType {
     #[serde(rename = "value")]
     Value,
