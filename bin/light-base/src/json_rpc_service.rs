@@ -46,6 +46,7 @@ use futures::{
     prelude::*,
 };
 use smoldot::{
+    chain::fork_tree,
     chain_spec,
     executor::{host, read_only_runtime_host},
     header,
@@ -54,7 +55,7 @@ use smoldot::{
     network::protocol,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     iter,
     marker::PhantomData,
     num::NonZeroU32,
@@ -184,10 +185,16 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             }),
             genesis_block: config.genesis_block_hash,
             next_subscription: atomic::AtomicU64::new(0),
-            subscriptions: Mutex::new(HashMap::with_capacity_and_hasher(
-                usize::try_from(config.max_subscriptions).unwrap_or(usize::max_value()),
-                Default::default(),
-            )),
+            subscriptions: Mutex::new(Subscriptions {
+                misc: HashMap::with_capacity_and_hasher(
+                    usize::try_from(config.max_subscriptions).unwrap_or(usize::max_value()),
+                    Default::default(),
+                ),
+                chain_head_follow: HashMap::with_capacity_and_hasher(
+                    usize::try_from(config.max_subscriptions).unwrap_or(usize::max_value()),
+                    Default::default(),
+                ),
+            }),
         });
 
         // Spawns the background task that actually runs the logic of that JSON-RPC service.
@@ -444,10 +451,30 @@ struct Background<TPlat: Platform> {
 
     next_subscription: atomic::AtomicU64,
 
+    subscriptions: Mutex<Subscriptions>,
+}
+
+struct Subscriptions {
     /// For each active subscription (the key), a sender. If the user unsubscribes, send the
     /// unsubscription request ID of the channel in order to close the subscription.
-    subscriptions:
-        Mutex<HashMap<(String, SubscriptionTy), oneshot::Sender<String>, fnv::FnvBuildHasher>>,
+    misc: HashMap<(String, SubscriptionTy), oneshot::Sender<String>, fnv::FnvBuildHasher>,
+
+    chain_head_follow: HashMap<String, FollowSubscription, fnv::FnvBuildHasher>,
+}
+
+struct FollowSubscription {
+    /// List of finalized blocks that are pinned by the subscription.
+    finalized_pinned_blocks: slab::Slab<()>,
+
+    /// Tree of non-finalized blocks that are pinned by the subscription.
+    non_finalized_pinned_blocks: fork_tree::ForkTree<()>,
+
+    /// For each pinned block hash, the SCALE-encoded header of the block.
+    pinned_blocks_headers: HashMap<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
+
+    /// If the user unsubscribes, send the unsubscription request ID of the channel in order to
+    /// stop the subscription.
+    cancel: oneshot::Sender<String>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -458,7 +485,6 @@ enum SubscriptionTy {
     Storage,
     Transaction,
     RuntimeSpec,
-    Follow,
 }
 
 struct Blocks {
@@ -592,6 +618,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .subscriptions
                     .lock()
                     .await
+                    .misc
                     .remove(&(subscription.to_owned(), SubscriptionTy::Transaction))
                 {
                     // `cancel_tx` might have been closed if the channel from the transactions
@@ -716,6 +743,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .subscriptions
                     .lock()
                     .await
+                    .misc
                     .remove(&(subscription, SubscriptionTy::AllHeads))
                 {
                     cancel_tx.send(request_id.to_owned()).is_err()
@@ -738,6 +766,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .subscriptions
                     .lock()
                     .await
+                    .misc
                     .remove(&(subscription, SubscriptionTy::FinalizedHeads))
                 {
                     cancel_tx.send(request_id.to_owned()).is_err()
@@ -760,6 +789,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .subscriptions
                     .lock()
                     .await
+                    .misc
                     .remove(&(subscription, SubscriptionTy::NewHeads))
                 {
                     cancel_tx.send(request_id.to_owned()).is_err()
@@ -1100,6 +1130,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .subscriptions
                     .lock()
                     .await
+                    .misc
                     .remove(&(subscription.to_owned(), SubscriptionTy::RuntimeSpec))
                 {
                     cancel_tx.send(request_id.to_owned()).is_err()
@@ -1144,6 +1175,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .subscriptions
                     .lock()
                     .await
+                    .misc
                     .remove(&(subscription.to_owned(), SubscriptionTy::Storage))
                 {
                     cancel_tx.send(request_id.to_owned()).is_err()
@@ -1332,6 +1364,108 @@ impl<TPlat: Platform> Background<TPlat> {
                     .to_json_response(request_id),
                 )
                 .await;
+            }
+            methods::MethodCall::chainHead_unstable_header {
+                followSubscriptionId,
+                hash,
+            } => {
+                let response = {
+                    let lock = self.subscriptions.lock().await;
+                    if let Some(subscription) = lock.chain_head_follow.get(followSubscriptionId) {
+                        subscription.pinned_blocks_headers.get(&hash.0).cloned()
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(response) = response {
+                    // TODO: should return None if subscription is dead
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        methods::Response::chainHead_unstable_header(Some(methods::HexString(
+                            response,
+                        )))
+                        .to_json_response(request_id),
+                    )
+                    .await;
+                } else {
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::InvalidParams,
+                            None,
+                        ),
+                    )
+                    .await;
+                }
+            }
+            methods::MethodCall::chainHead_unstable_unpin {
+                followSubscriptionId,
+                hash,
+            } => {
+                let response = {
+                    let lock = self.subscriptions.lock().await;
+                    if let Some(subscription) = lock.chain_head_follow.get(followSubscriptionId) {
+                        subscription.pinned_blocks_headers.remove(&hash.0).is_some()
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(response) = response {
+                    // TODO: should return None if subscription is dead
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        methods::Response::chainHead_unstable_header(Some(methods::HexString(
+                            response,
+                        )))
+                        .to_json_response(request_id),
+                    )
+                    .await;
+                } else {
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::InvalidParams,
+                            None,
+                        ),
+                    )
+                    .await;
+                }
+            }
+            methods::MethodCall::chainHead_unstable_unfollow {
+                followSubscriptionId,
+            } => {
+                let invalid = if let Some(subscription) = self
+                    .subscriptions
+                    .lock()
+                    .await
+                    .chain_head_follow
+                    .remove(followSubscriptionId)
+                {
+                    subscription.cancel.send(request_id.to_owned()).is_err()
+                } else {
+                    true
+                };
+
+                if invalid {
+                    log_and_respond(
+                        &self.responses_sender,
+                        &self.log_target,
+                        json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::InvalidParams,
+                            None,
+                        ),
+                    )
+                    .await;
+                }
             }
 
             _method => {
@@ -1958,26 +2092,44 @@ impl<TPlat: Platform> Background<TPlat> {
     async fn chain_head_follow(&self, request_id: &str, runtime_updates: bool) {
         assert!(!runtime_updates); // TODO: not supported yet
 
-        let (subscription, mut unsubscribe_rx) =
-            match self.alloc_subscription(SubscriptionTy::Follow).await {
-                Ok(v) => v,
-                Err(()) => {
-                    log_and_respond(
-                        &self.responses_sender,
-                        &self.log_target,
-                        json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(
-                                -32000,
-                                "Too many active subscriptions",
-                            ),
-                            None,
+        let (subscription, mut unsubscribe_rx) = {
+            let subscription = self
+                .next_subscription
+                .fetch_add(1, atomic::Ordering::Relaxed)
+                .to_string();
+
+            let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
+            let mut lock = self.subscriptions.lock().await;
+            if lock.chain_head_follow.len() + lock.misc.len() >= self.max_subscriptions {
+                log_and_respond(
+                    &self.responses_sender,
+                    &self.log_target,
+                    json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(
+                            -32000,
+                            "Too many active subscriptions",
                         ),
-                    )
-                    .await;
-                    return;
-                }
-            };
+                        None,
+                    ),
+                )
+                .await;
+                return;
+            }
+
+            // TODO: capacity of these containers
+            lock.chain_head_follow.insert(
+                subscription.clone(),
+                FollowSubscription {
+                    finalized_pinned_blocks: slab::Slab::new(),
+                    non_finalized_pinned_blocks: fork_tree::ForkTree::new(),
+                    pinned_blocks_headers: HashMap::with_capacity_and_hasher(0, Default::default()),
+                    cancel: unsubscribe_tx,
+                },
+            );
+
+            (subscription, unsubscribe_rx)
+        };
 
         let mut subscribe_all = self.sync_service.subscribe_all(32).await;
 
@@ -2106,11 +2258,11 @@ impl<TPlat: Platform> Background<TPlat> {
 
         let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
         let mut lock = self.subscriptions.lock().await;
-        if lock.len() >= self.max_subscriptions {
+        if lock.chain_head_follow.len() + lock.misc.len() >= self.max_subscriptions {
             return Err(());
         }
 
-        lock.insert((subscription.clone(), ty), unsubscribe_tx);
+        lock.misc.insert((subscription.clone(), ty), unsubscribe_tx);
 
         Ok((subscription, unsubscribe_rx))
     }

@@ -405,7 +405,7 @@ define_methods! {
     chainHead_unstable_callEnd(subscriptionId: &'a str) -> (),
     chainHead_unstable_follow(runtimeUpdates: bool) -> FollowResult<'a>,
     chainHead_unstable_genesisHash() -> HashHexString,
-    chainHead_unstable_header(followSubscriptionId: &'a str, hash: HashHexString) -> Option<&'a str>,
+    chainHead_unstable_header(followSubscriptionId: &'a str, hash: HashHexString) -> Option<HexString>,
     chainHead_unstable_storage(followSubscriptionId: &'a str, hash: HashHexString, key: HexString, childKey: Option<HexString>, r#type: StorageQueryType, networkConfig: Option<NetworkConfig>) -> &'a str,
     chainHead_unstable_storageEnd(subscriptionId: &'a str) -> (),
     chainHead_unstable_unfollow(followSubscriptionId: &'a str) -> (),
