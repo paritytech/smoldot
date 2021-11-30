@@ -37,6 +37,19 @@ const client = smoldot.start({
     forbidTcp: false,
     forbidWs: false,
     forbidWss: false,
+    logCallback: (level, target, message) => {
+        // As incredible as it seems, there is currently no better way to print the current time
+        // formatted in a certain way.
+        const now = new Date();
+        const hours = ("0" + now.getHours()).slice(-2);
+        const minutes = ("0" + now.getMinutes()).slice(-2);
+        const seconds = ("0" + now.getSeconds()).slice(-2);
+        const milliseconds = ("00" + now.getMilliseconds()).slice(-3);
+        console.log(
+            "[%s:%s:%s.%s] [%s] %s",
+            hours, minutes, seconds, milliseconds, target, message
+        );
+    }
 });
 
 // Pre-load smoldot with the relay chain spec.
