@@ -43,10 +43,10 @@ use crate::header;
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
-pub mod aura_config;
-pub mod babe_config;
+pub mod aura_genesis_config;
 pub mod babe_fetch_epoch;
-pub mod grandpa_config;
+pub mod babe_genesis_config;
+pub mod grandpa_genesis_config;
 
 /// Information about the latest finalized block and state found in its ancestors.
 ///

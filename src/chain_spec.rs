@@ -35,8 +35,8 @@
 //!
 
 use crate::chain::chain_information::{
-    aura_config, babe_config, grandpa_config, BabeEpochInformation, ChainInformation,
-    ChainInformationConsensus, ChainInformationFinality,
+    aura_genesis_config, babe_genesis_config, grandpa_genesis_config, BabeEpochInformation,
+    ChainInformation, ChainInformationConsensus, ChainInformationFinality,
 };
 
 use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
@@ -84,12 +84,12 @@ impl ChainSpec {
 
         let consensus = {
             let aura_genesis_config =
-                aura_config::AuraGenesisConfiguration::from_genesis_storage(|k| {
+                aura_genesis_config::AuraGenesisConfiguration::from_genesis_storage(|k| {
                     genesis_storage.value(k).map(|v| v.to_owned())
                 });
 
             let babe_genesis_config =
-                babe_config::BabeGenesisConfiguration::from_genesis_storage(|k| {
+                babe_genesis_config::BabeGenesisConfiguration::from_genesis_storage(|k| {
                     genesis_storage.value(k).map(|v| v.to_owned())
                 });
 
@@ -136,7 +136,7 @@ impl ChainSpec {
 
         let finality = {
             let grandpa_genesis_config =
-                grandpa_config::GrandpaGenesisConfiguration::from_genesis_storage(|k| {
+                grandpa_genesis_config::GrandpaGenesisConfiguration::from_genesis_storage(|k| {
                     genesis_storage.value(k).map(|v| v.to_owned())
                 });
 
@@ -386,11 +386,11 @@ enum ParseErrorInner {
 #[derive(Debug, derive_more::Display)]
 pub enum FromGenesisStorageError {
     /// Error when retrieving the GrandPa configuration.
-    GrandpaConfigLoad(grandpa_config::FromGenesisStorageError),
+    GrandpaConfigLoad(grandpa_genesis_config::FromGenesisStorageError),
     /// Error when retrieving the Aura algorithm configuration.
-    AuraConfigLoad(aura_config::FromGenesisStorageError),
+    AuraConfigLoad(aura_genesis_config::FromGenesisStorageError),
     /// Error when retrieving the Babe algorithm configuration.
-    BabeConfigLoad(babe_config::FromGenesisStorageError),
+    BabeConfigLoad(babe_genesis_config::FromGenesisStorageError),
     /// Multiple consensus algorithms have been detected.
     MultipleConsensusAlgorithms,
     /// Chain specification doesn't contain the list of storage items.
