@@ -114,7 +114,11 @@ pub(crate) fn init(max_log_level: u32) {
         ))
         .unwrap();
 
-    let client = smoldot_light_base::Client::new(new_task_tx.clone());
+    let client = smoldot_light_base::Client::new(
+        new_task_tx.clone(),
+        env!("CARGO_PKG_NAME").to_owned(),
+        env!("CARGO_PKG_VERSION").to_owned(),
+    );
 
     let mut client_lock = crate::CLIENT.lock().unwrap();
     assert!(client_lock.is_none());
