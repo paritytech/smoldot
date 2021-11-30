@@ -2495,6 +2495,7 @@ dependencies = [
 name = "smoldot-light-wasm"
 version = "0.5.4"
 dependencies = [
+ "event-listener",
  "futures",
  "lazy_static",
  "log",
