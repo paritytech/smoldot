@@ -18,21 +18,21 @@
 /**
  * Thrown in case of a problem when initializing the chain.
  */
-declare class AddChainError extends Error {
+export class AddChainError extends Error {
   constructor(message: string);
 }
 
 /**
  * Thrown in case the API user tries to use a chain or client that has already been destroyed.
  */
-declare class AlreadyDestroyedError extends Error {
+export class AlreadyDestroyedError extends Error {
 }
 
 /**
  * Thrown when trying to send a JSON-RPC message to a chain whose JSON-RPC system hasn't been
  * enabled.
  */
-declare class JsonRpcDisabledError extends Error {
+export class JsonRpcDisabledError extends Error {
 }
 
 /**
@@ -40,7 +40,7 @@ declare class JsonRpcDisabledError extends Error {
  *
  * This is always an internal bug in smoldot and is never supposed to happen.
  */
-declare class CrashError extends Error {
+export class CrashError extends Error {
   constructor(message: string);
 }
 
@@ -80,7 +80,7 @@ export interface Client {
    * @throws {AlreadyDestroyedError} If the client has already been terminated earlier.
    * @throws {CrashError} If the background client has crashed.
    */
-  terminate(): void;
+  terminate(): Promise<void>;
 }
 
 /**
@@ -256,18 +256,12 @@ export interface SmoldotHealth {
   shouldHavePeers: boolean;
 }
 
-export interface Smoldot {
-  /**
-   * Initializes a new client. This is a pre-requisite to connecting to a blockchain.
-   *
-   * Can never fail.
-   *
-   * @param options Configuration of the client. Defaults to `{}`.
-   */
-  start(options?: ClientOptions): Client;
-  healthChecker(): HealthChecker;
-}
-
-export const smoldot: Smoldot;
-
-export default smoldot;
+/**
+ * Initializes a new client. This is a pre-requisite to connecting to a blockchain.
+ *
+ * Can never fail.
+ *
+ * @param options Configuration of the client. Defaults to `{}`.
+ */
+export function start(options?: ClientOptions): Client;
+export function healthChecker(): HealthChecker;

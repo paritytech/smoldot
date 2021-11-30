@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { Worker, workerOnError, workerOnMessage } from './compat-nodejs.js';
+import { Worker, workerOnError, workerOnMessage, workerTerminate } from './compat-nodejs.js';
 export * from './health.js';
 
 export class AlreadyDestroyedError extends Error {
@@ -230,9 +230,14 @@ export function start(config) {
       return chainAddedPromise;
     },
     terminate: () => {
-      worker.terminate();
-      if (!workerError)
-        workerError = new AlreadyDestroyedError();
+      if (workerError)
+        return Promise.reject(workerError)
+      workerError = new AlreadyDestroyedError();
+
+      if (livenessTimeout !== null)
+        clearTimeout(livenessTimeout)
+
+      return workerTerminate(worker)
     }
   }
 }
