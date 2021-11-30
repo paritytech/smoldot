@@ -50,6 +50,16 @@ pub fn parse_json_call(message: &str) -> Result<(&str, MethodCall), ParseError> 
     Ok((request_id, call))
 }
 
+/// Builds a JSON call, to send it to a JSON-RPC server.
+///
+/// # Panic
+///
+/// Panics if the `id_json` isn't valid JSON.
+///
+pub fn build_json_call_object_parameters(id_json: Option<&str>, method: MethodCall) -> String {
+    method.to_json_call_object_parameters(id_json)
+}
+
 /// Error produced by [`parse_json_call`].
 #[derive(Debug, derive_more::Display)]
 pub enum ParseError<'a> {
@@ -145,7 +155,7 @@ pub struct InvalidParameterError(serde_json::Error);
 /// Generates two enums, one for requests and one for responses, based on the list of supported
 /// requests.
 macro_rules! define_methods {
-    ($rq_name:ident, $rp_name:ident, $(
+    ($rq_name:ident, $rp_name:ident $(<$l:lifetime>)*, $(
         $(#[$attrs:meta])*
         $name:ident ($($p_name:ident: $p_ty:ty),*) -> $ret_ty:ty
             $([$($alias:ident),*])*
@@ -166,6 +176,51 @@ macro_rules! define_methods {
             /// Returns a list of RPC method names of all the methods in the enum.
             pub fn method_names() -> impl ExactSizeIterator<Item = &'static str> {
                 [$(stringify!($name)),*].iter().copied()
+            }
+
+            /// Returns the name of the method.
+            pub fn name(&self) -> &'static str {
+                match self {
+                    $($rq_name::$name { .. } => stringify!($name),)*
+                }
+            }
+
+            /// Returns an JSON object containing the list of the parameters of the method.
+            pub fn params_to_json_object(&self) -> String {
+                match self {
+                    $($rq_name::$name { $($p_name),* } => {
+                        #[derive(serde::Serialize)]
+                        struct Params<'a> {
+                            $(
+                                $p_name: &'a $p_ty,
+                            )*
+
+                            // This `_dummy` field is necessary to not have an "unused lifetime"
+                            // error if the parameters don't have a lifetime.
+                            #[serde(skip)]
+                            _dummy: core::marker::PhantomData<&'a ()>,
+                        }
+
+                        serde_json::to_string(&Params {
+                            $($p_name,)*
+                            _dummy: core::marker::PhantomData
+                        }).unwrap()
+                    },)*
+                }
+            }
+
+            /// Builds a JSON call, to send it to a JSON-RPC server.
+            ///
+            /// # Panic
+            ///
+            /// Panics if the `id_json` isn't valid JSON.
+            ///
+            pub fn to_json_call_object_parameters(&self, id_json: Option<&str>) -> String {
+                parse::build_call(parse::Call {
+                    id_json,
+                    method: self.name(),
+                    params_json: &self.params_to_json_object(),
+                })
             }
 
             fn from_defs(name: &'a str, params: &'a str) -> Result<Self, MethodError<'a>> {
@@ -242,13 +297,13 @@ macro_rules! define_methods {
 
         #[allow(non_camel_case_types)]
         #[derive(Debug, Clone)]
-        pub enum $rp_name<'a> {
+        pub enum $rp_name $(<$l>)* {
             $(
                 $name($ret_ty),
             )*
         }
 
-        impl<'a> $rp_name<'a> {
+        impl$(<$l>)* $rp_name$(<$l>)* {
             /// Serializes the response into a JSON string.
             ///
             /// `id_json` must be a valid JSON-formatted request identifier, the same the user
@@ -276,7 +331,7 @@ macro_rules! define_methods {
 // TODO: change everything to return values by ref when possible
 define_methods! {
     MethodCall,
-    Response,
+    Response<'a>,
     account_nextIndex() -> (), // TODO:
     author_hasKey() -> (), // TODO:
     author_hasSessionKeys() -> (), // TODO:
@@ -314,7 +369,7 @@ define_methods! {
     state_getMetadata(hash: Option<HashHexString>) -> HexString,
     state_getPairs() -> (), // TODO:
     state_getReadProof() -> (), // TODO:
-    state_getRuntimeVersion(at: Option<HashHexString>) -> RuntimeVersion [chain_getRuntimeVersion],
+    state_getRuntimeVersion(at: Option<HashHexString>) -> RuntimeVersion<'a> [chain_getRuntimeVersion],
     state_getStorage(key: HexString, hash: Option<HashHexString>) -> HexString [state_getStorageAt],
     state_getStorageHash() -> () [state_getStorageHashAt], // TODO:
     state_getStorageSize() -> () [state_getStorageSizeAt], // TODO:
@@ -348,13 +403,23 @@ define_methods! {
     chainHead_bodyEnd_unstable(subscriptionId: &'a str) -> (),
     chainHead_call_unstable(followSubscriptionId: &'a str, hash: HashHexString, function: &'a str, callParameters: Vec<HexString>, networkConfig: Option<NetworkConfig>) -> &'a str,
     chainHead_callEnd_unstable(subscriptionId: &'a str) -> (),
-    chainHead_follow_unstable(runtimeUpdates: bool) -> FollowResult,
+    chainHead_follow_unstable(runtimeUpdates: bool) -> FollowResult<'a>,
     chainHead_genesisHash_unstable() -> HashHexString,
     chainHead_header_unstable(followSubscriptionId: &'a str, hash: HashHexString) -> Option<&'a str>,
     chainHead_storage_unstable(followSubscriptionId: &'a str, hash: HashHexString, key: HexString, childKey: Option<HexString>, r#type: StorageQueryType, networkConfig: Option<NetworkConfig>) -> &'a str,
     chainHead_storageEnd_unstable(subscriptionId: &'a str) -> (),
     chainHead_unfollow_unstable(followSubscriptionId: &'a str) -> (),
     chainHead_unpin_unstable(followSubscriptionId: &'a str, hash: HashHexString) -> (),
+}
+
+define_methods! {
+    ServerToClient,
+    ServerToClientResponse, // TODO: unnecessary
+    author_extrinsicUpdate(subscription: &'a str, result: TransactionStatus) -> (),
+    chain_finalizedHead(subscription: &'a str, result: Header) -> (),
+    chain_newHead(subscription: &'a str, result: Header) -> (),
+    state_runtimeVersion(subscription: &'a str, result: Option<RuntimeVersion<'a>>) -> (), // TODO: the Option is a custom addition
+    state_storage(subscription: &'a str, result: StorageChangeSet) -> (),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -414,6 +479,15 @@ impl<'a> serde::Deserialize<'a> for HashHexString {
 #[derive(Debug, Clone)]
 pub struct AccountId(pub [u8; 32]);
 
+impl serde::Serialize for AccountId {
+    fn serialize<S>(&self, _: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        todo!() // TODO: /!\
+    }
+}
+
 // TODO: not great for type in public API
 impl<'a> serde::Deserialize<'a> for AccountId {
     fn deserialize<D>(deserializer: D) -> Result<AccountId, D::Error>
@@ -448,7 +522,7 @@ pub struct Block {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct FollowResult {
+pub struct FollowResult<'a> {
     #[serde(rename = "subscriptionId")]
     pub subscription_id: String,
     #[serde(rename = "finalizedBlockHash")]
@@ -457,10 +531,10 @@ pub struct FollowResult {
         rename = "finalizedBlockRuntime",
         skip_serializing_if = "Option::is_none"
     )]
-    pub finalized_block_runtime: Option<MaybeRuntimeSpec>,
+    pub finalized_block_runtime: Option<MaybeRuntimeSpec<'a>>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Header {
     #[serde(rename = "parentHash")]
     pub parent_hash: HashHexString,
@@ -500,12 +574,12 @@ impl Header {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HeaderDigest {
     pub logs: Vec<HexString>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NetworkConfig {
     #[serde(rename = "totalAttempts")]
     pub total_attempts: u32,
@@ -523,32 +597,45 @@ pub struct RpcMethods {
 
 // TODO: more strongly typed
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct MaybeRuntimeSpec {
-    pub r#type: String,
+pub struct MaybeRuntimeSpec<'a> {
+    pub r#type: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub spec: Option<RuntimeSpec>,
+    pub spec: Option<RuntimeSpec<'a>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct RuntimeSpec {
-    pub spec_name: String,
-    pub impl_name: String,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeSpec<'a> {
+    #[serde(rename = "specName")]
+    pub spec_name: &'a str,
+    #[serde(rename = "implName")]
+    pub impl_name: &'a str,
+    #[serde(rename = "authoringVersion")]
     pub authoring_version: u64,
+    #[serde(rename = "specVersion")]
     pub spec_version: u64,
+    #[serde(rename = "implVersion")]
     pub impl_version: u64,
+    #[serde(rename = "transactionVersion", skip_serializing_if = "Option::is_none")]
     pub transaction_version: Option<u64>,
-    pub apis: Vec<([u8; 8], u32)>,
+    pub apis: HashMap<HexString, u32>,
 }
 
-#[derive(Debug, Clone)]
-pub struct RuntimeVersion {
-    pub spec_name: String,
-    pub impl_name: String,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeVersion<'a> {
+    #[serde(rename = "specName")]
+    pub spec_name: &'a str,
+    #[serde(rename = "implName")]
+    pub impl_name: &'a str,
+    #[serde(rename = "authoringVersion")]
     pub authoring_version: u64,
+    #[serde(rename = "specVersion")]
     pub spec_version: u64,
+    #[serde(rename = "implVersion")]
     pub impl_version: u64,
+    #[serde(rename = "transactionVersion", skip_serializing_if = "Option::is_none")]
     pub transaction_version: Option<u64>,
-    pub apis: Vec<([u8; 8], u32)>,
+    // TODO: optimize?
+    pub apis: Vec<(HexString, u32)>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -565,7 +652,7 @@ pub enum DispatchClass {
     Mandatory,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StorageChangeSet {
     pub block: HashHexString,
     pub changes: Vec<(HexString, Option<HexString>)>,
@@ -609,16 +696,16 @@ pub enum SystemPeerRole {
     Light,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TransactionStatus {
     Future,
     Ready,
     Broadcast(Vec<String>), // Base58 PeerIds  // TODO: stronger typing
-    InBlock([u8; 32]),
-    Retracted([u8; 32]),
-    FinalityTimeout([u8; 32]),
-    Finalized([u8; 32]),
-    Usurped([u8; 32]),
+    InBlock(HashHexString),
+    Retracted(HashHexString),
+    FinalityTimeout(HashHexString),
+    Finalized(HashHexString),
+    Usurped(HashHexString),
     Dropped,
     Invalid,
 }
@@ -688,88 +775,6 @@ impl serde::Serialize for Block {
     }
 }
 
-impl serde::Serialize for RuntimeSpec {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        #[derive(serde::Serialize)]
-        struct SerdeRuntimeVersion<'a> {
-            #[serde(rename = "specName")]
-            spec_name: &'a str,
-            #[serde(rename = "implName")]
-            impl_name: &'a str,
-            #[serde(rename = "authoringVersion")]
-            authoring_version: u64,
-            #[serde(rename = "specVersion")]
-            spec_version: u64,
-            #[serde(rename = "implVersion")]
-            impl_version: u64,
-            #[serde(rename = "transactionVersion", skip_serializing_if = "Option::is_none")]
-            transaction_version: Option<u64>,
-            // TODO: optimize?
-            apis: HashMap<HexString, u32>,
-        }
-
-        SerdeRuntimeVersion {
-            spec_name: &self.spec_name,
-            impl_name: &self.impl_name,
-            authoring_version: self.authoring_version,
-            spec_version: self.spec_version,
-            impl_version: self.impl_version,
-            transaction_version: self.transaction_version,
-            // TODO: optimize?
-            apis: self
-                .apis
-                .iter()
-                .map(|(name_hash, version)| (HexString(name_hash.to_vec()), *version))
-                .collect(),
-        }
-        .serialize(serializer)
-    }
-}
-
-impl serde::Serialize for RuntimeVersion {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        #[derive(serde::Serialize)]
-        struct SerdeRuntimeVersion<'a> {
-            #[serde(rename = "specName")]
-            spec_name: &'a str,
-            #[serde(rename = "implName")]
-            impl_name: &'a str,
-            #[serde(rename = "authoringVersion")]
-            authoring_version: u64,
-            #[serde(rename = "specVersion")]
-            spec_version: u64,
-            #[serde(rename = "implVersion")]
-            impl_version: u64,
-            #[serde(rename = "transactionVersion", skip_serializing_if = "Option::is_none")]
-            transaction_version: Option<u64>,
-            // TODO: optimize?
-            apis: Vec<(HexString, u32)>,
-        }
-
-        SerdeRuntimeVersion {
-            spec_name: &self.spec_name,
-            impl_name: &self.impl_name,
-            authoring_version: self.authoring_version,
-            spec_version: self.spec_version,
-            impl_version: self.impl_version,
-            transaction_version: self.transaction_version,
-            // TODO: optimize?
-            apis: self
-                .apis
-                .iter()
-                .map(|(name_hash, version)| (HexString(name_hash.to_vec()), *version))
-                .collect(),
-        }
-        .serialize(serializer)
-    }
-}
-
 impl serde::Serialize for RuntimeDispatchInfo {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -815,53 +820,6 @@ impl serde::Serialize for SystemHealth {
             is_syncing: self.is_syncing,
             peers: self.peers,
             should_have_peers: self.should_have_peers,
-        }
-        .serialize(serializer)
-    }
-}
-
-impl serde::Serialize for TransactionStatus {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        #[derive(serde::Serialize)]
-        enum SerdeTransactionStatus<'a> {
-            #[serde(rename = "future")]
-            Future,
-            #[serde(rename = "ready")]
-            Ready,
-            #[serde(rename = "broadcast")]
-            Broadcast(&'a [String]), // Base58 libp2p PeerIds, example: "12D3KooWHEQXbvCzLYvc87obHV6HY4rruHz8BJ9Lw1Gg2csVfR6Z"
-            #[serde(rename = "inBlock")]
-            InBlock(HashHexString),
-            #[serde(rename = "retracted")]
-            Retracted(HashHexString),
-            #[serde(rename = "finalityTimeout")]
-            FinalityTimeout(HashHexString),
-            #[serde(rename = "finalized")]
-            Finalized(HashHexString),
-            #[serde(rename = "usurped")]
-            Usurped(HashHexString),
-            #[serde(rename = "dropped")]
-            Dropped,
-            #[serde(rename = "invalid")]
-            Invalid,
-        }
-
-        match self {
-            TransactionStatus::Future => SerdeTransactionStatus::Future,
-            TransactionStatus::Ready => SerdeTransactionStatus::Ready,
-            TransactionStatus::Broadcast(v) => SerdeTransactionStatus::Broadcast(v),
-            TransactionStatus::InBlock(v) => SerdeTransactionStatus::InBlock(HashHexString(*v)),
-            TransactionStatus::Retracted(v) => SerdeTransactionStatus::Retracted(HashHexString(*v)),
-            TransactionStatus::FinalityTimeout(v) => {
-                SerdeTransactionStatus::FinalityTimeout(HashHexString(*v))
-            }
-            TransactionStatus::Finalized(v) => SerdeTransactionStatus::Finalized(HashHexString(*v)),
-            TransactionStatus::Usurped(v) => SerdeTransactionStatus::Usurped(HashHexString(*v)),
-            TransactionStatus::Dropped => SerdeTransactionStatus::Dropped,
-            TransactionStatus::Invalid => SerdeTransactionStatus::Invalid,
         }
         .serialize(serializer)
     }

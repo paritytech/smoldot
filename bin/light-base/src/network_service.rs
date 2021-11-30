@@ -206,13 +206,13 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                         let event = loop {
                             match network_service.network.next_event(TPlat::now()).await {
                                 service::Event::Connected(peer_id) => {
-                                    log::info!(target: "network", "Connected to {}", peer_id);
+                                    log::debug!(target: "network", "Connected({})", peer_id);
                                 }
                                 service::Event::Disconnected {
                                     peer_id,
                                     chain_indices,
                                 } => {
-                                    log::info!(target: "network", "Disconnected from {} (chains: {:?})", peer_id, chain_indices);
+                                    log::debug!(target: "network", "Disconnected({})", peer_id);
                                     if !chain_indices.is_empty() {
                                         // TODO: properly implement when multiple chains
                                         if chain_indices.len() == 1 {
@@ -371,10 +371,10 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                         loop {
                             let start_connect = network_service
                                 .network
-                                .next_start_connect(TPlat::now())
+                                .next_start_connect(|| TPlat::now())
                                 .await;
 
-                            let is_important_peer = network_service
+                            let is_bootnode = network_service
                                 .important_nodes
                                 .contains(&start_connect.expected_peer_id);
 
@@ -401,12 +401,12 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                     result = socket => result.map_err(Some),
                                 };
 
-                                match (&result, is_important_peer) {
+                                match (&result, is_bootnode) {
                                     (Ok(_), _) => {}
                                     (Err(None), true) => {
                                         log::warn!(
                                             target: "connections",
-                                            "Timeout when trying to reach {} through {}",
+                                            "Timeout when trying to reach bootnode {} through {}",
                                             start_connect.expected_peer_id, start_connect.multiaddr
                                         );
                                     }
@@ -421,7 +421,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                     (Err(Some(err)), true) if !err.is_bad_addr => {
                                         log::warn!(
                                             target: "connections",
-                                            "Failed to reach {} through {}: {}",
+                                            "Failed to reach bootnode {} through {}: {}",
                                             start_connect.expected_peer_id, start_connect.multiaddr,
                                             err.message
                                         );
@@ -480,7 +480,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                         id,
                                         start_connect.expected_peer_id,
                                         start_connect.multiaddr,
-                                        is_important_peer,
+                                        is_bootnode,
                                     )
                                 }))
                                 .await;
@@ -868,14 +868,14 @@ pub enum Event {
 
 /// Asynchronous task managing a specific connection.
 ///
-/// `is_important_peer` controls the log level used for problems that happen on this connection.
+/// `is_bootnode` controls the log level used for problems that happen on this connection.
 async fn connection_task<TPlat: Platform>(
     mut websocket: TPlat::Connection,
     network_service: Arc<NetworkServiceInner<TPlat>>,
     id: service::ConnectionId,
     expected_peer_id: PeerId,
     attemped_multiaddr: Multiaddr,
-    is_important_peer: bool,
+    is_bootnode: bool,
 ) {
     let mut write_buffer = vec![0; 4096];
 
@@ -898,11 +898,18 @@ async fn connection_task<TPlat: Platform>(
             .await
         {
             Ok(rw) => rw,
-            Err(err) if is_important_peer => {
-                log::warn!(
-                    target: "connections", "Error in connection with {}: {}",
-                    expected_peer_id, err
-                );
+            Err(err) if is_bootnode => {
+                match err {
+                    // Ungraceful termination.
+                    ConnectionError::Established(_) | ConnectionError::Handshake(_) => {
+                        log::warn!(
+                            target: "connections", "Error in connection with bootnode {}: {}",
+                            expected_peer_id, err
+                        );
+                    }
+                    // Graceful termination.
+                    ConnectionError::LocalShutdown | ConnectionError::Eof => {}
+                }
 
                 // For any handshake error other than "no protocol in common has been found",
                 // it is likely that the cause is connecting to a port that isn't serving the

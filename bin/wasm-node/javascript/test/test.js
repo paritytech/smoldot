@@ -17,26 +17,27 @@
 
 import test from 'ava';
 import * as fs from 'fs';
-import * as client from "../src/index.js";
+import { start } from "../src/index.js";
 
 const westendSpec = fs.readFileSync('../../westend.json', 'utf8');
 
 test('invalid chain spec throws error', async t => {
+  const client = start({ logCallback: () => { } });
   await client
-    .start({ logCallback: () => { } })
     .addChain({
       chainSpec: "invalid chain spec",
     })
     .then((chain) => t.fail())
-    .catch(() => t.pass());
+    .catch(() => t.pass())
+    .then(() => client.terminate());
 });
 
 test('system_name works', async t => {
   let promiseResolve;
   const promise = new Promise((resolve, reject) => promiseResolve = resolve);
 
+  const client = start({ logCallback: () => { } });
   await client
-    .start({ logCallback: () => { } })
     .addChain({
       chainSpec: westendSpec,
       jsonRpcCallback: (resp) => {
@@ -49,5 +50,6 @@ test('system_name works', async t => {
       chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}', 0, 0);
     })
     .then(() => promise)
-    .then(() => t.pass());
+    .then(() => t.pass())
+    .then(() => client.terminate());
 });
