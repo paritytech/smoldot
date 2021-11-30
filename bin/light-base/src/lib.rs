@@ -355,6 +355,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                     }));
                 }
 
+                (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), Some(Ok(ci))) => ci,
+
                 (Err(err), _) => {
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
                         user_data: config.user_data,
