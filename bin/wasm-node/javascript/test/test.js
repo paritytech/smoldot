@@ -41,7 +41,7 @@ test('system_name works', async t => {
     .addChain({
       chainSpec: westendSpec,
       jsonRpcCallback: (resp) => {
-        if (resp == '{"jsonrpc":"2.0","id":1,"result":"smoldot-light"}') {
+        if (resp == '{"jsonrpc":"2.0","id":1,"result":"smoldot-light-wasm"}') {
           promiseResolve();
         }
       }
