@@ -94,6 +94,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2.4.0
+      - uses: Swatinem/rust-cache@v1   # See also the `cache-fill` workflow.
       - uses: actions-rs/toolchain@v1
         with:
             toolchain: nightly
