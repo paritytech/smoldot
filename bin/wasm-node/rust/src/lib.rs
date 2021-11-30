@@ -139,6 +139,7 @@ fn add_chain(
         return chain_id.into();
     }
 
+    // Retrieve the chain spec parameter passed through the FFI layer.
     let chain_spec: Box<[u8]> = {
         let chain_spec_pointer = usize::try_from(chain_spec_pointer).unwrap();
         let chain_spec_len = usize::try_from(chain_spec_len).unwrap();
@@ -150,6 +151,7 @@ fn add_chain(
         }
     };
 
+    // Retrieve the potential relay chains parameter passed through the FFI layer.
     let potential_relay_chains: Vec<_> = {
         let allowed_relay_chains_ptr = usize::try_from(potential_relay_chains_ptr).unwrap();
         let allowed_relay_chains_len = usize::try_from(potential_relay_chains_len).unwrap();
@@ -168,6 +170,17 @@ fn add_chain(
             .collect()
     };
 
+    // If `json_rpc_running` is non-zero, then we pass a `Sender<String>` to the `add_client`
+    // function. The client will push on this channel the JSON-RPC responses and notifications.
+    //
+    // After the client has pushed a response or notification, we must then propagate it to the
+    // FFI layer. This is achieved by spawning a task that continuously polls the `Receiver` (see
+    // below).
+    //
+    // When the chain is later removed, we want the task to immediately stop without sending any
+    // additional response or notification to the FFI. This is achieved by storing an
+    // `AbortHandle` as the "user data" of the chain within the client. When the chain is removed,
+    // the client will yield back this `AbortHandle` and we can use it to abort the task.
     let (json_rpc_responses, responses_rx_and_reg, abort_handle) = if json_rpc_running != 0 {
         let (tx, rx) = mpsc::channel::<String>(64);
         let (handle, reg) = future::AbortHandle::new_pair();
@@ -176,6 +189,7 @@ fn add_chain(
         (None, None, None)
     };
 
+    // Insert the chain in the client.
     let chain_id = client_lock
         .as_mut()
         .unwrap()
@@ -187,23 +201,24 @@ fn add_chain(
             potential_relay_chains: potential_relay_chains.into_iter(),
         });
 
+    // Spawn the task if necessary.
+    // See explanations above.
     if let Some((mut responses_rx, abort_registration)) = responses_rx_and_reg {
-        let messages_out_task = future::Abortable::new(
-            async move {
-                while let Some(response) = responses_rx.next().await {
-                    emit_json_rpc_response(&response, chain_id);
-                }
-            },
-            abort_registration,
-        );
+        let messages_out_task = async move {
+            while let Some(response) = responses_rx.next().await {
+                emit_json_rpc_response(&response, chain_id);
+            }
+        };
 
         client_lock
             .as_mut()
             .unwrap()
             .1
             .unbounded_send((
-                "json-rpc-service-messages-out".to_owned(),
-                messages_out_task.map(|_| ()).boxed(),
+                "json-rpc-messages-out".to_owned(),
+                future::Abortable::new(messages_out_task, abort_registration)
+                    .map(|_| ())
+                    .boxed(),
             ))
             .unwrap();
     }
@@ -213,6 +228,7 @@ fn add_chain(
 
 fn remove_chain(chain_id: u32) {
     let mut client_lock = CLIENT.lock().unwrap();
+
     let abort_handle = client_lock
         .as_mut()
         .unwrap()
@@ -224,6 +240,7 @@ fn remove_chain(chain_id: u32) {
     // were still pending.
     // Note that this only works because Wasm is single-threaded, otherwise the task being aborted
     // might be in the process of being polled.
+    // TODO: solve this in case we use Wasm threads in the future
     if let Some(abort_handle) = abort_handle {
         abort_handle.abort();
     }
