@@ -40,16 +40,19 @@ export function start(config) {
   config = config || {};
 
   const logCallback = config.logCallback || ((level, target, message) => {
+    // The first parameter of the methods of `console` has some printf-like substitution
+    // capabilities. We don't really need to use this, but not using it means that the logs might
+    // not get printed correctly if they contain `%`.
     if (level <= 1) {
-      console.error("[" + target + "]", message);
+      console.error("[%s] %s", target, message);
     } else if (level == 2) {
-      console.warn("[" + target + "]", message);
+      console.warn("[%s] %s", target, message);
     } else if (level == 3) {
-      console.info("[" + target + "]", message);
+      console.info("[%s] %s", target, message);
     } else if (level == 4) {
-      console.debug("[" + target + "]", message);
+      console.debug("[%s] %s", target, message);
     } else {
-      console.trace("[" + target + "]", message);
+      console.trace("[%s] %s", target, message);
     }
   });
 
