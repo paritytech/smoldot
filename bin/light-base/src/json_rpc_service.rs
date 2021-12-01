@@ -545,7 +545,7 @@ fn log_and_respond_no_mutex<'a>(
 }
 
 impl<TPlat: Platform> Background<TPlat> {
-    async fn handle_request(&self, json_rpc_request: &str) {
+    async fn handle_request(self: &Arc<Self>, json_rpc_request: &str) {
         // Check whether the JSON-RPC request is correct, and bail out if it isn't.
         let (request_id, call) = match methods::parse_json_call(json_rpc_request) {
             Ok(v) => v,
@@ -2113,8 +2113,14 @@ impl<TPlat: Platform> Background<TPlat> {
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_follow`].
-    async fn chain_head_follow(&self, request_id: &str, runtime_updates: bool) {
-        assert!(!runtime_updates); // TODO: not supported yet
+    async fn chain_head_follow(self: &Arc<Self>, request_id: &str, runtime_updates: bool) {
+        assert!(!runtime_updates); // TODO: not correctly supported yet
+
+        let mut subscribe_all = if runtime_updates {
+            self.runtime_service.subscribe_all(32).await
+        } else {
+            self.sync_service.subscribe_all(32).await
+        };
 
         let (subscription, mut unsubscribe_rx) = {
             let subscription = self
@@ -2141,13 +2147,29 @@ impl<TPlat: Platform> Background<TPlat> {
                 return;
             }
 
-            // TODO: capacity of these containers
+            let mut pinned_blocks_headers =
+                HashMap::with_capacity_and_hasher(0, Default::default());
+            pinned_blocks_headers.insert(
+                header::hash_from_scale_encoded_header(
+                    &subscribe_all.finalized_block_scale_encoded_header,
+                ),
+                subscribe_all.finalized_block_scale_encoded_header.clone(),
+            );
+            for block in &subscribe_all.non_finalized_blocks_ancestry_order {
+                let _was_in = pinned_blocks_headers.insert(
+                    header::hash_from_scale_encoded_header(&block.scale_encoded_header),
+                    block.scale_encoded_header.clone(),
+                );
+                debug_assert!(_was_in.is_none());
+            }
+
             lock.chain_head_follow.insert(
                 subscription.clone(),
                 FollowSubscription {
                     finalized_pinned_blocks: slab::Slab::new(),
                     non_finalized_pinned_blocks: fork_tree::ForkTree::new(),
-                    pinned_blocks_headers: HashMap::with_capacity_and_hasher(0, Default::default()),
+                    // TODO: insert finalized block and all
+                    pinned_blocks_headers,
                     cancel: unsubscribe_tx,
                 },
             );
@@ -2155,19 +2177,25 @@ impl<TPlat: Platform> Background<TPlat> {
             (subscription, unsubscribe_rx)
         };
 
-        let mut subscribe_all = self.sync_service.subscribe_all(32).await;
-
-        let confirmation = methods::Response::chainHead_unstable_follow(methods::FollowResult {
-            subscription_id: subscription.clone(),
-            finalized_block_hash: methods::HashHexString(header::hash_from_scale_encoded_header(
-                &subscribe_all.finalized_block_scale_encoded_header[..],
-            )),
-            finalized_block_runtime: None,
-        })
-        .to_json_response(request_id);
+        let confirmation = methods::Response::chainHead_unstable_follow(&subscription)
+            .to_json_response(request_id);
+        // TODO: do correctly
+        let confirmation2 = methods::ServerToClient::chainHead_unstable_followEvent {
+            subscription: &subscription,
+            result: methods::FollowEvent::Initialized {
+                finalized_block_hash: methods::HashHexString(
+                    header::hash_from_scale_encoded_header(
+                        &subscribe_all.finalized_block_scale_encoded_header[..],
+                    ),
+                ),
+                finalized_block_runtime: None,
+            },
+        }
+        .to_json_call_object_parameters(None);
 
         let mut responses_sender = self.responses_sender.lock().await.clone();
         let log_target = self.log_target.clone();
+        let me = self.clone();
 
         // Spawn a separate task for the subscription.
         self.new_child_tasks_tx
@@ -2176,6 +2204,9 @@ impl<TPlat: Platform> Background<TPlat> {
             .unbounded_send(Box::pin(async move {
                 // Send back to the user the confirmation of the registration.
                 log_and_respond_no_mutex(&mut responses_sender, &log_target, confirmation).await;
+                log_and_respond_no_mutex(&mut responses_sender, &log_target, confirmation2).await;
+
+                // TODO: report all existing blocks
 
                 loop {
                     // Wait for either a new block, or for the subscription to be canceled.
@@ -2224,6 +2255,16 @@ impl<TPlat: Platform> Background<TPlat> {
                         )) => {
                             let hash =
                                 header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+
+                            let mut subscriptions = me.subscriptions.lock().await;
+                            if let Some(sub) =
+                                subscriptions.chain_head_follow.get_mut(&subscription)
+                            {
+                                let _was_in = sub
+                                    .pinned_blocks_headers
+                                    .insert(hash, block.scale_encoded_header);
+                                debug_assert!(_was_in.is_none());
+                            }
 
                             log_and_respond_no_mutex(
                                 &mut responses_sender,

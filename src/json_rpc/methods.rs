@@ -403,7 +403,7 @@ define_methods! {
     chainHead_unstable_bodyEnd(subscriptionId: &'a str) -> (),
     chainHead_unstable_call(followSubscriptionId: &'a str, hash: HashHexString, function: &'a str, callParameters: Vec<HexString>, networkConfig: Option<NetworkConfig>) -> &'a str,
     chainHead_unstable_callEnd(subscriptionId: &'a str) -> (),
-    chainHead_unstable_follow(runtimeUpdates: bool) -> FollowResult<'a>,
+    chainHead_unstable_follow(runtimeUpdates: bool) -> &'a str,
     chainHead_unstable_genesisHash() -> HashHexString,
     chainHead_unstable_header(followSubscriptionId: &'a str, hash: HashHexString) -> Option<HexString>,
     chainHead_unstable_storage(followSubscriptionId: &'a str, hash: HashHexString, key: HexString, childKey: Option<HexString>, r#type: StorageQueryType, networkConfig: Option<NetworkConfig>) -> &'a str,
@@ -528,6 +528,16 @@ pub struct Block {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event")]
 pub enum FollowEvent<'a> {
+    #[serde(rename = "initialized")]
+    Initialized {
+        #[serde(rename = "finalizedBlockHash")]
+        finalized_block_hash: HashHexString,
+        #[serde(
+            rename = "finalizedBlockRuntime",
+            skip_serializing_if = "Option::is_none"
+        )]
+        finalized_block_runtime: Option<MaybeRuntimeSpec<'a>>,
+    },
     #[serde(rename = "newBlock")]
     NewBlock {
         #[serde(rename = "blockHash")]
@@ -551,19 +561,6 @@ pub enum FollowEvent<'a> {
     },
     #[serde(rename = "stop")]
     Stop {},
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct FollowResult<'a> {
-    #[serde(rename = "subscriptionId")]
-    pub subscription_id: String,
-    #[serde(rename = "finalizedBlockHash")]
-    pub finalized_block_hash: HashHexString,
-    #[serde(
-        rename = "finalizedBlockRuntime",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub finalized_block_runtime: Option<MaybeRuntimeSpec<'a>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
