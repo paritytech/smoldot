@@ -194,6 +194,14 @@ pub struct Client<TChain, TPlat: Platform> {
     /// The [`ChainServices`] is within a `MaybeDone`. The variant will be `MaybeDone::Future` if
     /// initialization is still in progress.
     chains_by_key: HashMap<ChainKey, RunningChain<TPlat>>,
+
+    /// Value to return when the `system_name` RPC is called. Should be set to the name of the
+    /// final executable.
+    system_name: String,
+
+    /// Value to return when the `system_version` RPC is called. Should be set to the version of
+    /// the final executable.
+    system_version: String,
 }
 
 enum PublicApiChain<TChain, TPlat: Platform> {
@@ -306,12 +314,16 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     /// for debugging purposes.
     pub fn new(
         tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
+        system_name: String,
+        system_version: String,
     ) -> Self {
         let expected_chains = 8;
         Client {
             new_task_tx: tasks_spawner,
             public_api_chains: slab::Slab::with_capacity(expected_chains),
             chains_by_key: HashMap::with_capacity(expected_chains),
+            system_name,
+            system_version,
         }
     }
 
@@ -354,6 +366,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         ),
                     }));
                 }
+
+                (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), Some(Ok(ci))) => ci,
 
                 (Err(err), _) => {
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
@@ -657,6 +671,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
             > = {
                 let new_task_tx = self.new_task_tx.clone();
                 let log_name = log_name.clone();
+                let system_name = self.system_name.clone();
+                let system_version = self.system_version.clone();
                 let init_future = async move {
                     // Wait for the chain to finish initializing before starting the JSON-RPC service.
                     (&mut running_chain_init).await;
@@ -672,6 +688,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         runtime_service: running_chain.runtime_service,
                         chain_spec: &chain_spec,
                         peer_id: &running_chain.network_identity.clone(),
+                        system_name,
+                        system_version,
                         genesis_block_hash,
                         genesis_block_state_root,
                         responses_sender: json_rpc_responses,

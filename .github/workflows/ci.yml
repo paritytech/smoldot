@@ -48,7 +48,7 @@ jobs:
     steps:
     - uses: actions/checkout@v2.4.0
     - uses: Swatinem/rust-cache@v1
-    - uses: actions/setup-node@v2.4.1
+    - uses: actions/setup-node@v2.5.0
       with:
         node-version: '12'
     - run: apt-get update && apt install -y binaryen # For `wasm-opt`
@@ -94,6 +94,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2.4.0
+      - uses: Swatinem/rust-cache@v1   # See also the `cache-fill` workflow.
       - uses: actions-rs/toolchain@v1
         with:
             toolchain: nightly

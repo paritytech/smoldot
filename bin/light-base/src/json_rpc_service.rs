@@ -93,6 +93,14 @@ pub struct Config<'a, TPlat: Platform> {
     /// Network identity of the node.
     pub peer_id: &'a PeerId,
 
+    /// Value to return when the `system_name` RPC is called. Should be set to the name of the
+    /// final executable.
+    pub system_name: String,
+
+    /// Value to return when the `system_version` RPC is called. Should be set to the version of
+    /// the final executable.
+    pub system_version: String,
+
     /// Hash of the genesis block of the chain.
     ///
     /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
@@ -175,6 +183,8 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             chain_is_live: config.chain_spec.has_live_network(),
             chain_properties_json: config.chain_spec.properties().to_owned(),
             peer_id_base58: config.peer_id.to_base58(),
+            system_name: config.system_name,
+            system_version: config.system_version,
             sync_service: config.sync_service,
             runtime_service: config.runtime_service,
             transactions_service: config.transactions_service,
@@ -432,6 +442,10 @@ struct Background<TPlat: Platform> {
     /// See [`Config::peer_id`]. The only use for this field is to send the base58 encoding of
     /// the [`PeerId`]. Consequently, we store the conversion to base58 ahead of time.
     peer_id_base58: String,
+    /// Value to return when the `system_name` RPC is called.
+    system_name: String,
+    /// Value to return when the `system_version` RPC is called.
+    system_version: String,
 
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
@@ -1305,7 +1319,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 log_and_respond(
                     &self.responses_sender,
                     &self.log_target,
-                    methods::Response::system_name("smoldot-light").to_json_response(request_id),
+                    methods::Response::system_name(&self.system_name).to_json_response(request_id),
                 )
                 .await;
             }
@@ -1347,7 +1361,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 log_and_respond(
                     &self.responses_sender,
                     &self.log_target,
-                    methods::Response::system_version(env!("CARGO_PKG_VERSION"))
+                    methods::Response::system_version(&self.system_version)
                         .to_json_response(request_id),
                 )
                 .await;
@@ -1690,7 +1704,7 @@ impl<TPlat: Platform> Background<TPlat> {
             stream::iter(subscribe_all.non_finalized_blocks_ancestry_order)
                 .chain(subscribe_all.new_blocks.filter_map(|notif| {
                     future::ready(match notif {
-                        sync_service::Notification::Block(b) => Some(b),
+                        runtime_service::Notification::Block(b) => Some(b),
                         _ => None,
                     })
                 }))
