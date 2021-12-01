@@ -269,18 +269,69 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 let finalized_hash = header::hash_from_scale_encoded_header(
                     &subscribe_all.finalized_block_scale_encoded_header,
                 );
-                let new_blocks =
+                let new_blocks = Some(
                     stream::iter(subscribe_all.non_finalized_blocks_ancestry_order.clone())
                         .map(Notification::Block)
-                        .chain(subscribe_all.new_blocks);
+                        .chain(subscribe_all.new_blocks),
+                );
 
-                (new_blocks, blocks, tree, current_best, finalized_hash)
+                (
+                    self.clone(),
+                    new_blocks,
+                    blocks,
+                    tree,
+                    current_best,
+                    finalized_hash,
+                )
             },
-            move |(mut new_blocks, mut blocks, mut tree, mut current_best, mut finalized_hash)| async move {
+            move |(
+                runtime_service,
+                mut new_blocks,
+                mut blocks,
+                mut tree,
+                mut current_best,
+                mut finalized_hash,
+            )| async move {
                 loop {
                     let mut best_runtime_has_changed = false;
-                    match new_blocks.next().await {
-                        None => return None, // TODO: doesn't match the API of the function
+
+                    let notif = match &mut new_blocks {
+                        Some(b) => b.next().await,
+                        None => None,
+                    };
+
+                    match notif {
+                        None => {
+                            let subscribe_all = runtime_service.subscribe_all(8).await;
+                            let finalized_runtime = subscribe_all.finalized_block_runtime.unwrap(); // TODO: unwrap() ?!
+
+                            let new_blocks = Some(
+                                stream::iter(
+                                    subscribe_all.non_finalized_blocks_ancestry_order.clone(),
+                                )
+                                .map(Notification::Block)
+                                .chain(subscribe_all.new_blocks),
+                            );
+
+                            blocks.clear();
+                            tree.clear();
+                            current_best = None;
+                            finalized_hash = header::hash_from_scale_encoded_header(
+                                &subscribe_all.finalized_block_scale_encoded_header,
+                            );
+
+                            break Some((
+                                finalized_runtime,
+                                (
+                                    runtime_service,
+                                    new_blocks,
+                                    blocks,
+                                    tree,
+                                    current_best,
+                                    finalized_hash,
+                                ),
+                            ));
+                        }
                         Some(Notification::Block(block)) => {
                             let hash =
                                 header::hash_from_scale_encoded_header(&block.scale_encoded_header);
@@ -294,7 +345,8 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                                 (block.new_runtime, hash),
                             );
 
-                            blocks.insert(hash, new_block_index);
+                            let _was_in = blocks.insert(hash, new_block_index);
+                            debug_assert!(_was_in.is_none());
 
                             if block.is_new_best {
                                 best_runtime_has_changed = if let Some(current_best) = current_best
@@ -345,9 +397,34 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
                         break Some((
                             best_runtime,
-                            (new_blocks, blocks, tree, current_best, finalized_hash),
+                            (
+                                runtime_service,
+                                new_blocks,
+                                blocks,
+                                tree,
+                                current_best,
+                                finalized_hash,
+                            ),
                         ));
                     }
+                }
+            },
+        );
+
+        // Deduplicate the elements in `stream`.
+        let stream = stream::unfold(
+            (
+                stream.boxed(), // There's unfortunately no choice but to box the stream.
+                subscribe_all.finalized_block_runtime.clone(),
+            ),
+            move |(mut stream, previously_reported)| async move {
+                loop {
+                    let item = stream.next().await?;
+                    match (&item, &previously_reported) {
+                        (Ok(a), Some(Ok(b))) if a == b => continue,
+                        _ => {} // TODO: what about errors? do we not deduplicate them?
+                    }
+                    break Some((item.clone(), (stream, Some(item))));
                 }
             },
         );
