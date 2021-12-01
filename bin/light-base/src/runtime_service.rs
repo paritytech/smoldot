@@ -50,7 +50,7 @@ use futures::{
     prelude::*,
 };
 use smoldot::{
-    chain::async_tree,
+    chain::{async_tree, fork_tree},
     chain_spec, executor, header,
     informant::HashDisplay,
     metadata,
@@ -253,9 +253,109 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         self: &Arc<RuntimeService<TPlat>>,
     ) -> (
         Option<Result<executor::CoreVersion, RuntimeError>>,
-        NotificationsReceiver<Result<executor::CoreVersion, RuntimeError>>,
+        stream::BoxStream<'static, Result<executor::CoreVersion, RuntimeError>>,
     ) {
-        let (tx, rx) = lossy_channel::channel();
+        let subscribe_all = self.subscribe_all(8).await;
+
+        // TODO: make this code easier to read
+        let stream = stream::unfold(
+            {
+                let blocks =
+                    hashbrown::HashMap::<_, _, fnv::FnvBuildHasher>::with_capacity_and_hasher(
+                        subscribe_all.non_finalized_blocks_ancestry_order.len() + 8,
+                        Default::default(),
+                    );
+                let tree = fork_tree::ForkTree::new();
+                let current_best = None;
+                let finalized_hash = header::hash_from_scale_encoded_header(
+                    &subscribe_all.finalized_block_scale_encoded_header,
+                );
+                let new_blocks =
+                    stream::iter(subscribe_all.non_finalized_blocks_ancestry_order.clone())
+                        .map(Notification::Block)
+                        .chain(subscribe_all.new_blocks);
+
+                (new_blocks, blocks, tree, current_best, finalized_hash)
+            },
+            move |(mut new_blocks, mut blocks, mut tree, mut current_best, mut finalized_hash)| async move {
+                loop {
+                    let mut best_runtime_has_changed = false;
+                    match new_blocks.next().await {
+                        None => return None,
+                        Some(Notification::Block(block)) => {
+                            let hash =
+                                header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+
+                            let new_block_index = tree.insert(
+                                if block.parent_hash == finalized_hash {
+                                    None
+                                } else {
+                                    Some(*blocks.get(&block.parent_hash).unwrap())
+                                },
+                                (block.new_runtime, hash),
+                            );
+
+                            blocks.insert(hash, new_block_index);
+
+                            if block.is_new_best {
+                                best_runtime_has_changed = if let Some(current_best) = current_best
+                                {
+                                    let (ascend, descend) =
+                                        tree.ascend_and_descend(new_block_index, current_best);
+                                    ascend
+                                        .chain(descend)
+                                        .any(|n| tree.get(n).unwrap().0.is_some())
+                                } else {
+                                    tree.node_to_root_path(new_block_index)
+                                        .any(|n| tree.get(n).unwrap().0.is_some())
+                                };
+
+                                current_best = Some(new_block_index);
+                            }
+                        }
+                        Some(Notification::Finalized {
+                            hash,
+                            best_block_hash,
+                        }) => {
+                            finalized_hash = hash;
+
+                            for pruned in tree.prune_ancestors(*blocks.get(&hash).unwrap()) {
+                                let (_, hash) = pruned.user_data;
+                                let _was_in = blocks.remove(&hash);
+                                debug_assert_eq!(_was_in, Some(pruned.index));
+                            }
+
+                            current_best = if best_block_hash == finalized_hash {
+                                None
+                            } else {
+                                Some(*blocks.get(&best_block_hash).unwrap())
+                            };
+
+                            // TODO: handle best block might have changed
+                        }
+                    }
+
+                    if best_runtime_has_changed {
+                        let best_runtime = if let Some(current_best) = current_best {
+                            tree.node_to_root_path(current_best)
+                                .find_map(|n| tree.get(n).unwrap().0.clone())
+                        } else {
+                            None
+                        }
+                        .unwrap(); // TODO: don't unwrap, use the finalized block runtime instead
+
+                        break Some((
+                            best_runtime,
+                            (new_blocks, blocks, tree, current_best, finalized_hash),
+                        ));
+                    }
+                }
+            },
+        );
+
+        (subscribe_all.finalized_block_runtime, stream.boxed())
+
+        /*let (tx, rx) = lossy_channel::channel();
 
         let mut guarded = self.guarded.lock().await;
         guarded.runtime_version_subscriptions.push(tx);
@@ -278,7 +378,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 .map_err(|err| err.clone())
         };
 
-        (Some(current_version), rx)
+        (Some(current_version), rx)*/
     }
 
     /// Returns the runtime version of the block with the given hash.
