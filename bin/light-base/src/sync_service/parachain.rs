@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::{BlockNotification, Notification, SubscribeAll, ToBackground};
+use super::ToBackground;
 use crate::{network_service, runtime_service, Platform};
 
 use futures::{channel::mpsc, prelude::*};
@@ -193,7 +193,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         // inserted back if the channel is still open.
                         for index in (0..all_subscriptions.len()).rev() {
                             let mut sender = all_subscriptions.swap_remove(index);
-                            let notif = Notification::Finalized {
+                            let notif = super::Notification::Finalized {
                                 hash,
                                 best_block_hash,
                             };
@@ -246,7 +246,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         let parent_hash = header::hash_from_scale_encoded_header(&parent_header);
                         for index in (0..all_subscriptions.len()).rev() {
                             let mut sender = all_subscriptions.swap_remove(index);
-                            let notif = Notification::Block(BlockNotification {
+                            let notif = super::Notification::Block(super::BlockNotification {
                                 is_new_best,
                                 parent_hash,
                                 scale_encoded_header: scale_encoded_header.clone(),
@@ -275,7 +275,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     // Update the local tree of blocks to match the update sent by the relay chain
                     // syncing service.
                     match relay_chain_notif {
-                        Notification::Finalized { hash, best_block_hash } => {
+                        runtime_service::Notification::Finalized { hash, best_block_hash } => {
                             log::debug!(
                                 target: &log_target,
                                 "Relay chain has finalized block 0x{}",
@@ -286,7 +286,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             let best = async_tree.input_iter_unordered().find(|b| *b.user_data == best_block_hash).unwrap().id;
                             async_tree.input_finalize(finalized, best);
                         }
-                        Notification::Block(block) => {
+                        runtime_service::Notification::Block(block) => {
                             let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
 
                             log::debug!(
@@ -352,7 +352,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         },
                         ToBackground::SubscribeAll { send_back, buffer_size } => {
                             let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
-                            let _ = send_back.send(SubscribeAll {
+                            let _ = send_back.send(super::SubscribeAll {
                                 finalized_block_scale_encoded_header: finalized_parahead.clone(),
                                 non_finalized_blocks_ancestry_order: async_tree.input_iter_unordered().filter_map(|block| {
                                     // `async_op_user_data` is `Some` only if this block has
@@ -364,7 +364,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                         .or_else(|| async_tree.finalized_async_user_data().as_ref().map(header::hash_from_scale_encoded_header))
                                         .unwrap_or(header::hash_from_scale_encoded_header(&finalized_parahead));
 
-                                    Some(BlockNotification {
+                                    Some(super::BlockNotification {
                                         is_new_best: block.is_output_best,
                                         scale_encoded_header: parahead.clone(),
                                         parent_hash,
