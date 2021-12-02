@@ -72,11 +72,14 @@ jobs:
     - run: cp ./target/wasm32-wasi/release/smoldot_light_wasm.wasm ./.ci-parent-build.wasm  # TODO: update path after https://github.com/paritytech/smoldot/pull/1729
     - run: git checkout ${{ github.event.pull_request.head.sha }}
     - run: cd bin/wasm-node/javascript && npm ci && npm run-script build
-    - run: twiggy diff ./.ci-parent-build.wasm ./target/wasm32-wasi/release/smoldot_light_wasm.wasm > ./.ci-twiggy-diff  # TODO: update path after https://github.com/paritytech/smoldot/pull/1729
+    - run: twiggy diff ./.ci-parent-build.wasm ./target/wasm32-wasi/release/smoldot_light_wasm.wasm > ./twiggy-diff  # TODO: update path after https://github.com/paritytech/smoldot/pull/1729
+    # Now that we've generated the diff in a `./twiggy-diff` file, the next step is to upload
+    # the PR number and diff content as an artifact that will then be picked up by a
+    # `workflow_run` action that does the actual commenting.
     - run: |
         mkdir -p ./pr
         echo ${{ github.event.pull_request.number }} > ./pr/number
-        cp ./.ci-twiggy-diff ./pr
+        cp ./twiggy-diff ./pr
     - uses: actions/upload-artifact@v2
       with:
         name: pr

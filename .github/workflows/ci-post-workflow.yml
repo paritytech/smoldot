@@ -7,6 +7,14 @@ on:
       - completed
 
 jobs:
+  # This job is run after a pull request workflow has completed, potentially from a fork
+  # repository. It downloads the artifact output of the workflow, then comments in the pull
+  # request accordingly.
+  #
+  # The reason why this is necessary is that the workflow of the pull request itself doesn't
+  # have the authorization to post comments (or any other "write" access action) to avoid people
+  # opening pull requests that modify workflows and execute arbitrary code.
+  # Instead, this workflow here is always taken from the base branch.
   wasm-node-size-diff:
     runs-on: ubuntu-latest
     if: ${{ github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success' }}
@@ -39,10 +47,14 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            return fs.readFileSync('./.ci-twiggy-diff', 'utf8').toString();
+            return fs.readFileSync('./twiggy-diff', 'utf8').toString();
           result-encoding: string
       - id: pr-num
         uses: actions/github-script@v4
+        # This step grabs the pull request number from the artifacts to know where to comment.
+        # This pull request number is untrusted and could be malicious. However the harm that
+        # could be done is very limited (spammy comments), and so this is not considered a
+        # problem.
         with:
           script: |
             const fs = require('fs');
