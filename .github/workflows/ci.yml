@@ -75,10 +75,12 @@ jobs:
     - run: twiggy diff ./.ci-parent-build.wasm ./target/wasm32-wasi/release/smoldot_light_wasm.wasm > ./.ci-twiggy-diff  # TODO: update path after https://github.com/paritytech/smoldot/pull/1729
     - id: twiggy-diff
       # This step is purely meant to turn the diff into an GitHub action output that can be picked up by the further steps.
-      # This snippet has been found here: https://github.com/marketplace/actions/create-or-update-comment
-      run: |
-        body="$(cat ./.ci-twiggy-diff)"
-        echo "::set-output name=body::$body"
+      uses: actions/github-script@v4
+      with:
+        script: |
+          const fs = require('fs');
+          return fs.readFileSync('./ci-twiggy-diff', 'utf8').toString();
+        result-encoding: string
     - uses: peter-evans/find-comment@v1
       id: find-comment
       with:
