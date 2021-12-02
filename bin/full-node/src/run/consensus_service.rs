@@ -741,6 +741,10 @@ impl SyncBackground {
             .with_start_time_override(block_author_jaeger_start_time);
 
         // Print a warning if generating the block has taken more time than expected.
+        // This can happen because the node is completely overloaded, is running on a slow machine,
+        // or if the runtime code being executed contains a very heavy operation.
+        // In any case, there is not much that a node operator can do except try increase the
+        // performance of their machine.
         if authoring_end.elapsed().map_or(false, |now_minus_end| {
             now_minus_end >= Duration::from_millis(500)
         }) {
