@@ -46,6 +46,20 @@ impl DatabaseThread {
             .unwrap();
         rx.await.unwrap()
     }
+
+    pub async fn with_database_detached(
+        &self,
+        closure: impl FnOnce(&SqliteFullDatabase) + Send + 'static,
+    ) {
+        self.sender
+            .lock()
+            .await
+            .send(Box::new(move |db| {
+                closure(db);
+            }))
+            .await
+            .unwrap();
+    }
 }
 
 impl From<SqliteFullDatabase> for DatabaseThread {
