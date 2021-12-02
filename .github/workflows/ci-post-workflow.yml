@@ -74,6 +74,10 @@ jobs:
             # twiggy diff report
 
             Difference in .wasm size before and after this pull request.
+
             ---
+
+            ```
             ${{ steps.twiggy-diff.outputs.result }}
+            ```
           edit-mode: replace
