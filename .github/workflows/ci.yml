@@ -61,22 +61,25 @@ jobs:
     steps:
     - uses: actions/checkout@v2.4.0
       with:
-        fetch-depth: 2  # Necessary to fetch `HEAD^` below
+        fetch-depth: 0  # Necessary to fetch `HEAD^` below
     - uses: Swatinem/rust-cache@v1
     - uses: actions/setup-node@v2.5.0
       with:
         node-version: '12'
     - run: cargo install twiggy
-    - run: git checkout HEAD^
-    - run: cd bin/wasm-node/javascript
-    - run: npm ci
-    - run: npm build
-    - run: cp ../../../target/wasm32-wasi/release/smoldot_light_wasm.wasm ./.ci-parent-build.wasm
+    - run: git checkout ${{ github.event.pull_request.base.sha }}
+    - run: cd bin/wasm-node/javascript && npm ci && npm build
+    - run: cp ./target/wasm32-wasi/release/smoldot_light_wasm.wasm ./.ci-parent-build.wasm
     - run: git checkout ${{ github.event.pull_request.head.sha }}
-    - run: npm build
-    - run: twiggy diff ./.ci-parent-build.wasm ../../../target/wasm32-wasi/release/smoldot_light_wasm.wasm > ./.ci-twiggy-diff
+    - run: cd bin/wasm-node/javascript && npm ci && npm build
+    - run: twiggy diff ./.ci-parent-build.wasm ./target/wasm32-wasi/release/smoldot_light_wasm.wasm > ./.ci-twiggy-diff
     - uses: ArkoseLabs/post-comment-action@v1
       with:
+        header: |
+          # twiggy diff report
+
+          This comment contains the difference in size between .
+          ---
         path: ./.ci-twiggy-diff
 
   check-features:
