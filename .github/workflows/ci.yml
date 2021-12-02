@@ -61,17 +61,17 @@ jobs:
     steps:
     - uses: actions/checkout@v2.4.0
       with:
-        fetch-depth: 0  # Necessary to fetch `HEAD^` below
+        fetch-depth: 0  # Necessary to fetch pull request base below
     - uses: Swatinem/rust-cache@v1
     - uses: actions/setup-node@v2.5.0
       with:
         node-version: '12'
     - run: cargo install twiggy
     - run: git checkout ${{ github.event.pull_request.base.sha }}
-    - run: cd bin/wasm-node/javascript && npm ci && npm build
+    - run: cd bin/wasm-node/javascript && npm ci && npm run-script build
     - run: cp ./target/wasm32-wasi/release/smoldot_light_wasm.wasm ./.ci-parent-build.wasm
     - run: git checkout ${{ github.event.pull_request.head.sha }}
-    - run: cd bin/wasm-node/javascript && npm ci && npm build
+    - run: cd bin/wasm-node/javascript && npm ci && npm run-script build
     - run: twiggy diff ./.ci-parent-build.wasm ./target/wasm32-wasi/release/smoldot_light_wasm.wasm > ./.ci-twiggy-diff
     - uses: ArkoseLabs/post-comment-action@v1
       with:
