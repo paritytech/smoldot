@@ -54,6 +54,31 @@ jobs:
     - run: apt-get update && apt install -y binaryen # For `wasm-opt`
     - run: cd bin/wasm-node/javascript && RUSTFLAGS=-Dwarnings npm install-ci-test
 
+  wasm-node-size-diff:
+    runs-on: ubuntu-latest
+    container:
+      image: rust
+    steps:
+    - uses: actions/checkout@v2.4.0
+      with:
+        fetch-depth: 2  # Necessary to fetch `HEAD^` below
+    - uses: Swatinem/rust-cache@v1
+    - uses: actions/setup-node@v2.5.0
+      with:
+        node-version: '12'
+    - run: cargo install twiggy
+    - run: git checkout HEAD^
+    - run: cd bin/wasm-node/javascript
+    - run: npm ci
+    - run: npm build
+    - run: cp ../../../target/wasm32-wasi/release/smoldot_light_wasm.wasm ./.ci-parent-build.wasm
+    - run: git checkout ${{ github.event.pull_request.head.sha }}
+    - run: npm build
+    - run: twiggy diff ./.ci-parent-build.wasm ../../../target/wasm32-wasi/release/smoldot_light_wasm.wasm > ./.ci-twiggy-diff
+    - uses: ArkoseLabs/post-comment-action@v1
+      with:
+        path: ./.ci-twiggy-diff
+
   check-features:
     runs-on: ubuntu-latest
     container:
@@ -140,7 +165,7 @@ jobs:
   all-ci:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [test-64bits, test-32bits, wasm-node-check, check-features, check-rustdoc-links, fmt, clippy, cargo-deny, wasm-node-versions-match]
+    needs: [test-64bits, test-32bits, wasm-node-check, wasm-node-size-diff, check-features, check-rustdoc-links, fmt, clippy, cargo-deny, wasm-node-versions-match]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success
