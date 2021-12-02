@@ -317,8 +317,6 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
         system_name: String,
         system_version: String,
     ) -> Self {
-        log::info!("test remove me, just twiggy test");
-
         let expected_chains = 8;
         Client {
             new_task_tx: tasks_spawner,
