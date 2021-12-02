@@ -79,7 +79,7 @@ jobs:
       with:
         script: |
           const fs = require('fs');
-          return fs.readFileSync('./ci-twiggy-diff', 'utf8').toString();
+          return fs.readFileSync('./.ci-twiggy-diff', 'utf8').toString();
         result-encoding: string
     - uses: peter-evans/find-comment@v1
       id: find-comment
