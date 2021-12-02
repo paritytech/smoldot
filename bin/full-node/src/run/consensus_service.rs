@@ -1089,7 +1089,10 @@ impl SyncBackground {
                                 }
                             }
 
-                            database_finalized(&self.database, finalized_blocks).await;
+                            let new_finalized_hash =
+                                finalized_blocks.last().map(|lf| lf.header.hash()).unwrap();
+                            database_blocks(&self.database, finalized_blocks).await;
+                            database_set_finalized(&self.database, new_finalized_hash).await;
                             continue;
                         }
                         (sync_out, all::JustificationVerifyOutcome::Error(error)) => {
@@ -1141,15 +1144,10 @@ impl SyncBackground {
 }
 
 /// Writes blocks to the database
-async fn database_finalized(
-    database: &database_thread::DatabaseThread,
-    finalized_blocks: Vec<all::Block<()>>,
-) {
+async fn database_blocks(database: &database_thread::DatabaseThread, blocks: Vec<all::Block<()>>) {
     database
         .with_database_detached(|database| {
-            let new_finalized_hash = finalized_blocks.last().map(|lf| lf.header.hash());
-
-            for block in finalized_blocks {
+            for block in blocks {
                 // TODO: overhead for building the SCALE encoding of the header
                 let result = database.insert(
                     &block.header.scale_encoding().fold(Vec::new(), |mut a, b| {
@@ -1173,10 +1171,19 @@ async fn database_finalized(
                     Err(err) => panic!("{}", err),
                 }
             }
+        })
+        .await
+}
 
-            if let Some(new_finalized_hash) = new_finalized_hash {
-                database.set_finalized(&new_finalized_hash).unwrap();
-            }
+/// Writes blocks to the database
+async fn database_set_finalized(
+    database: &database_thread::DatabaseThread,
+    finalized_block_hash: [u8; 32],
+) {
+    // TODO: what if best block changed?
+    database
+        .with_database_detached(move |database| {
+            database.set_finalized(&finalized_block_hash).unwrap();
         })
         .await
 }
