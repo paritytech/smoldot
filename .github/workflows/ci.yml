@@ -78,9 +78,6 @@ jobs:
       # This snippet has been found here: https://github.com/marketplace/actions/create-or-update-comment
       run: |
         body="$(cat ./.ci-twiggy-diff)"
-        body="${body//'%'/'%25'}"
-        body="${body//$'\n'/'%0A'}"
-        body="${body//$'\r'/'%0D'}"
         echo "::set-output name=body::$body"
     - uses: peter-evans/find-comment@v1
       id: find-comment
