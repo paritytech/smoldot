@@ -592,6 +592,7 @@ impl SyncBackground {
             let start = authoring_start.slot_start_from_unix_epoch();
             let end = authoring_start.slot_end_from_unix_epoch();
             debug_assert!(start < end);
+            debug_assert!(SystemTime::now() >= SystemTime::UNIX_EPOCH + start);
             SystemTime::UNIX_EPOCH
                 + start
                 + (end - start) * u32::from(self.slot_duration_author_ratio)
