@@ -69,6 +69,24 @@ pub struct Config<'a> {
 
     /// Service to use to report traces.
     pub jaeger_service: Arc<jaeger_service::JaegerService>,
+
+    /// A node has the authorization to author a block during a slot.
+    ///
+    /// In order for the network to perform well, a block should be authored and propagated
+    /// throughout the peer-to-peer network before the end of the slot. In order for this to
+    /// happen, the block creation process itself should end a few seconds before the end of the
+    /// slot. This threshold after which the block creation should end is determined by this value.
+    ///
+    /// The moment in the slot when the authoring ends is determined by
+    /// `slot_duration * slot_duration_author_ratio / u16::max_value()`.
+    /// For example, passing `u16::max_value()` means that the entire slot is used. Passing
+    /// `u16::max_value() / 2` means that half of the slot is used.
+    ///
+    /// A typical value is `43691_u16`, representing 2/3rds of a slot.
+    ///
+    /// Note that this value doesn't determine the moment when creating the block has ended, but
+    /// the moment when creating the block should start its final phase.
+    pub slot_duration_author_ratio: u16,
 }
 
 /// Identifier for a blocks request to be performed.
@@ -200,6 +218,7 @@ impl ConsensusService {
                 block_author_sync_source,
                 block_authoring: None,
                 authored_block: None,
+                slot_duration_author_ratio: config.slot_duration_author_ratio,
                 keystore: config.keystore,
                 finalized_block_storage,
                 sync_state: sync_state.clone(),
@@ -269,6 +288,9 @@ struct SyncBackground {
     /// to `Idle` so as to avoid trying to create a block over and over again.
     // TODO: this list of public keys is a bit hacky
     block_authoring: Option<(author::build::Builder, Vec<[u8; 32]>)>,
+
+    /// See [`Config::slot_duration_author_ratio`].
+    slot_duration_author_ratio: u16,
 
     /// After a block has been authored, it is inserted here while waiting for the `sync` to
     /// import it. Contains the block height, the block hash, the SCALE-encoded block header, and
@@ -554,27 +576,30 @@ impl SyncBackground {
         // the block hash, which is only known at the end.
         let block_author_jaeger_start_time = mick_jaeger::StartTime::now();
 
+        // Determine when the block should stop being authored.
+        //
+        // In order for the network to perform well, a block should be authored and propagated
+        // throughout the peer-to-peer network before the end of the slot. In order for this
+        // to happen, the block creation process itself should end a few seconds before the
+        // end of the slot.
+        //
+        // Most parts of the block authorship can't be accelerated, in particular the
+        // initialization and the signing at the end. This end of authoring threshold is only
+        // checked when deciding whether to continue including more transactions in the block.
+        // TODO: use this
+        // TODO: Substrate nodes increase the time available for authoring if it detects that slots have been skipped, in order to account for the possibility that the initialization of a block or the inclusion of an extrinsic takes too long
+        let authoring_end = {
+            let start = authoring_start.slot_start_from_unix_epoch();
+            let end = authoring_start.slot_end_from_unix_epoch();
+            debug_assert!(start < end);
+            SystemTime::UNIX_EPOCH
+                + start
+                + (end - start) * u32::from(self.slot_duration_author_ratio)
+                    / u32::from(u16::max_value())
+        };
+
         // Actual block production now happening.
         let block = {
-            // Determine when the block should stop being authored.
-            //
-            // In order for the network to perform well, a block should be authored and propagated
-            // throughout the peer-to-peer network before the end of the slot. In order for this
-            // to happen, the block creation process itself should end a few seconds before the
-            // end of the slot. This threshold after which the block creation should end is
-            // arbitrary, but we define it here as 2/3rds of the block duration.
-            //
-            // Most parts of the block authorship can't be accelerated, in particular the
-            // initialization and the signing at the end. This end of authoring threshold is only
-            // checked when deciding whether to continue including more transactions in the block.
-            // TODO: use this
-            let _authoring_end = {
-                let start = authoring_start.slot_start_from_unix_epoch();
-                let end = authoring_start.slot_end_from_unix_epoch();
-                debug_assert!(start < end);
-                SystemTime::UNIX_EPOCH + start + (end - start) * 2 / 3
-            };
-
             // Start the block authoring process.
             let mut block_authoring = {
                 let best_block_storage_access = self.sync.best_block_storage().unwrap();
@@ -714,6 +739,13 @@ impl SyncBackground {
             .jaeger_service
             .block_span(&new_block_hash, "author")
             .with_start_time_override(block_author_jaeger_start_time);
+
+        // Print a warning if generating the block has taken more time than expected.
+        if authoring_end.elapsed().map_or(false, |now_minus_end| {
+            now_minus_end >= Duration::from_millis(500)
+        }) {
+            tracing::warn!(hash = %HashDisplay(&new_block_hash), "block-generation-too-long");
+        }
 
         // Switch the block authoring to a state where we won't try to generate a new block again
         // until something new happens.
