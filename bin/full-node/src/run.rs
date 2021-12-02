@@ -327,6 +327,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         database,
         keystore,
         jaeger_service: jaeger_service.clone(),
+        slot_duration_author_ratio: 43691_u16,
     })
     .instrument(tracing::debug_span!("consensus-service-init"))
     .await;
@@ -340,6 +341,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 database: relay_chain_database,
                 keystore: Arc::new(keystore::Keystore::new(rand::random())),
                 jaeger_service, // TODO: consider passing a different jaeger service with a different service name
+                slot_duration_author_ratio: 43691_u16,
             })
             .instrument(tracing::debug_span!("relay-chain-consensus-service-init"))
             .await,
