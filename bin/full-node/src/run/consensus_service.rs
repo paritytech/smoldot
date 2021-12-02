@@ -27,7 +27,7 @@
 use crate::run::{database_thread, jaeger_service, network_service};
 
 use core::num::NonZeroU32;
-use futures::{channel::mpsc, lock::Mutex, prelude::*};
+use futures::{lock::Mutex, prelude::*};
 use smoldot::{
     author,
     chain::chain_information,
@@ -165,10 +165,6 @@ impl ConsensusService {
             finalized_block_number,
         }));
 
-        // Channel that sends blocks to the database for the database to write them.
-        // Writing blocks asynchronously considerably speeds up the syncing.
-        let (to_database, messages_rx) = mpsc::channel(4);
-
         // Spawn the background task that synchronizes blocks and updates the database.
         (config.tasks_executor)({
             let mut sync = all::AllSync::new(all::Config {
@@ -225,7 +221,7 @@ impl ConsensusService {
                 network_service: config.network_service.0,
                 network_chain_index: config.network_service.1,
                 from_network_service: config.network_events_receiver,
-                to_database,
+                database: config.database,
                 peers_source_id_map: Default::default(),
                 block_requests_finished: stream::FuturesUnordered::new(),
                 jaeger_service: config.jaeger_service,
@@ -235,13 +231,6 @@ impl ConsensusService {
                 tracing::trace_span!(parent: None, "sync-background", root = %HashDisplay(&finalized_block_hash)),
             ))
         });
-
-        // Spawn the background task that writes blocks to the database.
-        (config.tasks_executor)(Box::pin(
-            run_database_write(config.database, messages_rx).instrument(
-                tracing::trace_span!(parent: None, "database-write", root = %HashDisplay(&finalized_block_hash)),
-            ),
-        ));
 
         Arc::new(ConsensusService { sync_state })
     }
@@ -254,10 +243,6 @@ impl ConsensusService {
     pub async fn sync_state(&self) -> SyncState {
         self.sync_state.lock().await.clone()
     }
-}
-
-enum ToDatabase {
-    FinalizedBlocks(Vec<all::Block<()>>),
 }
 
 struct SyncBackground {
@@ -341,9 +326,8 @@ struct SyncBackground {
         >,
     >,
 
-    /// Channel to send messages to the background task dedicated to writing to the database
-    /// asynchronously.
-    to_database: mpsc::Sender<ToDatabase>,
+    /// See [`Config::database`].
+    database: Arc<database_thread::DatabaseThread>,
 
     /// How to report events about blocks.
     jaeger_service: Arc<jaeger_service::JaegerService>,
@@ -1105,11 +1089,7 @@ impl SyncBackground {
                                 }
                             }
 
-                            self.to_database
-                                .send(ToDatabase::FinalizedBlocks(finalized_blocks))
-                                .await
-                                .unwrap();
-
+                            database_finalized(&self.database, finalized_blocks).await;
                             continue;
                         }
                         (sync_out, all::JustificationVerifyOutcome::Error(error)) => {
@@ -1160,54 +1140,43 @@ impl SyncBackground {
     }
 }
 
-/// Runs the task that writes blocks to the database.
-#[tracing::instrument(level = "trace", skip(database, messages_rx))]
-async fn run_database_write(
-    database: Arc<database_thread::DatabaseThread>,
-    mut messages_rx: mpsc::Receiver<ToDatabase>,
+/// Writes blocks to the database
+async fn database_finalized(
+    database: &database_thread::DatabaseThread,
+    finalized_blocks: Vec<all::Block<()>>,
 ) {
-    loop {
-        match messages_rx.next().await {
-            None => break,
-            Some(ToDatabase::FinalizedBlocks(finalized_blocks)) => {
-                let span = tracing::debug_span!("blocks-db-write", len = finalized_blocks.len());
+    database
+        .with_database_detached(|database| {
+            let new_finalized_hash = finalized_blocks.last().map(|lf| lf.header.hash());
 
-                database
-                    .with_database(|database| {
-                        let new_finalized_hash = finalized_blocks.last().map(|lf| lf.header.hash());
+            for block in finalized_blocks {
+                // TODO: overhead for building the SCALE encoding of the header
+                let result = database.insert(
+                    &block.header.scale_encoding().fold(Vec::new(), |mut a, b| {
+                        a.extend_from_slice(b.as_ref());
+                        a
+                    }),
+                    true, // TODO: is_new_best?
+                    block.full.as_ref().unwrap().body.iter(),
+                    block
+                        .full
+                        .as_ref()
+                        .unwrap()
+                        .storage_top_trie_changes
+                        .iter()
+                        .map(|(k, v)| (k, v.as_ref())),
+                );
 
-                        for block in finalized_blocks {
-                            // TODO: overhead for building the SCALE encoding of the header
-                            let result = database.insert(
-                                &block.header.scale_encoding().fold(Vec::new(), |mut a, b| {
-                                    a.extend_from_slice(b.as_ref());
-                                    a
-                                }),
-                                true, // TODO: is_new_best?
-                                block.full.as_ref().unwrap().body.iter(),
-                                block
-                                    .full
-                                    .as_ref()
-                                    .unwrap()
-                                    .storage_top_trie_changes
-                                    .iter()
-                                    .map(|(k, v)| (k, v.as_ref())),
-                            );
-
-                            match result {
-                                Ok(()) => {}
-                                Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
-                                Err(err) => panic!("{}", err),
-                            }
-                        }
-
-                        if let Some(new_finalized_hash) = new_finalized_hash {
-                            database.set_finalized(&new_finalized_hash).unwrap();
-                        }
-                    })
-                    .instrument(span)
-                    .await;
+                match result {
+                    Ok(()) => {}
+                    Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
+                    Err(err) => panic!("{}", err),
+                }
             }
-        }
-    }
+
+            if let Some(new_finalized_hash) = new_finalized_hash {
+                database.set_finalized(&new_finalized_hash).unwrap();
+            }
+        })
+        .await
 }
