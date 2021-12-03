@@ -22,7 +22,9 @@
 use futures::{channel::mpsc, prelude::*};
 use itertools::Itertools as _;
 use smoldot::{
-    chain, chain_spec, header,
+    chain, chain_spec,
+    database::finalized_serialize,
+    header,
     informant::HashDisplay,
     libp2p::{connection, multiaddr, peer_id},
 };
@@ -363,8 +365,11 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         s.as_chain_information(),
                     )
                 }),
+                finalized_serialize::decode_chain(config.database_content),
             ) {
-                (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None) => {
+                (_, _, Ok((ci, _))) => ci,
+
+                (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None, _) => {
                     // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
                         user_data: config.user_data,
@@ -374,32 +379,36 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                     }));
                 }
 
-                (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), Some(Ok(ci))) => ci,
+                (
+                    Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
+                    Some(Ok(ci)),
+                    _,
+                ) => ci,
 
-                (Err(err), _) => {
+                (Err(err), _, _) => {
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
                         user_data: config.user_data,
                         error: format!("Failed to build genesis chain information: {}", err),
                     }));
                 }
 
-                (Ok(Err(err)), _) => {
+                (Ok(Err(err)), _, _) => {
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
                         user_data: config.user_data,
                         error: format!("Invalid genesis chain information: {}", err),
                     }));
                 }
 
-                (_, Some(Err(err))) => {
+                (_, Some(Err(err)), _) => {
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
                         user_data: config.user_data,
                         error: format!("Invalid checkpoint in chain specification: {}", err),
                     }));
                 }
 
-                (_, Some(Ok(ci))) => ci,
+                (_, Some(Ok(ci)), _) => ci,
 
-                (Ok(Ok(ci)), None) => ci,
+                (Ok(Ok(ci)), None, _) => ci,
             }
         };
 
@@ -862,8 +871,36 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
 
     /// Returns opaque data that can later by passing back through
     /// [`AddChainOptions::database_content`].
-    pub async fn database_content(&self, id: ChainId) -> String {
-        String::new() // TODO:
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub async fn database_content(&self, chain_id: ChainId) -> String {
+        let mut services = match self.public_api_chains.get(chain_id.0) {
+            Some(PublicApiChain::Ok { key, .. }) => {
+                // Clone the services initialization future.
+                match &self.chains_by_key.get(key).unwrap().services {
+                    future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
+                    future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
+                    future::MaybeDone::Gone => unreachable!(),
+                }
+            }
+            _ => panic!(),
+        };
+
+        // Wait for the chain to finish initializing before we can obtain the database.
+        (&mut services).await;
+        let services = Pin::new(&mut services).take_output().unwrap();
+
+        // Finally getting the database.
+        // If the database can't be obtained, we just return a dummy value that will intentionally
+        // fail to decode if passed back.
+        services
+            .sync_service
+            .serialize_chain_information()
+            .await
+            .unwrap_or_else(|| "<unknown>".into())
     }
 }
 
