@@ -94,6 +94,16 @@ extern "C" {
     /// that the request was made to.
     pub fn json_rpc_respond(ptr: u32, len: u32, chain_id: u32);
 
+    /// This function is called by the client is response to calling [`database_content`].
+    ///
+    /// The database content is a UTF-8 string found in the memory of the WebAssembly virtual
+    /// machine at offset `ptr` and with length `len`.
+    ///
+    /// `chain_id` is the chain that the request was made to. It is guaranteed to always be valid.
+    /// This function is not called if the chain is removed with [`remove_chain`] while the fetch
+    /// is in progress.
+    pub fn database_content_ready(ptr: u32, len: u32, chain_id: u32);
+
     /// Client is emitting a log entry.
     ///
     /// Each log entry is made of a log level (1 = Error, 2 = Warn, 3 = Info, 4 = Debug,
@@ -236,16 +246,19 @@ pub extern "C" fn alloc(len: u32) -> u32 {
 
 /// Adds a chain to the client. The client will try to stay connected and synchronize this chain.
 ///
-/// Use [`alloc`] to allocate a buffer for the spec of the chain that needs to be started.
-/// Write the chain spec in this buffer as UTF-8. Then, pass the pointer and length (in bytes)
-/// as parameter to this function.
+/// Use [`alloc`] to allocate a buffer for the spec and the database of the chain that needs to
+/// be started. Write the chain spec and database content in these buffers as UTF-8. Then, pass
+/// the pointers and lengths (in bytes) as parameter to this function.
+///
+/// > **Note**: The database content is an opaque string that can be obtained by calling
+/// >           [`database_content`].
 ///
 /// Similarly, use [`alloc`] to allocate a buffer containing a list of 32-bits-little-endian chain
 /// ids. Pass the pointer and number of chain ids (*not* length in bytes of the buffer) to this
 /// function. If the chain specification refer to a parachain, these chain ids are the ones that
 /// will be looked up to find the corresponding relay chain.
 ///
-/// These two buffers **must** have been allocated with [`alloc`]. They are freed when this
+/// These three buffers **must** have been allocated with [`alloc`]. They are freed when this
 /// function is called, even if an error code is returned.
 ///
 /// If `json_rpc_running` is 0, then no JSON-RPC service will be started and it is forbidden to
@@ -260,6 +273,8 @@ pub extern "C" fn alloc(len: u32) -> u32 {
 pub extern "C" fn add_chain(
     chain_spec_pointer: u32,
     chain_spec_len: u32,
+    database_content_pointer: u32,
+    database_content_len: u32,
     json_rpc_running: u32,
     potential_relay_chains_ptr: u32,
     potential_relay_chains_len: u32,
@@ -267,6 +282,8 @@ pub extern "C" fn add_chain(
     super::add_chain(
         chain_spec_pointer,
         chain_spec_len,
+        database_content_pointer,
+        database_content_len,
         json_rpc_running,
         potential_relay_chains_ptr,
         potential_relay_chains_len,
@@ -330,6 +347,21 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) {
     super::json_rpc_send(text_ptr, text_len, chain_id)
+}
+
+/// Starts generating the content of the database of the chain.
+///
+/// This function doesn't immediately return the content, but later calls
+/// [`database_content_ready`] with the content of the database.
+///
+/// Calling this function multiple times will lead to multiple calls to [`database_content_ready`],
+/// with potentially different values.
+///
+/// [`database_content_ready`] will not be called if you remove the chain with [`remove_chain`]
+/// while the operation is in progress.
+#[no_mangle]
+pub extern "C" fn database_content(chain_id: u32) {
+    super::database_content(chain_id)
 }
 
 /// Must be called in response to [`start_timer`] after the given duration has passed.
