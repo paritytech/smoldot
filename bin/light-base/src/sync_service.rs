@@ -142,6 +142,24 @@ impl<TPlat: Platform> SyncService<TPlat> {
         }
     }
 
+    /// Returns the state of the finalized block of the chain, after passing it through
+    /// [`smoldot::database::finalized_serialize::encode_chain`].
+    ///
+    /// Returns `None` if this information couldn't be obtained because not enough is known about
+    /// the chain.
+    pub async fn serialize_chain_information(&self) -> Option<String> {
+        let (send_back, rx) = oneshot::channel();
+
+        self.to_background
+            .lock()
+            .await
+            .send(ToBackground::SerializeChainInformation { send_back })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
     /// Subscribes to the state of the chain: the current state and the new blocks.
     ///
     /// All new blocks are reported. Only up to `buffer_size` block notifications are buffered
@@ -639,5 +657,9 @@ enum ToBackground {
     /// See [`SyncService::syncing_peers`].
     SyncingPeers {
         send_back: oneshot::Sender<Vec<(PeerId, protocol::Role, u64, [u8; 32])>>,
+    },
+    /// See [`SyncService::serialize_chain_information`].
+    SerializeChainInformation {
+        send_back: oneshot::Sender<Option<String>>,
     },
 }

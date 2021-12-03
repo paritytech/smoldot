@@ -113,6 +113,17 @@ export interface Chain {
   sendJsonRpc(rpc: string): void;
 
   /**
+   * Serializes the important information about the state of the chain so that it can be provided
+   * back in the {AddChainOptions.databaseContent} when the chain is recreated.
+   *
+   * The content of the string is opaque and shouldn't be decoded.
+   *
+   * @throws {AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
+   * @throws {CrashError} If the background client has crashed.
+   */
+  databaseContent(): Promise<string>;
+
+  /**
    * Disconnects from the blockchain.
    *
    * The JSON-RPC callback will no longer be called.
@@ -210,6 +221,21 @@ export interface AddChainOptions {
    * the value in `relay_chain` with the value in `id` of the chains in `potentialRelayChains`.
    */
   chainSpec: string;
+
+  /**
+   * Content of the database of this chain. Can be obtained with {Client.databaseContent}.
+   *
+   * Smoldot reserves the right to change its database format, making previous databases
+   * incompatible. For this reason, no error is generated if the content of the database is invalid
+   * and/or can't be decoded.
+   *
+   * Important: please note that using a malicious database content can lead to a security
+   * vulnerability. This database content is considered by smoldot as trusted input. It is the
+   * responsibility of the API user to make sure that the value passed in this field comes from
+   * the same source of trust as the chain specification that was used when retrieving this
+   * database content.
+   */
+  databaseContent?: string;
 
   /**
    * If `chainSpec` concerns a parachain, contains the list of chains whose `id` smoldot will try

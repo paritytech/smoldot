@@ -403,6 +403,9 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                 (peer_id, role, height, *hash)
                             }).collect());
                         }
+                        ToBackground::SerializeChainInformation { send_back } => {
+                            let _ = send_back.send(None);
+                        }
                     }
                 },
 

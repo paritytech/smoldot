@@ -113,12 +113,14 @@ impl Sub<Instant> for Instant {
 }
 
 lazy_static::lazy_static! {
-    static ref CLIENT: Mutex<Option<(smoldot_light_base::Client<Option<future::AbortHandle>, platform::Platform>, mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>)>> = Mutex::new(None);
+    static ref CLIENT: Mutex<Option<(smoldot_light_base::Client<Vec<future::AbortHandle>, platform::Platform>, mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>)>> = Mutex::new(None);
 }
 
 fn add_chain(
     chain_spec_pointer: u32,
     chain_spec_len: u32,
+    database_content_pointer: u32,
+    database_content_len: u32,
     json_rpc_running: u32,
     potential_relay_chains_ptr: u32,
     potential_relay_chains_len: u32,
@@ -133,7 +135,7 @@ fn add_chain(
         let chain_id = client_lock.as_mut().unwrap().0.add_erroneous_chain(
             "Wasm node is running low on memory and will prevent any new chain from being added"
                 .into(),
-            None,
+            Vec::new(),
         );
 
         return chain_id.into();
@@ -147,6 +149,18 @@ fn add_chain(
             Box::from_raw(slice::from_raw_parts_mut(
                 chain_spec_pointer as *mut u8,
                 chain_spec_len,
+            ))
+        }
+    };
+
+    // Retrieve the database content parameter passed through the FFI layer.
+    let database_content: Box<[u8]> = {
+        let database_content_pointer = usize::try_from(database_content_pointer).unwrap();
+        let database_content_len = usize::try_from(database_content_len).unwrap();
+        unsafe {
+            Box::from_raw(slice::from_raw_parts_mut(
+                database_content_pointer as *mut u8,
+                database_content_len,
             ))
         }
     };
@@ -195,8 +209,9 @@ fn add_chain(
         .unwrap()
         .0
         .add_chain(smoldot_light_base::AddChainConfig {
-            user_data: abort_handle,
+            user_data: abort_handle.into_iter().collect(),
             specification: str::from_utf8(&chain_spec).unwrap(),
+            database_content: str::from_utf8(&database_content).unwrap(),
             json_rpc_responses,
             potential_relay_chains: potential_relay_chains.into_iter(),
         });
@@ -229,19 +244,20 @@ fn add_chain(
 fn remove_chain(chain_id: u32) {
     let mut client_lock = CLIENT.lock().unwrap();
 
-    let abort_handle = client_lock
+    let abort_handles = client_lock
         .as_mut()
         .unwrap()
         .0
         .remove_chain(smoldot_light_base::ChainId::from(chain_id));
 
-    // Abort the task that polls the channel and sends out the JSON-RPC responses. This prevents
-    // any new JSON-RPC response concerning this chain from ever being sent back, even if some
-    // were still pending.
+    // Abort the tasks that retrieve the database content or poll the channel and send out the
+    // JSON-RPC responses. This prevents any database callback from being called, and any new
+    // JSON-RPC response concerning this chain from ever being sent back, even if some were still
+    // pending.
     // Note that this only works because Wasm is single-threaded, otherwise the task being aborted
     // might be in the process of being polled.
     // TODO: solve this in case we use Wasm threads in the future
-    if let Some(abort_handle) = abort_handle {
+    for abort_handle in abort_handles {
         abort_handle.abort();
     }
 }
@@ -309,6 +325,41 @@ fn json_rpc_send(ptr: u32, len: u32, chain_id: u32) {
             emit_json_rpc_response(&response, chain_id);
         }
     }
+}
+
+fn database_content(chain_id: u32) {
+    let client_chain_id = smoldot_light_base::ChainId::from(chain_id);
+
+    let mut client_lock = CLIENT.lock().unwrap();
+    let (client, tasks_spawner) = client_lock.as_mut().unwrap();
+
+    let task = {
+        let future = client.database_content(client_chain_id);
+        async move {
+            let content = future.await;
+            unsafe {
+                bindings::database_content_ready(
+                    u32::try_from(content.as_ptr() as usize).unwrap(),
+                    u32::try_from(content.len()).unwrap(),
+                    chain_id,
+                );
+            }
+        }
+    };
+
+    let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
+    client
+        .chain_user_data_mut(client_chain_id)
+        .push(abort_handle);
+
+    tasks_spawner
+        .unbounded_send((
+            "database_content-output".to_owned(),
+            future::Abortable::new(task, abort_registration)
+                .map(|_| ())
+                .boxed(),
+        ))
+        .unwrap();
 }
 
 fn emit_json_rpc_response(rpc: &str, chain_id: smoldot_light_base::ChainId) {

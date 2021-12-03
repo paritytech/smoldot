@@ -22,7 +22,9 @@
 use futures::{channel::mpsc, prelude::*};
 use itertools::Itertools as _;
 use smoldot::{
-    chain, chain_spec, header,
+    chain, chain_spec,
+    database::finalized_serialize,
+    header,
     informant::HashDisplay,
     libp2p::{connection, multiaddr, peer_id},
 };
@@ -54,6 +56,15 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
 
     /// JSON text containing the specification of the chain (the so-called "chain spec").
     pub specification: &'a str,
+
+    /// Opaque data containing the database content that was retrieved by calling
+    /// [`Client::database_content`] in the past.
+    ///
+    /// Pass an empty string if no database content exists or is known.
+    ///
+    /// No error is generated if this data is invalid and/or can't be decoded. The implementation
+    /// reserves the right to break the format of this data at any point.
+    pub database_content: &'a str,
 
     /// If [`AddChainConfig`] defines a parachain, contains the list of relay chains to choose
     /// from. Ignored if not a parachain.
@@ -356,8 +367,11 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         s.as_chain_information(),
                     )
                 }),
+                finalized_serialize::decode_chain(config.database_content),
             ) {
-                (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None) => {
+                (_, _, Ok((ci, _))) => ci,
+
+                (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None, _) => {
                     // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
                         user_data: config.user_data,
@@ -367,32 +381,36 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                     }));
                 }
 
-                (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), Some(Ok(ci))) => ci,
+                (
+                    Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
+                    Some(Ok(ci)),
+                    _,
+                ) => ci,
 
-                (Err(err), _) => {
+                (Err(err), _, _) => {
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
                         user_data: config.user_data,
                         error: format!("Failed to build genesis chain information: {}", err),
                     }));
                 }
 
-                (Ok(Err(err)), _) => {
+                (Ok(Err(err)), _, _) => {
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
                         user_data: config.user_data,
                         error: format!("Invalid genesis chain information: {}", err),
                     }));
                 }
 
-                (_, Some(Err(err))) => {
+                (_, Some(Err(err)), _) => {
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
                         user_data: config.user_data,
                         error: format!("Invalid checkpoint in chain specification: {}", err),
                     }));
                 }
 
-                (_, Some(Ok(ci))) => ci,
+                (_, Some(Ok(ci)), _) => ci,
 
-                (Ok(Ok(ci)), None) => ci,
+                (Ok(Ok(ci)), None, _) => ci,
             }
         };
 
@@ -783,6 +801,19 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
         user_data
     }
 
+    /// Returns the user data associated to the given chain.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn chain_user_data_mut(&mut self, chain_id: ChainId) -> &mut TChain {
+        match self.public_api_chains.get_mut(chain_id.0).unwrap() {
+            PublicApiChain::Ok { user_data, .. } => user_data,
+            PublicApiChain::Erroneous { user_data, .. } => user_data,
+        }
+    }
+
     /// Enqueues a JSON-RPC request towards the given chain.
     ///
     /// Since most JSON-RPC requests can only be answered asynchronously, the request is only
@@ -850,6 +881,48 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                     }
                 }
             }
+        }
+    }
+
+    /// Returns opaque data that can later by passing back through
+    /// [`AddChainConfig::database_content`].
+    ///
+    /// Note that the `Future` being returned doesn't borrow `self`. Even if the chain is later
+    /// removed, this `Future` will still return a value.
+    ///
+    /// If the database content can't be obtained because not enough information is known about
+    /// the chain, a dummy value is intentionally returned.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn database_content(&self, chain_id: ChainId) -> impl Future<Output = String> {
+        let mut services = match self.public_api_chains.get(chain_id.0) {
+            Some(PublicApiChain::Ok { key, .. }) => {
+                // Clone the services initialization future.
+                match &self.chains_by_key.get(key).unwrap().services {
+                    future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
+                    future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
+                    future::MaybeDone::Gone => unreachable!(),
+                }
+            }
+            _ => panic!(),
+        };
+
+        async move {
+            // Wait for the chain to finish initializing before we can obtain the database.
+            (&mut services).await;
+            let services = Pin::new(&mut services).take_output().unwrap();
+
+            // Finally getting the database.
+            // If the database can't be obtained, we just return a dummy value that will intentionally
+            // fail to decode if passed back.
+            services
+                .sync_service
+                .serialize_chain_information()
+                .await
+                .unwrap_or_else(|| "<unknown>".into())
         }
     }
 }

@@ -52,6 +52,17 @@ export default (config) => {
             }
         },
 
+        // Used by the Rust side in response to asking for the database content of a chain.
+        database_content_ready: (ptr, len, chainId) => {
+            ptr >>>= 0;
+            len >>>= 0;
+
+            let content = Buffer.from(config.instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
+            if (config.databaseContentCallback) {
+                config.databaseContentCallback(content, chainId);
+            }
+        },
+
         // Used by the Rust side to emit a log entry.
         // See also the `max_log_level` parameter in the configuration.
         log: (level, target_ptr, target_len, message_ptr, message_len) => {
