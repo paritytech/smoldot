@@ -660,5 +660,5 @@ enum ToBackground {
     /// See [`SyncService::serialize_chain_information`].
     SerializeChainInformation {
         send_back: oneshot::Sender<Option<String>>,
-    }
+    },
 }
