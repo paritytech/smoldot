@@ -49,7 +49,7 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: rust
+      image: rust:1.57
     steps:
       - uses: actions/checkout@v2.4.0
       - uses: actions/setup-node@v2.5.0
