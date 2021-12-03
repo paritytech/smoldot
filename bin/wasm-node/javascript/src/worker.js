@@ -47,6 +47,12 @@ const injectMessage = (instance, message) => {
     Buffer.from(instance.exports.memory.buffer)
       .write(message.chainSpec, chainSpecPtr);
 
+    // Write the database content into memory.
+    const databaseContentLen = Buffer.byteLength(message.databaseContent, 'utf8');
+    const databaseContentPtr = instance.exports.alloc(databaseContentLen) >>> 0;
+    Buffer.from(instance.exports.memory.buffer)
+      .write(message.databaseContent, databaseContentPtr);
+
     // Write the potential relay chains into memory.
     const potentialRelayChainsLen = message.potentialRelayChains.length;
     const potentialRelayChainsPtr = instance.exports.alloc(potentialRelayChainsLen * 4) >>> 0;
@@ -61,6 +67,7 @@ const injectMessage = (instance, message) => {
     // Note that `add_chain` properly de-allocates buffers even if it failed.
     const chainId = instance.exports.add_chain(
       chainSpecPtr, chainSpecLen,
+      databaseContentPtr, databaseContentLen,
       message.jsonRpcRunning,
       potentialRelayChainsPtr, potentialRelayChainsLen
     );
@@ -80,6 +87,11 @@ const injectMessage = (instance, message) => {
     instance.exports.remove_chain(message.chainId);
     // `compat.postMessage` is the same as `postMessage`, but works across environments.
     compat.postMessage({ kind: 'chainRemoved' });
+
+  } else if (message.ty == 'databaseContent') {
+    instance.exports.database_content(message.chainId);
+    // `compat.postMessage` is the same as `postMessage`, but works across environments.
+    compat.postMessage({ kind: 'databaseContent', data: '' });  // TODO: data
 
   } else
     throw new Error('unrecognized message type');

@@ -55,6 +55,13 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     /// JSON text containing the specification of the chain (the so-called "chain spec").
     pub specification: &'a str,
 
+    /// Opaque data containing the database content that was retrieved by calling
+    /// [`Client::database_content`] in the past.
+    ///
+    /// No error is generated if this data is invalid and/or can't be decoded. The implementation
+    /// reserves the right to break the format of this data at any point.
+    pub database_content: &'a str,
+
     /// If [`AddChainConfig`] defines a parachain, contains the list of relay chains to choose
     /// from. Ignored if not a parachain.
     ///
@@ -851,6 +858,12 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                 }
             }
         }
+    }
+
+    /// Returns opaque data that can later by passing back through
+    /// [`AddChainOptions::database_content`].
+    pub async fn database_content(&self, id: ChainId) -> String {
+        String::new() // TODO:
     }
 }
 

@@ -236,16 +236,19 @@ pub extern "C" fn alloc(len: u32) -> u32 {
 
 /// Adds a chain to the client. The client will try to stay connected and synchronize this chain.
 ///
-/// Use [`alloc`] to allocate a buffer for the spec of the chain that needs to be started.
-/// Write the chain spec in this buffer as UTF-8. Then, pass the pointer and length (in bytes)
-/// as parameter to this function.
+/// Use [`alloc`] to allocate a buffer for the spec and the database of the chain that needs to
+/// be started. Write the chain spec and database content in these buffers as UTF-8. Then, pass
+/// the pointers and lengths (in bytes) as parameter to this function.
+///
+/// > **Note**: The database content is an opaque string that can be obtained by calling
+/// >           [`database_content`].
 ///
 /// Similarly, use [`alloc`] to allocate a buffer containing a list of 32-bits-little-endian chain
 /// ids. Pass the pointer and number of chain ids (*not* length in bytes of the buffer) to this
 /// function. If the chain specification refer to a parachain, these chain ids are the ones that
 /// will be looked up to find the corresponding relay chain.
 ///
-/// These two buffers **must** have been allocated with [`alloc`]. They are freed when this
+/// These three buffers **must** have been allocated with [`alloc`]. They are freed when this
 /// function is called, even if an error code is returned.
 ///
 /// If `json_rpc_running` is 0, then no JSON-RPC service will be started and it is forbidden to
@@ -260,6 +263,8 @@ pub extern "C" fn alloc(len: u32) -> u32 {
 pub extern "C" fn add_chain(
     chain_spec_pointer: u32,
     chain_spec_len: u32,
+    database_content_pointer: u32,
+    database_content_len: u32,
     json_rpc_running: u32,
     potential_relay_chains_ptr: u32,
     potential_relay_chains_len: u32,
@@ -267,6 +272,8 @@ pub extern "C" fn add_chain(
     super::add_chain(
         chain_spec_pointer,
         chain_spec_len,
+        database_content_pointer,
+        database_content_len,
         json_rpc_running,
         potential_relay_chains_ptr,
         potential_relay_chains_len,

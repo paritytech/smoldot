@@ -119,6 +119,8 @@ lazy_static::lazy_static! {
 fn add_chain(
     chain_spec_pointer: u32,
     chain_spec_len: u32,
+    database_content_pointer: u32,
+    database_content_len: u32,
     json_rpc_running: u32,
     potential_relay_chains_ptr: u32,
     potential_relay_chains_len: u32,
@@ -147,6 +149,18 @@ fn add_chain(
             Box::from_raw(slice::from_raw_parts_mut(
                 chain_spec_pointer as *mut u8,
                 chain_spec_len,
+            ))
+        }
+    };
+
+    // Retrieve the database content parameter passed through the FFI layer.
+    let database_content: Box<[u8]> = {
+        let database_content_pointer = usize::try_from(database_content_pointer).unwrap();
+        let database_content_len = usize::try_from(database_content_len).unwrap();
+        unsafe {
+            Box::from_raw(slice::from_raw_parts_mut(
+                database_content_pointer as *mut u8,
+                database_content_len,
             ))
         }
     };
@@ -197,6 +211,7 @@ fn add_chain(
         .add_chain(smoldot_light_base::AddChainConfig {
             user_data: abort_handle,
             specification: str::from_utf8(&chain_spec).unwrap(),
+            database_content: str::from_utf8(&database_content).unwrap(),
             json_rpc_responses,
             potential_relay_chains: potential_relay_chains.into_iter(),
         });

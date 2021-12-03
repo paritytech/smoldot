@@ -124,6 +124,21 @@ export function start(config) {
             throw new JsonRpcDisabledError();
           worker.postMessage({ ty: 'request', request, chainId });
         },
+        databaseContent: () => {
+          if (workerError)
+            return Promise.reject(workerError);
+          if (chainId === null)
+            return Promise.reject(new AlreadyDestroyedError());
+          let resolve;
+          let reject;
+          const promise = new Promise((res, rej) => {
+            resolve = res;
+            reject = rej;
+          });
+          pendingConfirmations.push({ ty: 'databaseContent', resolve, reject });
+          worker.postMessage({ ty: 'databaseContent', chainId });
+          return promise;
+        },
         remove: () => {
           if (workerError)
             throw workerError;
@@ -150,6 +165,10 @@ export function start(config) {
 
     } else if (message.kind == 'chainRemoved') {
       pendingConfirmations.shift();
+
+    } else if (message.kind == 'databaseContent') {
+      const confirmation = pendingConfirmations.shift();
+      confirmation.resolve(message.data);
 
     } else if (message.kind == 'log') {
       logCallback(message.level, message.target, message.message);
@@ -226,6 +245,7 @@ export function start(config) {
       worker.postMessage({
         ty: 'addChain',
         chainSpec: options.chainSpec,
+        databaseContent: options.databaseContent,
         potentialRelayChains: potentialRelayChainsIds,
         jsonRpcRunning: !!options.jsonRpcCallback,
       });
