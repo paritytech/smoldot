@@ -885,7 +885,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     }
 
     /// Returns opaque data that can later by passing back through
-    /// [`AddChainOptions::database_content`].
+    /// [`AddChainConfig::database_content`].
     ///
     /// Note that the `Future` being returned doesn't borrow `self`. Even if the chain is later
     /// removed, this `Future` will still return a value.
