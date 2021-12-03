@@ -89,7 +89,6 @@ const injectMessage = (instance, message) => {
     compat.postMessage({ kind: 'chainRemoved' });
 
   } else if (message.ty == 'databaseContent') {
-    // TODO: wrong /!\
     instance.exports.database_content(message.chainId);
 
   } else
