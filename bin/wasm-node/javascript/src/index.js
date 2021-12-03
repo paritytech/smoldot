@@ -176,7 +176,7 @@ export function start(config) {
       pendingConfirmations.shift();
 
     } else if (message.kind == 'databaseContent') {
-      const promises = chainsJsonRpcCallbacks.get(message.chainId);
+      const promises = chainsDatabaseContentPromises.get(message.chainId);
       if (promises) promises.shift().resolve(message.data);
 
     } else if (message.kind == 'log') {
