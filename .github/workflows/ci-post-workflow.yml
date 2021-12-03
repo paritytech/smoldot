@@ -17,7 +17,7 @@ jobs:
   # Instead, this workflow here is always taken from the base branch.
   wasm-node-size-diff:
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event.workflow_run.event == 'pull_request' }}
     steps:
       # TODO: use download-artifact action
       - uses: actions/github-script@v3.1.0
