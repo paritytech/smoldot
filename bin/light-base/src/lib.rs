@@ -60,7 +60,7 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     /// Opaque data containing the database content that was retrieved by calling
     /// [`Client::database_content`] in the past.
     ///
-    /// Pass an empty string is no database content exists or is known.
+    /// Pass an empty string if no database content exists or is known.
     ///
     /// No error is generated if this data is invalid and/or can't be decoded. The implementation
     /// reserves the right to break the format of this data at any point.
@@ -889,6 +889,9 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     ///
     /// Note that the `Future` being returned doesn't borrow `self`. Even if the chain is later
     /// removed, this `Future` will still return a value.
+    ///
+    /// If the database content can't be obtained because not enough information is known about
+    /// the chain, a dummy value is intentionally returned.
     ///
     /// # Panic
     ///

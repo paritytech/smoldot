@@ -142,10 +142,11 @@ impl<TPlat: Platform> SyncService<TPlat> {
         }
     }
 
-    /// Returns the state of the finalized block of the chain, as passed through
+    /// Returns the state of the finalized block of the chain, after passing it through
     /// [`smoldot::database::finalized_serialize::encode_chain`].
     ///
-    /// Returns `None` if this information couldn't be obtained.
+    /// Returns `None` if this information couldn't be obtained because not enough is known about
+    /// the chain.
     pub async fn serialize_chain_information(&self) -> Option<String> {
         let (send_back, rx) = oneshot::channel();
 
