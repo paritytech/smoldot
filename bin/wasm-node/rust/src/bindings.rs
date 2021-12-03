@@ -94,6 +94,16 @@ extern "C" {
     /// that the request was made to.
     pub fn json_rpc_respond(ptr: u32, len: u32, chain_id: u32);
 
+    /// This function is called by the client is response to calling [`database_content`].
+    ///
+    /// The database content is a UTF-8 string found in the memory of the WebAssembly virtual
+    /// machine at offset `ptr` and with length `len`.
+    ///
+    /// `chain_id` is the chain that the request was made to. It is guaranteed to always be valid.
+    /// This function is not called if the chain is removed with [`remove_chain`] while the fetch
+    /// is in progress.
+    pub fn database_content_ready(ptr: u32, len: u32, chain_id: u32);
+
     /// Client is emitting a log entry.
     ///
     /// Each log entry is made of a log level (1 = Error, 2 = Warn, 3 = Info, 4 = Debug,
@@ -337,6 +347,21 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) {
     super::json_rpc_send(text_ptr, text_len, chain_id)
+}
+
+/// Starts generating the content of the database of the chain.
+///
+/// This function doesn't immediately return the content, but later calls
+/// [`database_content_ready`] with the content of the database.
+///
+/// Calling this function multiple times will lead to multiple calls to [`database_content_ready`],
+/// with potentially different values.
+///
+/// [`database_content_ready`] will not be called if you remove the chain with [`remove_chain`]
+/// while the operation is in progress.
+#[no_mangle]
+pub extern "C" fn database_content(chain_id: u32) {
+    super::database_content(chain_id)
 }
 
 /// Must be called in response to [`start_timer`] after the given duration has passed.

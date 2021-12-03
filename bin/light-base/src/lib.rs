@@ -799,6 +799,19 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
         user_data
     }
 
+    /// Returns the user data associated to the given chain.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn chain_user_data_mut(&mut self, chain_id: ChainId) -> &mut TChain {
+        match self.public_api_chains.get_mut(chain_id.0).unwrap() {
+            PublicApiChain::Ok { user_data, .. } => user_data,
+            PublicApiChain::Erroneous { user_data, .. } => user_data,
+        }
+    }
+
     /// Enqueues a JSON-RPC request towards the given chain.
     ///
     /// Since most JSON-RPC requests can only be answered asynchronously, the request is only
@@ -872,11 +885,14 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     /// Returns opaque data that can later by passing back through
     /// [`AddChainOptions::database_content`].
     ///
+    /// Note that the `Future` being returned doesn't borrow `self`. Even if the chain is later
+    /// removed, this `Future` will still return a value.
+    ///
     /// # Panic
     ///
     /// Panics if the [`ChainId`] is invalid.
     ///
-    pub async fn database_content(&self, chain_id: ChainId) -> String {
+    pub fn database_content(&self, chain_id: ChainId) -> impl Future<Output = String> {
         let mut services = match self.public_api_chains.get(chain_id.0) {
             Some(PublicApiChain::Ok { key, .. }) => {
                 // Clone the services initialization future.
@@ -889,18 +905,20 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
             _ => panic!(),
         };
 
-        // Wait for the chain to finish initializing before we can obtain the database.
-        (&mut services).await;
-        let services = Pin::new(&mut services).take_output().unwrap();
+        async move {
+            // Wait for the chain to finish initializing before we can obtain the database.
+            (&mut services).await;
+            let services = Pin::new(&mut services).take_output().unwrap();
 
-        // Finally getting the database.
-        // If the database can't be obtained, we just return a dummy value that will intentionally
-        // fail to decode if passed back.
-        services
-            .sync_service
-            .serialize_chain_information()
-            .await
-            .unwrap_or_else(|| "<unknown>".into())
+            // Finally getting the database.
+            // If the database can't be obtained, we just return a dummy value that will intentionally
+            // fail to decode if passed back.
+            services
+                .sync_service
+                .serialize_chain_information()
+                .await
+                .unwrap_or_else(|| "<unknown>".into())
+        }
     }
 }
 

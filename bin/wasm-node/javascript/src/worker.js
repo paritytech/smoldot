@@ -89,9 +89,8 @@ const injectMessage = (instance, message) => {
     compat.postMessage({ kind: 'chainRemoved' });
 
   } else if (message.ty == 'databaseContent') {
+    // TODO: wrong /!\
     instance.exports.database_content(message.chainId);
-    // `compat.postMessage` is the same as `postMessage`, but works across environments.
-    compat.postMessage({ kind: 'databaseContent', data: '' });  // TODO: data
 
   } else
     throw new Error('unrecognized message type');
@@ -112,6 +111,10 @@ const startInstance = async (config) => {
     jsonRpcCallback: (data, chainId) => {
       // `compat.postMessage` is the same as `postMessage`, but works across environments.
       compat.postMessage({ kind: 'jsonrpc', data, chainId });
+    },
+    databaseContentCallback: (data, chainId) => {
+      // `compat.postMessage` is the same as `postMessage`, but works across environments.
+      compat.postMessage({ kind: 'databaseContent', data, chainId });
     },
     forbidTcp: config.forbidTcp,
     forbidWs: config.forbidWs,
