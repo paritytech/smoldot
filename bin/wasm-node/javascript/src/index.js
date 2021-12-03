@@ -245,7 +245,7 @@ export function start(config) {
       worker.postMessage({
         ty: 'addChain',
         chainSpec: options.chainSpec,
-        databaseContent: options.databaseContent,
+        databaseContent: typeof options.databaseContent === 'string' ? options.databaseContent : "",
         potentialRelayChains: potentialRelayChainsIds,
         jsonRpcRunning: !!options.jsonRpcCallback,
       });

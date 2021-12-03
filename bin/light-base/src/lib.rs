@@ -60,6 +60,8 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     /// Opaque data containing the database content that was retrieved by calling
     /// [`Client::database_content`] in the past.
     ///
+    /// Pass an empty string is no database content exists or is known.
+    ///
     /// No error is generated if this data is invalid and/or can't be decoded. The implementation
     /// reserves the right to break the format of this data at any point.
     pub database_content: &'a str,
