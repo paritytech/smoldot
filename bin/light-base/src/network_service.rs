@@ -42,7 +42,7 @@ use core::{cmp, num::NonZeroUsize, task::Poll, time::Duration};
 use futures::{channel::mpsc, prelude::*};
 use itertools::Itertools as _;
 use smoldot::{
-    informant::HashDisplay,
+    informant::{BytesDisplay, HashDisplay},
     libp2p::{
         collection::{ConnectionError, HandshakeError},
         connection::{self, handshake},
@@ -622,7 +622,26 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, service::BlocksRequestError> {
-        log::debug!(target: "network", "Connection({}) <= BlocksRequest({:?})", target, config);
+        match &config.start {
+            protocol::BlocksRequestConfigStart::Hash(hash) => {
+                log::debug!(
+                    target: "network",
+                    "Connection({}) <= BlocksRequest(start: {}, num: {}, descending: {:?}, header: {:?}, body: {:?}, justifications: {:?})",
+                    target, HashDisplay(hash), config.desired_count.get(),
+                    matches!(config.direction, protocol::BlocksRequestDirection::Descending),
+                    config.fields.header, config.fields.body, config.fields.justification
+                );
+            }
+            protocol::BlocksRequestConfigStart::Number(number) => {
+                log::debug!(
+                    target: "network",
+                    "Connection({}) <= BlocksRequest(start: #{}, num: {}, descending: {:?}, header: {:?}, body: {:?}, justifications: {:?})",
+                    target, number, config.desired_count.get(),
+                    matches!(config.direction, protocol::BlocksRequestDirection::Descending),
+                    config.fields.header, config.fields.body, config.fields.justification
+                );
+            }
+        }
 
         let result = self
             .inner
@@ -630,12 +649,30 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             .blocks_request(TPlat::now(), &target, chain_index, config)
             .await;
 
-        log::debug!(
-            target: "network",
-            "Connection({}) => BlocksRequest({:?})",
-            target,
-            result.as_ref().map(|b| b.len())
-        );
+        match &result {
+            Ok(blocks) => {
+                log::debug!(
+                    target: "network",
+                    "Connection({}) => BlocksRequest(num_blocks: {}, block_data_total_size: {})",
+                    target,
+                    blocks.len(),
+                    BytesDisplay(blocks.iter().fold(0, |sum, block| {
+                        let block_size = block.header.as_ref().map_or(0, |h| h.len()) +
+                            block.body.as_ref().map_or(0, |b| b.iter().fold(0, |s, e| s + e.len())) +
+                            block.justification.as_ref().map_or(0, |j| j.len());
+                        sum + u64::try_from(block_size).unwrap()
+                    }))
+                );
+            }
+            Err(err) => {
+                log::debug!(
+                    target: "network",
+                    "Connection({}) => BlocksRequest({})",
+                    target,
+                    err
+                );
+            }
+        }
 
         if !log::log_enabled!(log::Level::Debug) {
             match &result {
@@ -673,21 +710,25 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             .grandpa_warp_sync_request(TPlat::now(), &target, chain_index, begin_hash)
             .await;
 
-        if let Ok(response) = result.as_ref() {
-            log::debug!(
-                target: "network",
-                "Connection({}) => GrandpaWarpSyncRequest(num_fragments: {:?}, finished: {:?})",
-                target,
-                response.fragments.len(),
-                response.is_finished,
-            );
-        } else {
-            log::debug!(
-                target: "network",
-                "Connection({}) => GrandpaWarpSyncRequest({:?})",
-                target,
-                result,
-            );
+        match &result {
+            Ok(response) => {
+                // TODO: print total bytes size
+                log::debug!(
+                    target: "network",
+                    "Connection({}) => GrandpaWarpSyncRequest(num_fragments: {}, finished: {:?})",
+                    target,
+                    response.fragments.len(),
+                    response.is_finished,
+                );
+            }
+            Err(err) => {
+                log::debug!(
+                    target: "network",
+                    "Connection({}) => GrandpaWarpSyncRequest({})",
+                    target,
+                    err,
+                );
+            }
         }
 
         result
@@ -736,10 +777,9 @@ impl<TPlat: Platform> NetworkService<TPlat> {
     ) -> Result<Vec<Vec<u8>>, service::StorageProofRequestError> {
         log::debug!(
             target: "network",
-            "Connection({}) <= StorageProofRequest({}, {})",
+            "Connection({}) <= StorageProofRequest(block: {})",
             target,
-            HashDisplay(&config.block_hash),
-            config.keys.size_hint().0
+            HashDisplay(&config.block_hash)
         );
 
         let result = self
@@ -748,12 +788,25 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             .storage_proof_request(TPlat::now(), &target, chain_index, config)
             .await;
 
-        log::debug!(
-            target: "network",
-            "Connection({}) => StorageProofRequest({:?})",
-            target,
-            result.as_ref().map(|b| b.len())
-        );
+        match &result {
+            Ok(items) => {
+                log::debug!(
+                    target: "network",
+                    "Connection({}) => StorageProofRequest(num_elems: {}, total_size: {})",
+                    target,
+                    items.len(),
+                    BytesDisplay(items.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
+                );
+            }
+            Err(err) => {
+                log::debug!(
+                    target: "network",
+                    "Connection({}) => StorageProofRequest({})",
+                    target,
+                    err
+                );
+            }
+        }
 
         result
     }
@@ -782,12 +835,25 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             .call_proof_request(TPlat::now(), &target, chain_index, config)
             .await;
 
-        log::debug!(
-            target: "network",
-            "Connection({}) => CallProofRequest({:?})",
-            target,
-            result.as_ref().map(|b| b.len())
-        );
+        match &result {
+            Ok(items) => {
+                log::debug!(
+                    target: "network",
+                    "Connection({}) => CallProofRequest(num_elems: {}, total_size: {})",
+                    target,
+                    items.len(),
+                    BytesDisplay(items.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
+                );
+            }
+            Err(err) => {
+                log::debug!(
+                    target: "network",
+                    "Connection({}) => CallProofRequest({})",
+                    target,
+                    err
+                );
+            }
+        }
 
         result
     }
