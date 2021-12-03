@@ -115,7 +115,7 @@ export function start(config) {
       const expected = pendingConfirmations.shift();
       let chainId = message.chainId; // Later set to null when the chain is removed.
 
-      if (chainsJsonRpcCallbacks.has(chainId) ||chainsDatabaseContentPromises.has(chainId)) // Sanity check.
+      if (chainsJsonRpcCallbacks.has(chainId) || chainsDatabaseContentPromises.has(chainId)) // Sanity check.
         throw 'Unexpected reuse of a chain ID';
       chainsJsonRpcCallbacks.set(chainId, expected.jsonRpcCallback);
       chainsDatabaseContentPromises.set(chainId, new Array());
@@ -206,6 +206,12 @@ export function start(config) {
         pending.reject(workerError);
     }
     pendingConfirmations = [];
+
+    // Reject all promises for database contents.
+    chainsDatabaseContentPromises.forEach((chain) => {
+      chain.forEach((promise) => promise.reject(workerError));
+    });
+    chainsDatabaseContentPromises.clear();
   });
 
   // The first message expected by the worker contains the configuration.
