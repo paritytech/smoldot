@@ -38,7 +38,7 @@
 //!
 //! # Usage
 //!
-//! Use the [`warp_sync`] function to start a Grandpa warp syncing state machine.
+//! Use the [`warp_sync()`] function to start a Grandpa warp syncing state machine.
 //!
 //! At any given moment, this state machine holds a list of *sources* that it might use to
 //! download the warp sync proof or the runtime code. Sources must be added and removed by the API
@@ -74,7 +74,7 @@ use alloc::vec::Vec;
 
 pub use warp_sync::Error as FragmentError;
 
-/// Problem encountered during a call to [`warp_sync`].
+/// Problem encountered during a call to [`warp_sync()`].
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
     #[display(fmt = "Missing :code")]
@@ -90,7 +90,7 @@ pub enum Error {
     InvalidChain(chain_information::ValidityError),
 }
 
-/// The configuration for [`warp_sync`].
+/// The configuration for [`warp_sync()`].
 pub struct Config {
     /// The chain information of the starting point of the warp syncing.
     pub start_chain_information: ValidChainInformation,
