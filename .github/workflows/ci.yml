@@ -24,7 +24,7 @@ jobs:
   test-64bits:
     runs-on: ubuntu-latest
     container:
-      image: rust
+      image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
     - uses: Swatinem/rust-cache@v1   # See also the `cache-fill` workflow.
@@ -33,7 +33,7 @@ jobs:
   test-32bits:
     runs-on: ubuntu-latest
     container:
-      image: rust
+      image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
     - run: apt-get update && apt-get install -y libc6-dev-i386
@@ -44,7 +44,7 @@ jobs:
   wasm-node-check:
     runs-on: ubuntu-latest
     container:
-      image: rust
+      image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
     - uses: Swatinem/rust-cache@v1
@@ -57,7 +57,7 @@ jobs:
   wasm-node-size-diff:
     runs-on: ubuntu-latest
     container:
-      image: rust
+      image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
       with:
@@ -88,7 +88,7 @@ jobs:
   check-features:
     runs-on: ubuntu-latest
     container:
-      image: rust
+      image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
     - uses: Swatinem/rust-cache@v1
@@ -100,7 +100,7 @@ jobs:
   check-rustdoc-links:
     runs-on: ubuntu-latest
     container:
-      image: rust
+      image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
     - run: cargo doc --verbose --workspace --all-features --no-deps --document-private-items
