@@ -34,7 +34,7 @@ use crate::{
     chain::{blocks_tree, chain_information},
     executor::{host, vm::ExecHint},
     header,
-    sync::{all_forks, warp_sync, optimistic},
+    sync::{all_forks, optimistic, warp_sync},
     verify,
 };
 
@@ -337,9 +337,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     warp_sync::InProgressWarpSync::WaitingForSources(_) => {
                         unreachable!()
                     }
-                    warp_sync::InProgressWarpSync::Verifier(sync) => {
-                        sync.add_source(source_extra)
-                    }
+                    warp_sync::InProgressWarpSync::Verifier(sync) => sync.add_source(source_extra),
                     warp_sync::InProgressWarpSync::WarpSyncRequest(sync) => {
                         sync.add_source(source_extra)
                     }
@@ -349,9 +347,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     warp_sync::InProgressWarpSync::StorageGet(sync) => {
                         sync.add_source(source_extra)
                     }
-                    warp_sync::InProgressWarpSync::NextKey(sync) => {
-                        sync.add_source(source_extra)
-                    }
+                    warp_sync::InProgressWarpSync::NextKey(sync) => sync.add_source(source_extra),
                 };
 
                 outer_source_id_entry.insert(SourceMapping::GrandpaWarpSync(inner_source_id));
@@ -833,17 +829,15 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             keys: vec![get.key_as_vec()],
                         },
                     )),
-                    warp_sync::InProgressWarpSync::VirtualMachineParamsGet(rq) => {
-                        Some((
-                            rq.warp_sync_source().1.outer_source_id,
-                            &rq.warp_sync_source().1.user_data,
-                            RequestDetail::StorageGet {
-                                block_hash: rq.warp_sync_header().hash(),
-                                state_trie_root: *rq.warp_sync_header().state_root,
-                                keys: vec![b":code".to_vec(), b":heappages".to_vec()],
-                            },
-                        ))
-                    }
+                    warp_sync::InProgressWarpSync::VirtualMachineParamsGet(rq) => Some((
+                        rq.warp_sync_source().1.outer_source_id,
+                        &rq.warp_sync_source().1.user_data,
+                        RequestDetail::StorageGet {
+                            block_hash: rq.warp_sync_header().hash(),
+                            state_trie_root: *rq.warp_sync_header().state_root,
+                            keys: vec![b":code".to_vec(), b":heappages".to_vec()],
+                        },
+                    )),
                     _ => None,
                 };
 
@@ -1297,8 +1291,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         ) {
             (
                 AllSyncInner::GrandpaWarpSync {
-                    inner:
-                        warp_sync::InProgressWarpSync::VirtualMachineParamsGet(sync),
+                    inner: warp_sync::InProgressWarpSync::VirtualMachineParamsGet(sync),
                 },
                 Ok(mut response),
             ) => {
@@ -1343,8 +1336,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             }
             (
                 AllSyncInner::GrandpaWarpSync {
-                    inner:
-                        warp_sync::InProgressWarpSync::VirtualMachineParamsGet(sync),
+                    inner: warp_sync::InProgressWarpSync::VirtualMachineParamsGet(sync),
                 },
                 Err(_),
             ) => {

@@ -197,18 +197,21 @@ impl<TSrc> WarpSync<TSrc> {
                             },
                         }) {
                             Ok(ci) => ci,
-                            Err(err) => return (
-                                Self::InProgress(
-                                    InProgressWarpSync::warp_sync_request_from_next_source(
-                                        state.sources,
-                                        PreVerificationState {
-                                            start_chain_information: state.start_chain_information,
-                                        },
-                                        None,
+                            Err(err) => {
+                                return (
+                                    Self::InProgress(
+                                        InProgressWarpSync::warp_sync_request_from_next_source(
+                                            state.sources,
+                                            PreVerificationState {
+                                                start_chain_information: state
+                                                    .start_chain_information,
+                                            },
+                                            None,
+                                        ),
                                     ),
-                                ),
-                                Some(Error::InvalidChain(err)),
-                            ),
+                                    Some(Error::InvalidChain(err)),
+                                )
+                            }
                         };
 
                     return (
@@ -245,15 +248,13 @@ impl<TSrc> WarpSync<TSrc> {
                     _,
                 ) => {
                     return (
-                        Self::InProgress(
-                            InProgressWarpSync::warp_sync_request_from_next_source(
-                                state.sources,
-                                PreVerificationState {
-                                    start_chain_information: state.start_chain_information,
-                                },
-                                None,
-                            ),
-                        ),
+                        Self::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
+                            state.sources,
+                            PreVerificationState {
+                                start_chain_information: state.start_chain_information,
+                            },
+                            None,
+                        )),
                         Some(Error::BabeFetchEpoch(error)),
                     )
                 }
@@ -513,15 +514,13 @@ impl<TSrc> StorageGet<TSrc> {
 
     /// Injects a failure to retrieve the storage value.
     pub fn inject_error(self) -> WarpSync<TSrc> {
-        WarpSync::InProgress(
-            InProgressWarpSync::warp_sync_request_from_next_source(
-                self.state.sources,
-                PreVerificationState {
-                    start_chain_information: self.state.start_chain_information,
-                },
-                None,
-            ),
-        )
+        WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
+            self.state.sources,
+            PreVerificationState {
+                start_chain_information: self.state.start_chain_information,
+            },
+            None,
+        ))
     }
 }
 
@@ -570,10 +569,7 @@ impl<TSrc> NextKey<TSrc> {
     ///
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
-    pub fn inject_key(
-        self,
-        key: Option<impl AsRef<[u8]>>,
-    ) -> (WarpSync<TSrc>, Option<Error>) {
+    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> (WarpSync<TSrc>, Option<Error>) {
         WarpSync::from_babe_fetch_epoch_query(
             self.inner.inject_key(key),
             self.fetched_current_epoch,
@@ -657,17 +653,15 @@ impl<TSrc> Verifier<TSrc> {
 
                 if self.final_set_of_fragments {
                     (
-                        InProgressWarpSync::VirtualMachineParamsGet(
-                            VirtualMachineParamsGet {
-                                state: PostVerificationState {
-                                    header,
-                                    chain_information_finality,
-                                    start_chain_information: self.state.start_chain_information,
-                                    sources: self.sources,
-                                    warp_sync_source_id: self.warp_sync_source_id,
-                                },
+                        InProgressWarpSync::VirtualMachineParamsGet(VirtualMachineParamsGet {
+                            state: PostVerificationState {
+                                header,
+                                chain_information_finality,
+                                start_chain_information: self.state.start_chain_information,
+                                sources: self.sources,
+                                warp_sync_source_id: self.warp_sync_source_id,
                             },
-                        ),
+                        }),
                         Ok(()),
                     )
                 } else {
@@ -872,15 +866,13 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
 
     /// Injects a failure to retrieve the parameters.
     pub fn inject_error(self) -> WarpSync<TSrc> {
-        WarpSync::InProgress(
-            InProgressWarpSync::warp_sync_request_from_next_source(
-                self.state.sources,
-                PreVerificationState {
-                    start_chain_information: self.state.start_chain_information,
-                },
-                None,
-            ),
-        )
+        WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
+            self.state.sources,
+            PreVerificationState {
+                start_chain_information: self.state.start_chain_information,
+            },
+            None,
+        ))
     }
 
     /// Set the code and heappages from storage using the keys `:code` and `:heappages`
@@ -895,15 +887,13 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
             Some(code) => code,
             None => {
                 return (
-                    WarpSync::InProgress(
-                        InProgressWarpSync::warp_sync_request_from_next_source(
-                            self.state.sources,
-                            PreVerificationState {
-                                start_chain_information: self.state.start_chain_information,
-                            },
-                            None,
-                        ),
-                    ),
+                    WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
+                        self.state.sources,
+                        PreVerificationState {
+                            start_chain_information: self.state.start_chain_information,
+                        },
+                        None,
+                    )),
                     Some(Error::MissingCode),
                 )
             }
@@ -945,15 +935,13 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                 (warp_sync, error)
             }
             Err(error) => (
-                WarpSync::InProgress(
-                    InProgressWarpSync::warp_sync_request_from_next_source(
-                        self.state.sources,
-                        PreVerificationState {
-                            start_chain_information: self.state.start_chain_information,
-                        },
-                        None,
-                    ),
-                ),
+                WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
+                    self.state.sources,
+                    PreVerificationState {
+                        start_chain_information: self.state.start_chain_information,
+                    },
+                    None,
+                )),
                 Some(Error::NewRuntime(error)),
             ),
         }
