@@ -730,10 +730,11 @@ impl SyncBackground {
         // or if the runtime code being executed contains a very heavy operation.
         // In any case, there is not much that a node operator can do except try increase the
         // performance of their machine.
-        if authoring_end.elapsed().map_or(false, |now_minus_end| {
-            now_minus_end >= Duration::from_millis(500)
-        }) {
-            tracing::warn!(hash = %HashDisplay(&new_block_hash), "block-generation-too-long");
+        match authoring_end.elapsed() {
+            Ok(now_minus_end) if now_minus_end < Duration::from_millis(500) => {}
+            _ => {
+                tracing::warn!(hash = %HashDisplay(&new_block_hash), "block-generation-too-long");
+            }
         }
 
         // Switch the block authoring to a state where we won't try to generate a new block again
