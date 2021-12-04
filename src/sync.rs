@@ -50,6 +50,6 @@
 
 pub mod all;
 pub mod all_forks;
-pub mod grandpa_warp_sync;
 pub mod optimistic;
 pub mod para;
+pub mod warp_sync;
