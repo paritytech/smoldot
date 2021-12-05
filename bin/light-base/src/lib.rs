@@ -195,9 +195,9 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     /// the clients can send tasks to run to. The first tuple element is the name of the task used
     /// for debugging purposes.
     pub fn new(
-        tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
-        system_name: String,
-        system_version: String,
+        _tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
+        _system_name: String,
+        _system_version: String,
     ) -> Self {
         Client {
             marker: PhantomData,
@@ -207,7 +207,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     /// Adds a new chain to the list of chains smoldot tries to synchronize.
     pub fn add_chain(
         &mut self,
-        config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
+        _config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
     ) -> ChainId {
         ChainId(0)
     }
@@ -216,13 +216,13 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     ///
     /// The [`Client::chain_is_erroneous`] function for this chain returns `Some` with the given
     /// error message.
-    pub fn add_erroneous_chain(&mut self, error_message: String, user_data: TChain) -> ChainId {
+    pub fn add_erroneous_chain(&mut self, _error_message: String, _user_data: TChain) -> ChainId {
         ChainId(0)
     }
 
     /// If [`Client::add_chain`] encountered an error when creating this chain, returns the error
     /// message corresponding to it.
-    pub fn chain_is_erroneous(&self, id: ChainId) -> Option<&str> {
+    pub fn chain_is_erroneous(&self, _id: ChainId) -> Option<&str> {
         None
     }
 
@@ -236,7 +236,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     /// function will not actually immediately disconnect from the given chain if it is still used
     /// as the relay chain of a parachain.
     #[must_use]
-    pub fn remove_chain(&mut self, id: ChainId) -> TChain {
+    pub fn remove_chain(&mut self, _id: ChainId) -> TChain {
         panic!()
     }
 
@@ -246,7 +246,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     ///
     /// Panics if the [`ChainId`] is invalid.
     ///
-    pub fn chain_user_data_mut(&mut self, chain_id: ChainId) -> &mut TChain {
+    pub fn chain_user_data_mut(&mut self, _chain_id: ChainId) -> &mut TChain {
         panic!()
     }
 
@@ -267,8 +267,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     ///
     pub fn json_rpc_request(
         &mut self,
-        json_rpc_request: impl Into<String>,
-        chain_id: ChainId,
+        _json_rpc_request: impl Into<String>,
+        _chain_id: ChainId,
     ) -> Result<(), HandleRpcError> {
         Ok(())
     }
@@ -286,7 +286,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     ///
     /// Panics if the [`ChainId`] is invalid.
     ///
-    pub fn database_content(&self, chain_id: ChainId) -> impl Future<Output = String> {
+    pub fn database_content(&self, _chain_id: ChainId) -> impl Future<Output = String> {
         async move { String::new() }
     }
 }
