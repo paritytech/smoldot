@@ -37,4 +37,4 @@ pull_request_rules:
     actions:
       review:
         type: APPROVE
-        message: Automatically approving tomaka's pull requests
+        message: Automatically approving tomaka's pull requests. This auto-approval will be removed once more maintainers are active.
