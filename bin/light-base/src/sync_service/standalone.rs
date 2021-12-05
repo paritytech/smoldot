@@ -764,10 +764,9 @@ impl<TPlat: Platform> Task<TPlat> {
             } if chain_index == self.network_chain_index => {
                 let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
                 let decoded = announce.decode();
-                // TODO: stupid to re-encode header
                 match self.sync.block_announce(
                     sync_source_id,
-                    decoded.header.scale_encoding_vec(),
+                    decoded.scale_encoded_header.to_owned(),
                     decoded.is_best,
                 ) {
                     all::BlockAnnounceOutcome::HeaderVerify
@@ -810,13 +809,9 @@ impl<TPlat: Platform> Task<TPlat> {
                             peer_id
                         );
                     }
-                    all::BlockAnnounceOutcome::InvalidHeader(err) => {
-                        log::warn!(
-                            target: &self.log_target,
-                            "Failed to decode block announce header from {}: {}",
-                            peer_id,
-                            err
-                        );
+                    all::BlockAnnounceOutcome::InvalidHeader(_) => {
+                        // The block announce is verified.
+                        unreachable!()
                     }
                 }
             }
