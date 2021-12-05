@@ -22,6 +22,7 @@ use futures::{channel::mpsc, prelude::*};
 use smoldot::{
     chain,
     database::finalized_serialize,
+    executor::host,
     header,
     informant::HashDisplay,
     libp2p,
@@ -75,6 +76,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
         }),
         best_block_updated: false,
         finalized_block_updated: false,
+        known_finalized_runtime: None,
         pending_block_requests: stream::FuturesUnordered::new(),
         pending_grandpa_requests: stream::FuturesUnordered::new(),
         pending_storage_requests: stream::FuturesUnordered::new(),
@@ -254,8 +256,9 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
             | all::ResponseOutcome::Queued
             | all::ResponseOutcome::NotFinalizedChain { .. }
             | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
-            all::ResponseOutcome::WarpSyncFinished { .. } => {
-                // TODO: somehow pass the `finalized_block_runtime` provided by the `WarpSyncFinished` and communicate it to the runtime service
+            all::ResponseOutcome::WarpSyncFinished {
+                finalized_block_runtime,
+            } => {
                 let finalized_header = task.sync.finalized_block_header();
                 log::info!(
                     target: &task.log_target,
@@ -263,6 +266,10 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                     finalized_header.number,
                     HashDisplay(&finalized_header.hash())
                 );
+
+                debug_assert!(task.known_finalized_runtime.is_none());
+                task.known_finalized_runtime = Some(finalized_block_runtime);
+
                 task.finalized_block_updated = true;
                 task.best_block_updated = true;
                 // Since there is a gap in the blocks, all active notifications to all blocks
@@ -283,6 +290,9 @@ struct Task<TPlat: Platform> {
     /// For each request, we store a [`future::AbortHandle`] that can be used to abort the
     /// request if desired.
     sync: all::AllSync<future::AbortHandle, (libp2p::PeerId, protocol::Role), ()>,
+
+    /// If `Some`, contains the runtime of the current finalized block.
+    known_finalized_runtime: Option<host::HostVmPrototype>,
 
     /// For each networking peer, the index of the corresponding peer within the [`Task::sync`].
     peers_source_id_map: HashMap<libp2p::PeerId, all::SourceId>,
@@ -596,6 +606,7 @@ impl<TPlat: Platform> Task<TPlat> {
 
                             self.best_block_updated |= updates_best_block;
                             self.finalized_block_updated = true;
+                            self.known_finalized_runtime = None; // TODO: only do if there was no RuntimeUpdated log item
                             continue;
                         }
 
@@ -629,6 +640,7 @@ impl<TPlat: Platform> Task<TPlat> {
             ToBackground::SubscribeAll {
                 send_back,
                 buffer_size,
+                runtime_interest,
             } => {
                 let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
                 self.all_notifications.push(tx);
@@ -655,6 +667,11 @@ impl<TPlat: Platform> Task<TPlat> {
                         .sync
                         .finalized_block_header()
                         .scale_encoding_vec(),
+                    finalized_block_runtime: if runtime_interest {
+                        self.known_finalized_runtime.take()
+                    } else {
+                        None
+                    },
                     non_finalized_blocks_ancestry_order,
                     new_blocks,
                 });
@@ -810,7 +827,8 @@ impl<TPlat: Platform> Task<TPlat> {
             } if chain_index == self.network_chain_index => {
                 match self.sync.grandpa_commit_message(&message.as_encoded()) {
                     Ok(()) => {
-                        self.finalized_block_updated = true;
+                        self.finalized_block_updated = true; // TODO: only do if commit message has been processed
+                        self.known_finalized_runtime = None; // TODO: only do if commit message has been processed and if there was no RuntimeUpdated log item in the finalized blocks
                         self.best_block_updated = true; // TODO: done in case finality changes the best block; make this clearer in the sync layer
                         self.dispatch_all_subscribers(Notification::Finalized {
                             hash: self.sync.finalized_block_header().hash(),

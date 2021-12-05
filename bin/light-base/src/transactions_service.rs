@@ -302,7 +302,7 @@ async fn background_task<TPlat: Platform>(
         // after a Grandpa warp sync) or because the transactions service was too busy to process
         // the new blocks.
 
-        let mut subscribe_all = worker.sync_service.subscribe_all(32).await;
+        let mut subscribe_all = worker.sync_service.subscribe_all(32, false).await;
         let initial_finalized_block_hash = header::hash_from_scale_encoded_header(
             &subscribe_all.finalized_block_scale_encoded_header,
         );
