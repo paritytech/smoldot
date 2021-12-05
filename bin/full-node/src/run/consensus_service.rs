@@ -484,16 +484,15 @@ impl SyncBackground {
                                 .block_span(&decoded.header.hash(), "block-announce-process");
 
                             let id = *self.peers_source_id_map.get(&peer_id).unwrap();
-                            // TODO: stupid to re-encode header
                             // TODO: log the outcome
-                            match self.sync.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best) {
+                            match self.sync.block_announce(id, decoded.scale_encoded_header.to_owned(), decoded.is_best) {
                                 all::BlockAnnounceOutcome::HeaderVerify => {},
                                 all::BlockAnnounceOutcome::TooOld { .. } => {},
                                 all::BlockAnnounceOutcome::AlreadyInChain => {},
                                 all::BlockAnnounceOutcome::NotFinalizedChain => {},
-                                all::BlockAnnounceOutcome::InvalidHeader(_) => {},
                                 all::BlockAnnounceOutcome::Discarded => {},
                                 all::BlockAnnounceOutcome::Disjoint {} => {},
+                                all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(),
                             }
                         },
                         _ => {
