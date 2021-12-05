@@ -1184,7 +1184,6 @@ version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab5ef0d4909ef3724cc8cce6ccc8572c5c817592e9285f5464f8e86f8bd3726e"
 dependencies = [
- "ahash",
  "serde",
 ]
 
@@ -1395,15 +1394,6 @@ checksum = "51b9bbe6c47d51fc3e1a9b945965946b4c44142ab8792c50835a980d362c2710"
 dependencies = [
  "cfg-if",
  "value-bag",
-]
-
-[[package]]
-name = "lru"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c748cfe47cb8da225c37595b3108bea1c198c84aaae8ea0ba76d01dda9fc803"
-dependencies = [
- "hashbrown 0.11.2",
 ]
 
 [[package]]
@@ -2477,19 +2467,8 @@ dependencies = [
 name = "smoldot-light-base"
 version = "0.1.0"
 dependencies = [
- "blake2-rfc",
  "derive_more",
- "fnv",
  "futures",
- "hashbrown 0.11.2",
- "hex",
- "itertools",
- "log",
- "lru",
- "rand 0.8.4",
- "serde_json",
- "slab",
- "smoldot",
 ]
 
 [[package]]
