@@ -34,6 +34,16 @@ pub enum HandleRpcError {
     },
 }
 
+impl HandleRpcError {
+    /// Builds the JSON-RPC error string corresponding to this error.
+    ///
+    /// Returns `None` if the JSON-RPC requests isn't valid JSON-RPC or if the call was a
+    /// notification.
+    pub fn into_json_rpc_error(self) -> Option<String> {
+        None
+    }
+}
+
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
 pub struct AddChainConfig<'a, TChain, TRelays> {
