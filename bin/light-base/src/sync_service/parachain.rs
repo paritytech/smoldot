@@ -350,10 +350,11 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
                             let _ = send_back.send(is_near_head_of_chain);
                         },
-                        ToBackground::SubscribeAll { send_back, buffer_size } => {
+                        ToBackground::SubscribeAll { send_back, buffer_size, .. } => {
                             let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
                             let _ = send_back.send(super::SubscribeAll {
                                 finalized_block_scale_encoded_header: finalized_parahead.clone(),
+                                finalized_block_runtime: None,
                                 non_finalized_blocks_ancestry_order: async_tree.input_iter_unordered().filter_map(|block| {
                                     // `async_op_user_data` is `Some` only if this block has
                                     // already been reported on the output. In order to maintain

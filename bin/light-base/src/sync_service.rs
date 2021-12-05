@@ -35,6 +35,7 @@ use futures::{
 };
 use smoldot::{
     chain,
+    executor::host,
     libp2p::PeerId,
     network::{protocol, service},
     trie::{self, prefix_proof, proof_verify},
@@ -170,7 +171,11 @@ impl<TPlat: Platform> SyncService<TPlat> {
     /// warp syncing.
     ///
     /// See [`SubscribeAll`] for information about the return value.
-    pub async fn subscribe_all(&self, buffer_size: usize) -> SubscribeAll {
+    ///
+    /// If `runtime_interest` is `false`, then [`SubscribeAll::finalized_block_runtime`] will
+    /// always be `None`. Since the runtime can only be provided to one call to this function,
+    /// only one subscriber should use `runtime_interest` equal to `true`.
+    pub async fn subscribe_all(&self, buffer_size: usize, runtime_interest: bool) -> SubscribeAll {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
@@ -179,6 +184,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
             .send(ToBackground::SubscribeAll {
                 send_back,
                 buffer_size,
+                runtime_interest,
             })
             .await
             .unwrap();
@@ -563,6 +569,16 @@ pub struct SubscribeAll {
     /// SCALE-encoded header of the finalized block at the time of the subscription.
     pub finalized_block_scale_encoded_header: Vec<u8>,
 
+    /// Runtime of the finalized block, if known.
+    ///
+    /// > **Note**: In order to do the initial synchronization, the sync service might have to
+    /// >           download and use the runtime near the head of the chain. Throwing away this
+    /// >           runtime at the end of the synchronization is possible, but would be wasteful.
+    /// >           Instead, this runtime is provided here if possible, but no guarantee is
+    /// >           offered that it can be found.
+    // TODO: should also provide the runtime code and heap pages
+    pub finalized_block_runtime: Option<host::HostVmPrototype>,
+
     /// List of all known non-finalized blocks at the time of subscription.
     ///
     /// Only one element in this list has [`BlockNotification::is_new_best`] equal to true.
@@ -647,6 +663,7 @@ enum ToBackground {
     SubscribeAll {
         send_back: oneshot::Sender<SubscribeAll>,
         buffer_size: usize,
+        runtime_interest: bool,
     },
     /// See [`SyncService::peers_assumed_know_blocks`].
     PeersAssumedKnowBlock {
