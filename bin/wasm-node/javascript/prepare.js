@@ -36,7 +36,7 @@ if (build_profile != 'debug' && build_profile != 'release')
 // The Rust version is pinned because the wasi target is still unstable. Without pinning, it is
 // possible for the wasm-js bindings to change between two Rust versions. Feel free to update
 // this version pin whenever you like, provided it continues to build.
-const rust_version = '1.56.0';
+const rust_version = '1.57.0';
 
 // Assume that the user has `rustup` installed and make sure that `rust_version` is available.
 // Because `rustup install` requires an Internet connection, check whether the toolchain is
