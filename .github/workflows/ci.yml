@@ -19,6 +19,9 @@ name: continuous-integration
 
 on:
   pull_request:
+  push:
+    branches:
+      - main   # Running the CI on the main branch is important in order to fill the caches that pull requests will pick up.
 
 jobs:
   test-64bits:
@@ -27,7 +30,7 @@ jobs:
       image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
-    - uses: Swatinem/rust-cache@v1   # See also the `cache-fill` workflow.
+    - uses: Swatinem/rust-cache@v1
     - run: RUSTFLAGS=-Dwarnings cargo test --locked --workspace --all-features
 
   test-32bits:
@@ -37,7 +40,7 @@ jobs:
     steps:
     - uses: actions/checkout@v2.4.0
     - run: apt-get update && apt-get install -y libc6-dev-i386
-    - uses: Swatinem/rust-cache@v1   # See also the `cache-fill` workflow.
+    - uses: Swatinem/rust-cache@v1
     - run: rustup target add i686-unknown-linux-gnu
     - run: RUSTFLAGS=-Dwarnings cargo test --target i686-unknown-linux-gnu --locked --workspace --all-features
 
@@ -125,7 +128,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2.4.0
-      - uses: Swatinem/rust-cache@v1   # See also the `cache-fill` workflow.
+      - uses: Swatinem/rust-cache@v1
       - uses: actions-rs/toolchain@v1
         with:
             toolchain: nightly
