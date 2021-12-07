@@ -43,7 +43,7 @@ use crate::header;
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
-pub mod aura_genesis_config;
+pub mod aura_config;
 pub mod babe_fetch_epoch;
 pub mod babe_genesis_config;
 pub mod grandpa_genesis_config;
