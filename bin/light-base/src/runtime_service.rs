@@ -2132,7 +2132,6 @@ struct SuccessfulRuntime {
     /// As documented in the smoldot metadata module, the metadata might access the storage, but
     /// we intentionally don't watch for changes in these storage keys to refresh the metadata.
     metadata: Option<Vec<u8>>,*/
-
     /// Runtime specs extracted from the runtime.
     runtime_spec: executor::CoreVersion,
 
