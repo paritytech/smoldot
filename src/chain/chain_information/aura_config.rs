@@ -15,6 +15,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+//! This module allows retrieving the current Aura configuration of the chain.
+//!
+//! It can be used on any block.
+
 use crate::{
     executor::{self, host, vm},
     header,
@@ -23,11 +27,11 @@ use crate::{
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
-/// Aura configuration of a chain, as extracted from the genesis block.
+/// Aura configuration of a chain, as extracted from a block.
 ///
 /// The way a chain configures Aura is stored in its runtime.
 #[derive(Debug, Clone)]
-pub struct AuraGenesisConfiguration {
+pub struct AuraConfiguration {
     /// List of authorities that can validate block #1.
     pub authorities_list: Vec<header::AuraAuthority>,
 
@@ -35,35 +39,35 @@ pub struct AuraGenesisConfiguration {
     pub slot_duration: NonZeroU64,
 }
 
-impl AuraGenesisConfiguration {
-    /// Retrieves the configuration from the storage of the genesis block.
+impl AuraConfiguration {
+    /// Retrieves the configuration from the storage of a block.
     ///
     /// Must be passed a closure that returns the storage value corresponding to the given key in
-    /// the genesis block storage.
-    pub fn from_genesis_storage(
-        mut genesis_storage_access: impl FnMut(&[u8]) -> Option<Vec<u8>>,
-    ) -> Result<Self, FromGenesisStorageError> {
+    /// the block storage.
+    pub fn from_storage(
+        mut storage_access: impl FnMut(&[u8]) -> Option<Vec<u8>>,
+    ) -> Result<Self, FromStorageError> {
         let wasm_code =
-            genesis_storage_access(b":code").ok_or(FromGenesisStorageError::RuntimeNotFound)?;
+            storage_access(b":code").ok_or(FromStorageError::RuntimeNotFound)?;
         let heap_pages =
-            executor::storage_heap_pages_to_value(genesis_storage_access(b":heappages").as_deref())
-                .map_err(FromGenesisStorageError::HeapPagesDecode)?;
+            executor::storage_heap_pages_to_value(storage_access(b":heappages").as_deref())
+                .map_err(FromStorageError::HeapPagesDecode)?;
         let vm = host::HostVmPrototype::new(&wasm_code, heap_pages, vm::ExecHint::Oneshot)
-            .map_err(FromGenesisStorageError::VmInitialization)?;
-        let (cfg, _) = Self::from_virtual_machine_prototype(vm, genesis_storage_access)
-            .map_err(FromGenesisStorageError::VmError)?;
+            .map_err(FromStorageError::VmInitialization)?;
+        let (cfg, _) = Self::from_virtual_machine_prototype(vm, storage_access)
+            .map_err(FromStorageError::VmError)?;
         Ok(cfg)
     }
 
     /// Retrieves the configuration from the given virtual machine prototype.
     ///
     /// Must be passed a closure that returns the storage value corresponding to the given key in
-    /// the genesis block storage.
+    /// the block storage.
     ///
     /// Returns back the same virtual machine prototype as was passed as parameter.
     pub fn from_virtual_machine_prototype(
         vm: host::HostVmPrototype,
-        mut genesis_storage_access: impl FnMut(&[u8]) -> Option<Vec<u8>>,
+        mut storage_access: impl FnMut(&[u8]) -> Option<Vec<u8>>,
     ) -> Result<(Self, host::HostVmPrototype), FromVmPrototypeError> {
         let mut vm: host::HostVm = vm
             .run_no_param("AuraApi_slot_duration")
@@ -84,7 +88,7 @@ impl AuraGenesisConfiguration {
                 host::HostVm::Error { .. } => return Err(FromVmPrototypeError::Trapped),
 
                 host::HostVm::ExternalStorageGet(req) => {
-                    let value = genesis_storage_access(req.key().as_ref());
+                    let value = storage_access(req.key().as_ref());
                     vm = req.resume_full_value(value.as_ref().map(|v| &v[..]));
                 }
 
@@ -116,7 +120,7 @@ impl AuraGenesisConfiguration {
                 host::HostVm::Error { .. } => return Err(FromVmPrototypeError::Trapped),
 
                 host::HostVm::ExternalStorageGet(req) => {
-                    let value = genesis_storage_access(req.key().as_ref());
+                    let value = storage_access(req.key().as_ref());
                     vm = req.resume_full_value(value.as_ref().map(|v| &v[..]));
                 }
 
@@ -129,7 +133,7 @@ impl AuraGenesisConfiguration {
             }
         };
 
-        let outcome = AuraGenesisConfiguration {
+        let outcome = AuraConfiguration {
             authorities_list,
             slot_duration,
         };
@@ -140,10 +144,10 @@ impl AuraGenesisConfiguration {
 
 /// Error when retrieving the Aura configuration.
 #[derive(Debug, derive_more::Display)]
-pub enum FromGenesisStorageError {
-    /// Runtime couldn't be found in the genesis storage.
+pub enum FromStorageError {
+    /// Runtime couldn't be found in the storage.
     RuntimeNotFound,
-    /// Failed to decode heap pages from the genesis storage.
+    /// Failed to decode heap pages from the storage.
     HeapPagesDecode(executor::InvalidHeapPagesError),
     /// Error when initializing the virtual machine.
     VmInitialization(host::NewErr),
@@ -151,11 +155,11 @@ pub enum FromGenesisStorageError {
     VmError(FromVmPrototypeError),
 }
 
-impl FromGenesisStorageError {
+impl FromStorageError {
     /// Returns `true` if this error is about an invalid function.
     pub fn is_function_not_found(&self) -> bool {
         match self {
-            FromGenesisStorageError::VmError(err) => err.is_function_not_found(),
+            FromStorageError::VmError(err) => err.is_function_not_found(),
             _ => false,
         }
     }
