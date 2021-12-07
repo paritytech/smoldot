@@ -47,8 +47,7 @@ impl AuraConfiguration {
     pub fn from_storage(
         mut storage_access: impl FnMut(&[u8]) -> Option<Vec<u8>>,
     ) -> Result<Self, FromStorageError> {
-        let wasm_code =
-            storage_access(b":code").ok_or(FromStorageError::RuntimeNotFound)?;
+        let wasm_code = storage_access(b":code").ok_or(FromStorageError::RuntimeNotFound)?;
         let heap_pages =
             executor::storage_heap_pages_to_value(storage_access(b":heappages").as_deref())
                 .map_err(FromStorageError::HeapPagesDecode)?;

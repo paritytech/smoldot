@@ -83,10 +83,9 @@ impl ChainSpec {
         };
 
         let consensus = {
-            let aura_genesis_config =
-                aura_config::AuraConfiguration::from_storage(|k| {
-                    genesis_storage.value(k).map(|v| v.to_owned())
-                });
+            let aura_genesis_config = aura_config::AuraConfiguration::from_storage(|k| {
+                genesis_storage.value(k).map(|v| v.to_owned())
+            });
 
             let babe_genesis_config =
                 babe_genesis_config::BabeGenesisConfiguration::from_genesis_storage(|k| {
