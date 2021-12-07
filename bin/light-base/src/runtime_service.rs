@@ -114,76 +114,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
         let best_near_head_of_chain = config.sync_service.is_near_head_of_chain_heuristic().await;
 
-        // Build the runtime of the genesis block.
-        let genesis_runtime = if let chain_spec::GenesisStorage::Items(genesis_storage) =
-            config.chain_spec.genesis_storage()
-        {
-            let code = genesis_storage
-                .iter()
-                .find(|(k, _)| k == b":code")
-                .map(|(_, v)| v.to_vec());
-            let heap_pages = genesis_storage
-                .iter()
-                .find(|(k, _)| k == b":heappages")
-                .map(|(_, v)| v.to_vec());
-
-            // Note that in the absolute we don't need to panic in case of a problem, and could
-            // simply store an `Err` and continue running.
-            // However, in practice, it seems more sane to detect problems in the genesis block.
-            let mut runtime = SuccessfulRuntime::from_params(&code, &heap_pages).await;
-
-            // As documented in the `metadata` field, we must fill it using the genesis storage.
-            if let Ok(runtime) = runtime.as_mut() {
-                let mut query = metadata::query_metadata(runtime.virtual_machine.take().unwrap());
-                loop {
-                    match query {
-                        metadata::Query::Finished(Ok(metadata), vm) => {
-                            runtime.virtual_machine = Some(vm);
-                            runtime.metadata = Some(metadata);
-                            break;
-                        }
-                        metadata::Query::StorageGet(get) => {
-                            let key = get.key_as_vec();
-                            let value = genesis_storage
-                                .iter()
-                                .find(|(k, _)| &**k == key)
-                                .map(|(_, v)| v);
-                            query = get.inject_value(value.map(iter::once));
-                        }
-                        metadata::Query::Finished(Err(err), _) => {
-                            panic!("Unable to generate genesis metadata: {}", err)
-                        }
-                    }
-                }
-            }
-
-            Some(Runtime {
-                num_references: 1,
-                runtime,
-                runtime_code: code,
-                heap_pages,
-            })
-        } else {
-            None
-        };
-
-        let mut runtimes = slab::Slab::with_capacity(2);
-
-        let tree = if let Some(genesis_runtime) = genesis_runtime {
-            let runtime_id = runtimes.insert(genesis_runtime);
-            GuardedInner::FinalizedBlockRuntimeKnown {
-                tree: Some(async_tree::AsyncTree::new(async_tree::Config {
-                    finalized_async_user_data: runtime_id,
-                    retry_after_failed: Duration::from_secs(10),
-                })),
-                finalized_block: Block {
-                    hash: header::hash_from_scale_encoded_header(
-                        &config.genesis_block_scale_encoded_header,
-                    ),
-                    scale_encoded_header: config.genesis_block_scale_encoded_header,
-                },
-            }
-        } else {
+        let tree = {
             let mut tree = async_tree::AsyncTree::new(async_tree::Config {
                 finalized_async_user_data: None,
                 retry_after_failed: Duration::from_secs(10),
@@ -210,7 +141,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             best_blocks_subscriptions: Vec::new(),
             best_near_head_of_chain,
             tree,
-            runtimes,
+            runtimes: slab::Slab::with_capacity(2),
         }));
 
         // Spawns a task that downloads the runtime code at every block to check whether it has
@@ -2183,7 +2114,8 @@ struct Runtime {
 }
 
 struct SuccessfulRuntime {
-    /// Cache of the metadata extracted from the runtime. `None` if unknown.
+    // TODO: restore this metadata cache
+    /*/// Cache of the metadata extracted from the runtime. `None` if unknown.
     ///
     /// This cache is filled lazily whenever it is requested through the public API.
     ///
@@ -2199,7 +2131,7 @@ struct SuccessfulRuntime {
     ///
     /// As documented in the smoldot metadata module, the metadata might access the storage, but
     /// we intentionally don't watch for changes in these storage keys to refresh the metadata.
-    metadata: Option<Vec<u8>>,
+    metadata: Option<Vec<u8>>,*/
 
     /// Runtime specs extracted from the runtime.
     runtime_spec: executor::CoreVersion,
@@ -2243,7 +2175,6 @@ impl SuccessfulRuntime {
         };
 
         Ok(SuccessfulRuntime {
-            metadata: None,
             runtime_spec,
             virtual_machine: Some(vm),
         })
