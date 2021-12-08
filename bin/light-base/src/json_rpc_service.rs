@@ -570,7 +570,10 @@ impl<TPlat: Platform> Background<TPlat> {
                 .await;
             }
             methods::MethodCall::author_submitExtrinsic { transaction } => {
-                // In Substrate, `author_submitExtrinsic` returns the hash of the extrinsic. It
+                // Note that this function is misnamed. It should really be called
+                // "author_submitTransaction".
+
+                // In Substrate, `author_submitExtrinsic` returns the hash of the transaction. It
                 // is unclear whether it has to actually be the hash of the transaction or if it
                 // could be any opaque value. Additionally, there isn't any other JSON-RPC method
                 // that accepts as parameter the value returned here. When in doubt, we return
@@ -583,7 +586,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 // Send the transaction to the transactions service. It will be sent to the
                 // rest of the network asynchronously.
                 self.transactions_service
-                    .submit_extrinsic(transaction.0)
+                    .submit_transaction(transaction.0)
                     .await;
 
                 log_and_respond(
@@ -597,7 +600,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 .await;
             }
             methods::MethodCall::author_submitAndWatchExtrinsic { transaction } => {
-                self.submit_and_watch_extrinsic(request_id, transaction)
+                self.submit_and_watch_transaction(request_id, transaction)
                     .await
             }
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
@@ -1351,7 +1354,11 @@ impl<TPlat: Platform> Background<TPlat> {
     }
 
     /// Handles a call to [`methods::MethodCall::author_submitAndWatchExtrinsic`].
-    async fn submit_and_watch_extrinsic(&self, request_id: &str, transaction: methods::HexString) {
+    async fn submit_and_watch_transaction(
+        &self,
+        request_id: &str,
+        transaction: methods::HexString,
+    ) {
         let (subscription, mut unsubscribe_rx) =
             match self.alloc_subscription(SubscriptionTy::Transaction).await {
                 Ok(v) => v,
@@ -1375,7 +1382,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
         let mut transaction_updates = self
             .transactions_service
-            .submit_and_watch_extrinsic(transaction.0, 16)
+            .submit_and_watch_transaction(transaction.0, 16)
             .await;
 
         let confirmation = methods::Response::author_submitAndWatchExtrinsic(&subscription)

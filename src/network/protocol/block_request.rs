@@ -237,13 +237,13 @@ pub struct BlockData {
     /// SCALE-encoded block header, if requested.
     pub header: Option<Vec<u8>>,
 
-    /// Block body, if requested. Each item (each `Vec<u8>`) is a SCALE-encoded transaction.
-    /// These transactions aren't decodable, as their meaning depends on the chain.
+    /// Block body, if requested. Each item (each `Vec<u8>`) is a SCALE-encoded extrinsic.
+    /// These extrinsics aren't decodable, as their meaning depends on the chain.
     ///
-    /// > **Note**: Be aware that in many chains a transaction is actually a `Vec<u8>`, which
-    /// >           means that you will find, at the beginning of each SCALE-encoded transaction,
+    /// > **Note**: Be aware that in many chains an extrinsic is actually a `Vec<u8>`, which
+    /// >           means that you will find, at the beginning of each SCALE-encoded extrinsic,
     /// >           a length prefix. Don't get fooled into thinking that this length prefix must
-    /// >           be removed. It is part of the opaque format transaction format.
+    /// >           be removed. It is part of the opaque format extrinsic format.
     pub body: Option<Vec<Vec<u8>>>,
 
     /// SCALE-encoded justification, if requested and available.
