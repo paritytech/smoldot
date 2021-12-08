@@ -126,6 +126,11 @@ panic = "abort"
 lto = true
 #strip = "symbols"      # TODO: uncomment once stable
 
+[profile.min-size-release]
+inherits = "release"
+lto = true
+opt-level = "z"
+
 [[bench]]
 name = "header"
 harness = false
