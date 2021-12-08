@@ -54,7 +54,7 @@ futures = "0.3.18"   # TODO: no-std-ize
 hashbrown = { version = "0.11.2", default-features = false, features = ["serde"] }   # TODO: remove serde feature
 hex = { version = "0.4.3", default-features = false }
 hmac = { version = "0.11.0", default-features = false }
-itertools = { version = "0.10.1", default-features = false }
+itertools = { version = "0.10.3", default-features = false }
 # TODO: don't activate `static-context` by default; see https://github.com/paritytech/libsecp256k1/issues/77
 libsecp256k1 = { version = "0.7.0", default-features = false, features = ["static-context"] }
 # Reminder: `log` is forbidden
