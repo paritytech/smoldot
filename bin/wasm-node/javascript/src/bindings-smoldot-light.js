@@ -130,7 +130,11 @@ export default (config) => {
                     if (wsParsed[4] == 'ws') {
                         proto = 'ws';
                     }
-                    if ((proto == 'ws' && config.forbidWs) || (proto == 'wss' && config.forbidWss)) {
+                    if (
+                        (proto == 'ws' && config.forbidWs) ||
+                        (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && config.forbidNonLocalWs) ||
+                        (proto == 'wss' && config.forbidWss)
+                    ) {
                         const error = new Error('Connection type not allowed');
                         error.isBadAddress = true;
                         throw error;
