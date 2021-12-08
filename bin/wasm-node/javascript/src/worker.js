@@ -117,6 +117,7 @@ const startInstance = async (config) => {
     },
     forbidTcp: config.forbidTcp,
     forbidWs: config.forbidWs,
+    forbidNonLocalWs: config.forbidNonLocalWs,
     forbidWss: config.forbidWss,
   };
 
