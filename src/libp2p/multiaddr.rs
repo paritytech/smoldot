@@ -172,7 +172,9 @@ impl<'a> ProtocolRef<'a> {
             "p2p" => {
                 let s = iter.next().ok_or(())?;
                 let decoded = bs58::decode(s).into_vec().map_err(|_| ())?;
-                // TODO: must check if valid multihash /!\
+                if super::peer_id::multihash::<nom::error::Error<&'_ [u8]>>(&decoded).is_err() {
+                    return Err(());
+                }
                 Ok(ProtocolRef::P2p(Cow::Owned(decoded)))
             }
             "tcp" => {
@@ -209,13 +211,41 @@ impl<'a> ProtocolRef<'a> {
 
         // TODO: optimize by not allocating a Vec
         let extra = match self {
-            ProtocolRef::Dns(addr) => addr.as_bytes().to_vec(),
-            ProtocolRef::Dns4(addr) => addr.as_bytes().to_vec(),
-            ProtocolRef::Dns6(addr) => addr.as_bytes().to_vec(),
-            ProtocolRef::DnsAddr(addr) => addr.as_bytes().to_vec(),
+            ProtocolRef::Dns(addr) => {
+                let mut out = Vec::with_capacity(addr.len() + 4);
+                out.extend_from_slice(crate::util::encode_scale_compact_usize(addr.len()).as_ref());
+                out.extend_from_slice(addr.as_bytes());
+                out
+            }
+            ProtocolRef::Dns4(addr) => {
+                let mut out = Vec::with_capacity(addr.len() + 4);
+                out.extend_from_slice(crate::util::encode_scale_compact_usize(addr.len()).as_ref());
+                out.extend_from_slice(addr.as_bytes());
+                out
+            }
+            ProtocolRef::Dns6(addr) => {
+                let mut out = Vec::with_capacity(addr.len() + 4);
+                out.extend_from_slice(crate::util::encode_scale_compact_usize(addr.len()).as_ref());
+                out.extend_from_slice(addr.as_bytes());
+                out
+            }
+            ProtocolRef::DnsAddr(addr) => {
+                let mut out = Vec::with_capacity(addr.len() + 4);
+                out.extend_from_slice(crate::util::encode_scale_compact_usize(addr.len()).as_ref());
+                out.extend_from_slice(addr.as_bytes());
+                out
+            }
             ProtocolRef::Ip4(ip) => ip.to_vec(),
             ProtocolRef::Ip6(ip) => ip.to_vec(),
-            ProtocolRef::P2p(multihash) => multihash.to_vec(),
+            ProtocolRef::P2p(multihash) => {
+                // TODO: what if not a valid multihash? the enum variant can be constructed by the user
+                let mut out = Vec::with_capacity(multihash.len() + 4);
+                out.extend_from_slice(
+                    crate::util::encode_scale_compact_usize(multihash.len()).as_ref(),
+                );
+                out.extend_from_slice(multihash);
+                out
+            }
             ProtocolRef::Tcp(port) => port.to_be_bytes().to_vec(),
             ProtocolRef::Udp(port) => port.to_be_bytes().to_vec(),
             _ => Vec::new(),
@@ -248,9 +278,6 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
         }
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MultihashRef<'a>(&'a [u8]);
 
 /// Parses a single protocol from its bytes.
 fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
