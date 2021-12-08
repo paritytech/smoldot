@@ -27,7 +27,7 @@
 //!
 //! # How watching transactions works
 //!
-//! Calling [`TransactionsService::submit_extrinsic`] returns a channel receiver that will contain
+//! Calling [`TransactionsService::submit_transaction`] returns a channel receiver that will contain
 //! status updates about this transaction.
 //!
 //! In order to implement this, the [`TransactionsService`] will follow all the blocks that are
@@ -43,7 +43,7 @@
 //! The same "panic mode" happens if there's an accidental gap in the chain, which will typically
 //! happen if the [`sync_service::SyncService`] is overwhelmed.
 //!
-//! If the channel returned by [`TransactionsService::submit_extrinsic`] is full, it will
+//! If the channel returned by [`TransactionsService::submit_transaction`] is full, it will
 //! automatically be closed so as to not block the transactions service if the receive is too slow
 //! to be processed.
 //!
@@ -158,16 +158,16 @@ impl<TPlat: Platform> TransactionsService<TPlat> {
     /// Must pass as parameter the SCALE-encoded transaction.
     ///
     /// The return value of this method is a channel which will receive updates on the state
-    /// of the extrinsic. The channel is closed when no new update is expected or if it becomes
+    /// of the transaction. The channel is closed when no new update is expected or if it becomes
     /// full.
     ///
-    /// > **Note**: Dropping the value returned does not cancel sending out the extrinsic.
+    /// > **Note**: Dropping the value returned does not cancel sending out the transaction.
     ///
     /// If this exact same transaction has already been submitted before, the transaction isn't
     /// added a second time. Instead, a second channel is created pointing to the already-existing
     /// transaction.
-    #[must_use = "Use `submit_extrinsic` instead if you don't need the return value"]
-    pub async fn submit_and_watch_extrinsic(
+    #[must_use = "Use `submit_transaction` instead if you don't need the return value"]
+    pub async fn submit_and_watch_transaction(
         &self,
         transaction_bytes: Vec<u8>,
         channel_size: usize,
@@ -187,9 +187,9 @@ impl<TPlat: Platform> TransactionsService<TPlat> {
         rx
     }
 
-    /// Similar to [`TransactionsService::submit_and_watch_extrinsic`], but doesn't return any
+    /// Similar to [`TransactionsService::submit_and_watch_transaction`], but doesn't return any
     /// channel.
-    pub async fn submit_extrinsic(&self, transaction_bytes: Vec<u8>) {
+    pub async fn submit_transaction(&self, transaction_bytes: Vec<u8>) {
         self.to_background
             .lock()
             .await
@@ -202,7 +202,7 @@ impl<TPlat: Platform> TransactionsService<TPlat> {
     }
 }
 
-/// Update on the state of an extrinsic in the service.
+/// Update on the state of an transaction in the service.
 ///
 /// > **Note**: Because this code isn't an *actual* transactions pool that leverages the runtime,
 /// >           some variants (e.g. `Invalid`) are missing compared to the ones that can be found
@@ -754,7 +754,7 @@ struct Worker<TPlat: Platform> {
     /// List of pending transactions.
     ///
     /// Contains all transactions that were submitted with
-    /// [`TransactionsService::submit_extrinsic`] and their channel to send back their status.
+    /// [`TransactionsService::submit_transaction`] and their channel to send back their status.
     ///
     /// All the entries in this map represent transactions that we're trying to include on the
     /// network. It is normal to find entries where the status report channel is close, as they
