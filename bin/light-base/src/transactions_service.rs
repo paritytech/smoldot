@@ -102,7 +102,7 @@ pub struct Config<TPlat: Platform> {
 
     /// Maximum number of pending transactions allowed in the service.
     ///
-    /// Any extra transaction will lead to [`TransactionStatus::MaxPendingTransactionsReached`].
+    /// Any extra transaction will lead to [`DropReason::MaxPendingTransactionsReached`].
     pub max_pending_transactions: NonZeroU32,
 
     /// Maximum number of block body downloads that can be performed in parallel.
