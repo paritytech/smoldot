@@ -328,7 +328,7 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10a5720225ef5daecf08657f23791354e1685a8c91a4c60c7f3d3b2892f978f4"
 dependencies = [
- "crypto-mac 0.8.0",
+ "crypto-mac",
  "digest 0.9.0",
  "opaque-debug",
 ]
@@ -792,16 +792,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crypto-mac"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1d1a86f49236c215f271d40892d5fc950490551400b02ef360692c29815c714"
-dependencies = [
- "generic-array",
- "subtle",
-]
-
-[[package]]
 name = "csv"
 version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -915,6 +905,7 @@ dependencies = [
  "block-buffer 0.10.0",
  "crypto-common",
  "generic-array",
+ "subtle",
 ]
 
 [[package]]
@@ -1243,12 +1234,11 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hmac"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a2a2320eb7ec0ebe8da8f744d7812d9fc4cb4d09344ac01898dbcb6a20ae69b"
+checksum = "ddca131f3e7f2ce2df364b57949a9d47915cfbd35e46cfee355ccebbf794d6a2"
 dependencies = [
- "crypto-mac 0.11.1",
- "digest 0.9.0",
+ "digest 0.10.0",
 ]
 
 [[package]]
@@ -1774,11 +1764,11 @@ checksum = "acbf547ad0c65e31259204bd90935776d1c693cec2f4ff7abb7a1bbbd40dfe58"
 
 [[package]]
 name = "pbkdf2"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f05894bce6a1ba4be299d0c5f29563e08af2bc18bb7d48313113bed71e904739"
+checksum = "a4628cc3cf953b82edcd3c1388c5715401420ce5524fedbab426bd5aba017434"
 dependencies = [
- "crypto-mac 0.11.1",
+ "digest 0.10.0",
 ]
 
 [[package]]
