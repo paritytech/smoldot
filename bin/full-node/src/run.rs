@@ -246,9 +246,10 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                         .iter()
                         .chain(cli_options.additional_bootnode.iter())
                     {
-                        let address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
+                        let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
                         if let Some(multiaddr::ProtocolRef::P2p(peer_id)) = address.iter().last() {
                             let peer_id = PeerId::from_bytes(peer_id.to_vec()).unwrap(); // TODO: don't unwrap
+                            address.pop();
                             list.push((peer_id, address));
                         } else {
                             panic!() // TODO:
@@ -285,11 +286,12 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                             let mut list =
                                 Vec::with_capacity(relay_chains_specs.boot_nodes().len());
                             for node in relay_chains_specs.boot_nodes().iter() {
-                                let address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
+                                let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
                                 if let Some(multiaddr::ProtocolRef::P2p(peer_id)) =
                                     address.iter().last()
                                 {
                                     let peer_id = PeerId::from_bytes(peer_id.to_vec()).unwrap(); // TODO: don't unwrap
+                                    address.pop();
                                     list.push((peer_id, address));
                                 } else {
                                     panic!() // TODO:

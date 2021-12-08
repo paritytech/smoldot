@@ -45,6 +45,28 @@ impl Multiaddr {
             nom::combinator::iterator(&self.bytes[..], protocol::<nom::error::Error<&'_ [u8]>>);
         iter::from_fn(move || (&mut iter).next())
     }
+
+    /// Pops the last protocol from the list.
+    // TODO: what if list becomes empty? is that legal? what if already empty?
+    pub fn pop(&mut self) {
+        let remain = {
+            let mut iter = nom::combinator::iterator(
+                &self.bytes[..],
+                nom::combinator::recognize(protocol::<nom::error::Error<&'_ [u8]>>),
+            );
+
+            let bytes_prefix = iter.last().unwrap().len();
+            self.bytes.len() - bytes_prefix
+        };
+
+        self.bytes.truncate(remain);
+    }
+}
+
+impl AsRef<[u8]> for Multiaddr {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl<'a> From<ProtocolRef<'a>> for Multiaddr {
@@ -172,7 +194,10 @@ impl<'a> ProtocolRef<'a> {
             "p2p" => {
                 let s = iter.next().ok_or(())?;
                 let decoded = bs58::decode(s).into_vec().map_err(|_| ())?;
-                if super::peer_id::multihash::<nom::error::Error<&'_ [u8]>>(&decoded).is_err() {
+                if let Err(_) = nom::combinator::all_consuming(
+                    super::peer_id::multihash::<nom::error::Error<&'_ [u8]>>,
+                )(&decoded)
+                {
                     return Err(());
                 }
                 Ok(ProtocolRef::P2p(Cow::Owned(decoded)))
@@ -192,6 +217,8 @@ impl<'a> ProtocolRef<'a> {
         }
     }
 
+    /// Returns an iterator to a list of buffers that, when concatenated together, form the
+    /// binary representation of this protocol.
     pub fn as_bytes(&self) -> impl Iterator<Item = impl AsRef<[u8]>> {
         let code = match self {
             ProtocolRef::Dns(_) => 53,
@@ -213,25 +240,25 @@ impl<'a> ProtocolRef<'a> {
         let extra = match self {
             ProtocolRef::Dns(addr) => {
                 let mut out = Vec::with_capacity(addr.len() + 4);
-                out.extend_from_slice(crate::util::encode_scale_compact_usize(addr.len()).as_ref());
+                out.extend(crate::util::leb128::encode_usize(addr.len()));
                 out.extend_from_slice(addr.as_bytes());
                 out
             }
             ProtocolRef::Dns4(addr) => {
                 let mut out = Vec::with_capacity(addr.len() + 4);
-                out.extend_from_slice(crate::util::encode_scale_compact_usize(addr.len()).as_ref());
+                out.extend(crate::util::leb128::encode_usize(addr.len()));
                 out.extend_from_slice(addr.as_bytes());
                 out
             }
             ProtocolRef::Dns6(addr) => {
                 let mut out = Vec::with_capacity(addr.len() + 4);
-                out.extend_from_slice(crate::util::encode_scale_compact_usize(addr.len()).as_ref());
+                out.extend(crate::util::leb128::encode_usize(addr.len()));
                 out.extend_from_slice(addr.as_bytes());
                 out
             }
             ProtocolRef::DnsAddr(addr) => {
                 let mut out = Vec::with_capacity(addr.len() + 4);
-                out.extend_from_slice(crate::util::encode_scale_compact_usize(addr.len()).as_ref());
+                out.extend(crate::util::leb128::encode_usize(addr.len()));
                 out.extend_from_slice(addr.as_bytes());
                 out
             }
@@ -240,9 +267,7 @@ impl<'a> ProtocolRef<'a> {
             ProtocolRef::P2p(multihash) => {
                 // TODO: what if not a valid multihash? the enum variant can be constructed by the user
                 let mut out = Vec::with_capacity(multihash.len() + 4);
-                out.extend_from_slice(
-                    crate::util::encode_scale_compact_usize(multihash.len()).as_ref(),
-                );
+                out.extend(crate::util::leb128::encode_usize(multihash.len()));
                 out.extend_from_slice(multihash);
                 out
             }
@@ -251,8 +276,9 @@ impl<'a> ProtocolRef<'a> {
             _ => Vec::new(),
         };
 
-        let code = crate::util::encode_scale_compact_usize(code);
-        [either::Left(code), either::Right(extra)].into_iter()
+        let mut out = crate::util::leb128::encode_usize(code).collect::<Vec<_>>();
+        out.extend(extra);
+        iter::once(out.into_iter())
     }
 }
 
@@ -283,7 +309,7 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
 fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], ProtocolRef<'a>, E> {
-    nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |protocol_code| {
+    nom::combinator::flat_map(crate::util::leb128::nom_leb128_usize, |protocol_code| {
         move |bytes: &'a [u8]| match protocol_code {
             4 => nom::combinator::map(nom::bytes::complete::take(4_u32), |ip: &'a [u8]| {
                 ProtocolRef::Ip4(ip.try_into().unwrap())
@@ -298,28 +324,28 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             })(bytes),
             53 => nom::combinator::map(
                 nom::combinator::map_opt(
-                    nom::multi::length_data(crate::util::nom_scale_compact_usize),
+                    nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
                     |s| str::from_utf8(s).ok(),
                 ),
                 ProtocolRef::Dns,
             )(bytes),
             54 => nom::combinator::map(
                 nom::combinator::map_opt(
-                    nom::multi::length_data(crate::util::nom_scale_compact_usize),
+                    nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
                     |s| str::from_utf8(s).ok(),
                 ),
                 ProtocolRef::Dns4,
             )(bytes),
             55 => nom::combinator::map(
                 nom::combinator::map_opt(
-                    nom::multi::length_data(crate::util::nom_scale_compact_usize),
+                    nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
                     |s| str::from_utf8(s).ok(),
                 ),
                 ProtocolRef::Dns6,
             )(bytes),
             56 => nom::combinator::map(
                 nom::combinator::map_opt(
-                    nom::multi::length_data(crate::util::nom_scale_compact_usize),
+                    nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
                     |s| str::from_utf8(s).ok(),
                 ),
                 ProtocolRef::DnsAddr,
@@ -331,7 +357,7 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             }
             421 => nom::combinator::map(
                 nom::combinator::map_parser(
-                    nom::multi::length_data(crate::util::nom_scale_compact_usize),
+                    nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
                     nom::combinator::recognize(nom::combinator::all_consuming(
                         super::peer_id::multihash,
                     )),

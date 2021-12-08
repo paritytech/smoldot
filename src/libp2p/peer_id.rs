@@ -313,7 +313,7 @@ pub(super) fn multihash<'a, E: nom::error::ParseError<&'a [u8]>>(
             nom::sequence::preceded(
                 nom::bytes::complete::tag([0x0]),
                 nom::combinator::verify(
-                    nom::multi::length_data(crate::util::nom_scale_compact_usize),
+                    nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
                     |bytes: &[u8]| bytes.len() <= MAX_INLINE_KEY_LENGTH,
                 ),
             ),
