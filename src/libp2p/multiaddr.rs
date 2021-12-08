@@ -17,7 +17,7 @@
 
 // TODO: needs documentation
 
-use alloc::{borrow::Cow, format, vec::Vec};
+use alloc::{borrow::Cow, vec::Vec};
 use core::{
     fmt, iter,
     str::{self, FromStr},
@@ -161,19 +161,13 @@ impl<'a> ProtocolRef<'a> {
             }
             "ip4" => {
                 let string_ip = iter.next().ok_or(())?;
-                let mut splits = string_ip.split(".");
-                let byte0: u8 = splits.next().ok_or(())?.parse().map_err(|_| ())?;
-                let byte1: u8 = splits.next().ok_or(())?.parse().map_err(|_| ())?;
-                let byte2: u8 = splits.next().ok_or(())?.parse().map_err(|_| ())?;
-                let byte3: u8 = splits.next().ok_or(())?.parse().map_err(|_| ())?;
-                if splits.next().is_some() {
-                    return Err(());
-                }
-                Ok(ProtocolRef::Ip4([byte0, byte1, byte2, byte3]))
+                let parsed = no_std_net::Ipv4Addr::from_str(string_ip).map_err(|_| ())?;
+                Ok(ProtocolRef::Ip4(parsed.octets()))
             }
             "ip6" => {
-                // TODO: not implemented 😬
-                Err(())
+                let string_ip = iter.next().ok_or(())?;
+                let parsed = no_std_net::Ipv6Addr::from_str(string_ip).map_err(|_| ())?;
+                Ok(ProtocolRef::Ip6(parsed.octets()))
             }
             "p2p" => {
                 let s = iter.next().ok_or(())?;
@@ -240,27 +234,8 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
             ProtocolRef::Dns4(addr) => write!(f, "/dns4/{}", addr),
             ProtocolRef::Dns6(addr) => write!(f, "/dns6/{}", addr),
             ProtocolRef::DnsAddr(addr) => write!(f, "/dnsaddr/{}", addr),
-            ProtocolRef::Ip4(ip) => {
-                // We first write to an intermediary buffer because the formatter might enforce
-                // alignment stuff when writing numbers.
-                let buf = format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
-                write!(f, "/ip4/{}", buf)
-            }
-            ProtocolRef::Ip6(ip) => {
-                // TODO: writing ipv6s is actually super complicated https://datatracker.ietf.org/doc/html/rfc5952
-                write!(
-                    f,
-                    "/ip6/{}:{}:{}:{}:{}:{}:{}:{}",
-                    hex::encode(&ip[..2]),
-                    hex::encode(&ip[2..4]),
-                    hex::encode(&ip[4..6]),
-                    hex::encode(&ip[6..8]),
-                    hex::encode(&ip[8..10]),
-                    hex::encode(&ip[10..12]),
-                    hex::encode(&ip[12..14]),
-                    hex::encode(&ip[14..16])
-                )
-            }
+            ProtocolRef::Ip4(ip) => fmt::Display::fmt(&no_std_net::Ipv4Addr::from(*ip), f),
+            ProtocolRef::Ip6(ip) => fmt::Display::fmt(&no_std_net::Ipv6Addr::from(*ip), f),
             ProtocolRef::P2p(multihash) => {
                 write!(f, "/p2p/{}", bs58::encode(multihash).into_string())
             }
