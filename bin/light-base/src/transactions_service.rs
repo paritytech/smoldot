@@ -202,7 +202,7 @@ impl<TPlat: Platform> TransactionsService<TPlat> {
     }
 }
 
-/// Update on the state of an transaction in the service.
+/// Update on the state of a transaction in the service.
 ///
 /// > **Note**: Because this code isn't an *actual* transactions pool that leverages the runtime,
 /// >           some variants (e.g. `Invalid`) are missing compared to the ones that can be found
