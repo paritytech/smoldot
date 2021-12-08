@@ -59,12 +59,10 @@ itertools = { version = "0.10.3", default-features = false }
 libsecp256k1 = { version = "0.7.0", default-features = false, features = ["static-context"] }
 # Reminder: `log` is forbidden
 merlin = { version = "3.0", default-features = false }
-multihash = "0.11.4"  # TODO: waiting for a crates.io publication of https://github.com/multiformats/rust-multihash/pull/82 that adds no_std support
 nom = { version = "7.1.0", default-features = false, features = ["alloc"] }
 num-bigint = { version = "0.4.3", default-features = false }
 num-rational = { version = "0.4.0", default-features = false, features = ["num-bigint"] }
 num-traits = { version = "0.2.14", default-features = false }
-parity-multiaddr = "0.9.6" # TODO: doesn't support no_std
 pbkdf2 = { version = "0.10.0", default-features = false }
 pin-project = "1.0.8"
 prost = { version = "0.9.0", default-features = false, features = ["prost-derive"] }

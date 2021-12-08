@@ -88,11 +88,11 @@
 pub mod async_std_connection;
 pub mod collection;
 pub mod connection;
+pub mod multiaddr;
+//pub mod multihash;
 pub mod peer_id;
 pub mod peers;
 pub mod read_write;
 
 pub use multiaddr::Multiaddr;
-#[doc(inline)]
-pub use parity_multiaddr as multiaddr;
 pub use peer_id::PeerId;

@@ -148,7 +148,7 @@ enum State {
 
 #[cfg(test)]
 mod tests {
-    use crate::network::Multiaddr;
+    use crate::libp2p::multiaddr::Multiaddr;
 
     #[test]
     fn transition_not_tried_connected() {
