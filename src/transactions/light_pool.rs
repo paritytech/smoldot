@@ -97,7 +97,8 @@ pub struct LightPool<TTx, TBl> {
     transactions: slab::Slab<Transaction<TTx>>,
 
     /// Holds tuples of `(block_hash, transaction_id)`. When an entry is present in this set, it
-    /// means that this transaction has been found in the body of this block.
+    /// means that this transaction has been found in the body of this block. The value contains
+    /// the index in that body where the transaction is present.
     ///
     /// Blocks are guaranteed to be found in [`LightPool::blocks_tree`].
     ///
@@ -105,7 +106,7 @@ pub struct LightPool<TTx, TBl> {
     /// container, no other parent and child of this block also includes this transaction. In
     /// other words, a transaction is always included only in the earliest block of any given
     /// fork.
-    transactions_by_inclusion: BTreeSet<([u8; 32], TransactionId)>,
+    transactions_by_inclusion: BTreeMap<([u8; 32], TransactionId), usize>,
 
     /// Symmetry of [`LightPool::transactions_by_inclusion`].
     included_transactions: BTreeSet<(TransactionId, [u8; 32])>,
@@ -156,7 +157,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     pub fn new(config: Config) -> Self {
         LightPool {
             transactions: slab::Slab::with_capacity(config.transactions_capacity),
-            transactions_by_inclusion: BTreeSet::new(),
+            transactions_by_inclusion: BTreeMap::new(),
             included_transactions: BTreeSet::new(),
             transaction_validations: BTreeMap::new(),
             transactions_by_validation: BTreeSet::new(),
@@ -232,7 +233,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             let _removed = self.included_transactions.remove(&(id, block_hash));
             debug_assert!(_removed);
             let _removed = self.transactions_by_inclusion.remove(&(block_hash, id));
-            debug_assert!(_removed);
+            debug_assert!(_removed.is_some());
         }
 
         for block_hash in blocks_validated {
@@ -485,22 +486,22 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         let mut retracted_transactions = Vec::new();
         for to_retract_index in old_best_to_common_ancestor {
             let retracted = self.blocks_tree.get(to_retract_index).unwrap();
-            for (_, tx_id) in self.transactions_by_inclusion.range(
+            for ((_, tx_id), index) in self.transactions_by_inclusion.range(
                 (retracted.hash, TransactionId(usize::min_value()))
                     ..=(retracted.hash, TransactionId(usize::max_value())),
             ) {
-                retracted_transactions.push((*tx_id, retracted.hash));
+                retracted_transactions.push((*tx_id, retracted.hash, *index));
             }
         }
 
         let mut included_transactions = Vec::new();
         for to_include_index in common_ancestor_to_new_best {
             let included = self.blocks_tree.get(to_include_index).unwrap();
-            for (_, tx_id) in self.transactions_by_inclusion.range(
+            for ((_, tx_id), index) in self.transactions_by_inclusion.range(
                 (included.hash, TransactionId(usize::min_value()))
                     ..=(included.hash, TransactionId(usize::max_value())),
             ) {
-                included_transactions.push((*tx_id, included.hash));
+                included_transactions.push((*tx_id, included.hash, *index));
             }
         }
 
@@ -536,7 +537,8 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Sets the list of single-SCALE-encoded transactions that are present in the body of a block.
     ///
     /// If the block is part of the best chain, returns the list of transactions that are in the
-    /// pool, that were found in the body, and that weren't part of the best chain before.
+    /// pool, that were found in the body, and that weren't part of the best chain before,
+    /// alongside with their index in the body.
     ///
     /// # Panic
     ///
@@ -548,7 +550,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         &'_ mut self,
         block_hash: &[u8; 32],
         body: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) -> impl Iterator<Item = TransactionId> + '_ {
+    ) -> impl Iterator<Item = (TransactionId, usize)> + '_ {
         let block_index = *self.blocks_by_id.get(block_hash).unwrap();
 
         // TODO: what if body was already known? this will trigger the `debug_assert!(_was_included)` below
@@ -567,7 +569,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         // TODO: optimize by not having Vec
         let mut included_transactions = Vec::new();
 
-        for included_body in body {
+        for (included_body_index, included_body) in body.into_iter().enumerate() {
             let included_body = included_body.as_ref();
             let hash = blake2_hash(included_body);
 
@@ -603,7 +605,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                         let _was_removed = self
                             .transactions_by_inclusion
                             .remove(&(existing_included_block, *known_tx_id));
-                        debug_assert!(_was_removed);
+                        debug_assert!(_was_removed.is_some());
 
                         let _was_removed = self
                             .included_transactions
@@ -621,10 +623,10 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                     }
                 }
 
-                let _was_included = self
+                let _was_present = self
                     .transactions_by_inclusion
-                    .insert((*block_hash, *known_tx_id));
-                debug_assert!(_was_included);
+                    .insert((*block_hash, *known_tx_id), included_body_index);
+                debug_assert!(_was_present.is_none());
 
                 let _was_included = self
                     .included_transactions
@@ -632,7 +634,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 debug_assert!(_was_included);
 
                 if now_included {
-                    included_transactions.push(*known_tx_id);
+                    included_transactions.push((*known_tx_id, included_body_index));
                 }
             }
         }
@@ -708,14 +710,14 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                                 TransactionId(usize::max_value()),
                             ),
                     )
-                    .map(|(_, tx)| *tx)
+                    .map(|((_, tx), _)| *tx)
                     .collect::<Vec<_>>();
 
                 for tx_id in included_txs {
                     let _was_removed = self
                         .transactions_by_inclusion
                         .remove(&(pruned_block.user_data.hash, tx_id));
-                    debug_assert!(_was_removed);
+                    debug_assert!(_was_removed.is_some());
                     let _was_removed = self
                         .included_transactions
                         .remove(&(tx_id, pruned_block.user_data.hash));
@@ -816,7 +818,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                     (pruned.user_data.hash, TransactionId(usize::min_value()))
                         ..=(pruned.user_data.hash, TransactionId(usize::max_value())),
                 )
-                .map(|(_, tx_id)| *tx_id)
+                .map(|((_, tx_id), _)| *tx_id)
                 .collect::<Vec<_>>();
             let mut included_transactions = Vec::with_capacity(included_transactions_ids.len());
 
@@ -847,7 +849,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                     let _removed = self.included_transactions.remove(&(*tx_id, block_hash));
                     debug_assert!(_removed);
                     let _removed = self.transactions_by_inclusion.remove(&(block_hash, *tx_id));
-                    debug_assert!(_removed);
+                    debug_assert!(_removed.is_some());
                 }
 
                 for block_hash in blocks_validated {
@@ -947,18 +949,20 @@ pub struct PruneBodyFinalized<TTx, TBl> {
 #[derive(Debug, Clone)]
 pub struct SetBestBlock {
     /// List of transactions that were included in a block of the best chain but no longer are,
-    /// and the hash of the block in which it was.
+    /// the hash of the block in which it was, and the index of the transaction in that block's
+    /// body.
     ///
     /// Can share some entries with [`SetBestBlock::included_transactions`] in case a transaction
     /// has been retracted then included.
-    pub retracted_transactions: Vec<(TransactionId, [u8; 32])>,
+    pub retracted_transactions: Vec<(TransactionId, [u8; 32], usize)>,
 
-    /// List of transactions that weren't included in a block of the best chain but now are, and
-    /// the hash of the block in which it was found.
+    /// List of transactions that weren't included in a block of the best chain but now are, the
+    /// hash of the block in which it was found, and the index of the transaction in that block's
+    /// body.
     ///
     /// Can share some entries with [`SetBestBlock::retracted_transactions`] in case a transaction
     /// has been retracted then included.
-    pub included_transactions: Vec<(TransactionId, [u8; 32])>,
+    pub included_transactions: Vec<(TransactionId, [u8; 32], usize)>,
 }
 
 /// Entry in [`LightPool::transactions`].

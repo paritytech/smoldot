@@ -1407,7 +1407,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     )
                                 }
                                 transactions_service::TransactionStatus::IncludedBlockUpdate {
-                                    block_hash: Some(block_hash),
+                                    block_hash: Some((block_hash, _)),
                                 } => {
                                     included_block = Some(block_hash);
                                     methods::TransactionStatus::InBlock(methods::HashHexString(

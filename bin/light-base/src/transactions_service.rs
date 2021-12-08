@@ -217,8 +217,9 @@ pub enum TransactionStatus {
     /// The block in which a block is included has changed.
     IncludedBlockUpdate {
         /// If `Some`, the transaction is included in the block of the best chain with the given
-        /// hash. If `None`, the transaction isn't present in the best chain.
-        block_hash: Option<[u8; 32]>,
+        /// hash and at the given index. If `None`, the transaction isn't present in the best
+        /// chain.
+        block_hash: Option<([u8; 32], usize)>,
     },
 
     /// Transaction has been removed from the pool.
@@ -541,14 +542,16 @@ async fn background_task<TPlat: Platform>(
                     );
 
                     if let Ok(block_body) = block_body {
+                        let block_body_size = block_body.len();
                         let included_transactions = worker
                             .pending_transactions
                             .set_block_body(&block_hash, block_body.into_iter())
                             .collect::<Vec<_>>();
 
-                        for tx_id in included_transactions {
+                        for (tx_id, body_index) in included_transactions {
+                            debug_assert!(body_index < block_body_size);
                             let tx = worker.pending_transactions.transaction_user_data_mut(tx_id).unwrap();
-                            tx.update_status(TransactionStatus::IncludedBlockUpdate { block_hash: Some(block_hash) });
+                            tx.update_status(TransactionStatus::IncludedBlockUpdate { block_hash: Some((block_hash, body_index)) });
                         }
                     }
                 },
@@ -815,7 +818,7 @@ impl<TPlat: Platform> Worker<TPlat> {
         // In that situation we need to first signal `Retracted`, then only `InBlock`.
         // Consequently, process `retracted_transactions` first.
 
-        for (tx_id, _) in updates.retracted_transactions {
+        for (tx_id, _, _) in updates.retracted_transactions {
             let tx = self
                 .pending_transactions
                 .transaction_user_data_mut(tx_id)
@@ -823,13 +826,13 @@ impl<TPlat: Platform> Worker<TPlat> {
             tx.update_status(TransactionStatus::IncludedBlockUpdate { block_hash: None });
         }
 
-        for (tx_id, block_hash) in updates.included_transactions {
+        for (tx_id, block_hash, block_body_index) in updates.included_transactions {
             let tx = self
                 .pending_transactions
                 .transaction_user_data_mut(tx_id)
                 .unwrap();
             tx.update_status(TransactionStatus::IncludedBlockUpdate {
-                block_hash: Some(block_hash),
+                block_hash: Some((block_hash, block_body_index)),
             });
         }
     }
