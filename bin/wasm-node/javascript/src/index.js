@@ -221,6 +221,7 @@ export function start(config) {
     maxLogLevel: config.maxLogLevel || 3,
     forbidTcp: config.forbidTcp,
     forbidWs: config.forbidWs,
+    forbidNonLocalWs: config.forbidNonLocalWs,
     forbidWss: config.forbidWss,
   });
 
