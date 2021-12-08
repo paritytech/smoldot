@@ -1398,6 +1398,8 @@ impl<TPlat: Platform> Background<TPlat> {
                 // Send back to the user the confirmation of the registration.
                 log_and_respond_no_mutex(&mut responses_sender, &log_target, confirmation).await;
 
+                let mut included_block = None;
+
                 loop {
                     // Wait for either a status update block, or for the subscription to
                     // be canceled.
@@ -1411,33 +1413,60 @@ impl<TPlat: Platform> Background<TPlat> {
                                         peers.into_iter().map(|peer| peer.to_base58()).collect(),
                                     )
                                 }
-                                transactions_service::TransactionStatus::InBlock(block) => {
-                                    methods::TransactionStatus::InBlock(methods::HashHexString(block))
+                                transactions_service::TransactionStatus::IncludedBlockUpdate {
+                                    block_hash: Some((block_hash, _)),
+                                } => {
+                                    included_block = Some(block_hash);
+                                    methods::TransactionStatus::InBlock(methods::HashHexString(
+                                        block_hash,
+                                    ))
                                 }
-                                transactions_service::TransactionStatus::Retracted(block) => {
-                                    methods::TransactionStatus::Retracted(methods::HashHexString(block))
+                                transactions_service::TransactionStatus::IncludedBlockUpdate {
+                                    block_hash: None,
+                                } => {
+                                    if let Some(block_hash) = included_block.take() {
+                                        methods::TransactionStatus::Retracted(
+                                            methods::HashHexString(block_hash),
+                                        )
+                                    } else {
+                                        continue;
+                                    }
                                 }
-                                transactions_service::TransactionStatus::GapInChain |
-                                transactions_service::TransactionStatus::MaxPendingTransactionsReached |
-                                transactions_service::TransactionStatus::Invalid(_) |
-                                transactions_service::TransactionStatus::ValidateError(_) => {
-                                    methods::TransactionStatus::Dropped
-                                }
-                                transactions_service::TransactionStatus::Finalized(block) => {
-                                    methods::TransactionStatus::Finalized(methods::HashHexString(block))
-                                }
+                                transactions_service::TransactionStatus::Dropped(
+                                    transactions_service::DropReason::GapInChain,
+                                )
+                                | transactions_service::TransactionStatus::Dropped(
+                                    transactions_service::DropReason::MaxPendingTransactionsReached,
+                                )
+                                | transactions_service::TransactionStatus::Dropped(
+                                    transactions_service::DropReason::Invalid(_),
+                                )
+                                | transactions_service::TransactionStatus::Dropped(
+                                    transactions_service::DropReason::ValidateError(_),
+                                ) => methods::TransactionStatus::Dropped,
+                                transactions_service::TransactionStatus::Dropped(
+                                    transactions_service::DropReason::Finalized(block),
+                                ) => methods::TransactionStatus::Finalized(methods::HashHexString(
+                                    block,
+                                )),
                             };
 
-                            log_and_respond_no_mutex(&mut responses_sender, &log_target, methods::ServerToClient::author_extrinsicUpdate {
-                                subscription: &subscription,
-                                result: update,
-                            }.to_json_call_object_parameters(None))
-                                .await;
+                            log_and_respond_no_mutex(
+                                &mut responses_sender,
+                                &log_target,
+                                methods::ServerToClient::author_extrinsicUpdate {
+                                    subscription: &subscription,
+                                    result: update,
+                                }
+                                .to_json_call_object_parameters(None),
+                            )
+                            .await;
                         }
                         future::Either::Right((Ok(unsub_request_id), _)) => {
                             let response = methods::Response::chain_unsubscribeNewHeads(true)
                                 .to_json_response(&unsub_request_id);
-                            log_and_respond_no_mutex(&mut responses_sender, &log_target, response).await;
+                            log_and_respond_no_mutex(&mut responses_sender, &log_target, response)
+                                .await;
                             break;
                         }
                         future::Either::Left((None, _)) => {
