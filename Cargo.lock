@@ -2400,6 +2400,7 @@ dependencies = [
  "ctrlc",
  "derive_more",
  "directories",
+ "either",
  "fnv",
  "futures",
  "futures-timer",

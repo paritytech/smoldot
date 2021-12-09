@@ -102,6 +102,21 @@ impl FromStr for Multiaddr {
     }
 }
 
+impl<'a> FromIterator<ProtocolRef<'a>> for Multiaddr {
+    fn from_iter<T>(iter: T) -> Self
+    where
+        T: IntoIterator<Item = ProtocolRef<'a>>,
+    {
+        let mut bytes = Vec::new();
+        for protocol in iter {
+            for slice in protocol.as_bytes() {
+                bytes.extend(slice.as_ref());
+            }
+        }
+        Multiaddr { bytes }
+    }
+}
+
 impl TryFrom<Vec<u8>> for Multiaddr {
     type Error = FromVecError;
 
@@ -120,9 +135,6 @@ impl TryFrom<Vec<u8>> for Multiaddr {
         Ok(Multiaddr { bytes })
     }
 }
-
-#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
-pub struct FromVecError {}
 
 impl fmt::Debug for Multiaddr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -144,6 +156,9 @@ impl fmt::Display for Multiaddr {
         Ok(())
     }
 }
+
+#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
+pub struct FromVecError {}
 
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum ParseError {
