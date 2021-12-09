@@ -81,14 +81,14 @@ impl<'a> From<ProtocolRef<'a>> for Multiaddr {
 }
 
 impl FromStr for Multiaddr {
-    type Err = (); // TODO: better than ()
+    type Err = ParseError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         let mut bytes = Vec::with_capacity(input.len());
         let mut parts = input.split('/').peekable();
 
         if parts.next() != Some("") {
-            return Err(());
+            return Err(ParseError::InvalidMultiaddr);
         }
 
         while parts.peek().is_some() {
@@ -145,12 +145,25 @@ impl fmt::Display for Multiaddr {
     }
 }
 
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum ParseError {
+    /// A multiaddress must always start with `/`.
+    InvalidMultiaddr,
+    UnexpectedEof,
+    UnrecognizedProtocol,
+    InvalidPort,
+    InvalidIp,
+    NotBase58,
+    InvalidDomainName,
+    InvalidMultihash,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolRef<'a> {
-    Dns(&'a str),
-    Dns4(&'a str),
-    Dns6(&'a str),
-    DnsAddr(&'a str),
+    Dns(DomainNameRef<'a>),
+    Dns4(DomainNameRef<'a>),
+    Dns6(DomainNameRef<'a>),
+    DnsAddr(DomainNameRef<'a>),
     Ip4([u8; 4]),
     Ip6([u8; 16]),
     P2p(Cow<'a, [u8]>), // TODO: a bit hacky
@@ -163,57 +176,66 @@ pub enum ProtocolRef<'a> {
 }
 
 impl<'a> ProtocolRef<'a> {
-    pub fn from_str_parts(mut iter: impl Iterator<Item = &'a str>) -> Result<Self, ()> {
-        match iter.next().ok_or(())? {
+    /// Attempts to extract a protocol from an iterator of `/`-separated components.
+    pub fn from_str_parts(mut iter: impl Iterator<Item = &'a str>) -> Result<Self, ParseError> {
+        match iter.next().ok_or(ParseError::UnexpectedEof)? {
             "dns" => {
-                let addr = iter.next().ok_or(())?;
-                Ok(ProtocolRef::Dns(addr))
+                let addr = iter.next().ok_or(ParseError::UnexpectedEof)?;
+                Ok(ProtocolRef::Dns(DomainNameRef::try_from(addr)?))
             }
             "dns4" => {
-                let addr = iter.next().ok_or(())?;
-                Ok(ProtocolRef::Dns4(addr))
+                let addr = iter.next().ok_or(ParseError::UnexpectedEof)?;
+                Ok(ProtocolRef::Dns4(DomainNameRef::try_from(addr)?))
             }
             "dns6" => {
-                let addr = iter.next().ok_or(())?;
-                Ok(ProtocolRef::Dns6(addr))
+                let addr = iter.next().ok_or(ParseError::UnexpectedEof)?;
+                Ok(ProtocolRef::Dns6(DomainNameRef::try_from(addr)?))
             }
             "dnsaddr" => {
-                let addr = iter.next().ok_or(())?;
-                Ok(ProtocolRef::DnsAddr(addr))
+                let addr = iter.next().ok_or(ParseError::UnexpectedEof)?;
+                Ok(ProtocolRef::DnsAddr(DomainNameRef::try_from(addr)?))
             }
             "ip4" => {
-                let string_ip = iter.next().ok_or(())?;
-                let parsed = no_std_net::Ipv4Addr::from_str(string_ip).map_err(|_| ())?;
+                let string_ip = iter.next().ok_or(ParseError::UnexpectedEof)?;
+                let parsed =
+                    no_std_net::Ipv4Addr::from_str(string_ip).map_err(|_| ParseError::InvalidIp)?;
                 Ok(ProtocolRef::Ip4(parsed.octets()))
             }
             "ip6" => {
-                let string_ip = iter.next().ok_or(())?;
-                let parsed = no_std_net::Ipv6Addr::from_str(string_ip).map_err(|_| ())?;
+                let string_ip = iter.next().ok_or(ParseError::UnexpectedEof)?;
+                let parsed =
+                    no_std_net::Ipv6Addr::from_str(string_ip).map_err(|_| ParseError::InvalidIp)?;
                 Ok(ProtocolRef::Ip6(parsed.octets()))
             }
             "p2p" => {
-                let s = iter.next().ok_or(())?;
-                let decoded = bs58::decode(s).into_vec().map_err(|_| ())?;
+                let s = iter.next().ok_or(ParseError::UnexpectedEof)?;
+                let decoded = bs58::decode(s)
+                    .into_vec()
+                    .map_err(|_| ParseError::NotBase58)?;
                 if let Err(_) = nom::combinator::all_consuming(
                     super::peer_id::multihash::<nom::error::Error<&'_ [u8]>>,
                 )(&decoded)
                 {
-                    return Err(());
+                    return Err(ParseError::InvalidMultihash);
                 }
                 Ok(ProtocolRef::P2p(Cow::Owned(decoded)))
             }
             "tcp" => {
-                let port = iter.next().ok_or(())?;
-                Ok(ProtocolRef::Tcp(port.parse().map_err(|_| ())?))
+                let port = iter.next().ok_or(ParseError::UnexpectedEof)?;
+                Ok(ProtocolRef::Tcp(
+                    port.parse().map_err(|_| ParseError::InvalidPort)?,
+                ))
             }
             "tls" => Ok(ProtocolRef::Tls),
             "udp" => {
-                let port = iter.next().ok_or(())?;
-                Ok(ProtocolRef::Udp(port.parse().map_err(|_| ())?))
+                let port = iter.next().ok_or(ParseError::UnexpectedEof)?;
+                Ok(ProtocolRef::Udp(
+                    port.parse().map_err(|_| ParseError::InvalidPort)?,
+                ))
             }
             "ws" => Ok(ProtocolRef::Ws),
             "wss" => Ok(ProtocolRef::Wss),
-            _ => Err(()),
+            _ => Err(ParseError::UnrecognizedProtocol),
         }
     }
 
@@ -239,27 +261,27 @@ impl<'a> ProtocolRef<'a> {
         // TODO: optimize by not allocating a Vec
         let extra = match self {
             ProtocolRef::Dns(addr) => {
-                let mut out = Vec::with_capacity(addr.len() + 4);
-                out.extend(crate::util::leb128::encode_usize(addr.len()));
-                out.extend_from_slice(addr.as_bytes());
+                let mut out = Vec::with_capacity(addr.0.len() + 4);
+                out.extend(crate::util::leb128::encode_usize(addr.0.len()));
+                out.extend_from_slice(addr.0.as_bytes());
                 out
             }
             ProtocolRef::Dns4(addr) => {
-                let mut out = Vec::with_capacity(addr.len() + 4);
-                out.extend(crate::util::leb128::encode_usize(addr.len()));
-                out.extend_from_slice(addr.as_bytes());
+                let mut out = Vec::with_capacity(addr.0.len() + 4);
+                out.extend(crate::util::leb128::encode_usize(addr.0.len()));
+                out.extend_from_slice(addr.0.as_bytes());
                 out
             }
             ProtocolRef::Dns6(addr) => {
-                let mut out = Vec::with_capacity(addr.len() + 4);
-                out.extend(crate::util::leb128::encode_usize(addr.len()));
-                out.extend_from_slice(addr.as_bytes());
+                let mut out = Vec::with_capacity(addr.0.len() + 4);
+                out.extend(crate::util::leb128::encode_usize(addr.0.len()));
+                out.extend_from_slice(addr.0.as_bytes());
                 out
             }
             ProtocolRef::DnsAddr(addr) => {
-                let mut out = Vec::with_capacity(addr.len() + 4);
-                out.extend(crate::util::leb128::encode_usize(addr.len()));
-                out.extend_from_slice(addr.as_bytes());
+                let mut out = Vec::with_capacity(addr.0.len() + 4);
+                out.extend(crate::util::leb128::encode_usize(addr.0.len()));
+                out.extend_from_slice(addr.0.as_bytes());
                 out
             }
             ProtocolRef::Ip4(ip) => ip.to_vec(),
@@ -284,8 +306,9 @@ impl<'a> ProtocolRef<'a> {
 
 impl<'a> fmt::Display for ProtocolRef<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // TODO: what if DNS address contains a `/`?
         match self {
+            // Note that since a `DomainNameRef` always contains a valid domain name, it is
+            // guaranteed that `addr` never contains a `/`.
             ProtocolRef::Dns(addr) => write!(f, "/dns/{}", addr),
             ProtocolRef::Dns4(addr) => write!(f, "/dns4/{}", addr),
             ProtocolRef::Dns6(addr) => write!(f, "/dns6/{}", addr),
@@ -293,6 +316,7 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
             ProtocolRef::Ip4(ip) => fmt::Display::fmt(&no_std_net::Ipv4Addr::from(*ip), f),
             ProtocolRef::Ip6(ip) => fmt::Display::fmt(&no_std_net::Ipv6Addr::from(*ip), f),
             ProtocolRef::P2p(multihash) => {
+                // Base58 encoding doesn't have `/` in its characters set.
                 write!(f, "/p2p/{}", bs58::encode(multihash).into_string())
             }
             ProtocolRef::Quic => write!(f, "/quic"),
@@ -302,6 +326,34 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
             ProtocolRef::Ws => write!(f, "/ws"),
             ProtocolRef::Wss => write!(f, "/wss"),
         }
+    }
+}
+
+/// Domain name. Guarantees that the domain name is valid.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DomainNameRef<'a>(&'a str);
+
+impl<'a> TryFrom<&'a str> for DomainNameRef<'a> {
+    type Error = ParseError;
+
+    fn try_from(input: &'a str) -> Result<Self, Self::Error> {
+        if addr::parse_dns_name(input).is_err() {
+            return Err(ParseError::InvalidDomainName);
+        }
+
+        Ok(DomainNameRef(input))
+    }
+}
+
+impl<'a> fmt::Debug for DomainNameRef<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl<'a> fmt::Display for DomainNameRef<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
     }
 }
 
@@ -325,28 +377,44 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             53 => nom::combinator::map(
                 nom::combinator::map_opt(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| str::from_utf8(s).ok(),
+                    |s| {
+                        str::from_utf8(s)
+                            .ok()
+                            .and_then(|s| DomainNameRef::try_from(s).ok())
+                    },
                 ),
                 ProtocolRef::Dns,
             )(bytes),
             54 => nom::combinator::map(
                 nom::combinator::map_opt(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| str::from_utf8(s).ok(),
+                    |s| {
+                        str::from_utf8(s)
+                            .ok()
+                            .and_then(|s| DomainNameRef::try_from(s).ok())
+                    },
                 ),
                 ProtocolRef::Dns4,
             )(bytes),
             55 => nom::combinator::map(
                 nom::combinator::map_opt(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| str::from_utf8(s).ok(),
+                    |s| {
+                        str::from_utf8(s)
+                            .ok()
+                            .and_then(|s| DomainNameRef::try_from(s).ok())
+                    },
                 ),
                 ProtocolRef::Dns6,
             )(bytes),
             56 => nom::combinator::map(
                 nom::combinator::map_opt(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |s| str::from_utf8(s).ok(),
+                    |s| {
+                        str::from_utf8(s)
+                            .ok()
+                            .and_then(|s| DomainNameRef::try_from(s).ok())
+                    },
                 ),
                 ProtocolRef::DnsAddr,
             )(bytes),
