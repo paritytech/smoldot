@@ -118,10 +118,15 @@ export interface Chain {
    *
    * The content of the string is opaque and shouldn't be decoded.
    *
+   * A parameter can be passed to indicate the maximum length of the database content (in number
+   * of bytes this string would occupy in the UTF-8 encoding). Smoldot will never go above this
+   * limit, and the higher this limit is the more information it can include. Not passing any
+   * value means "unbounded".
+   *
    * @throws {AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
    * @throws {CrashError} If the background client has crashed.
    */
-  databaseContent(): Promise<string>;
+  databaseContent(maxUtf8BytesSize?: number): Promise<string>;
 
   /**
    * Disconnects from the blockchain.
