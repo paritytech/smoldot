@@ -21,7 +21,17 @@ use smoldot_light_base::ConnectError;
 
 use core::{fmt, marker, pin::Pin, slice, str, time::Duration};
 use futures::prelude::*;
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
+/// Total number of bytes that all the connections created through [`Platform`] combined have
+/// received.
+pub static TOTAL_BYTES_RECEIVED: AtomicUsize = AtomicUsize::new(0);
+/// Total number of bytes that all the connections created through [`Platform`] combined have
+/// sent.
+pub static TOTAL_BYTES_SENT: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) struct Platform;
 
@@ -177,6 +187,8 @@ impl smoldot_light_base::Platform for Platform {
                 return;
             }
 
+            TOTAL_BYTES_SENT.fetch_add(data.len(), Ordering::Relaxed);
+
             bindings::connection_send(
                 this.id.unwrap(),
                 u32::try_from(data.as_ptr() as usize).unwrap(),
@@ -235,6 +247,8 @@ pub(crate) fn connection_message(id: u32, ptr: u32, len: u32) {
 
     let ptr = usize::try_from(ptr).unwrap();
     let len = usize::try_from(len).unwrap();
+
+    TOTAL_BYTES_RECEIVED.fetch_add(len, Ordering::Relaxed);
 
     let message: Box<[u8]> =
         unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) };
