@@ -89,7 +89,18 @@ const injectMessage = (instance, message) => {
     compat.postMessage({ kind: 'chainRemoved' });
 
   } else if (message.ty == 'databaseContent') {
-    instance.exports.database_content(message.chainId);
+    // The value of `maxUtf8BytesSize` is guaranteed (by `index.js`) to always fit in 32 bits, in
+    // other words, that `maxUtf8BytesSize < (1 << 32)`.
+    // We need to perform a conversion in such a way that the the bits of the output of
+    // `ToInt32(converted)`, when interpreted as u32, is equal to `maxUtf8BytesSize`.
+    // See ToInt32 here: https://tc39.es/ecma262/#sec-toint32
+    // Note that the code below has been tested against example values. Please be very careful
+    // if you decide to touch it. Ideally it would be unit-tested, but since it concerns the FFI
+    // layer between JS and Rust, writing unit tests would be extremely complicated.
+    const twoPower31 = (1 << 30) * 2;  // `1 << 31` in JavaScript doesn't give the value that you expect.
+    const converted = (message.maxUtf8BytesSize >= twoPower31) ?
+      (message.maxUtf8BytesSize - (twoPower31 * 2)) : message.maxUtf8BytesSize;
+    instance.exports.database_content(message.chainId, converted);
 
   } else
     throw new Error('unrecognized message type');
