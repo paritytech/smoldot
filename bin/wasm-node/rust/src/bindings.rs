@@ -359,8 +359,8 @@ pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) {
 ///
 /// The `max_size` parameter contains the maximum length, in bytes, of the value that will be
 /// provided back. Please be aware that passing a `u32` accross the FFI boundary can be tricky.
-/// From the Wasm perspective, the parameter of this function is actually a `i32̀  that is then
-/// reinterpreted as a `u32̀ .
+/// From the Wasm perspective, the parameter of this function is actually a `i32` that is then
+/// reinterpreted as a `u32`.
 ///
 /// [`database_content_ready`] will not be called if you remove the chain with [`remove_chain`]
 /// while the operation is in progress.
