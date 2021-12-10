@@ -60,7 +60,6 @@ const client = smoldot.start({
 // WebSocket connection has been established.
 client
     .addChain({ chainSpec: westend })
-    .then((chain) => chain.databaseContent())
     .catch((error) => {
         console.error("Error while adding chain: " + error);
         process.exit(1);
