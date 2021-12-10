@@ -95,7 +95,8 @@ const injectMessage = (instance, message) => {
     // `ToInt32(converted)`, when interpreted as u32, is equal to `maxUtf8BytesSize`.
     // See ToInt32 here: https://tc39.es/ecma262/#sec-toint32
     // Note that the code below has been tested against example values. Please be very careful
-    // if you decide to touch it.
+    // if you decide to touch it. Ideally it would be unit-tested, but since it concerns the FFI
+    // layer between JS and Rust, writing unit tests would be extremely complicated.
     const twoPower31 = (1 << 30) * 2;  // `1 << 31` in JavaScript doesn't give the value that you expect.
     const converted = (message.maxUtf8BytesSize >= twoPower31) ?
       (message.maxUtf8BytesSize - (twoPower31 * 2)) : message.maxUtf8BytesSize;
