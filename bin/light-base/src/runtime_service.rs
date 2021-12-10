@@ -1472,6 +1472,7 @@ async fn run_background<TPlat: Platform>(
         // become full before the execution of the runtime service resumes.
         // TODO: make use of the `SubscribeAll::finalized_block_runtime`
         let subscription = sync_service.subscribe_all(16, true).await;
+        drop(subscription.finalized_block_runtime); // TODO: frees up the resources
 
         log::debug!(
             target: &log_target,
