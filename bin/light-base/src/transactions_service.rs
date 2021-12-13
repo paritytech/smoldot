@@ -27,7 +27,7 @@
 //!
 //! # How watching transactions works
 //!
-//! Calling [`TransactionsService::submit_extrinsic`] returns a channel receiver that will contain
+//! Calling [`TransactionsService::submit_transaction`] returns a channel receiver that will contain
 //! status updates about this transaction.
 //!
 //! In order to implement this, the [`TransactionsService`] will follow all the blocks that are
@@ -43,7 +43,7 @@
 //! The same "panic mode" happens if there's an accidental gap in the chain, which will typically
 //! happen if the [`sync_service::SyncService`] is overwhelmed.
 //!
-//! If the channel returned by [`TransactionsService::submit_extrinsic`] is full, it will
+//! If the channel returned by [`TransactionsService::submit_transaction`] is full, it will
 //! automatically be closed so as to not block the transactions service if the receive is too slow
 //! to be processed.
 //!
@@ -102,7 +102,7 @@ pub struct Config<TPlat: Platform> {
 
     /// Maximum number of pending transactions allowed in the service.
     ///
-    /// Any extra transaction will lead to [`TransactionStatus::MaxPendingTransactionsReached`].
+    /// Any extra transaction will lead to [`DropReason::MaxPendingTransactionsReached`].
     pub max_pending_transactions: NonZeroU32,
 
     /// Maximum number of block body downloads that can be performed in parallel.
@@ -158,16 +158,16 @@ impl<TPlat: Platform> TransactionsService<TPlat> {
     /// Must pass as parameter the SCALE-encoded transaction.
     ///
     /// The return value of this method is a channel which will receive updates on the state
-    /// of the extrinsic. The channel is closed when no new update is expected or if it becomes
+    /// of the transaction. The channel is closed when no new update is expected or if it becomes
     /// full.
     ///
-    /// > **Note**: Dropping the value returned does not cancel sending out the extrinsic.
+    /// > **Note**: Dropping the value returned does not cancel sending out the transaction.
     ///
     /// If this exact same transaction has already been submitted before, the transaction isn't
     /// added a second time. Instead, a second channel is created pointing to the already-existing
     /// transaction.
-    #[must_use = "Use `submit_extrinsic` instead if you don't need the return value"]
-    pub async fn submit_and_watch_extrinsic(
+    #[must_use = "Use `submit_transaction` instead if you don't need the return value"]
+    pub async fn submit_and_watch_transaction(
         &self,
         transaction_bytes: Vec<u8>,
         channel_size: usize,
@@ -187,9 +187,9 @@ impl<TPlat: Platform> TransactionsService<TPlat> {
         rx
     }
 
-    /// Similar to [`TransactionsService::submit_and_watch_extrinsic`], but doesn't return any
+    /// Similar to [`TransactionsService::submit_and_watch_transaction`], but doesn't return any
     /// channel.
-    pub async fn submit_extrinsic(&self, transaction_bytes: Vec<u8>) {
+    pub async fn submit_transaction(&self, transaction_bytes: Vec<u8>) {
         self.to_background
             .lock()
             .await
@@ -202,7 +202,7 @@ impl<TPlat: Platform> TransactionsService<TPlat> {
     }
 }
 
-/// Update on the state of an extrinsic in the service.
+/// Update on the state of a transaction in the service.
 ///
 /// > **Note**: Because this code isn't an *actual* transactions pool that leverages the runtime,
 /// >           some variants (e.g. `Invalid`) are missing compared to the ones that can be found
@@ -214,16 +214,27 @@ pub enum TransactionStatus {
     /// Transaction has been broadcasted to the given peers.
     Broadcast(Vec<PeerId>),
 
-    /// Detected a block that is part of the best chain and that contains this transaction.
-    ///
-    /// Contains the hash of the block that contains the transaction.
-    InBlock([u8; 32]),
+    /// The block in which a block is included has changed.
+    IncludedBlockUpdate {
+        /// If `Some`, the transaction is included in the block of the best chain with the given
+        /// hash and at the given index. If `None`, the transaction isn't present in the best
+        /// chain.
+        block_hash: Option<([u8; 32], usize)>,
+    },
 
-    /// Can be sent after [`TransactionStatus::InBlock`] to notify that a re-org happened and the
-    /// current best tree of blocks no longer contains the transaction.
+    /// Transaction has been removed from the pool.
     ///
-    /// Contains the same block as was previously passed in [`TransactionStatus::InBlock`].
-    Retracted([u8; 32]),
+    /// This is always the last message sent back by the channel reporting the status.
+    Dropped(DropReason),
+}
+
+/// See [`TransactionStatus::Dropped`].
+#[derive(Debug, Clone)]
+pub enum DropReason {
+    /// Transaction has been included in a finalized block.
+    ///
+    /// This is a success path.
+    Finalized([u8; 32]),
 
     /// Transaction has been dropped because there was a gap in the chain of blocks. It is
     /// impossible to know.
@@ -238,9 +249,6 @@ pub enum TransactionStatus {
 
     /// Transaction has been dropped because we have failed to validate it.
     ValidateError(ValidateTransactionError),
-
-    /// Transaction has been included in a finalized block.
-    Finalized([u8; 32]),
 }
 
 /// Failed to check the validity of a transaction.
@@ -310,7 +318,7 @@ async fn background_task<TPlat: Platform>(
         // Drop all pending transactions of the pool.
         for (_, pending) in worker.pending_transactions.transactions_iter_mut() {
             // TODO: only do this if transaction hasn't been validated yet
-            pending.update_status(TransactionStatus::GapInChain);
+            pending.update_status(TransactionStatus::Dropped(DropReason::GapInChain));
         }
 
         // Reset the blocks tracking state machine.
@@ -468,7 +476,9 @@ async fn background_task<TPlat: Platform>(
             for block in worker.pending_transactions.prune_finalized_with_body() {
                 debug_assert!(!block.user_data.downloading);
                 for (_, mut tx) in block.included_transactions {
-                    tx.update_status(TransactionStatus::Finalized(block.block_hash));
+                    tx.update_status(TransactionStatus::Dropped(DropReason::Finalized(
+                        block.block_hash,
+                    )));
                     // `tx` is no longer in the pool.
                 }
             }
@@ -532,14 +542,16 @@ async fn background_task<TPlat: Platform>(
                     );
 
                     if let Ok(block_body) = block_body {
+                        let block_body_size = block_body.len();
                         let included_transactions = worker
                             .pending_transactions
                             .set_block_body(&block_hash, block_body.into_iter())
                             .collect::<Vec<_>>();
 
-                        for tx_id in included_transactions {
+                        for (tx_id, body_index) in included_transactions {
+                            debug_assert!(body_index < block_body_size);
                             let tx = worker.pending_transactions.transaction_user_data_mut(tx_id).unwrap();
-                            tx.update_status(TransactionStatus::InBlock(block_hash));
+                            tx.update_status(TransactionStatus::IncludedBlockUpdate { block_hash: Some((block_hash, body_index)) });
                         }
                     }
                 },
@@ -660,7 +672,7 @@ async fn background_task<TPlat: Platform>(
                             // The validation itself has completed, but the runtime indicated
                             // that the transaction was invalid. Drop the transaction.
                             let mut tx = worker.pending_transactions.remove_transaction(maybe_validated_tx_id);
-                            tx.update_status(TransactionStatus::Invalid(error));
+                            tx.update_status(TransactionStatus::Dropped(DropReason::Invalid(error)));
                         }
                         Err(error) => {
                             log::warn!(
@@ -674,7 +686,7 @@ async fn background_task<TPlat: Platform>(
                             // executing the runtime. This most likely indicates a compatibility
                             // problem between smoldot and the runtime code. Drop the transaction.
                             let mut tx = worker.pending_transactions.remove_transaction(maybe_validated_tx_id);
-                            tx.update_status(TransactionStatus::ValidateError(error));
+                            tx.update_status(TransactionStatus::Dropped(DropReason::ValidateError(error)));
                         }
                     }
                 },
@@ -709,7 +721,7 @@ async fn background_task<TPlat: Platform>(
                             // and immediately drop new transactions of this limit is reached.
                             if worker.pending_transactions.num_transactions() >= worker.max_pending_transactions {
                                 if let Some(mut updates_report) = updates_report {
-                                    let _ = updates_report.try_send(TransactionStatus::MaxPendingTransactionsReached);
+                                    let _ = updates_report.try_send(TransactionStatus::Dropped(DropReason::MaxPendingTransactionsReached));
                                 }
                                 continue;
                             }
@@ -754,7 +766,7 @@ struct Worker<TPlat: Platform> {
     /// List of pending transactions.
     ///
     /// Contains all transactions that were submitted with
-    /// [`TransactionsService::submit_extrinsic`] and their channel to send back their status.
+    /// [`TransactionsService::submit_transaction`] and their channel to send back their status.
     ///
     /// All the entries in this map represent transactions that we're trying to include on the
     /// network. It is normal to find entries where the status report channel is close, as they
@@ -806,20 +818,22 @@ impl<TPlat: Platform> Worker<TPlat> {
         // In that situation we need to first signal `Retracted`, then only `InBlock`.
         // Consequently, process `retracted_transactions` first.
 
-        for (tx_id, hash) in updates.retracted_transactions {
+        for (tx_id, _, _) in updates.retracted_transactions {
             let tx = self
                 .pending_transactions
                 .transaction_user_data_mut(tx_id)
                 .unwrap();
-            tx.update_status(TransactionStatus::Retracted(hash));
+            tx.update_status(TransactionStatus::IncludedBlockUpdate { block_hash: None });
         }
 
-        for (tx_id, hash) in updates.included_transactions {
+        for (tx_id, block_hash, block_body_index) in updates.included_transactions {
             let tx = self
                 .pending_transactions
                 .transaction_user_data_mut(tx_id)
                 .unwrap();
-            tx.update_status(TransactionStatus::InBlock(hash));
+            tx.update_status(TransactionStatus::IncludedBlockUpdate {
+                block_hash: Some((block_hash, block_body_index)),
+            });
         }
     }
 }

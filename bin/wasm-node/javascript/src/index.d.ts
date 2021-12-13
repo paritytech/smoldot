@@ -118,10 +118,15 @@ export interface Chain {
    *
    * The content of the string is opaque and shouldn't be decoded.
    *
+   * A parameter can be passed to indicate the maximum length of the returned value (in number
+   * of bytes this string would occupy in the UTF-8 encoding). The higher this limit is the more
+   * information can be included. This parameter is optional, and not passing any value means
+   * "unbounded".
+   *
    * @throws {AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
    * @throws {CrashError} If the background client has crashed.
    */
-  databaseContent(): Promise<string>;
+  databaseContent(maxUtf8BytesSize?: number): Promise<string>;
 
   /**
    * Disconnects from the blockchain.
@@ -195,6 +200,23 @@ export interface ClientOptions {
    * supported anyway.
    */
   forbidWs?: boolean;
+
+  /**
+   * If `true`, then the client will never open any non-secure WebSocket connection to addresses
+   * other than `localhost` or `127.0.0.1`.
+   * Defaults to `false`.
+   *
+   * This option is similar to `forbidWs`, except that connections to `localhost` and `127.0.0.1`
+   * do not take the value of this option into account.
+   *
+   * This option can be used in order to mimic an environment where non-secure WebSocket
+   * connections aren't supported (e.g. web pages) from an environment where they are supported
+   * (e.g. NodeJS).
+   *
+   * This option has no effect in environments where non-secure WebSocket connections aren't
+   * supported anyway.
+   */
+  forbidNonLocalWs?: boolean;
 
   /**
    * If `true`, then the client will never open any secure WebSocket connection.

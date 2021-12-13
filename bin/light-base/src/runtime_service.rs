@@ -52,7 +52,7 @@ use futures::{
 use smoldot::{
     chain::{async_tree, fork_tree},
     chain_spec, executor, header,
-    informant::HashDisplay,
+    informant::{BytesDisplay, HashDisplay},
     metadata,
     network::protocol,
     trie::{self, proof_verify},
@@ -1472,6 +1472,7 @@ async fn run_background<TPlat: Platform>(
         // become full before the execution of the runtime service resumes.
         // TODO: make use of the `SubscribeAll::finalized_block_runtime`
         let subscription = sync_service.subscribe_all(16, true).await;
+        drop(subscription.finalized_block_runtime); // TODO: frees up the resources
 
         log::debug!(
             target: &log_target,
@@ -1787,7 +1788,28 @@ impl<TPlat: Platform> Background<TPlat> {
         let runtime_index = if let Some(existing_runtime) = existing_runtime {
             existing_runtime
         } else {
+            // No identical runtime was found. Try compiling the new runtime.
             let runtime = SuccessfulRuntime::from_params(&storage_code, &storage_heap_pages).await;
+            match &runtime {
+                Ok(runtime) => {
+                    log::info!(
+                        target: &self.log_target,
+                        "Successfully compiled runtime. Spec version: {}. Size of `:code`: {}.",
+                        runtime.runtime_spec.decode().spec_version,
+                        BytesDisplay(u64::try_from(storage_code.as_ref().map_or(0, |v| v.len())).unwrap())
+                    );
+                }
+                Err(error) => {
+                    log::warn!(
+                        target: &self.log_target,
+                        "Failed to compile runtime. Size of `:code`: {}.\nError: {}\n\
+                        This indicates an incompatibility between smoldot and the chain.",
+                        BytesDisplay(u64::try_from(storage_code.as_ref().map_or(0, |v| v.len())).unwrap()),
+                        error
+                    );
+                }
+            }
+
             guarded.runtimes.insert(Runtime {
                 num_references: 0, // Incremented below.
                 heap_pages: storage_heap_pages,

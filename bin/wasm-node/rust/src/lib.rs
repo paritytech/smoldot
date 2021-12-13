@@ -327,14 +327,15 @@ fn json_rpc_send(ptr: u32, len: u32, chain_id: u32) {
     }
 }
 
-fn database_content(chain_id: u32) {
+fn database_content(chain_id: u32, max_size: u32) {
     let client_chain_id = smoldot_light_base::ChainId::from(chain_id);
 
     let mut client_lock = CLIENT.lock().unwrap();
     let (client, tasks_spawner) = client_lock.as_mut().unwrap();
 
     let task = {
-        let future = client.database_content(client_chain_id);
+        let max_size = usize::try_from(max_size).unwrap();
+        let future = client.database_content(client_chain_id, max_size);
         async move {
             let content = future.await;
             unsafe {

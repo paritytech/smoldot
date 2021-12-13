@@ -132,11 +132,12 @@ export function start(config) {
             throw new JsonRpcDisabledError();
           worker.postMessage({ ty: 'request', request, chainId });
         },
-        databaseContent: () => {
+        databaseContent: (maxUtf8BytesSize) => {
           if (workerError)
             return Promise.reject(workerError);
           if (chainId === null)
             return Promise.reject(new AlreadyDestroyedError());
+
           let resolve;
           let reject;
           const promise = new Promise((res, rej) => {
@@ -144,7 +145,13 @@ export function start(config) {
             reject = rej;
           });
           chainsDatabaseContentPromises.get(chainId).push({ resolve, reject });
-          worker.postMessage({ ty: 'databaseContent', chainId });
+
+          const twoPower32 = (1 << 30) * 4;  // `1 << 31` and `1 << 32` in JavaScript don't give the value that you expect.
+          const maxSize = maxUtf8BytesSize || (twoPower32 - 1);
+          const cappedMaxSize = (maxSize >= twoPower32) ? (twoPower32 - 1) : maxSize;
+
+          worker.postMessage({ ty: 'databaseContent', chainId, maxUtf8BytesSize: cappedMaxSize });
+
           return promise;
         },
         remove: () => {
@@ -221,6 +228,7 @@ export function start(config) {
     maxLogLevel: config.maxLogLevel || 3,
     forbidTcp: config.forbidTcp,
     forbidWs: config.forbidWs,
+    forbidNonLocalWs: config.forbidNonLocalWs,
     forbidWss: config.forbidWss,
   });
 
