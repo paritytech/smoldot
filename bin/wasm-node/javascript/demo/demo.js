@@ -59,7 +59,7 @@ const client = smoldot.start({
 // By calling it now, we let smoldot start syncing that chain in the background even before a
 // WebSocket connection has been established.
 client
-    .addChain({ chainSpec: westend })
+    .addChain({ chainSpec: rococo })
     .catch((error) => {
         console.error("Error while adding chain: " + error);
         process.exit(1);

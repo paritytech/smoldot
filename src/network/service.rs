@@ -203,6 +203,10 @@ struct NextEventGuarded {
     to_process_pre_event: Option<peers::Event<multiaddr::Multiaddr>>,
 
     /// Tuples of `(peer_id, chain_index)` that have been reported as open to the API user.
+    ///
+    /// This is a subset of the block announce notification protocol substreams that are open.
+    /// Some substreams might have been opened and have been left out of this map if their
+    /// handshake was invalid, or had a different genesis hash, or similar problem.
     open_chains: hashbrown::HashSet<(PeerId, usize), ahash::RandomState>,
 }
 
@@ -1547,22 +1551,23 @@ where
                     }
 
                     // The chain is now considered as closed.
-                    let _was_removed = guarded.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
-                    debug_assert!(_was_removed);
+                    let was_open = guarded.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
 
-                    // As a slot has been unassigned, wake up the discovery process in order for
-                    // it to be filled.
-                    // TODO: correct?
-                    // TODO: if necessary, mark another peer+substream tuple as desired to fill a slot
-                    self.start_connect_needed.notify_additional(1);
+                    if was_open {
+                        // As a slot has been unassigned, wake up the discovery process in order for
+                        // it to be filled.
+                        // TODO: correct?
+                        // TODO: if necessary, mark another peer+substream tuple as desired to fill a slot
+                        self.start_connect_needed.notify_additional(1);
 
-                    return Event::ChainDisconnected {
-                        chain_index,
-                        peer_id: match guarded.to_process_pre_event.take().unwrap() {
-                            peers::Event::NotificationsOutClose { peer_id, .. } => peer_id,
-                            _ => unreachable!(),
-                        },
-                    };
+                        return Event::ChainDisconnected {
+                            chain_index,
+                            peer_id: match guarded.to_process_pre_event.take().unwrap() {
+                                peers::Event::NotificationsOutClose { peer_id, .. } => peer_id,
+                                _ => unreachable!(),
+                            },
+                        };
+                    }
                 }
 
                 // Other protocol.
