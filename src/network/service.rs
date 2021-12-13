@@ -1538,22 +1538,22 @@ where
                     )
                     .await;
 
-                    // Update the k-buckets, marking the peer as disconnected.
-                    {
-                        let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                        if let Some(mut entry) = ephemeral_guarded.chains[chain_index]
-                            .kbuckets
-                            .entry(peer_id)
-                            .into_occupied()
-                        {
-                            entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
-                        }
-                    }
-
                     // The chain is now considered as closed.
                     let was_open = guarded.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
 
                     if was_open {
+                        // Update the k-buckets, marking the peer as disconnected.
+                        {
+                            let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                            if let Some(mut entry) = ephemeral_guarded.chains[chain_index]
+                                .kbuckets
+                                .entry(peer_id)
+                                .into_occupied()
+                            {
+                                entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
+                            }
+                        }
+
                         // As a slot has been unassigned, wake up the discovery process in order for
                         // it to be filled.
                         // TODO: correct?
@@ -1567,6 +1567,8 @@ where
                                 _ => unreachable!(),
                             },
                         };
+                    } else {
+                        guarded.to_process_pre_event = None;
                     }
                 }
 
