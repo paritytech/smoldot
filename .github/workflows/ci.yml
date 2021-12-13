@@ -30,10 +30,9 @@ jobs:
       image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
-    - run: |
-        # Restore files timestamps. It is unclear whether this is necessary, but it can't hurt.
-        find . -exec touch -t 202005260100 {} +
-        git restore-mtime
+      with:
+        fetch-depth: 0  # Needed for git-restore-mtime
+    - uses: chetan/git-restore-mtime-action@v1
     - uses: Swatinem/rust-cache@v1
     - run: RUSTFLAGS=-Dwarnings cargo test --locked --workspace --all-features
 
@@ -43,10 +42,9 @@ jobs:
       image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
-    - run: |
-        # Restore files timestamps. It is unclear whether this is necessary, but it can't hurt.
-        find . -exec touch -t 202005260100 {} +
-        git restore-mtime
+      with:
+        fetch-depth: 0  # Needed for git-restore-mtime
+    - uses: chetan/git-restore-mtime-action@v1
     - run: apt-get update && apt-get install -y libc6-dev-i386
     - uses: Swatinem/rust-cache@v1
     - run: rustup target add i686-unknown-linux-gnu
@@ -58,10 +56,9 @@ jobs:
       image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
-    - run: |
-        # Restore files timestamps. It is unclear whether this is necessary, but it can't hurt.
-        find . -exec touch -t 202005260100 {} +
-        git restore-mtime
+      with:
+        fetch-depth: 0  # Needed for git-restore-mtime
+    - uses: chetan/git-restore-mtime-action@v1
     - uses: Swatinem/rust-cache@v1
     - uses: actions/setup-node@v2.5.0
       with:
@@ -76,11 +73,8 @@ jobs:
     steps:
     - uses: actions/checkout@v2.4.0
       with:
-        fetch-depth: 0  # Necessary to fetch pull request base below
-    - run: |
-        # Restore files timestamps. It is unclear whether this is necessary, but it can't hurt.
-        find . -exec touch -t 202005260100 {} +
-        git restore-mtime
+        fetch-depth: 0  # Necessary for git-restore-mtime and to fetch pull request base below
+    - uses: chetan/git-restore-mtime-action@v1
     - uses: Swatinem/rust-cache@v1
     - uses: actions/setup-node@v2.5.0
       with:
@@ -110,10 +104,9 @@ jobs:
       image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
-    - run: |
-        # Restore files timestamps. It is unclear whether this is necessary, but it can't hurt.
-        find . -exec touch -t 202005260100 {} +
-        git restore-mtime
+      with:
+        fetch-depth: 0  # Needed for git-restore-mtime
+    - uses: chetan/git-restore-mtime-action@v1
     - uses: Swatinem/rust-cache@v1
     - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features
     - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features database-sqlite
