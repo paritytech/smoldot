@@ -23,6 +23,8 @@ use core::{
     str::{self, FromStr},
 };
 
+use super::multihash;
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Multiaddr {
     bytes: Vec<u8>,
@@ -186,7 +188,7 @@ pub enum ParseError {
     InvalidIp,
     NotBase58,
     InvalidDomainName,
-    InvalidMultihash,
+    InvalidMultihash(multihash::FromBytesError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,11 +245,8 @@ impl<'a> ProtocolRef<'a> {
                 let decoded = bs58::decode(s)
                     .into_vec()
                     .map_err(|_| ParseError::NotBase58)?;
-                if let Err(_) = nom::combinator::all_consuming(
-                    super::peer_id::multihash::<nom::error::Error<&'_ [u8]>>,
-                )(&decoded)
-                {
-                    return Err(ParseError::InvalidMultihash);
+                if let Err(err) = multihash::MultihashRef::from_bytes(&decoded) {
+                    return Err(ParseError::InvalidMultihash(err));
                 }
                 Ok(ProtocolRef::P2p(Cow::Owned(decoded)))
             }
@@ -487,11 +486,9 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
                 )
             }
             421 => nom::combinator::map(
-                nom::combinator::map_parser(
+                nom::combinator::verify(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    nom::combinator::recognize(nom::combinator::all_consuming(
-                        super::peer_id::multihash,
-                    )),
+                    |s| multihash::MultihashRef::from_bytes(s).is_ok(),
                 ),
                 |b| ProtocolRef::P2p(Cow::Borrowed(b)),
             )(bytes),

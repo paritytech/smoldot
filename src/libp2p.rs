@@ -89,7 +89,7 @@ pub mod async_std_connection;
 pub mod collection;
 pub mod connection;
 pub mod multiaddr;
-//pub mod multihash;
+pub mod multihash;
 pub mod peer_id;
 pub mod peers;
 pub mod read_write;

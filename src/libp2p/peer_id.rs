@@ -21,6 +21,9 @@
 use alloc::{string::String, vec::Vec};
 use core::{cmp, fmt, hash, str::FromStr};
 use prost::Message as _;
+use sha2::Digest as _;
+
+use super::multihash;
 
 mod keys_proto {
     include!(concat!(env!("OUT_DIR"), "/keys_proto.rs"));
@@ -119,6 +122,7 @@ const MAX_INLINE_KEY_LENGTH: usize = 42;
 /// The data is a multihash of the public key of the peer.
 #[derive(Clone, Eq)]
 pub struct PeerId {
+    /// Always contains a valid multihash.
     multihash: Vec<u8>,
 }
 
@@ -129,15 +133,19 @@ impl PeerId {
 
         let out = if key_enc.len() <= MAX_INLINE_KEY_LENGTH {
             let mut out = Vec::with_capacity(key_enc.len() + 8);
-            out.push(0x0);
-            out.extend_from_slice(crate::util::encode_scale_compact_usize(key_enc.len()).as_ref());
-            out.extend_from_slice(&key_enc);
+            for slice in multihash::MultihashRef::identity(&key_enc).as_bytes() {
+                out.extend_from_slice(slice.as_ref())
+            }
             out
         } else {
             let mut out = Vec::with_capacity(34);
             out.push(0x12);
             out.push(0x32);
-            out.extend_from_slice(&key_enc);
+
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(&key_enc);
+            out.extend_from_slice(hasher.finalize().as_slice());
+
             out
         };
 
@@ -148,18 +156,24 @@ impl PeerId {
     ///
     /// In case of error, returns the bytes passed as parameter in addition to the error.
     pub fn from_bytes(data: Vec<u8>) -> Result<PeerId, (FromBytesError, Vec<u8>)> {
-        let result =
-            match nom::combinator::all_consuming(multihash::<nom::error::Error<&[u8]>>)(&data) {
-                Ok((_, Some(public_key))) => {
-                    if let Err(err) = PublicKey::from_protobuf_encoding(public_key) {
+        let result = match multihash::MultihashRef::from_bytes(&data) {
+            Ok(hash) => {
+                // For a PeerId to be valid, it must use either the "identity" multihash code (0x0)
+                // or the "sha256" multihash code (0x12).
+                if hash.hash_algorithm_code() == 0 {
+                    if let Err(err) = PublicKey::from_protobuf_encoding(hash.data()) {
                         Err(FromBytesError::InvalidPublicKey(err))
                     } else {
                         Ok(())
                     }
+                } else if hash.hash_algorithm_code() == 0x12 {
+                    Ok(())
+                } else {
+                    Err(FromBytesError::InvalidMultihashAlgorithm)
                 }
-                Ok((_, None)) => Ok(()),
-                Err(_) => Err(FromBytesError::DecodeError),
-            };
+            }
+            Err(err) => Err(FromBytesError::DecodeError(err)),
+        };
 
         match result {
             Ok(()) => Ok(PeerId { multihash: data }),
@@ -277,7 +291,7 @@ impl FromStr for PeerId {
             .into_vec()
             .map_err(Bs58DecodeError)
             .map_err(ParseError::Bs58)?;
-        PeerId::from_bytes(bytes).map_err(|_| ParseError::Multihash)
+        PeerId::from_bytes(bytes).map_err(|(err, _)| ParseError::NotPeerId(err))
     }
 }
 
@@ -285,7 +299,9 @@ impl FromStr for PeerId {
 #[derive(Debug, derive_more::Display)]
 pub enum FromBytesError {
     /// Failed to decode bytes into a multihash.
-    DecodeError,
+    DecodeError(multihash::FromBytesError),
+    /// The algorithm used in the multihash isn't identity or sha256.
+    InvalidMultihashAlgorithm,
     /// Multihash uses the identity algorithm, but the data isn't a valid public key.
     InvalidPublicKey(FromProtobufEncodingError),
 }
@@ -296,35 +312,9 @@ pub enum ParseError {
     /// Error decoding the base58 encoding.
     Bs58(Bs58DecodeError),
     /// Decoded bytes aren't a valid [`PeerId`].
-    Multihash, // TODO: proper error
+    NotPeerId(FromBytesError),
 }
 
 /// Error when decoding base58 encoding.
 #[derive(Debug, derive_more::Display, derive_more::From)]
 pub struct Bs58DecodeError(bs58::decode::Error);
-
-/// Parses a multihash. Returns the protobuf-encoded public key, if available.
-// TODO: fix visibility of this
-pub(super) fn multihash<'a, E: nom::error::ParseError<&'a [u8]>>(
-    bytes: &'a [u8],
-) -> nom::IResult<&'a [u8], Option<&'a [u8]>, E> {
-    nom::branch::alt((
-        nom::combinator::map(
-            nom::sequence::preceded(
-                nom::bytes::complete::tag([0x0]),
-                nom::combinator::verify(
-                    nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
-                    |bytes: &[u8]| bytes.len() <= MAX_INLINE_KEY_LENGTH,
-                ),
-            ),
-            Some,
-        ),
-        nom::combinator::map(
-            nom::sequence::preceded(
-                nom::bytes::complete::tag([0x12, 0x32]),
-                nom::bytes::complete::take(32_u32),
-            ),
-            |_| None,
-        ),
-    ))(bytes)
-}
