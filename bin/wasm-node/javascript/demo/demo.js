@@ -36,6 +36,7 @@ const client = smoldot.start({
     maxLogLevel: 3,  // Can be increased for more verbosity
     forbidTcp: false,
     forbidWs: false,
+    forbidNonLocalWs: false,
     forbidWss: false,
     logCallback: (level, target, message) => {
         // As incredible as it seems, there is currently no better way to print the current time

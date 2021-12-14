@@ -893,11 +893,18 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     /// If the database content can't be obtained because not enough information is known about
     /// the chain, a dummy value is intentionally returned.
     ///
+    /// `max_size` can be passed force the output of the function to be smaller than the given
+    /// value.
+    ///
     /// # Panic
     ///
     /// Panics if the [`ChainId`] is invalid.
     ///
-    pub fn database_content(&self, chain_id: ChainId) -> impl Future<Output = String> {
+    pub fn database_content(
+        &self,
+        chain_id: ChainId,
+        max_size: usize,
+    ) -> impl Future<Output = String> {
         let mut services = match self.public_api_chains.get(chain_id.0) {
             Some(PublicApiChain::Ok { key, .. }) => {
                 // Clone the services initialization future.
@@ -918,11 +925,23 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
             // Finally getting the database.
             // If the database can't be obtained, we just return a dummy value that will intentionally
             // fail to decode if passed back.
-            services
+            let database_content = services
                 .sync_service
                 .serialize_chain_information()
                 .await
-                .unwrap_or_else(|| "<unknown>".into())
+                .unwrap_or_else(|| "<unknown>".into());
+
+            // Cap the database length to the requested max length.
+            if database_content.len() > max_size {
+                let dummy_message = "<too-large>";
+                if dummy_message.len() >= max_size {
+                    String::new()
+                } else {
+                    dummy_message.to_owned()
+                }
+            } else {
+                database_content
+            }
         }
     }
 }

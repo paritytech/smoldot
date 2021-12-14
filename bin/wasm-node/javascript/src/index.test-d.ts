@@ -8,6 +8,7 @@ let sm = start({
   logCallback: (level, target, message) => { },
   forbidTcp: false,
   forbidWs: false,
+  forbidNonLocalWs: false,
   forbidWss: false,
 });
 

@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{alloc, bindings, timers::Delay};
+use crate::{alloc, bindings, platform, timers::Delay};
 
 use core::{
     future::Future,
@@ -27,7 +27,10 @@ use futures::{channel::mpsc, prelude::*};
 use smoldot::informant::BytesDisplay;
 use std::{
     panic,
-    sync::{atomic, Arc, Mutex},
+    sync::{
+        atomic::{self, Ordering},
+        Arc, Mutex,
+    },
     task,
 };
 
@@ -101,13 +104,32 @@ pub(crate) fn init(max_log_level: u32) {
         .unbounded_send((
             "memory-printer".to_owned(),
             Box::pin(async move {
+                let mut previous_read_bytes = 0;
+                let mut previous_sent_bytes = 0;
+                let interval = 60;
+
                 loop {
-                    Delay::new(Duration::from_secs(60)).await;
+                    Delay::new(Duration::from_secs(interval)).await;
 
                     // For the unwrap below to fail, the quantity of allocated would have to
                     // not fit in a `u64`, which as of 2021 is basically impossible.
                     let mem = u64::try_from(alloc::total_alloc_bytes()).unwrap();
-                    log::info!(target: "smoldot", "Node memory usage: {}", BytesDisplay(mem));
+
+                    let bytes_rx = platform::TOTAL_BYTES_RECEIVED.load(Ordering::Relaxed);
+                    let avg_dl = u64::try_from(bytes_rx - previous_read_bytes).unwrap() / interval;
+                    previous_read_bytes = bytes_rx;
+
+                    let bytes_tx = platform::TOTAL_BYTES_SENT.load(Ordering::Relaxed);
+                    let avg_up = u64::try_from(bytes_tx - previous_sent_bytes).unwrap() / interval;
+                    previous_sent_bytes = bytes_tx;
+
+                    log::info!(
+                        target: "smoldot",
+                        "Current memory usage: {}. Average download: {}/s. Average upload: {}/s.",
+                        BytesDisplay(mem),
+                        BytesDisplay(avg_dl),
+                        BytesDisplay(avg_up)
+                    );
                 }
             }),
         ))
