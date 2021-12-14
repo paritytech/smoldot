@@ -1481,7 +1481,17 @@ async fn run_background<TPlat: Platform>(
         );
 
         // Update the state of `guarded` with what we just grabbed.
-        // TODO: if subscription.finalized is equal to current finalized, skip the whole process below?
+        //
+        // Note that the content of `guarded` is reset unconditionally.
+        // It might seem like a good idea to only reset the content of `guarded` if the new
+        // subscription has a different finalized block than currently. However, there is
+        // absolutely no guarantee for the non-finalized blocks currently in the tree to be a
+        // subset or superset of the non-finalized blocks in the new subscription.
+        // Using the new subscription but keeping the existing tree could therefore result in
+        // state inconsistencies.
+        //
+        // Additionally, the situation where a subscription is killed but the finalized block
+        // didn't change should be extremely rare anyway.
         {
             let mut lock = guarded.lock().await;
             let lock = &mut *lock; // Solves borrow checking issues.
