@@ -195,22 +195,6 @@ impl PeerId {
     pub fn to_base58(&self) -> String {
         bs58::encode(self.as_bytes()).into_string()
     }
-
-    /// Checks whether the public key passed as parameter matches the public key of this `PeerId`.
-    ///
-    /// Returns `None` if this `PeerId`s hash algorithm is not supported when encoding the
-    /// given public key, otherwise `Some` boolean as the result of an equality check.
-    pub fn is_public_key(&self, _public_key: &PublicKey) -> Option<bool> {
-        todo!() // TODO: /!\
-
-        /*match nom::combinator::all_consuming(multihash::<nom::error::Error<&[u8]>>)(&self.multihash) {
-            Ok((_, Some(self_public_key))) => {
-                self_public_key == encoded
-            }
-            Ok((_, None)) => None,  // TODO: fixme
-            Err(_) => unreachable!(),
-        }*/
-    }
 }
 
 impl<'a> From<&'a PublicKey> for PeerId {
@@ -227,7 +211,7 @@ impl From<PublicKey> for PeerId {
 
 impl fmt::Debug for PeerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("PeerId").field(&self.to_base58()).finish()
+        fmt::Display::fmt(self, f)
     }
 }
 
