@@ -29,6 +29,18 @@ pub struct Multiaddr {
 }
 
 impl Multiaddr {
+    /// Creates a new empty multiaddr.
+    pub fn new() -> Self {
+        Multiaddr { bytes: Vec::new() }
+    }
+
+    /// Pushes a protocol at the end of this multiaddr.
+    pub fn push(&mut self, protocol: ProtocolRef) {
+        for slice in protocol.as_bytes() {
+            self.bytes.extend(slice.as_ref());
+        }
+    }
+
     /// Shrinks the memory used by the underlying container to its size.
     pub fn shrink_to_fit(&mut self) {
         self.bytes.shrink_to_fit()
@@ -47,7 +59,11 @@ impl Multiaddr {
     }
 
     /// Pops the last protocol from the list.
-    // TODO: what if list becomes empty? is that legal? what if already empty?
+    ///
+    /// # Panic
+    ///
+    /// Panics if the multiaddr is empty.
+    ///
     pub fn pop(&mut self) {
         let remain = {
             let mut iter = nom::combinator::iterator(
@@ -84,10 +100,6 @@ impl FromStr for Multiaddr {
     type Err = ParseError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        if input.is_empty() {
-            return Err(ParseError::InvalidMultiaddr);
-        }
-
         let mut bytes = Vec::with_capacity(input.len());
         let mut parts = input.split('/').peekable();
 
@@ -126,7 +138,7 @@ impl TryFrom<Vec<u8>> for Multiaddr {
 
     fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
         // Check whether this is indeed a valid list of protocols.
-        if nom::combinator::all_consuming(nom::multi::fold_many1(
+        if nom::combinator::all_consuming(nom::multi::fold_many0(
             protocol::<nom::error::Error<&[u8]>>,
             || (),
             |(), _| (),
@@ -516,6 +528,7 @@ mod tests {
             assert!(addr.parse::<Multiaddr>().is_err(), "{}", addr);
         }
 
+        check_valid("");
         check_valid("/ip4/1.2.3.4/tcp/30333");
         check_valid(
             "/ip4/127.0.0.1/tcp/30333/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
@@ -528,7 +541,6 @@ mod tests {
         check_valid("/dns6//tcp/55");
         check_valid("/dnsaddr/./tcp/55");
 
-        check_invalid("");
         check_invalid("/");
         check_invalid("ip4/1.2.3.4");
         check_invalid("/nonexistingprotocol");
