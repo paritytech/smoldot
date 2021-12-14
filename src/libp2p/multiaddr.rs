@@ -84,6 +84,10 @@ impl FromStr for Multiaddr {
     type Err = ParseError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
+        if input.is_empty() {
+            return Err(ParseError::InvalidMultiaddr);
+        }
+
         let mut bytes = Vec::with_capacity(input.len());
         let mut parts = input.split('/').peekable();
 
@@ -328,8 +332,8 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
             ProtocolRef::Dns4(addr) => write!(f, "/dns4/{}", addr),
             ProtocolRef::Dns6(addr) => write!(f, "/dns6/{}", addr),
             ProtocolRef::DnsAddr(addr) => write!(f, "/dnsaddr/{}", addr),
-            ProtocolRef::Ip4(ip) => fmt::Display::fmt(&no_std_net::Ipv4Addr::from(*ip), f),
-            ProtocolRef::Ip6(ip) => fmt::Display::fmt(&no_std_net::Ipv6Addr::from(*ip), f),
+            ProtocolRef::Ip4(ip) => write!(f, "/ip4/{}", no_std_net::Ipv4Addr::from(*ip)),
+            ProtocolRef::Ip6(ip) => write!(f, "/ip6/{}", no_std_net::Ipv6Addr::from(*ip)),
             ProtocolRef::P2p(multihash) => {
                 // Base58 encoding doesn't have `/` in its characters set.
                 write!(f, "/p2p/{}", bs58::encode(multihash).into_string())
@@ -489,4 +493,49 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             ))),
         }
     })(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Multiaddr;
+
+    #[test]
+    fn basic() {
+        fn check_valid(addr: &str) {
+            let parsed = addr.parse::<Multiaddr>().unwrap();
+            assert_eq!(parsed.to_string(), addr, "{}", addr);
+            assert_eq!(
+                Multiaddr::try_from(parsed.to_vec()).unwrap(),
+                parsed,
+                "{}",
+                addr
+            );
+        }
+
+        fn check_invalid(addr: &str) {
+            assert!(addr.parse::<Multiaddr>().is_err(), "{}", addr);
+        }
+
+        check_valid("/ip4/1.2.3.4/tcp/30333");
+        check_valid(
+            "/ip4/127.0.0.1/tcp/30333/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+        );
+        check_valid("/ip6/::/udp/30333");
+        check_valid("/ip6/::1/udp/30333/tls");
+        check_valid("/tcp/65535/udp/65535/ws/tls/wss");
+        check_valid("/dns/0.0.0.0");
+        check_valid("/dns4/example.com./tcp/55");
+        check_valid("/dns6//tcp/55");
+        check_valid("/dnsaddr/./tcp/55");
+
+        check_invalid("");
+        check_invalid("/");
+        check_invalid("ip4/1.2.3.4");
+        check_invalid("/nonexistingprotocol");
+        check_invalid("/ip4/1.1.1");
+        check_invalid("/ip6/:::");
+        check_invalid("/ws/1.2.3.4");
+        check_invalid("/tcp/65536");
+        check_invalid("/p2p/blablabla");
+    }
 }
