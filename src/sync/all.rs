@@ -1378,11 +1378,17 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 ResponseOutcome::Queued
             }
             warp_sync::WarpSync::Finished(success) => {
-                let (all_forks, finalized_block_runtime) =
-                    self.shared.transition_grandpa_warp_sync_all_forks(success);
+                let (
+                    all_forks,
+                    finalized_block_runtime,
+                    finalized_storage_code,
+                    finalized_storage_heap_pages,
+                ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
                 self.inner = AllSyncInner::AllForks(all_forks);
                 ResponseOutcome::WarpSyncFinished {
                     finalized_block_runtime,
+                    finalized_storage_code,
+                    finalized_storage_heap_pages,
                 }
             }
         }
@@ -1566,6 +1572,12 @@ pub enum ResponseOutcome {
         /// > **Note**: Use methods such as [`AllSync::finalized_block_header`] to know which
         /// >           block this runtime corresponds to.
         finalized_block_runtime: host::HostVmPrototype,
+
+        /// Storage value at the `:code` key of the finalized block.
+        finalized_storage_code: Option<Vec<u8>>,
+
+        /// Storage value at the `:heappages` key of the finalized block.
+        finalized_storage_heap_pages: Option<Vec<u8>>,
     },
 
     /// Source has given blocks that aren't part of the finalized chain.
@@ -2168,6 +2180,8 @@ impl<TRq> Shared<TRq> {
     ) -> (
         all_forks::AllForksSync<TBl, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
         host::HostVmPrototype,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
     ) {
         let mut all_forks = all_forks::AllForksSync::new(all_forks::Config {
             chain_information: grandpa.chain_information,
@@ -2201,7 +2215,12 @@ impl<TRq> Shared<TRq> {
             .iter()
             .all(|(_, s)| matches!(s, SourceMapping::AllForks(_))));
 
-        (all_forks, grandpa.runtime)
+        (
+            all_forks,
+            grandpa.finalized_runtime,
+            grandpa.finalized_storage_code,
+            grandpa.finalized_storage_heap_pages,
+        )
     }
 }
 

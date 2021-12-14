@@ -120,9 +120,17 @@ pub struct SourceId(usize);
 pub struct Success<TSrc> {
     /// The synced chain information.
     pub chain_information: ValidChainInformation,
+
     /// The runtime constructed in `VirtualMachineParamsGet`. Corresponds to the runtime of the
     /// finalized block of [`Success::chain_information`].
-    pub runtime: HostVmPrototype,
+    pub finalized_runtime: HostVmPrototype,
+
+    /// Storage value at the `:code` key of the finalized block.
+    pub finalized_storage_code: Option<Vec<u8>>,
+
+    /// Storage value at the `:heappages` key of the finalized block.
+    pub finalized_storage_heap_pages: Option<Vec<u8>>,
+
     /// The list of sources that were added to the state machine.
     pub sources: Vec<TSrc>,
 }
@@ -163,6 +171,7 @@ impl<TSrc> WarpSync<TSrc> {
         mut query: babe_fetch_epoch::Query,
         mut fetched_current_epoch: Option<BabeEpochInformation>,
         mut state: PostVerificationState<TSrc>,
+        post_download: PostRuntimeDownloadState,
     ) -> (Self, Option<Error>) {
         loop {
             match (query, fetched_current_epoch) {
@@ -217,7 +226,10 @@ impl<TSrc> WarpSync<TSrc> {
                     return (
                         Self::Finished(Success {
                             chain_information,
-                            runtime: virtual_machine,
+                            finalized_runtime: virtual_machine,
+                            finalized_storage_code: post_download.finalized_storage_code,
+                            finalized_storage_heap_pages: post_download
+                                .finalized_storage_heap_pages,
                             sources: state
                                 .sources
                                 .drain()
@@ -264,6 +276,7 @@ impl<TSrc> WarpSync<TSrc> {
                             inner: storage_get,
                             fetched_current_epoch,
                             state,
+                            post_download,
                         })),
                         None,
                     )
@@ -278,6 +291,7 @@ impl<TSrc> WarpSync<TSrc> {
                             inner: next_key,
                             fetched_current_epoch,
                             state,
+                            post_download,
                         })),
                         None,
                     )
@@ -459,6 +473,7 @@ pub struct StorageGet<TSrc> {
     inner: babe_fetch_epoch::StorageGet,
     fetched_current_epoch: Option<BabeEpochInformation>,
     state: PostVerificationState<TSrc>,
+    post_download: PostRuntimeDownloadState,
 }
 
 impl<TSrc> StorageGet<TSrc> {
@@ -509,6 +524,7 @@ impl<TSrc> StorageGet<TSrc> {
             self.inner.inject_value(value),
             self.fetched_current_epoch,
             self.state,
+            self.post_download,
         )
     }
 
@@ -530,6 +546,7 @@ pub struct NextKey<TSrc> {
     inner: babe_fetch_epoch::NextKey,
     fetched_current_epoch: Option<BabeEpochInformation>,
     state: PostVerificationState<TSrc>,
+    post_download: PostRuntimeDownloadState,
 }
 
 impl<TSrc> NextKey<TSrc> {
@@ -574,6 +591,7 @@ impl<TSrc> NextKey<TSrc> {
             self.inner.inject_key(key),
             self.fetched_current_epoch,
             self.state,
+            self.post_download,
         )
     }
 }
@@ -727,6 +745,11 @@ impl<TSrc> PostVerificationState<TSrc> {
 enum StateRemoveSourceResult<TSrc> {
     RemovedCurrent(InProgressWarpSync<TSrc>),
     RemovedOther(PostVerificationState<TSrc>),
+}
+
+struct PostRuntimeDownloadState {
+    finalized_storage_code: Option<Vec<u8>>,
+    finalized_storage_heap_pages: Option<Vec<u8>>,
 }
 
 /// Requesting GrandPa warp sync data from a source is required to continue.
@@ -884,7 +907,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
         exec_hint: ExecHint,
     ) -> (WarpSync<TSrc>, Option<Error>) {
         let code = match code {
-            Some(code) => code,
+            Some(code) => code.as_ref().to_vec(),
             None => {
                 return (
                     WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
@@ -899,7 +922,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
             }
         };
 
-        let heap_pages =
+        let decoded_heap_pages =
             match executor::storage_heap_pages_to_value(heap_pages.as_ref().map(|p| p.as_ref())) {
                 Ok(hp) => hp,
                 Err(err) => {
@@ -918,7 +941,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                 }
             };
 
-        match HostVmPrototype::new(code, heap_pages, exec_hint) {
+        match HostVmPrototype::new(&code, decoded_heap_pages, exec_hint) {
             Ok(runtime) => {
                 let babe_current_epoch_query =
                     babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
@@ -930,6 +953,10 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                     babe_current_epoch_query,
                     None,
                     self.state,
+                    PostRuntimeDownloadState {
+                        finalized_storage_code: Some(code),
+                        finalized_storage_heap_pages: heap_pages.map(|hp| hp.as_ref().to_vec()),
+                    },
                 );
 
                 (warp_sync, error)

@@ -15,14 +15,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::{BlockNotification, Notification, SubscribeAll, ToBackground};
+use super::{BlockNotification, FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground};
 use crate::{network_service, Platform};
 
 use futures::{channel::mpsc, prelude::*};
 use smoldot::{
     chain,
     database::finalized_serialize,
-    executor::host,
     header,
     informant::HashDisplay,
     libp2p,
@@ -258,6 +257,8 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
             | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
             all::ResponseOutcome::WarpSyncFinished {
                 finalized_block_runtime,
+                finalized_storage_code,
+                finalized_storage_heap_pages,
             } => {
                 let finalized_header = task.sync.finalized_block_header();
                 log::info!(
@@ -268,7 +269,11 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                 );
 
                 debug_assert!(task.known_finalized_runtime.is_none());
-                task.known_finalized_runtime = Some(finalized_block_runtime);
+                task.known_finalized_runtime = Some(FinalizedBlockRuntime {
+                    virtual_machine: finalized_block_runtime,
+                    storage_code: finalized_storage_code,
+                    storage_heap_pages: finalized_storage_heap_pages,
+                });
 
                 task.finalized_block_updated = true;
                 task.best_block_updated = true;
@@ -292,7 +297,7 @@ struct Task<TPlat: Platform> {
     sync: all::AllSync<future::AbortHandle, (libp2p::PeerId, protocol::Role), ()>,
 
     /// If `Some`, contains the runtime of the current finalized block.
-    known_finalized_runtime: Option<host::HostVmPrototype>,
+    known_finalized_runtime: Option<FinalizedBlockRuntime>,
 
     /// For each networking peer, the index of the corresponding peer within the [`Task::sync`].
     peers_source_id_map: HashMap<libp2p::PeerId, all::SourceId>,
