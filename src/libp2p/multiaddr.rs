@@ -353,8 +353,11 @@ impl<'a> TryFrom<&'a str> for DomainNameRef<'a> {
 
     fn try_from(input: &'a str) -> Result<Self, Self::Error> {
         // Checks whether the input is valid domain name.
-        //
         // See https://datatracker.ietf.org/doc/html/rfc2181#section-11
+
+        // An earlier version of this code used the `addr` Rust library, but it resulted in an
+        // unnecessarily large binary size overhead (~1.1 MiB!), so the check is now implemented
+        // manually instead.
 
         if input.as_bytes().len() > 255 {
             return Err(ParseError::InvalidDomainName);
