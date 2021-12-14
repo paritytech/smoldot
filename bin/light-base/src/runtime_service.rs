@@ -1465,7 +1465,7 @@ struct Block {
 async fn run_background<TPlat: Platform>(
     log_target: String,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
-    original_guarded: Arc<Mutex<Guarded<TPlat>>>,
+    guarded: Arc<Mutex<Guarded<TPlat>>>,
 ) {
     loop {
         // The buffer size should be large enough so that, if the CPU is busy, it doesn't
@@ -1482,116 +1482,77 @@ async fn run_background<TPlat: Platform>(
             )) // TODO: print block height
         );
 
-        // In order to bootstrap the new runtime service, a fresh temporary runtime service is
-        // created.
-        // Later, when the `Guarded` contains at least a finalized runtime, it will be written
-        // over the original runtime service.
+        // Update the state of `guarded` with what we just grabbed.
         // TODO: if subscription.finalized is equal to current finalized, skip the whole process below?
+        {
+            let mut lock = guarded.lock().await;
+            lock.all_blocks_subscriptions.clear();
+            lock.best_blocks_subscriptions.clear();
+            lock.finalized_blocks_subscriptions.clear();
+            // TODO: restore
+            /*lock.best_near_head_of_chain =
+            is_near_head_of_chain_heuristic(&sync_service, &guarded).await;*/
+            lock.tree = GuardedInner::FinalizedBlockRuntimeUnknown {
+                tree: Some({
+                    let mut tree = async_tree::AsyncTree::new(async_tree::Config {
+                        finalized_async_user_data: None,
+                        retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
+                    });
+                    let node_index = tree.input_insert_block(
+                        Block {
+                            hash: header::hash_from_scale_encoded_header(
+                                &subscription.finalized_block_scale_encoded_header,
+                            ),
+                            scale_encoded_header: subscription.finalized_block_scale_encoded_header,
+                        },
+                        None,
+                        false,
+                        true,
+                    );
+                    tree.input_finalize(node_index, node_index);
+
+                    for block in subscription.non_finalized_blocks_ancestry_order {
+                        let parent_index = tree
+                            .input_iter_unordered()
+                            .find(|b| b.user_data.hash == block.parent_hash)
+                            .unwrap()
+                            .id;
+
+                        let same_runtime_as_parent =
+                            same_runtime_as_parent(&block.scale_encoded_header);
+                        let _ = tree.input_insert_block(
+                            Block {
+                                hash: header::hash_from_scale_encoded_header(
+                                    &block.scale_encoded_header,
+                                ),
+                                scale_encoded_header: block.scale_encoded_header,
+                            },
+                            Some(parent_index),
+                            same_runtime_as_parent,
+                            block.is_new_best,
+                        );
+                    }
+
+                    tree
+                }),
+            };
+            lock.runtimes = slab::Slab::with_capacity(2); // TODO: hardcoded capacity
+        }
+
+        // State machine containing all the state that will be manipulated below.
         let mut background = Background {
             log_target: log_target.clone(),
             sync_service: sync_service.clone(),
-            guarded: Arc::new(Mutex::new(Guarded {
-                all_blocks_subscriptions: Vec::new(),
-                best_blocks_subscriptions: Vec::new(),
-                finalized_blocks_subscriptions: Vec::new(),
-                best_near_head_of_chain: is_near_head_of_chain_heuristic(
-                    &sync_service,
-                    &original_guarded,
-                )
-                .await,
-                tree: GuardedInner::FinalizedBlockRuntimeUnknown {
-                    tree: Some({
-                        let mut tree = async_tree::AsyncTree::new(async_tree::Config {
-                            finalized_async_user_data: None,
-                            retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
-                        });
-                        let node_index = tree.input_insert_block(
-                            Block {
-                                hash: header::hash_from_scale_encoded_header(
-                                    &subscription.finalized_block_scale_encoded_header,
-                                ),
-                                scale_encoded_header: subscription
-                                    .finalized_block_scale_encoded_header,
-                            },
-                            None,
-                            false,
-                            true,
-                        );
-                        tree.input_finalize(node_index, node_index);
-                        tree
-                    }),
-                },
-                runtimes: slab::Slab::with_capacity(2), // TODO: hardcoded
-            })),
+            guarded: guarded.clone(),
             blocks_stream: subscription.new_blocks.boxed(),
             wake_up_new_necessary_download: future::pending().boxed().fuse(),
             runtime_downloads: stream::FuturesUnordered::new(),
         };
 
-        for block in subscription.non_finalized_blocks_ancestry_order {
-            match &mut background.guarded.try_lock().unwrap().tree {
-                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
-                    let parent_index = tree
-                        .input_iter_unordered()
-                        .find(|b| b.user_data.hash == block.parent_hash)
-                        .unwrap()
-                        .id;
-
-                    let same_runtime_as_parent =
-                        same_runtime_as_parent(&block.scale_encoded_header);
-                    let _ = tree.input_insert_block(
-                        Block {
-                            hash: header::hash_from_scale_encoded_header(
-                                &block.scale_encoded_header,
-                            ),
-                            scale_encoded_header: block.scale_encoded_header,
-                        },
-                        Some(parent_index),
-                        same_runtime_as_parent,
-                        block.is_new_best,
-                    );
-                }
-                _ => unreachable!(),
-            }
-        }
-
         background.start_necessary_downloads().await;
 
         // Inner loop. Process incoming events.
         loop {
-            if !Arc::ptr_eq(&background.guarded, &original_guarded) {
-                // The `Background` object is manipulating a temporary runtime service. Check if
-                // it is possible to write to the original runtime service.
-                let mut temporary_guarded_lock = background.guarded.try_lock().unwrap();
-                let temporary_guarded = &mut *temporary_guarded_lock;
-
-                if let GuardedInner::FinalizedBlockRuntimeKnown {
-                    tree,
-                    finalized_block,
-                    ..
-                } = &mut temporary_guarded.tree
-                {
-                    log::debug!(target: &log_target, "Background worker now in sync");
-
-                    let mut original_guarded_lock = original_guarded.lock().await;
-                    original_guarded_lock.best_near_head_of_chain =
-                        temporary_guarded.best_near_head_of_chain;
-                    original_guarded_lock.tree = GuardedInner::FinalizedBlockRuntimeKnown {
-                        tree: Some(tree.take().unwrap()),
-                        finalized_block: finalized_block.clone(),
-                    };
-                    original_guarded_lock.runtimes = mem::take(&mut temporary_guarded.runtimes);
-
-                    drop(temporary_guarded_lock);
-
-                    original_guarded_lock.all_blocks_subscriptions.clear();
-                    // TODO: correct? especially for the runtime?
-                    original_guarded_lock.notify_subscribers(true, true);
-
-                    background.guarded = original_guarded.clone();
-                }
-            }
-
             futures::select! {
                 _ = &mut background.wake_up_new_necessary_download => {
                     background.start_necessary_downloads().await;
@@ -1747,8 +1708,7 @@ struct Background<TPlat: Platform> {
 
     guarded: Arc<Mutex<Guarded<TPlat>>>,
 
-    /// Stream of blocks updates coming from the sync service.
-    /// Initially has a dummy value.
+    /// Stream of notifications coming from the sync service.
     blocks_stream: Pin<Box<dyn Stream<Item = sync_service::Notification> + Send>>,
 
     /// List of runtimes currently being downloaded from the network.
