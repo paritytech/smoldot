@@ -23,5 +23,3 @@
 pub mod kademlia;
 pub mod protocol;
 pub mod service;
-
-pub use parity_multiaddr::Multiaddr;

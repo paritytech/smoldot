@@ -140,9 +140,6 @@ pub use established::{
     ConfigRequestResponse, ConfigRequestResponseIn, InboundError, NotificationsInClosedErr,
     NotificationsOutErr, SubstreamId,
 };
-pub use multiaddr::Multiaddr;
-#[doc(inline)]
-pub use parity_multiaddr as multiaddr;
 
 /// Configuration for a [`Network`].
 pub struct Config {

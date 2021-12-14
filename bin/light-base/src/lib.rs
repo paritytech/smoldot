@@ -982,8 +982,9 @@ async fn start_services<TPlat: Platform>(
                     let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
                     for node in chain_spec.boot_nodes() {
                         let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
-                        if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
-                            let peer_id = peer_id::PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
+                        if let Some(multiaddr::ProtocolRef::P2p(peer_id)) = address.iter().last() {
+                            let peer_id = peer_id::PeerId::from_bytes(peer_id.to_vec()).unwrap(); // TODO: don't unwrap
+                            address.pop();
                             list.push((peer_id, address));
                         } else {
                             panic!() // TODO:
