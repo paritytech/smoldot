@@ -344,7 +344,7 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
     }
 }
 
-/// Domain name. Guarantees that the domain name is valid.
+/// Domain name. Guarantees that the domain name has a valid syntax.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DomainNameRef<'a>(&'a str);
 
@@ -352,9 +352,32 @@ impl<'a> TryFrom<&'a str> for DomainNameRef<'a> {
     type Error = ParseError;
 
     fn try_from(input: &'a str) -> Result<Self, Self::Error> {
-        if addr::parse_dns_name(input).is_err() {
+        // Checks whether the input is valid domain name.
+        //
+        // See https://datatracker.ietf.org/doc/html/rfc2181#section-11
+
+        if input.as_bytes().len() > 255 {
             return Err(ParseError::InvalidDomainName);
         }
+
+        if !input.is_empty() && input != "." {
+            // The checks within this for loop would fail if `input` is empty or equal to ".",
+            // even though "" and "." are valid domain names.
+            for label in input.split_terminator('.') {
+                if label.is_empty() || label.as_bytes().len() > 63 {
+                    return Err(ParseError::InvalidDomainName);
+                }
+            }
+        }
+
+        // In addition to the standard, we also forbid any domain name containing a `/` byte,
+        // because it would mess up with the multiaddress format.
+        if input.chars().any(|c| c == '/') || input.as_bytes().iter().any(|b| *b == b'/') {
+            return Err(ParseError::InvalidDomainName);
+        }
+
+        // Note that success here does in no way guarantee that this domain name is registrable,
+        // only that its syntax is valid.
 
         Ok(DomainNameRef(input))
     }
