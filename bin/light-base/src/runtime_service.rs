@@ -1470,9 +1470,7 @@ async fn run_background<TPlat: Platform>(
     loop {
         // The buffer size should be large enough so that, if the CPU is busy, it doesn't
         // become full before the execution of the runtime service resumes.
-        // TODO: make use of the `SubscribeAll::finalized_block_runtime`
         let subscription = sync_service.subscribe_all(16, true).await;
-        drop(subscription.finalized_block_runtime); // TODO: frees up the resources
 
         log::debug!(
             target: &log_target,
@@ -1483,60 +1481,163 @@ async fn run_background<TPlat: Platform>(
         );
 
         // Update the state of `guarded` with what we just grabbed.
-        // TODO: if subscription.finalized is equal to current finalized, skip the whole process below?
+        //
+        // Note that the content of `guarded` is reset unconditionally.
+        // It might seem like a good idea to only reset the content of `guarded` if the new
+        // subscription has a different finalized block than currently. However, there is
+        // absolutely no guarantee for the non-finalized blocks currently in the tree to be a
+        // subset or superset of the non-finalized blocks in the new subscription.
+        // Using the new subscription but keeping the existing tree could therefore result in
+        // state inconsistencies.
+        //
+        // Additionally, the situation where a subscription is killed but the finalized block
+        // didn't change should be extremely rare anyway.
         {
             let mut lock = guarded.lock().await;
+            let lock = &mut *lock; // Solves borrow checking issues.
+
             lock.all_blocks_subscriptions.clear();
             lock.best_blocks_subscriptions.clear();
             lock.finalized_blocks_subscriptions.clear();
             // TODO: restore
             /*lock.best_near_head_of_chain =
             is_near_head_of_chain_heuristic(&sync_service, &guarded).await;*/
-            lock.tree = GuardedInner::FinalizedBlockRuntimeUnknown {
-                tree: Some({
-                    let mut tree = async_tree::AsyncTree::new(async_tree::Config {
-                        finalized_async_user_data: None,
-                        retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
-                    });
-                    let node_index = tree.input_insert_block(
-                        Block {
-                            hash: header::hash_from_scale_encoded_header(
-                                &subscription.finalized_block_scale_encoded_header,
-                            ),
-                            scale_encoded_header: subscription.finalized_block_scale_encoded_header,
-                        },
-                        None,
-                        false,
-                        true,
-                    );
-                    tree.input_finalize(node_index, node_index);
 
-                    for block in subscription.non_finalized_blocks_ancestry_order {
-                        let parent_index = tree
-                            .input_iter_unordered()
-                            .find(|b| b.user_data.hash == block.parent_hash)
-                            .unwrap()
-                            .id;
+            lock.runtimes = slab::Slab::with_capacity(2); // TODO: hardcoded capacity
 
-                        let same_runtime_as_parent =
-                            same_runtime_as_parent(&block.scale_encoded_header);
-                        let _ = tree.input_insert_block(
-                            Block {
-                                hash: header::hash_from_scale_encoded_header(
-                                    &block.scale_encoded_header,
-                                ),
-                                scale_encoded_header: block.scale_encoded_header,
-                            },
-                            Some(parent_index),
-                            same_runtime_as_parent,
-                            block.is_new_best,
+            // TODO: DRY below
+            if let Some(finalized_block_runtime) = subscription.finalized_block_runtime {
+                let finalized_block_hash = header::hash_from_scale_encoded_header(
+                    &subscription.finalized_block_scale_encoded_header,
+                );
+
+                let storage_code_len = u64::try_from(
+                    finalized_block_runtime
+                        .storage_code
+                        .as_ref()
+                        .map_or(0, |v| v.len()),
+                )
+                .unwrap();
+
+                let runtime = Runtime {
+                    num_references: 1, // Added below.
+                    runtime_code: finalized_block_runtime.storage_code,
+                    heap_pages: finalized_block_runtime.storage_heap_pages,
+                    runtime: SuccessfulRuntime::from_virtual_machine(
+                        finalized_block_runtime.virtual_machine,
+                    )
+                    .await,
+                };
+
+                match &runtime.runtime {
+                    Ok(runtime) => {
+                        log::info!(
+                            target: &log_target,
+                            "Finalized block runtime ready. Spec version: {}. Size of `:code`: {}.",
+                            runtime.runtime_spec.decode().spec_version,
+                            BytesDisplay(storage_code_len)
                         );
                     }
+                    Err(error) => {
+                        log::warn!(
+                            target: &log_target,
+                            "Erroenous finalized block runtime. Size of `:code`: {}.\nError: {}\n\
+                            This indicates an incompatibility between smoldot and the chain.",
+                            BytesDisplay(storage_code_len),
+                            error
+                        );
+                    }
+                }
 
-                    tree
-                }),
-            };
-            lock.runtimes = slab::Slab::with_capacity(2); // TODO: hardcoded capacity
+                lock.tree = GuardedInner::FinalizedBlockRuntimeKnown {
+                    finalized_block: Block {
+                        hash: finalized_block_hash,
+                        scale_encoded_header: subscription.finalized_block_scale_encoded_header,
+                    },
+                    tree: Some({
+                        let mut tree =
+                            async_tree::AsyncTree::<_, Block, _>::new(async_tree::Config {
+                                finalized_async_user_data: lock.runtimes.insert(runtime),
+                                retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
+                            });
+
+                        for block in subscription.non_finalized_blocks_ancestry_order {
+                            let parent_index = if block.parent_hash == finalized_block_hash {
+                                None
+                            } else {
+                                Some(
+                                    tree.input_iter_unordered()
+                                        .find(|b| b.user_data.hash == block.parent_hash)
+                                        .unwrap()
+                                        .id,
+                                )
+                            };
+
+                            let same_runtime_as_parent =
+                                same_runtime_as_parent(&block.scale_encoded_header);
+                            let _ = tree.input_insert_block(
+                                Block {
+                                    hash: header::hash_from_scale_encoded_header(
+                                        &block.scale_encoded_header,
+                                    ),
+                                    scale_encoded_header: block.scale_encoded_header,
+                                },
+                                parent_index,
+                                same_runtime_as_parent,
+                                block.is_new_best,
+                            );
+                        }
+
+                        tree
+                    }),
+                };
+            } else {
+                lock.tree = GuardedInner::FinalizedBlockRuntimeUnknown {
+                    tree: Some({
+                        let mut tree = async_tree::AsyncTree::new(async_tree::Config {
+                            finalized_async_user_data: None,
+                            retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
+                        });
+                        let node_index = tree.input_insert_block(
+                            Block {
+                                hash: header::hash_from_scale_encoded_header(
+                                    &subscription.finalized_block_scale_encoded_header,
+                                ),
+                                scale_encoded_header: subscription
+                                    .finalized_block_scale_encoded_header,
+                            },
+                            None,
+                            false,
+                            true,
+                        );
+                        tree.input_finalize(node_index, node_index);
+
+                        for block in subscription.non_finalized_blocks_ancestry_order {
+                            let parent_index = tree
+                                .input_iter_unordered()
+                                .find(|b| b.user_data.hash == block.parent_hash)
+                                .unwrap()
+                                .id;
+
+                            let same_runtime_as_parent =
+                                same_runtime_as_parent(&block.scale_encoded_header);
+                            let _ = tree.input_insert_block(
+                                Block {
+                                    hash: header::hash_from_scale_encoded_header(
+                                        &block.scale_encoded_header,
+                                    ),
+                                    scale_encoded_header: block.scale_encoded_header,
+                                },
+                                Some(parent_index),
+                                same_runtime_as_parent,
+                                block.is_new_best,
+                            );
+                        }
+
+                        tree
+                    }),
+                };
+            }
         }
 
         // State machine containing all the state that will be manipulated below.
@@ -1749,7 +1850,7 @@ impl<TPlat: Platform> Background<TPlat> {
             existing_runtime
         } else {
             // No identical runtime was found. Try compiling the new runtime.
-            let runtime = SuccessfulRuntime::from_params(&storage_code, &storage_heap_pages).await;
+            let runtime = SuccessfulRuntime::from_storage(&storage_code, &storage_heap_pages).await;
             match &runtime {
                 Ok(runtime) => {
                     log::info!(
@@ -2124,12 +2225,11 @@ struct SuccessfulRuntime {
 }
 
 impl SuccessfulRuntime {
-    async fn from_params(
+    async fn from_storage(
         code: &Option<Vec<u8>>,
         heap_pages: &Option<Vec<u8>>,
     ) -> Result<Self, RuntimeError> {
-        // Since compiling the runtime is a CPU-intensive operation, we yield once before and
-        // once after.
+        // Since compiling the runtime is a CPU-intensive operation, we yield once before.
         crate::util::yield_once().await;
 
         let vm = match executor::host::HostVmPrototype::new(
@@ -2144,8 +2244,13 @@ impl SuccessfulRuntime {
             }
         };
 
-        // Since compiling the runtime is a CPU-intensive operation, we yield once before and
-        // once after.
+        Self::from_virtual_machine(vm).await
+    }
+
+    async fn from_virtual_machine(
+        vm: executor::host::HostVmPrototype,
+    ) -> Result<Self, RuntimeError> {
+        // Since getting the runtime spec is a CPU-intensive operation, we yield once before.
         crate::util::yield_once().await;
 
         let (runtime_spec, vm) = match executor::core_version(vm) {

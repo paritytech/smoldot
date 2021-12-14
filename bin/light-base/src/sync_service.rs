@@ -576,8 +576,7 @@ pub struct SubscribeAll {
     /// >           runtime at the end of the synchronization is possible, but would be wasteful.
     /// >           Instead, this runtime is provided here if possible, but no guarantee is
     /// >           offered that it can be found.
-    // TODO: should also provide the runtime code and heap pages
-    pub finalized_block_runtime: Option<host::HostVmPrototype>,
+    pub finalized_block_runtime: Option<FinalizedBlockRuntime>,
 
     /// List of all known non-finalized blocks at the time of subscription.
     ///
@@ -590,6 +589,18 @@ pub struct SubscribeAll {
     /// Channel onto which new blocks are sent. The channel gets closed if it is full when a new
     /// block needs to be reported.
     pub new_blocks: mpsc::Receiver<Notification>,
+}
+
+/// See [`SubscribeAll::finalized_block_runtime`].
+pub struct FinalizedBlockRuntime {
+    /// Compiled virtual machine.
+    pub virtual_machine: host::HostVmPrototype,
+
+    /// Storage value at the `:code` key.
+    pub storage_code: Option<Vec<u8>>,
+
+    /// Storage value at the `:heappages` key.
+    pub storage_heap_pages: Option<Vec<u8>>,
 }
 
 /// Notification about a new block or a new finalized block.
