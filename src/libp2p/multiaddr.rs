@@ -276,27 +276,27 @@ impl<'a> ProtocolRef<'a> {
         // TODO: optimize by not allocating a Vec
         let extra = match self {
             ProtocolRef::Dns(addr) => {
-                let mut out = Vec::with_capacity(addr.0.len() + 4);
-                out.extend(crate::util::leb128::encode_usize(addr.0.len()));
-                out.extend_from_slice(addr.0.as_bytes());
+                let mut out = Vec::with_capacity(addr.as_ref().len() + 4);
+                out.extend(crate::util::leb128::encode_usize(addr.as_ref().len()));
+                out.extend_from_slice(addr.as_ref());
                 out
             }
             ProtocolRef::Dns4(addr) => {
-                let mut out = Vec::with_capacity(addr.0.len() + 4);
-                out.extend(crate::util::leb128::encode_usize(addr.0.len()));
-                out.extend_from_slice(addr.0.as_bytes());
+                let mut out = Vec::with_capacity(addr.as_ref().len() + 4);
+                out.extend(crate::util::leb128::encode_usize(addr.as_ref().len()));
+                out.extend_from_slice(addr.as_ref());
                 out
             }
             ProtocolRef::Dns6(addr) => {
-                let mut out = Vec::with_capacity(addr.0.len() + 4);
-                out.extend(crate::util::leb128::encode_usize(addr.0.len()));
-                out.extend_from_slice(addr.0.as_bytes());
+                let mut out = Vec::with_capacity(addr.as_ref().len() + 4);
+                out.extend(crate::util::leb128::encode_usize(addr.as_ref().len()));
+                out.extend_from_slice(addr.as_ref());
                 out
             }
             ProtocolRef::DnsAddr(addr) => {
-                let mut out = Vec::with_capacity(addr.0.len() + 4);
-                out.extend(crate::util::leb128::encode_usize(addr.0.len()));
-                out.extend_from_slice(addr.0.as_bytes());
+                let mut out = Vec::with_capacity(addr.as_ref().len() + 4);
+                out.extend(crate::util::leb128::encode_usize(addr.as_ref().len()));
+                out.extend_from_slice(addr.as_ref());
                 out
             }
             ProtocolRef::Ip4(ip) => ip.to_vec(),
@@ -383,6 +383,12 @@ impl<'a> TryFrom<&'a str> for DomainNameRef<'a> {
         // only that its syntax is valid.
 
         Ok(DomainNameRef(input))
+    }
+}
+
+impl<'a> AsRef<[u8]> for DomainNameRef<'a> {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_bytes()
     }
 }
 
