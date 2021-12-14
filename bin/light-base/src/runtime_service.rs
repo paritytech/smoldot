@@ -1511,6 +1511,44 @@ async fn run_background<TPlat: Platform>(
                     &subscription.finalized_block_scale_encoded_header,
                 );
 
+                let storage_code_len = u64::try_from(
+                    finalized_block_runtime
+                        .storage_code
+                        .as_ref()
+                        .map_or(0, |v| v.len()),
+                )
+                .unwrap();
+
+                let runtime = Runtime {
+                    num_references: 1, // Added below.
+                    runtime_code: finalized_block_runtime.storage_code,
+                    heap_pages: finalized_block_runtime.storage_heap_pages,
+                    runtime: SuccessfulRuntime::from_virtual_machine(
+                        finalized_block_runtime.virtual_machine,
+                    )
+                    .await,
+                };
+
+                match &runtime.runtime {
+                    Ok(runtime) => {
+                        log::info!(
+                            target: &log_target,
+                            "Finalized block runtime ready. Spec version: {}. Size of `:code`: {}.",
+                            runtime.runtime_spec.decode().spec_version,
+                            BytesDisplay(storage_code_len)
+                        );
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            target: &log_target,
+                            "Erroenous finalized block runtime. Size of `:code`: {}.\nError: {}\n\
+                            This indicates an incompatibility between smoldot and the chain.",
+                            BytesDisplay(storage_code_len),
+                            error
+                        );
+                    }
+                }
+
                 lock.tree = GuardedInner::FinalizedBlockRuntimeKnown {
                     finalized_block: Block {
                         hash: finalized_block_hash,
@@ -1519,15 +1557,7 @@ async fn run_background<TPlat: Platform>(
                     tree: Some({
                         let mut tree =
                             async_tree::AsyncTree::<_, Block, _>::new(async_tree::Config {
-                                finalized_async_user_data: lock.runtimes.insert(Runtime {
-                                    num_references: 1, // Added below.
-                                    runtime_code: finalized_block_runtime.storage_code,
-                                    heap_pages: finalized_block_runtime.storage_heap_pages,
-                                    runtime: SuccessfulRuntime::from_virtual_machine(
-                                        finalized_block_runtime.virtual_machine,
-                                    )
-                                    .await,
-                                }),
+                                finalized_async_user_data: lock.runtimes.insert(runtime),
                                 retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
                             });
 
