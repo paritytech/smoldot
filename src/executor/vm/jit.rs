@@ -74,6 +74,10 @@ pub struct JitPrototype {
     /// Reference to the memory used by the module, if any.
     memory: Option<wasmtime::Memory>,
 
+    /// If `true`, the memory in [`JitPrototype::memory`] is zero-ed. Any additional zero-ing can
+    /// be skipped as an optimization.
+    memory_zeroed: bool,
+
     /// Reference to the table of indirect functions, in case we need to access it.
     /// `None` if the module doesn't export such table.
     indirect_table: Option<wasmtime::Table>,
@@ -254,6 +258,7 @@ impl JitPrototype {
             instance,
             shared,
             memory,
+            memory_zeroed: true,
             indirect_table,
         })
     }
@@ -270,7 +275,12 @@ impl JitPrototype {
     }
 
     /// See [`super::VirtualMachinePrototype::start`].
-    pub fn start(self, function_name: &str, params: &[WasmValue]) -> Result<Jit, (StartErr, Self)> {
+    pub fn start(
+        self,
+        function_name: &str,
+        params: &[WasmValue],
+        zero_memory_above: u32,
+    ) -> Result<Jit, (StartErr, Self)> {
         // Try to start executing `_start`.
         let start_function = match self.instance.get_export(function_name) {
             Some(export) => match export.into_func() {
@@ -300,6 +310,23 @@ impl JitPrototype {
             assert!(result.len() == 0 || result.len() == 1);
             Ok(result.get(0).map(|v| TryFrom::try_from(v).unwrap()))
         });
+
+        // Zero the memory if necessary.
+        if !self.memory_zeroed {
+            if let Some(memory) = self.memory.as_ref() {
+                let offset = cmp::min(
+                    memory.data_size(),
+                    usize::try_from(zero_memory_above).unwrap(),
+                );
+
+                // Soundness: the documentation of wasmtime precisely explains what is safe or not.
+                // Basically, we are safe as long as we are sure that we don't potentially grow the
+                // buffer (which would invalidate the buffer pointer).
+                unsafe {
+                    memory.data_unchecked_mut()[offset..].fill(0);
+                }
+            }
+        }
 
         Ok(Jit {
             function_call: Some(function_call),
@@ -509,23 +536,11 @@ impl Jit {
     pub fn into_prototype(self) -> JitPrototype {
         // TODO: how do we handle if the coroutine was within a host function?
 
-        // TODO: necessary?
-        /*// Zero-ing the memory.
-        if let Some(memory) = &self.memory {
-            // Soundness: the documentation of wasmtime precisely explains what is safe or not.
-            // Basically, we are safe as long as we are sure that we don't potentially grow the
-            // buffer (which would invalidate the buffer pointer).
-            unsafe {
-                for byte in memory.data_unchecked_mut() {
-                    *byte = 0;
-                }
-            }
-        }*/
-
         JitPrototype {
             instance: self.instance,
             shared: self.shared,
             memory: self.memory,
+            memory_zeroed: false,
             indirect_table: self.indirect_table,
         }
     }

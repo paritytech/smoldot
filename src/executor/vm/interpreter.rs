@@ -23,7 +23,12 @@ use super::{
 };
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::ToString as _, sync::Arc, vec::Vec};
-use core::{cell::RefCell, fmt};
+use core::{
+    cell::RefCell,
+    cmp,
+    convert::{TryFrom, TryInto as _},
+    fmt,
+};
 use wasmi::memory_units::ByteSize as _;
 
 /// See [`super::Module`].
@@ -59,6 +64,10 @@ pub struct InterpreterPrototype {
     /// Contains `None` if the process doesn't export any memory object, which means it doesn't
     /// use any memory.
     memory: Option<wasmi::MemoryRef>,
+
+    /// If `true`, the memory in [`InterpreterPrototype::memory`] is zero-ed. Any additional
+    /// zero-ing can be skipped as an optimization.
+    memory_zeroed: bool,
 
     /// Table of the indirect function calls.
     ///
@@ -224,6 +233,7 @@ impl InterpreterPrototype {
         Ok(InterpreterPrototype {
             module,
             memory,
+            memory_zeroed: true,
             indirect_table,
         })
     }
@@ -252,6 +262,7 @@ impl InterpreterPrototype {
         self,
         function_name: &str,
         params: &[WasmValue],
+        zero_memory_above: u32,
     ) -> Result<Interpreter, (StartErr, Self)> {
         let execution = match self.module.export_by_name(function_name) {
             Some(wasmi::ExternVal::Func(f)) => {
@@ -273,6 +284,15 @@ impl InterpreterPrototype {
             None => return Err((StartErr::FunctionNotFound, self)),
             _ => return Err((StartErr::NotAFunction, self)),
         };
+
+        // Zero the memory if necessary.
+        if !self.memory_zeroed {
+            if let Some(memory) = self.memory.as_ref() {
+                let size = memory.current_size().0 * wasmi::memory_units::Pages::byte_size().0;
+                let offset = cmp::min(size, usize::try_from(zero_memory_above).unwrap());
+                memory.zero(offset, size - offset).unwrap(); // Can error only if out of bounds.
+            }
+        }
 
         Ok(Interpreter {
             _module: self.module,
@@ -527,11 +547,10 @@ impl Interpreter {
 
     /// See [`super::VirtualMachine::into_prototype`].
     pub fn into_prototype(self) -> InterpreterPrototype {
-        // TODO: zero the memory
-
         InterpreterPrototype {
             module: self._module,
             memory: self.memory,
+            memory_zeroed: false,
             indirect_table: self.indirect_table,
         }
     }

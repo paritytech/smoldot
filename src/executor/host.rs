@@ -324,6 +324,7 @@ impl HostVmPrototype {
                 vm::WasmValue::I32(i32::from_ne_bytes(self.heap_base.to_ne_bytes())),
                 vm::WasmValue::I32(i32::from_ne_bytes(data_len_u32.to_ne_bytes())),
             ],
+            self.heap_base.saturating_add(data_len_u32),
         ) {
             Ok(vm) => vm,
             Err((error, vm_proto)) => {
