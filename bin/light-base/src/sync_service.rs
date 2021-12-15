@@ -148,7 +148,9 @@ impl<TPlat: Platform> SyncService<TPlat> {
     ///
     /// Returns `None` if this information couldn't be obtained because not enough is known about
     /// the chain.
-    pub async fn serialize_chain_information(&self) -> Option<String> {
+    pub async fn serialize_chain_information(
+        &self,
+    ) -> Option<chain::chain_information::ValidChainInformation> {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
@@ -688,6 +690,6 @@ enum ToBackground {
     },
     /// See [`SyncService::serialize_chain_information`].
     SerializeChainInformation {
-        send_back: oneshot::Sender<Option<String>>,
+        send_back: oneshot::Sender<Option<chain::chain_information::ValidChainInformation>>,
     },
 }
