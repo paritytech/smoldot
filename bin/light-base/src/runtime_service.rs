@@ -49,6 +49,7 @@ use futures::{
     lock::{Mutex, MutexGuard},
     prelude::*,
 };
+use itertools::Itertools as _;
 use smoldot::{
     chain::{async_tree, fork_tree},
     chain_spec, executor, header,
@@ -1474,10 +1475,10 @@ async fn run_background<TPlat: Platform>(
 
         log::debug!(
             target: &log_target,
-            "Reinitialized background worker to finalized block {}",
+            "Worker <= Reset(finalized_block: {})",
             HashDisplay(&header::hash_from_scale_encoded_header(
                 &subscription.finalized_block_scale_encoded_header
-            )) // TODO: print block height
+            ))
         );
 
         // Update the state of `guarded` with what we just grabbed.
@@ -1664,7 +1665,7 @@ async fn run_background<TPlat: Platform>(
                         Some(sync_service::Notification::Block(new_block)) => {
                             log::debug!(
                                 target: &log_target,
-                                "New sync service block: hash={}, parent={}, is_new_best={}",
+                                "Worker <= InputNewBlock(hash={}, parent={}, is_new_best={})",
                                 HashDisplay(&header::hash_from_scale_encoded_header(&new_block.scale_encoded_header)),
                                 HashDisplay(&new_block.parent_hash),
                                 new_block.is_new_best
@@ -1725,7 +1726,7 @@ async fn run_background<TPlat: Platform>(
                         Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {
                             log::debug!(
                                 target: &log_target,
-                                "New sync service finalization: hash={}, new_best={}",
+                                "Worker <= InputFinalized(hash={}, best={})",
                                 HashDisplay(&hash), HashDisplay(&best_block_hash)
                             );
 
@@ -1737,33 +1738,48 @@ async fn run_background<TPlat: Platform>(
                     background.start_necessary_downloads().await;
                 },
                 (async_op_id, download_result) = background.runtime_downloads.select_next_some() => {
+                    let mut guarded = background.guarded.lock().await;
+
+                    let concerned_blocks = match &guarded.tree {
+                        GuardedInner::FinalizedBlockRuntimeKnown {
+                            tree: Some(tree), ..
+                        } => either::Left(tree.async_op_blocks(async_op_id)),
+                        GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                            either::Right(tree.async_op_blocks(async_op_id))
+                        }
+                        _ => unreachable!(),
+                    }.format_with(", ", |block, fmt| fmt(&HashDisplay(&block.hash))).to_string();
+
                     match download_result {
                         Ok((storage_code, storage_heap_pages)) => {
                             log::debug!(
                                 target: &log_target,
-                                "Successfully finished download of id {:?}",
-                                async_op_id
+                                "Worker <= SuccessfulDownload(blocks=[{}])",
+                                concerned_blocks
                             );
 
                             // TODO: the line below is a complete hack; the code that updates this value is never reached for parachains, and as such the line below is here to update this field
-                            background.guarded.lock().await.best_near_head_of_chain = true;
+                            guarded.best_near_head_of_chain = true;
+                            drop(guarded);
 
                             background.runtime_download_finished(async_op_id, storage_code, storage_heap_pages).await;
                         }
                         Err(error) => {
-                            log::log!(
+                            log::debug!(
                                 target: &log_target,
-                                if error.is_network_problem() {
-                                    log::Level::Debug
-                                } else {
-                                    log::Level::Warn
-                                },
-                                // TODO: better message
-                                "Failed to download :code and :heappages of block: {}",
+                                "Worker <= FailedDownload(blocks=[{}], error={})",
+                                concerned_blocks,
                                 error
                             );
+                            if !error.is_network_problem() {
+                                log::warn!(
+                                    target: &log_target,
+                                    "Failed to download :code and :heappages of blocks {}: {}",
+                                    concerned_blocks,
+                                    error
+                                );
+                            }
 
-                            let mut guarded = background.guarded.lock().await;
                             match &mut guarded.tree {
                                 GuardedInner::FinalizedBlockRuntimeKnown {
                                     tree: Some(tree), ..
@@ -1775,6 +1791,8 @@ async fn run_background<TPlat: Platform>(
                                 }
                                 _ => unreachable!(),
                             }
+
+                            drop(guarded);
                         }
                     }
 
@@ -1923,6 +1941,12 @@ impl<TPlat: Platform> Background<TPlat> {
                         let best_block_hash = best_block_index
                             .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash);
 
+                        log::debug!(
+                            target: &self.log_target,
+                            "Worker => OutputFinalized(hash={}, best={})",
+                            HashDisplay(&finalized_block.hash), HashDisplay(&best_block_hash)
+                        );
+
                         guarded.runtimes[former_finalized_runtime_index].num_references -= 1;
                         for (_, _, runtime_index) in pruned_blocks {
                             if let Some(runtime_index) = runtime_index {
@@ -1939,6 +1963,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         let block_index = block.index;
                         let block_runtime_index = *block.async_op_user_data;
                         let scale_encoded_header = block.user_data.scale_encoded_header.clone();
+                        let is_new_best = block.is_new_best;
 
                         best_block_updated |= block.is_new_best;
                         let parent_runtime_index = tree
@@ -1947,11 +1972,18 @@ impl<TPlat: Platform> Background<TPlat> {
                                 *tree.block_async_user_data(idx).unwrap()
                             });
 
+                        log::debug!(
+                            target: &self.log_target,
+                            "Worker => OutputNewBlock(hash={}, is_new_best={})",
+                            HashDisplay(&tree.block_user_data(block_index).hash),
+                            is_new_best
+                        );
+
                         Notification::Block(BlockNotification {
                             parent_hash: tree
                                 .parent(block_index)
                                 .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash),
-                            is_new_best: false,
+                            is_new_best,
                             scale_encoded_header,
                             new_runtime: if parent_runtime_index != block_runtime_index {
                                 Some(
@@ -1989,6 +2021,12 @@ impl<TPlat: Platform> Background<TPlat> {
                         });
                         let new_finalized_hash = new_finalized.hash;
 
+                        log::debug!(
+                            target: &self.log_target,
+                            "Worker => OutputFinalized(hash={}, best={})",
+                            HashDisplay(&new_finalized_hash), HashDisplay(&best_block_hash)
+                        );
+
                         guarded.tree =
                             GuardedInner::FinalizedBlockRuntimeKnown {
                                 tree: Some(tree.take().unwrap().map_async_op_user_data(
@@ -1996,6 +2034,8 @@ impl<TPlat: Platform> Background<TPlat> {
                                 )),
                                 finalized_block: new_finalized,
                             };
+
+                        // TODO: doesn't report existing blocks /!\
 
                         for (_, _, runtime_index) in pruned_blocks {
                             if let Some(Some(runtime_index)) = runtime_index {
@@ -2065,8 +2105,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
             log::debug!(
                 target: &self.log_target,
-                "Starting new download, id={:?}, block={}",
-                download_params.id,
+                "Worker => NewDownload(block={})",
                 HashDisplay(&download_params.block_user_data.hash)
             );
 
