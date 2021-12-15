@@ -100,6 +100,16 @@ jobs:
     - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features std
     - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features database-sqlite --features std
 
+  check-no-std:
+    runs-on: ubuntu-latest
+    container:
+      image: rust
+    steps:
+    - uses: actions/checkout@v2.4.0
+    - uses: Swatinem/rust-cache@v1
+    - run: rustup default nightly
+    - run: RUSTFLAGS=-Dwarnings cargo +nightly build --lib --no-default-features -Z build-std=core,alloc --target=x86_64-unknown-uefi
+
   check-rustdoc-links:
     runs-on: ubuntu-latest
     container:
@@ -174,7 +184,7 @@ jobs:
   all-ci:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [test-64bits, test-32bits, wasm-node-check, wasm-node-size-diff, check-features, check-rustdoc-links, fmt, clippy, cargo-deny, wasm-node-versions-match]
+    needs: [test-64bits, test-32bits, wasm-node-check, wasm-node-size-diff, check-features, check-no-std, check-rustdoc-links, fmt, clippy, cargo-deny, wasm-node-versions-match]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success
