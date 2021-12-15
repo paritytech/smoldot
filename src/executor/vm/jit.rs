@@ -508,10 +508,7 @@ impl Jit {
         Ok(())
     }
 
-    /// Increases the size of the memory by the given number of pages.
-    ///
-    /// Returns an error if the size of the memory can't be expanded more. This can be known ahead
-    /// of time by using [`VirtualMachinePrototype::memory_max_pages`].
+    /// See [`super::VirtualMachine::grow_memory`].
     pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
         let mem = match self.memory.as_ref() {
             Some(m) => m,
