@@ -40,15 +40,19 @@ mod defs;
 /// Serializes the given chain information as a string.
 ///
 /// This is a shortcut for [`encode_chain_storage`] with no `finalized_storage`.
-pub fn encode_chain(information: chain_information::ValidChainInformationRef<'_>) -> String {
+pub fn encode_chain<'a>(
+    information: impl Into<chain_information::ValidChainInformationRef<'a>>,
+) -> String {
     encode_chain_storage(information, None::<iter::Empty<(Vec<u8>, Vec<u8>)>>)
 }
 
 /// Serializes the given chain information and finalized block storage as a string.
-pub fn encode_chain_storage(
-    information: chain_information::ValidChainInformationRef<'_>,
+pub fn encode_chain_storage<'a>(
+    information: impl Into<chain_information::ValidChainInformationRef<'a>>,
     finalized_storage: Option<impl Iterator<Item = (impl AsRef<[u8]>, impl AsRef<[u8]>)>>,
 ) -> String {
+    let information = information.into();
+
     let decoded = defs::SerializedChainInformation::V1(defs::SerializedChainInformationV1::new(
         information.as_ref(),
         finalized_storage,

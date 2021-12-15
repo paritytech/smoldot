@@ -929,6 +929,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                 .sync_service
                 .serialize_chain_information()
                 .await
+                .map(|ci| finalized_serialize::encode_chain(&ci))
                 .unwrap_or_else(|| "<unknown>".into());
 
             // Cap the database length to the requested max length.

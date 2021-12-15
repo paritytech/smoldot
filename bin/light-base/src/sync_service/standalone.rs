@@ -20,9 +20,7 @@ use crate::{network_service, Platform};
 
 use futures::{channel::mpsc, prelude::*};
 use smoldot::{
-    chain,
-    database::finalized_serialize,
-    header,
+    chain, header,
     informant::HashDisplay,
     libp2p,
     network::{self, protocol},
@@ -723,8 +721,7 @@ impl<TPlat: Platform> Task<TPlat> {
             }
 
             ToBackground::SerializeChainInformation { send_back } => {
-                let db = finalized_serialize::encode_chain(self.sync.as_chain_information());
-                let _ = send_back.send(Some(db));
+                let _ = send_back.send(Some(self.sync.as_chain_information().into()));
             }
         }
     }
