@@ -108,7 +108,7 @@ jobs:
     - uses: actions/checkout@v2.4.0
     - uses: Swatinem/rust-cache@v1
     - run: rustup default nightly
-    - run: RUSTFLAGS=-Dwarnings cargo +nightly build --lib --no-default-features -Z build-std=core,alloc --target=x86_64-unknown-uefi
+    - run: RUSTFLAGS=-Dwarnings cargo +nightly build --package smoldot --no-default-features -Z build-std=core,alloc --target=x86_64-unknown-uefi
 
   check-rustdoc-links:
     runs-on: ubuntu-latest

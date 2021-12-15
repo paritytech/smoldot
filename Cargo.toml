@@ -94,7 +94,7 @@ soketto = { version = "0.7.1", optional = true }
 # TODO:
 parity-scale-codec = { version = "2.3.1", features = ["derive"] } # TODO: a lot of unnecessary overhead in terms of memory allocations
 
-[target.'cfg(target_arch = "x86_63")'.dependencies]
+[target.'cfg(target_arch = "x86_64")'.dependencies]
 # `std` feature
 wasmtime = { version = "0.27.0", default-features = false, features = ["async"], optional = true }
 
