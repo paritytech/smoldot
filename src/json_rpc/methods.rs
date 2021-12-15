@@ -398,7 +398,7 @@ define_methods! {
     /// Returns, as an opaque string, the version of the client serving these JSON-RPC requests.
     system_version() -> &'a str,
 
-    // The functions below are experimental and are defined in the document https://hackmd.io/@JF-CdHdTQdSl-2XgOR4SnA/rJ8SaI5Pt
+    // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_unstable_body(followSubscriptionId: &'a str, hash: HashHexString, networkConfig: Option<NetworkConfig>) -> &'a str,
     chainHead_unstable_bodyEnd(subscriptionId: &'a str) -> (),
     chainHead_unstable_call(followSubscriptionId: &'a str, hash: HashHexString, function: &'a str, callParameters: Vec<HexString>, networkConfig: Option<NetworkConfig>) -> &'a str,
@@ -422,7 +422,7 @@ define_methods! {
     state_runtimeVersion(subscription: &'a str, result: Option<RuntimeVersion<'a>>) -> (), // TODO: the Option is a custom addition
     state_storage(subscription: &'a str, result: StorageChangeSet) -> (),
 
-    // The functions below are experimental and are defined in the document https://hackmd.io/@JF-CdHdTQdSl-2XgOR4SnA/rJ8SaI5Pt
+    // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_unstable_followEvent(subscription: &'a str, result: FollowEvent<'a>) -> (),
 }
 
