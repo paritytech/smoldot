@@ -410,6 +410,9 @@ define_methods! {
     chainHead_unstable_storageEnd(subscriptionId: &'a str) -> (),
     chainHead_unstable_unfollow(followSubscriptionId: &'a str) -> (),
     chainHead_unstable_unpin(followSubscriptionId: &'a str, hash: HashHexString) -> (),
+    chainSpec_unstable_chainName() -> &'a str,
+    chainSpec_unstable_genesisHash() -> HashHexString,
+    chainSpec_unstable_properties() -> Box<serde_json::value::RawValue>,
     sudo_unstable_version() -> &'a str,
 }
 
