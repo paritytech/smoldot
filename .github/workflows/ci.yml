@@ -19,32 +19,35 @@ name: continuous-integration
 
 on:
   pull_request:
+  push:
+    branches:
+      - main   # Running the CI on the main branch is important in order to fill the caches that pull requests will pick up.
 
 jobs:
   test-64bits:
     runs-on: ubuntu-latest
     container:
-      image: rust
+      image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
-    - uses: Swatinem/rust-cache@v1   # See also the `cache-fill` workflow.
+    - uses: Swatinem/rust-cache@v1
     - run: RUSTFLAGS=-Dwarnings cargo test --locked --workspace --all-features
 
   test-32bits:
     runs-on: ubuntu-latest
     container:
-      image: rust
+      image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
     - run: apt-get update && apt-get install -y libc6-dev-i386
-    - uses: Swatinem/rust-cache@v1   # See also the `cache-fill` workflow.
+    - uses: Swatinem/rust-cache@v1
     - run: rustup target add i686-unknown-linux-gnu
     - run: RUSTFLAGS=-Dwarnings cargo test --target i686-unknown-linux-gnu --locked --workspace --all-features
 
   wasm-node-check:
     runs-on: ubuntu-latest
     container:
-      image: rust
+      image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
     - uses: Swatinem/rust-cache@v1
@@ -54,10 +57,41 @@ jobs:
     - run: apt-get update && apt install -y binaryen # For `wasm-opt`
     - run: cd bin/wasm-node/javascript && RUSTFLAGS=-Dwarnings npm install-ci-test
 
+  wasm-node-size-diff:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1.57
+    steps:
+    - uses: actions/checkout@v2.4.0
+      with:
+        fetch-depth: 0  # Necessary to fetch pull request base below
+    - uses: Swatinem/rust-cache@v1
+    - uses: actions/setup-node@v2.5.0
+      with:
+        node-version: '12'
+    - run: cargo install twiggy  # TODO: somehow cache this in order to not compile twiggy every single time
+    - run: git checkout ${{ github.event.pull_request.base.sha }}
+    - run: cd bin/wasm-node/javascript && npm ci && npm run-script build
+    - run: cp ./target/wasm32-wasi/min-size-release/smoldot_light_wasm.wasm ./.ci-parent-build.wasm  # TODO: maybe get the path from the `npm build` output or something?
+    - run: git checkout ${{ github.event.pull_request.head.sha }}
+    - run: cd bin/wasm-node/javascript && npm ci && npm run-script build
+    - run: twiggy diff ./.ci-parent-build.wasm ./target/wasm32-wasi/min-size-release/smoldot_light_wasm.wasm > ./twiggy-diff  # TODO: maybe get the path from the `npm build` output or something?
+    # Now that we've generated the diff in a `./twiggy-diff` file, the next step is to upload
+    # the PR number and diff content as an artifact that will then be picked up by a
+    # `workflow_run` action that does the actual commenting.
+    - run: |
+        mkdir -p ./pr
+        echo ${{ github.event.pull_request.number }} > ./pr/number
+        cp ./twiggy-diff ./pr
+    - uses: actions/upload-artifact@v2
+      with:
+        name: pr
+        path: pr/
+
   check-features:
     runs-on: ubuntu-latest
     container:
-      image: rust
+      image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
     - uses: Swatinem/rust-cache@v1
@@ -69,7 +103,7 @@ jobs:
   check-rustdoc-links:
     runs-on: ubuntu-latest
     container:
-      image: rust
+      image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
     - run: cargo doc --verbose --workspace --all-features --no-deps --document-private-items
@@ -94,7 +128,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2.4.0
-      - uses: Swatinem/rust-cache@v1   # See also the `cache-fill` workflow.
+      - uses: Swatinem/rust-cache@v1
       - uses: actions-rs/toolchain@v1
         with:
             toolchain: nightly
@@ -140,7 +174,7 @@ jobs:
   all-ci:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [test-64bits, test-32bits, wasm-node-check, check-features, check-rustdoc-links, fmt, clippy, cargo-deny, wasm-node-versions-match]
+    needs: [test-64bits, test-32bits, wasm-node-check, wasm-node-size-diff, check-features, check-rustdoc-links, fmt, clippy, cargo-deny, wasm-node-versions-match]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success

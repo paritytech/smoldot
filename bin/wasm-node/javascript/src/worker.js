@@ -47,6 +47,12 @@ const injectMessage = (instance, message) => {
     Buffer.from(instance.exports.memory.buffer)
       .write(message.chainSpec, chainSpecPtr);
 
+    // Write the database content into memory.
+    const databaseContentLen = Buffer.byteLength(message.databaseContent, 'utf8');
+    const databaseContentPtr = instance.exports.alloc(databaseContentLen) >>> 0;
+    Buffer.from(instance.exports.memory.buffer)
+      .write(message.databaseContent, databaseContentPtr);
+
     // Write the potential relay chains into memory.
     const potentialRelayChainsLen = message.potentialRelayChains.length;
     const potentialRelayChainsPtr = instance.exports.alloc(potentialRelayChainsLen * 4) >>> 0;
@@ -61,6 +67,7 @@ const injectMessage = (instance, message) => {
     // Note that `add_chain` properly de-allocates buffers even if it failed.
     const chainId = instance.exports.add_chain(
       chainSpecPtr, chainSpecLen,
+      databaseContentPtr, databaseContentLen,
       message.jsonRpcRunning,
       potentialRelayChainsPtr, potentialRelayChainsLen
     );
@@ -80,6 +87,20 @@ const injectMessage = (instance, message) => {
     instance.exports.remove_chain(message.chainId);
     // `compat.postMessage` is the same as `postMessage`, but works across environments.
     compat.postMessage({ kind: 'chainRemoved' });
+
+  } else if (message.ty == 'databaseContent') {
+    // The value of `maxUtf8BytesSize` is guaranteed (by `index.js`) to always fit in 32 bits, in
+    // other words, that `maxUtf8BytesSize < (1 << 32)`.
+    // We need to perform a conversion in such a way that the the bits of the output of
+    // `ToInt32(converted)`, when interpreted as u32, is equal to `maxUtf8BytesSize`.
+    // See ToInt32 here: https://tc39.es/ecma262/#sec-toint32
+    // Note that the code below has been tested against example values. Please be very careful
+    // if you decide to touch it. Ideally it would be unit-tested, but since it concerns the FFI
+    // layer between JS and Rust, writing unit tests would be extremely complicated.
+    const twoPower31 = (1 << 30) * 2;  // `1 << 31` in JavaScript doesn't give the value that you expect.
+    const converted = (message.maxUtf8BytesSize >= twoPower31) ?
+      (message.maxUtf8BytesSize - (twoPower31 * 2)) : message.maxUtf8BytesSize;
+    instance.exports.database_content(message.chainId, converted);
 
   } else
     throw new Error('unrecognized message type');
@@ -101,8 +122,13 @@ const startInstance = async (config) => {
       // `compat.postMessage` is the same as `postMessage`, but works across environments.
       compat.postMessage({ kind: 'jsonrpc', data, chainId });
     },
+    databaseContentCallback: (data, chainId) => {
+      // `compat.postMessage` is the same as `postMessage`, but works across environments.
+      compat.postMessage({ kind: 'databaseContent', data, chainId });
+    },
     forbidTcp: config.forbidTcp,
     forbidWs: config.forbidWs,
+    forbidNonLocalWs: config.forbidNonLocalWs,
     forbidWss: config.forbidWss,
   };
 

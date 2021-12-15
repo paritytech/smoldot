@@ -35,6 +35,7 @@ use futures::{
 };
 use smoldot::{
     chain,
+    executor::host,
     libp2p::PeerId,
     network::{protocol, service},
     trie::{self, prefix_proof, proof_verify},
@@ -142,6 +143,26 @@ impl<TPlat: Platform> SyncService<TPlat> {
         }
     }
 
+    /// Returns the state of the finalized block of the chain, after passing it through
+    /// [`smoldot::database::finalized_serialize::encode_chain`].
+    ///
+    /// Returns `None` if this information couldn't be obtained because not enough is known about
+    /// the chain.
+    pub async fn serialize_chain_information(
+        &self,
+    ) -> Option<chain::chain_information::ValidChainInformation> {
+        let (send_back, rx) = oneshot::channel();
+
+        self.to_background
+            .lock()
+            .await
+            .send(ToBackground::SerializeChainInformation { send_back })
+            .await
+            .unwrap();
+
+        rx.await.unwrap()
+    }
+
     /// Subscribes to the state of the chain: the current state and the new blocks.
     ///
     /// All new blocks are reported. Only up to `buffer_size` block notifications are buffered
@@ -152,7 +173,11 @@ impl<TPlat: Platform> SyncService<TPlat> {
     /// warp syncing.
     ///
     /// See [`SubscribeAll`] for information about the return value.
-    pub async fn subscribe_all(&self, buffer_size: usize) -> SubscribeAll {
+    ///
+    /// If `runtime_interest` is `false`, then [`SubscribeAll::finalized_block_runtime`] will
+    /// always be `None`. Since the runtime can only be provided to one call to this function,
+    /// only one subscriber should use `runtime_interest` equal to `true`.
+    pub async fn subscribe_all(&self, buffer_size: usize, runtime_interest: bool) -> SubscribeAll {
         let (send_back, rx) = oneshot::channel();
 
         self.to_background
@@ -161,6 +186,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
             .send(ToBackground::SubscribeAll {
                 send_back,
                 buffer_size,
+                runtime_interest,
             })
             .await
             .unwrap();
@@ -545,6 +571,15 @@ pub struct SubscribeAll {
     /// SCALE-encoded header of the finalized block at the time of the subscription.
     pub finalized_block_scale_encoded_header: Vec<u8>,
 
+    /// Runtime of the finalized block, if known.
+    ///
+    /// > **Note**: In order to do the initial synchronization, the sync service might have to
+    /// >           download and use the runtime near the head of the chain. Throwing away this
+    /// >           runtime at the end of the synchronization is possible, but would be wasteful.
+    /// >           Instead, this runtime is provided here if possible, but no guarantee is
+    /// >           offered that it can be found.
+    pub finalized_block_runtime: Option<FinalizedBlockRuntime>,
+
     /// List of all known non-finalized blocks at the time of subscription.
     ///
     /// Only one element in this list has [`BlockNotification::is_new_best`] equal to true.
@@ -556,6 +591,18 @@ pub struct SubscribeAll {
     /// Channel onto which new blocks are sent. The channel gets closed if it is full when a new
     /// block needs to be reported.
     pub new_blocks: mpsc::Receiver<Notification>,
+}
+
+/// See [`SubscribeAll::finalized_block_runtime`].
+pub struct FinalizedBlockRuntime {
+    /// Compiled virtual machine.
+    pub virtual_machine: host::HostVmPrototype,
+
+    /// Storage value at the `:code` key.
+    pub storage_code: Option<Vec<u8>>,
+
+    /// Storage value at the `:heappages` key.
+    pub storage_heap_pages: Option<Vec<u8>>,
 }
 
 /// Notification about a new block or a new finalized block.
@@ -629,6 +676,7 @@ enum ToBackground {
     SubscribeAll {
         send_back: oneshot::Sender<SubscribeAll>,
         buffer_size: usize,
+        runtime_interest: bool,
     },
     /// See [`SyncService::peers_assumed_know_blocks`].
     PeersAssumedKnowBlock {
@@ -639,5 +687,9 @@ enum ToBackground {
     /// See [`SyncService::syncing_peers`].
     SyncingPeers {
         send_back: oneshot::Sender<Vec<(PeerId, protocol::Role, u64, [u8; 32])>>,
+    },
+    /// See [`SyncService::serialize_chain_information`].
+    SerializeChainInformation {
+        send_back: oneshot::Sender<Option<chain::chain_information::ValidChainInformation>>,
     },
 }

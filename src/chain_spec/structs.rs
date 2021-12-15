@@ -60,6 +60,7 @@ pub(super) struct ClientSpec {
     pub(super) bad_blocks: Option<HashSet<HashHexString, FnvBuildHasher>>,
     // Unused but for some reason still part of the chain specs.
     #[serde(default, skip_serializing)]
+    #[allow(unused)]
     pub(super) consensus_engine: (),
     pub(super) genesis: Genesis,
     pub(super) light_sync_state: Option<LightSyncState>,

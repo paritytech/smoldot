@@ -113,6 +113,22 @@ export interface Chain {
   sendJsonRpc(rpc: string): void;
 
   /**
+   * Serializes the important information about the state of the chain so that it can be provided
+   * back in the {AddChainOptions.databaseContent} when the chain is recreated.
+   *
+   * The content of the string is opaque and shouldn't be decoded.
+   *
+   * A parameter can be passed to indicate the maximum length of the returned value (in number
+   * of bytes this string would occupy in the UTF-8 encoding). The higher this limit is the more
+   * information can be included. This parameter is optional, and not passing any value means
+   * "unbounded".
+   *
+   * @throws {AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
+   * @throws {CrashError} If the background client has crashed.
+   */
+  databaseContent(maxUtf8BytesSize?: number): Promise<string>;
+
+  /**
    * Disconnects from the blockchain.
    *
    * The JSON-RPC callback will no longer be called.
@@ -186,6 +202,23 @@ export interface ClientOptions {
   forbidWs?: boolean;
 
   /**
+   * If `true`, then the client will never open any non-secure WebSocket connection to addresses
+   * other than `localhost` or `127.0.0.1`.
+   * Defaults to `false`.
+   *
+   * This option is similar to `forbidWs`, except that connections to `localhost` and `127.0.0.1`
+   * do not take the value of this option into account.
+   *
+   * This option can be used in order to mimic an environment where non-secure WebSocket
+   * connections aren't supported (e.g. web pages) from an environment where they are supported
+   * (e.g. NodeJS).
+   *
+   * This option has no effect in environments where non-secure WebSocket connections aren't
+   * supported anyway.
+   */
+  forbidNonLocalWs?: boolean;
+
+  /**
    * If `true`, then the client will never open any secure WebSocket connection.
    * Defaults to `false`.
    *
@@ -210,6 +243,21 @@ export interface AddChainOptions {
    * the value in `relay_chain` with the value in `id` of the chains in `potentialRelayChains`.
    */
   chainSpec: string;
+
+  /**
+   * Content of the database of this chain. Can be obtained with {Client.databaseContent}.
+   *
+   * Smoldot reserves the right to change its database format, making previous databases
+   * incompatible. For this reason, no error is generated if the content of the database is invalid
+   * and/or can't be decoded.
+   *
+   * Important: please note that using a malicious database content can lead to a security
+   * vulnerability. This database content is considered by smoldot as trusted input. It is the
+   * responsibility of the API user to make sure that the value passed in this field comes from
+   * the same source of trust as the chain specification that was used when retrieving this
+   * database content.
+   */
+  databaseContent?: string;
 
   /**
    * If `chainSpec` concerns a parachain, contains the list of chains whose `id` smoldot will try

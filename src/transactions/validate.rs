@@ -195,7 +195,9 @@ pub enum Error {
     WasmVmReadOnly(runtime_host::ErrorDetail),
     /// Error while decoding the output of the runtime.
     OutputDecodeError(DecodeError),
-    /// The list of provided tags ([`ValidTransaction::provides`]). This is a bug in the runtime.
+    /// The list of provided tags ([`ValidTransaction::provides`]) is empty. It is mandatory for
+    /// the runtime to always provide a non-empty list of tags. This error is consequently a bug
+    /// in the runtime.
     EmptyProvidedTags,
 }
 

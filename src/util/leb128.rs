@@ -75,6 +75,45 @@ pub fn encode_usize(value: usize) -> impl ExactSizeIterator<Item = u8> {
     encode(u64::try_from(value).unwrap())
 }
 
+/// Decodes a LEB128-encoded `usize`.
+///
+/// > **Note**: When using this function outside of a `nom` "context", you might have to explicit
+/// >           the type of `E`. Use `nom::error::Error<&[u8]>`.
+pub(crate) fn nom_leb128_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], usize, E> {
+    let mut out = 0usize;
+
+    for (n, byte) in bytes.iter().enumerate() {
+        match usize::from(*byte & 0b1111111).checked_mul(1 << (7 * n)) {
+            Some(o) => out |= o,
+            None => {
+                return Err(nom::Err::Error(nom::error::make_error(
+                    bytes,
+                    nom::error::ErrorKind::LengthValue,
+                )))
+            }
+        };
+
+        if (*byte & 0x80) == 0 {
+            // We want to avoid LEB128 numbers such as `[0x81, 0x0]`.
+            if n >= 1 && *byte == 0x0 {
+                return Err(nom::Err::Error(nom::error::make_error(
+                    bytes,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
+
+            return Ok((&bytes[(n + 1)..], out));
+        }
+    }
+
+    Err(nom::Err::Error(nom::error::make_error(
+        bytes,
+        nom::error::ErrorKind::Eof,
+    )))
+}
+
 // TODO: document all this below
 
 pub enum Framed {

@@ -616,7 +616,11 @@ impl<'a, T> Iterator for PruneAncestorsIter<'a, T> {
 impl<'a, T> Drop for PruneAncestorsIter<'a, T> {
     fn drop(&mut self) {
         // Make sure that all elements are removed.
-        while let Some(_) = self.next() {}
+        loop {
+            if self.next().is_none() {
+                break;
+            }
+        }
 
         if self.uncles_only {
             debug_assert!(self.tree.first_root.is_some());

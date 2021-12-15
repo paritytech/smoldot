@@ -247,8 +247,9 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                         .chain(cli_options.additional_bootnode.iter())
                     {
                         let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
-                        if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
-                            let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
+                        if let Some(multiaddr::ProtocolRef::P2p(peer_id)) = address.iter().last() {
+                            let peer_id = PeerId::from_bytes(peer_id.to_vec()).unwrap(); // TODO: don't unwrap
+                            address.pop();
                             list.push((peer_id, address));
                         } else {
                             panic!() // TODO:
@@ -286,8 +287,11 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                                 Vec::with_capacity(relay_chains_specs.boot_nodes().len());
                             for node in relay_chains_specs.boot_nodes().iter() {
                                 let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
-                                if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
-                                    let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
+                                if let Some(multiaddr::ProtocolRef::P2p(peer_id)) =
+                                    address.iter().last()
+                                {
+                                    let peer_id = PeerId::from_bytes(peer_id.to_vec()).unwrap(); // TODO: don't unwrap
+                                    address.pop();
                                     list.push((peer_id, address));
                                 } else {
                                     panic!() // TODO:
@@ -327,6 +331,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         database,
         keystore,
         jaeger_service: jaeger_service.clone(),
+        slot_duration_author_ratio: 43691_u16,
     })
     .instrument(tracing::debug_span!("consensus-service-init"))
     .await;
@@ -340,6 +345,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 database: relay_chain_database,
                 keystore: Arc::new(keystore::Keystore::new(rand::random())),
                 jaeger_service, // TODO: consider passing a different jaeger service with a different service name
+                slot_duration_author_ratio: 43691_u16,
             })
             .instrument(tracing::debug_span!("relay-chain-consensus-service-init"))
             .await,

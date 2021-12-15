@@ -15,9 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// TODO: the quality of this module is sub-par
-
-use crate::{alloc, bindings, timers::Delay};
+use crate::{alloc, bindings, platform, timers::Delay};
 
 use core::{
     future::Future,
@@ -28,7 +26,11 @@ use core::{
 use futures::{channel::mpsc, prelude::*};
 use smoldot::informant::BytesDisplay;
 use std::{
-    sync::{atomic, Arc, Mutex},
+    panic,
+    sync::{
+        atomic::{self, Ordering},
+        Arc, Mutex,
+    },
     task,
 };
 
@@ -44,7 +46,7 @@ pub(crate) fn init(max_log_level: u32) {
             _ => log::LevelFilter::Trace,
         })
     });
-    std::panic::set_hook(Box::new(|info| {
+    panic::set_hook(Box::new(|info| {
         panic(info.to_string());
     }));
 
@@ -102,13 +104,32 @@ pub(crate) fn init(max_log_level: u32) {
         .unbounded_send((
             "memory-printer".to_owned(),
             Box::pin(async move {
+                let mut previous_read_bytes = 0;
+                let mut previous_sent_bytes = 0;
+                let interval = 60;
+
                 loop {
-                    Delay::new(Duration::from_secs(60)).await;
+                    Delay::new(Duration::from_secs(interval)).await;
 
                     // For the unwrap below to fail, the quantity of allocated would have to
                     // not fit in a `u64`, which as of 2021 is basically impossible.
                     let mem = u64::try_from(alloc::total_alloc_bytes()).unwrap();
-                    log::info!(target: "smoldot", "Node memory usage: {}", BytesDisplay(mem));
+
+                    let bytes_rx = platform::TOTAL_BYTES_RECEIVED.load(Ordering::Relaxed);
+                    let avg_dl = u64::try_from(bytes_rx - previous_read_bytes).unwrap() / interval;
+                    previous_read_bytes = bytes_rx;
+
+                    let bytes_tx = platform::TOTAL_BYTES_SENT.load(Ordering::Relaxed);
+                    let avg_up = u64::try_from(bytes_tx - previous_sent_bytes).unwrap() / interval;
+                    previous_sent_bytes = bytes_tx;
+
+                    log::info!(
+                        target: "smoldot",
+                        "Current memory usage: {}. Average download: {}/s. Average upload: {}/s.",
+                        BytesDisplay(mem),
+                        BytesDisplay(avg_dl),
+                        BytesDisplay(avg_up)
+                    );
                 }
             }),
         ))
@@ -169,36 +190,46 @@ impl log::Log for Logger {
     fn flush(&self) {}
 }
 
+/// Spawns a task that runs forever in the background.
 fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static) {
+    // The way this works is:
+    //
+    // - We use `start_timer_wrap` with a duration of 0 to schedule a closure for execution as
+    //   soon as possible.
+    // - This closure calls `Future::poll`. During the call to `Future::poll`, or later, the waker
+    //   might be invoked, which again uses `start_timer_wrap` to schedule the same closure for
+    //   execution as soon as possible, which calls `Future::poll` again, etc.
+    // - The waker might be invoked multiple times. To prevent the closure from being scheduled
+    //   multiple time, the `allow_schedule` field stores whether we are allowed to schedule the
+    //   closure. It is set to `false` when the closure is scheduled for execution.
+
     struct Waker {
-        done: atomic::AtomicBool,
-        wake_up_registered: atomic::AtomicBool,
-        future: Mutex<future::BoxFuture<'static, ()>>,
+        allow_schedule: atomic::AtomicBool,
+        future: Mutex<(future::BoxFuture<'static, ()>, bool)>,
     }
 
     impl task::Wake for Waker {
         fn wake(self: Arc<Self>) {
-            if self
-                .wake_up_registered
-                .swap(true, atomic::Ordering::Relaxed)
-            {
+            if !self.allow_schedule.swap(false, atomic::Ordering::AcqRel) {
                 return;
             }
 
             crate::start_timer_wrap(Duration::new(0, 0), move || {
-                if self.done.load(atomic::Ordering::SeqCst) {
+                // The single-threaded-ness aspect of Wasm guarantees that the `Mutex` can only
+                // ever be locked once at a time.
+                let mut future = self.future.try_lock().unwrap();
+                if future.1 {
                     return;
                 }
 
-                let mut future = self.future.try_lock().unwrap();
-                self.wake_up_registered
-                    .store(false, atomic::Ordering::SeqCst);
+                self.allow_schedule.store(true, atomic::Ordering::Release);
+
                 match Future::poll(
-                    future.as_mut(),
+                    future.0.as_mut(),
                     &mut Context::from_waker(&task::Waker::from(self.clone())),
                 ) {
                     Poll::Ready(()) => {
-                        self.done.store(true, atomic::Ordering::SeqCst);
+                        future.1 = true;
                     }
                     Poll::Pending => {}
                 }
@@ -207,9 +238,8 @@ fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static) {
     }
 
     let waker = Arc::new(Waker {
-        done: false.into(),
-        wake_up_registered: false.into(),
-        future: Mutex::new(Box::pin(future)),
+        allow_schedule: atomic::AtomicBool::new(true),
+        future: Mutex::new((Box::pin(future), false)),
     });
 
     task::Wake::wake(waker);

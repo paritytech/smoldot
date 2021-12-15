@@ -38,12 +38,18 @@ use smoldot::{
     informant::HashDisplay,
     libp2p::{
         async_std_connection, connection,
-        multiaddr::{Multiaddr, Protocol},
+        multiaddr::{Multiaddr, ProtocolRef},
         peer_id::{self, PeerId},
     },
     network::{protocol, service},
 };
-use std::{io, net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Instant};
+use std::{
+    io,
+    net::{IpAddr, SocketAddr},
+    num::NonZeroUsize,
+    sync::Arc,
+    time::Instant,
+};
 use tracing::Instrument as _;
 
 /// Configuration for a [`NetworkService`].
@@ -467,31 +473,31 @@ impl NetworkService {
         for listen_address in config.listen_addresses {
             // Try to parse the requested address and create the corresponding listening socket.
             let tcp_listener: async_std::net::TcpListener = {
-                let mut iter = listen_address.iter();
-                let proto1 = match iter.next() {
-                    Some(p) => p,
-                    None => return Err(InitError::BadListenMultiaddr(listen_address)),
-                };
-                let proto2 = match iter.next() {
-                    Some(p) => p,
-                    None => return Err(InitError::BadListenMultiaddr(listen_address)),
-                };
-
-                if iter.next().is_some() {
-                    return Err(InitError::BadListenMultiaddr(listen_address));
-                }
-
-                let addr = match (proto1, proto2) {
-                    (Protocol::Ip4(ip), Protocol::Tcp(port)) => SocketAddr::from((ip, port)),
-                    (Protocol::Ip6(ip), Protocol::Tcp(port)) => SocketAddr::from((ip, port)),
-                    _ => return Err(InitError::BadListenMultiaddr(listen_address)),
-                };
-
-                match async_std::net::TcpListener::bind(addr).await {
-                    Ok(l) => l,
-                    Err(err) => {
-                        return Err(InitError::ListenerIo(listen_address, err));
+                let addr = {
+                    let mut iter = listen_address.iter();
+                    let proto1 = iter.next();
+                    let proto2 = iter.next();
+                    let proto3 = iter.next();
+                    match (proto1, proto2, proto3) {
+                        (Some(ProtocolRef::Ip4(ip)), Some(ProtocolRef::Tcp(port)), None) => {
+                            Some(SocketAddr::from((ip, port)))
+                        }
+                        (Some(ProtocolRef::Ip6(ip)), Some(ProtocolRef::Tcp(port)), None) => {
+                            Some(SocketAddr::from((ip, port)))
+                        }
+                        _ => None,
                     }
+                };
+
+                if let Some(addr) = addr {
+                    match async_std::net::TcpListener::bind(addr).await {
+                        Ok(l) => l,
+                        Err(err) => {
+                            return Err(InitError::ListenerIo(listen_address, err));
+                        }
+                    }
+                } else {
+                    return Err(InitError::BadListenMultiaddr(listen_address));
                 }
             };
 
@@ -513,7 +519,15 @@ impl NetworkService {
                             }
                         };
 
-                        let multiaddr = Multiaddr::from(addr.ip()).with(Protocol::Tcp(addr.port()));
+                        let multiaddr = [
+                            match addr.ip() {
+                                IpAddr::V4(ip) => ProtocolRef::Ip4(ip.octets()),
+                                IpAddr::V6(ip) => ProtocolRef::Ip6(ip.octets()),
+                            },
+                            ProtocolRef::Tcp(addr.port()),
+                        ]
+                        .into_iter()
+                        .collect::<Multiaddr>();
 
                         tracing::debug!(%multiaddr, "incoming-connection");
 
@@ -550,8 +564,7 @@ impl NetworkService {
                 let mut connec_tx = connec_tx.clone();
                 let future = async move {
                     loop {
-                        let start_connect =
-                            inner.network.next_start_connect(|| Instant::now()).await;
+                        let start_connect = inner.network.next_start_connect(Instant::now).await;
 
                         let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
                         let _enter = span.enter();
@@ -813,34 +826,32 @@ fn multiaddr_to_socket(
     }
 
     // Ensure ahead of time that the multiaddress is supported.
-    match (&proto1, &proto2) {
-        (Protocol::Ip4(_), Protocol::Tcp(_))
-        | (Protocol::Ip6(_), Protocol::Tcp(_))
-        | (Protocol::Dns(_), Protocol::Tcp(_))
-        | (Protocol::Dns4(_), Protocol::Tcp(_))
-        | (Protocol::Dns6(_), Protocol::Tcp(_)) => {}
+    let addr = match (&proto1, &proto2) {
+        (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port)) => {
+            either::Left(SocketAddr::new(IpAddr::V4((*ip).into()), *port))
+        }
+        (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port)) => {
+            either::Left(SocketAddr::new(IpAddr::V6((*ip).into()), *port))
+        }
+        // TODO: we don't care about the differences between Dns, Dns4, and Dns6
+        (ProtocolRef::Dns(addr), ProtocolRef::Tcp(port)) => {
+            either::Right((addr.to_string(), *port))
+        }
+        (ProtocolRef::Dns4(addr), ProtocolRef::Tcp(port)) => {
+            either::Right((addr.to_string(), *port))
+        }
+        (ProtocolRef::Dns6(addr), ProtocolRef::Tcp(port)) => {
+            either::Right((addr.to_string(), *port))
+        }
         _ => return Err(()),
-    }
-
-    let proto1 = proto1.acquire();
-    let proto2 = proto2.acquire();
+    };
 
     Ok(async move {
-        match (proto1, proto2) {
-            (Protocol::Ip4(ip), Protocol::Tcp(port)) => {
-                async_std::net::TcpStream::connect(SocketAddr::new(ip.into(), port)).await
+        match addr {
+            either::Left(socket_addr) => async_std::net::TcpStream::connect(socket_addr).await,
+            either::Right((dns, port)) => {
+                async_std::net::TcpStream::connect((&dns[..], port)).await
             }
-            (Protocol::Ip6(ip), Protocol::Tcp(port)) => {
-                async_std::net::TcpStream::connect(SocketAddr::new(ip.into(), port)).await
-            }
-            // TODO: for DNS, do things a bit more explicitly? with for example a library that does the resolution?
-            // TODO: differences between DNS, DNS4, DNS6 not respected
-            (Protocol::Dns(addr), Protocol::Tcp(port))
-            | (Protocol::Dns4(addr), Protocol::Tcp(port))
-            | (Protocol::Dns6(addr), Protocol::Tcp(port)) => {
-                async_std::net::TcpStream::connect((&*addr, port)).await
-            }
-            _ => unreachable!(),
         }
     })
 }

@@ -49,10 +49,11 @@ use futures::{
     lock::{Mutex, MutexGuard},
     prelude::*,
 };
+use itertools::Itertools as _;
 use smoldot::{
     chain::{async_tree, fork_tree},
     chain_spec, executor, header,
-    informant::HashDisplay,
+    informant::{BytesDisplay, HashDisplay},
     metadata,
     network::protocol,
     trie::{self, proof_verify},
@@ -114,76 +115,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
         let best_near_head_of_chain = config.sync_service.is_near_head_of_chain_heuristic().await;
 
-        // Build the runtime of the genesis block.
-        let genesis_runtime = if let chain_spec::GenesisStorage::Items(genesis_storage) =
-            config.chain_spec.genesis_storage()
-        {
-            let code = genesis_storage
-                .iter()
-                .find(|(k, _)| k == b":code")
-                .map(|(_, v)| v.to_vec());
-            let heap_pages = genesis_storage
-                .iter()
-                .find(|(k, _)| k == b":heappages")
-                .map(|(_, v)| v.to_vec());
-
-            // Note that in the absolute we don't need to panic in case of a problem, and could
-            // simply store an `Err` and continue running.
-            // However, in practice, it seems more sane to detect problems in the genesis block.
-            let mut runtime = SuccessfulRuntime::from_params(&code, &heap_pages).await;
-
-            // As documented in the `metadata` field, we must fill it using the genesis storage.
-            if let Ok(runtime) = runtime.as_mut() {
-                let mut query = metadata::query_metadata(runtime.virtual_machine.take().unwrap());
-                loop {
-                    match query {
-                        metadata::Query::Finished(Ok(metadata), vm) => {
-                            runtime.virtual_machine = Some(vm);
-                            runtime.metadata = Some(metadata);
-                            break;
-                        }
-                        metadata::Query::StorageGet(get) => {
-                            let key = get.key_as_vec();
-                            let value = genesis_storage
-                                .iter()
-                                .find(|(k, _)| &**k == key)
-                                .map(|(_, v)| v);
-                            query = get.inject_value(value.map(iter::once));
-                        }
-                        metadata::Query::Finished(Err(err), _) => {
-                            panic!("Unable to generate genesis metadata: {}", err)
-                        }
-                    }
-                }
-            }
-
-            Some(Runtime {
-                num_references: 1,
-                runtime,
-                runtime_code: code,
-                heap_pages,
-            })
-        } else {
-            None
-        };
-
-        let mut runtimes = slab::Slab::with_capacity(2);
-
-        let tree = if let Some(genesis_runtime) = genesis_runtime {
-            let runtime_id = runtimes.insert(genesis_runtime);
-            GuardedInner::FinalizedBlockRuntimeKnown {
-                tree: Some(async_tree::AsyncTree::new(async_tree::Config {
-                    finalized_async_user_data: runtime_id,
-                    retry_after_failed: Duration::from_secs(10),
-                })),
-                finalized_block: Block {
-                    hash: header::hash_from_scale_encoded_header(
-                        &config.genesis_block_scale_encoded_header,
-                    ),
-                    scale_encoded_header: config.genesis_block_scale_encoded_header,
-                },
-            }
-        } else {
+        let tree = {
             let mut tree = async_tree::AsyncTree::new(async_tree::Config {
                 finalized_async_user_data: None,
                 retry_after_failed: Duration::from_secs(10),
@@ -210,7 +142,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             best_blocks_subscriptions: Vec::new(),
             best_near_head_of_chain,
             tree,
-            runtimes,
+            runtimes: slab::Slab::with_capacity(2),
         }));
 
         // Spawns a task that downloads the runtime code at every block to check whether it has
@@ -1534,39 +1466,134 @@ struct Block {
 async fn run_background<TPlat: Platform>(
     log_target: String,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
-    original_guarded: Arc<Mutex<Guarded<TPlat>>>,
+    guarded: Arc<Mutex<Guarded<TPlat>>>,
 ) {
     loop {
         // The buffer size should be large enough so that, if the CPU is busy, it doesn't
         // become full before the execution of the runtime service resumes.
-        let subscription = sync_service.subscribe_all(16).await;
+        let subscription = sync_service.subscribe_all(16, true).await;
 
         log::debug!(
             target: &log_target,
-            "Reinitialized background worker to finalized block {}",
+            "Worker <= Reset(finalized_block: {})",
             HashDisplay(&header::hash_from_scale_encoded_header(
                 &subscription.finalized_block_scale_encoded_header
-            )) // TODO: print block height
+            ))
         );
 
-        // In order to bootstrap the new runtime service, a fresh temporary runtime service is
-        // created.
-        // Later, when the `Guarded` contains at least a finalized runtime, it will be written
-        // over the original runtime service.
-        // TODO: if subscription.finalized is equal to current finalized, skip the whole process below?
-        let mut background = Background {
-            log_target: log_target.clone(),
-            sync_service: sync_service.clone(),
-            guarded: Arc::new(Mutex::new(Guarded {
-                all_blocks_subscriptions: Vec::new(),
-                best_blocks_subscriptions: Vec::new(),
-                finalized_blocks_subscriptions: Vec::new(),
-                best_near_head_of_chain: is_near_head_of_chain_heuristic(
-                    &sync_service,
-                    &original_guarded,
+        // Update the state of `guarded` with what we just grabbed.
+        //
+        // Note that the content of `guarded` is reset unconditionally.
+        // It might seem like a good idea to only reset the content of `guarded` if the new
+        // subscription has a different finalized block than currently. However, there is
+        // absolutely no guarantee for the non-finalized blocks currently in the tree to be a
+        // subset or superset of the non-finalized blocks in the new subscription.
+        // Using the new subscription but keeping the existing tree could therefore result in
+        // state inconsistencies.
+        //
+        // Additionally, the situation where a subscription is killed but the finalized block
+        // didn't change should be extremely rare anyway.
+        {
+            let mut lock = guarded.lock().await;
+            let lock = &mut *lock; // Solves borrow checking issues.
+
+            lock.all_blocks_subscriptions.clear();
+            lock.best_blocks_subscriptions.clear();
+            lock.finalized_blocks_subscriptions.clear();
+            // TODO: restore
+            /*lock.best_near_head_of_chain =
+            is_near_head_of_chain_heuristic(&sync_service, &guarded).await;*/
+
+            lock.runtimes = slab::Slab::with_capacity(2); // TODO: hardcoded capacity
+
+            // TODO: DRY below
+            if let Some(finalized_block_runtime) = subscription.finalized_block_runtime {
+                let finalized_block_hash = header::hash_from_scale_encoded_header(
+                    &subscription.finalized_block_scale_encoded_header,
+                );
+
+                let storage_code_len = u64::try_from(
+                    finalized_block_runtime
+                        .storage_code
+                        .as_ref()
+                        .map_or(0, |v| v.len()),
                 )
-                .await,
-                tree: GuardedInner::FinalizedBlockRuntimeUnknown {
+                .unwrap();
+
+                let runtime = Runtime {
+                    num_references: 1, // Added below.
+                    runtime_code: finalized_block_runtime.storage_code,
+                    heap_pages: finalized_block_runtime.storage_heap_pages,
+                    runtime: SuccessfulRuntime::from_virtual_machine(
+                        finalized_block_runtime.virtual_machine,
+                    )
+                    .await,
+                };
+
+                match &runtime.runtime {
+                    Ok(runtime) => {
+                        log::info!(
+                            target: &log_target,
+                            "Finalized block runtime ready. Spec version: {}. Size of `:code`: {}.",
+                            runtime.runtime_spec.decode().spec_version,
+                            BytesDisplay(storage_code_len)
+                        );
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            target: &log_target,
+                            "Erroenous finalized block runtime. Size of `:code`: {}.\nError: {}\n\
+                            This indicates an incompatibility between smoldot and the chain.",
+                            BytesDisplay(storage_code_len),
+                            error
+                        );
+                    }
+                }
+
+                lock.tree = GuardedInner::FinalizedBlockRuntimeKnown {
+                    finalized_block: Block {
+                        hash: finalized_block_hash,
+                        scale_encoded_header: subscription.finalized_block_scale_encoded_header,
+                    },
+                    tree: Some({
+                        let mut tree =
+                            async_tree::AsyncTree::<_, Block, _>::new(async_tree::Config {
+                                finalized_async_user_data: lock.runtimes.insert(runtime),
+                                retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
+                            });
+
+                        for block in subscription.non_finalized_blocks_ancestry_order {
+                            let parent_index = if block.parent_hash == finalized_block_hash {
+                                None
+                            } else {
+                                Some(
+                                    tree.input_iter_unordered()
+                                        .find(|b| b.user_data.hash == block.parent_hash)
+                                        .unwrap()
+                                        .id,
+                                )
+                            };
+
+                            let same_runtime_as_parent =
+                                same_runtime_as_parent(&block.scale_encoded_header);
+                            let _ = tree.input_insert_block(
+                                Block {
+                                    hash: header::hash_from_scale_encoded_header(
+                                        &block.scale_encoded_header,
+                                    ),
+                                    scale_encoded_header: block.scale_encoded_header,
+                                },
+                                parent_index,
+                                same_runtime_as_parent,
+                                block.is_new_best,
+                            );
+                        }
+
+                        tree
+                    }),
+                };
+            } else {
+                lock.tree = GuardedInner::FinalizedBlockRuntimeUnknown {
                     tree: Some({
                         let mut tree = async_tree::AsyncTree::new(async_tree::Config {
                             finalized_async_user_data: None,
@@ -1585,80 +1612,49 @@ async fn run_background<TPlat: Platform>(
                             true,
                         );
                         tree.input_finalize(node_index, node_index);
+
+                        for block in subscription.non_finalized_blocks_ancestry_order {
+                            let parent_index = tree
+                                .input_iter_unordered()
+                                .find(|b| b.user_data.hash == block.parent_hash)
+                                .unwrap()
+                                .id;
+
+                            let same_runtime_as_parent =
+                                same_runtime_as_parent(&block.scale_encoded_header);
+                            let _ = tree.input_insert_block(
+                                Block {
+                                    hash: header::hash_from_scale_encoded_header(
+                                        &block.scale_encoded_header,
+                                    ),
+                                    scale_encoded_header: block.scale_encoded_header,
+                                },
+                                Some(parent_index),
+                                same_runtime_as_parent,
+                                block.is_new_best,
+                            );
+                        }
+
                         tree
                     }),
-                },
-                runtimes: slab::Slab::with_capacity(2), // TODO: hardcoded
-            })),
+                };
+            }
+        }
+
+        // State machine containing all the state that will be manipulated below.
+        let mut background = Background {
+            log_target: log_target.clone(),
+            sync_service: sync_service.clone(),
+            guarded: guarded.clone(),
             blocks_stream: subscription.new_blocks.boxed(),
             wake_up_new_necessary_download: future::pending().boxed().fuse(),
             runtime_downloads: stream::FuturesUnordered::new(),
         };
 
-        for block in subscription.non_finalized_blocks_ancestry_order {
-            match &mut background.guarded.try_lock().unwrap().tree {
-                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
-                    let parent_index = tree
-                        .input_iter_unordered()
-                        .find(|b| b.user_data.hash == block.parent_hash)
-                        .unwrap()
-                        .id;
-
-                    let same_runtime_as_parent =
-                        same_runtime_as_parent(&block.scale_encoded_header);
-                    let _ = tree.input_insert_block(
-                        Block {
-                            hash: header::hash_from_scale_encoded_header(
-                                &block.scale_encoded_header,
-                            ),
-                            scale_encoded_header: block.scale_encoded_header,
-                        },
-                        Some(parent_index),
-                        same_runtime_as_parent,
-                        block.is_new_best,
-                    );
-                }
-                _ => unreachable!(),
-            }
-        }
-
         background.start_necessary_downloads().await;
 
         // Inner loop. Process incoming events.
         loop {
-            if !Arc::ptr_eq(&background.guarded, &original_guarded) {
-                // The `Background` object is manipulating a temporary runtime service. Check if
-                // it is possible to write to the original runtime service.
-                let mut temporary_guarded_lock = background.guarded.try_lock().unwrap();
-                let temporary_guarded = &mut *temporary_guarded_lock;
-
-                if let GuardedInner::FinalizedBlockRuntimeKnown {
-                    tree,
-                    finalized_block,
-                    ..
-                } = &mut temporary_guarded.tree
-                {
-                    log::debug!(target: &log_target, "Background worker now in sync");
-
-                    let mut original_guarded_lock = original_guarded.lock().await;
-                    original_guarded_lock.best_near_head_of_chain =
-                        temporary_guarded.best_near_head_of_chain;
-                    original_guarded_lock.tree = GuardedInner::FinalizedBlockRuntimeKnown {
-                        tree: Some(tree.take().unwrap()),
-                        finalized_block: finalized_block.clone(),
-                    };
-                    original_guarded_lock.runtimes = mem::take(&mut temporary_guarded.runtimes);
-
-                    drop(temporary_guarded_lock);
-
-                    original_guarded_lock.all_blocks_subscriptions.clear();
-                    // TODO: correct? especially for the runtime?
-                    original_guarded_lock.notify_subscribers(true, true);
-
-                    background.guarded = original_guarded.clone();
-                }
-            }
-
             futures::select! {
                 _ = &mut background.wake_up_new_necessary_download => {
                     background.start_necessary_downloads().await;
@@ -1669,7 +1665,7 @@ async fn run_background<TPlat: Platform>(
                         Some(sync_service::Notification::Block(new_block)) => {
                             log::debug!(
                                 target: &log_target,
-                                "New sync service block: hash={}, parent={}, is_new_best={}",
+                                "Worker <= InputNewBlock(hash={}, parent={}, is_new_best={})",
                                 HashDisplay(&header::hash_from_scale_encoded_header(&new_block.scale_encoded_header)),
                                 HashDisplay(&new_block.parent_hash),
                                 new_block.is_new_best
@@ -1730,7 +1726,7 @@ async fn run_background<TPlat: Platform>(
                         Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {
                             log::debug!(
                                 target: &log_target,
-                                "New sync service finalization: hash={}, new_best={}",
+                                "Worker <= InputFinalized(hash={}, best={})",
                                 HashDisplay(&hash), HashDisplay(&best_block_hash)
                             );
 
@@ -1742,33 +1738,48 @@ async fn run_background<TPlat: Platform>(
                     background.start_necessary_downloads().await;
                 },
                 (async_op_id, download_result) = background.runtime_downloads.select_next_some() => {
+                    let mut guarded = background.guarded.lock().await;
+
+                    let concerned_blocks = match &guarded.tree {
+                        GuardedInner::FinalizedBlockRuntimeKnown {
+                            tree: Some(tree), ..
+                        } => either::Left(tree.async_op_blocks(async_op_id)),
+                        GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                            either::Right(tree.async_op_blocks(async_op_id))
+                        }
+                        _ => unreachable!(),
+                    }.format_with(", ", |block, fmt| fmt(&HashDisplay(&block.hash))).to_string();
+
                     match download_result {
                         Ok((storage_code, storage_heap_pages)) => {
                             log::debug!(
                                 target: &log_target,
-                                "Successfully finished download of id {:?}",
-                                async_op_id
+                                "Worker <= SuccessfulDownload(blocks=[{}])",
+                                concerned_blocks
                             );
 
                             // TODO: the line below is a complete hack; the code that updates this value is never reached for parachains, and as such the line below is here to update this field
-                            background.guarded.lock().await.best_near_head_of_chain = true;
+                            guarded.best_near_head_of_chain = true;
+                            drop(guarded);
 
                             background.runtime_download_finished(async_op_id, storage_code, storage_heap_pages).await;
                         }
                         Err(error) => {
-                            log::log!(
+                            log::debug!(
                                 target: &log_target,
-                                if error.is_network_problem() {
-                                    log::Level::Debug
-                                } else {
-                                    log::Level::Warn
-                                },
-                                // TODO: better message
-                                "Failed to download :code and :heappages of block: {}",
+                                "Worker <= FailedDownload(blocks=[{}], error={})",
+                                concerned_blocks,
                                 error
                             );
+                            if !error.is_network_problem() {
+                                log::warn!(
+                                    target: &log_target,
+                                    "Failed to download :code and :heappages of blocks {}: {}",
+                                    concerned_blocks,
+                                    error
+                                );
+                            }
 
-                            let mut guarded = background.guarded.lock().await;
                             match &mut guarded.tree {
                                 GuardedInner::FinalizedBlockRuntimeKnown {
                                     tree: Some(tree), ..
@@ -1780,6 +1791,8 @@ async fn run_background<TPlat: Platform>(
                                 }
                                 _ => unreachable!(),
                             }
+
+                            drop(guarded);
                         }
                     }
 
@@ -1814,8 +1827,7 @@ struct Background<TPlat: Platform> {
 
     guarded: Arc<Mutex<Guarded<TPlat>>>,
 
-    /// Stream of blocks updates coming from the sync service.
-    /// Initially has a dummy value.
+    /// Stream of notifications coming from the sync service.
     blocks_stream: Pin<Box<dyn Stream<Item = sync_service::Notification> + Send>>,
 
     /// List of runtimes currently being downloaded from the network.
@@ -1855,7 +1867,28 @@ impl<TPlat: Platform> Background<TPlat> {
         let runtime_index = if let Some(existing_runtime) = existing_runtime {
             existing_runtime
         } else {
-            let runtime = SuccessfulRuntime::from_params(&storage_code, &storage_heap_pages).await;
+            // No identical runtime was found. Try compiling the new runtime.
+            let runtime = SuccessfulRuntime::from_storage(&storage_code, &storage_heap_pages).await;
+            match &runtime {
+                Ok(runtime) => {
+                    log::info!(
+                        target: &self.log_target,
+                        "Successfully compiled runtime. Spec version: {}. Size of `:code`: {}.",
+                        runtime.runtime_spec.decode().spec_version,
+                        BytesDisplay(u64::try_from(storage_code.as_ref().map_or(0, |v| v.len())).unwrap())
+                    );
+                }
+                Err(error) => {
+                    log::warn!(
+                        target: &self.log_target,
+                        "Failed to compile runtime. Size of `:code`: {}.\nError: {}\n\
+                        This indicates an incompatibility between smoldot and the chain.",
+                        BytesDisplay(u64::try_from(storage_code.as_ref().map_or(0, |v| v.len())).unwrap()),
+                        error
+                    );
+                }
+            }
+
             guarded.runtimes.insert(Runtime {
                 num_references: 0, // Incremented below.
                 heap_pages: storage_heap_pages,
@@ -1908,6 +1941,12 @@ impl<TPlat: Platform> Background<TPlat> {
                         let best_block_hash = best_block_index
                             .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash);
 
+                        log::debug!(
+                            target: &self.log_target,
+                            "Worker => OutputFinalized(hash={}, best={})",
+                            HashDisplay(&finalized_block.hash), HashDisplay(&best_block_hash)
+                        );
+
                         guarded.runtimes[former_finalized_runtime_index].num_references -= 1;
                         for (_, _, runtime_index) in pruned_blocks {
                             if let Some(runtime_index) = runtime_index {
@@ -1924,6 +1963,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         let block_index = block.index;
                         let block_runtime_index = *block.async_op_user_data;
                         let scale_encoded_header = block.user_data.scale_encoded_header.clone();
+                        let is_new_best = block.is_new_best;
 
                         best_block_updated |= block.is_new_best;
                         let parent_runtime_index = tree
@@ -1932,11 +1972,18 @@ impl<TPlat: Platform> Background<TPlat> {
                                 *tree.block_async_user_data(idx).unwrap()
                             });
 
+                        log::debug!(
+                            target: &self.log_target,
+                            "Worker => OutputNewBlock(hash={}, is_new_best={})",
+                            HashDisplay(&tree.block_user_data(block_index).hash),
+                            is_new_best
+                        );
+
                         Notification::Block(BlockNotification {
                             parent_hash: tree
                                 .parent(block_index)
                                 .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash),
-                            is_new_best: false,
+                            is_new_best,
                             scale_encoded_header,
                             new_runtime: if parent_runtime_index != block_runtime_index {
                                 Some(
@@ -1974,6 +2021,12 @@ impl<TPlat: Platform> Background<TPlat> {
                         });
                         let new_finalized_hash = new_finalized.hash;
 
+                        log::debug!(
+                            target: &self.log_target,
+                            "Worker => OutputFinalized(hash={}, best={})",
+                            HashDisplay(&new_finalized_hash), HashDisplay(&best_block_hash)
+                        );
+
                         guarded.tree =
                             GuardedInner::FinalizedBlockRuntimeKnown {
                                 tree: Some(tree.take().unwrap().map_async_op_user_data(
@@ -1981,6 +2034,8 @@ impl<TPlat: Platform> Background<TPlat> {
                                 )),
                                 finalized_block: new_finalized,
                             };
+
+                        // TODO: doesn't report existing blocks /!\
 
                         for (_, _, runtime_index) in pruned_blocks {
                             if let Some(Some(runtime_index)) = runtime_index {
@@ -2050,8 +2105,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
             log::debug!(
                 target: &self.log_target,
-                "Starting new download, id={:?}, block={}",
-                download_params.id,
+                "Worker => NewDownload(block={})",
                 HashDisplay(&download_params.block_user_data.hash)
             );
 
@@ -2182,7 +2236,8 @@ struct Runtime {
 }
 
 struct SuccessfulRuntime {
-    /// Cache of the metadata extracted from the runtime. `None` if unknown.
+    // TODO: restore this metadata cache
+    /*/// Cache of the metadata extracted from the runtime. `None` if unknown.
     ///
     /// This cache is filled lazily whenever it is requested through the public API.
     ///
@@ -2198,8 +2253,7 @@ struct SuccessfulRuntime {
     ///
     /// As documented in the smoldot metadata module, the metadata might access the storage, but
     /// we intentionally don't watch for changes in these storage keys to refresh the metadata.
-    metadata: Option<Vec<u8>>,
-
+    metadata: Option<Vec<u8>>,*/
     /// Runtime specs extracted from the runtime.
     runtime_spec: executor::CoreVersion,
 
@@ -2210,12 +2264,11 @@ struct SuccessfulRuntime {
 }
 
 impl SuccessfulRuntime {
-    async fn from_params(
+    async fn from_storage(
         code: &Option<Vec<u8>>,
         heap_pages: &Option<Vec<u8>>,
     ) -> Result<Self, RuntimeError> {
-        // Since compiling the runtime is a CPU-intensive operation, we yield once before and
-        // once after.
+        // Since compiling the runtime is a CPU-intensive operation, we yield once before.
         crate::util::yield_once().await;
 
         let vm = match executor::host::HostVmPrototype::new(
@@ -2230,8 +2283,13 @@ impl SuccessfulRuntime {
             }
         };
 
-        // Since compiling the runtime is a CPU-intensive operation, we yield once before and
-        // once after.
+        Self::from_virtual_machine(vm).await
+    }
+
+    async fn from_virtual_machine(
+        vm: executor::host::HostVmPrototype,
+    ) -> Result<Self, RuntimeError> {
+        // Since getting the runtime spec is a CPU-intensive operation, we yield once before.
         crate::util::yield_once().await;
 
         let (runtime_spec, vm) = match executor::core_version(vm) {
@@ -2242,7 +2300,6 @@ impl SuccessfulRuntime {
         };
 
         Ok(SuccessfulRuntime {
-            metadata: None,
             runtime_spec,
             virtual_machine: Some(vm),
         })

@@ -76,6 +76,13 @@ export function start(config) {
   // JSON-RPC response even though we've already sent a `removeChain` message to it.
   let chainsJsonRpcCallbacks = new Map();
 
+  // For each chain that is currently running, contains the promises corresponding to the database
+  // retrieval requests.
+  // Entries are instantly removed when the user desires to remove a chain even before the worker
+  // has confirmed the removal. Doing so avoids a race condition where the worker sends back a
+  // database content even though we've already sent a `removeChain` message to it.
+  let chainsDatabaseContentPromises = new Map();
+
   // The worker periodically sends a message of kind 'livenessPing' in order to notify that it is
   // still alive.
   // If this liveness ping isn't received for a long time, an error is reported in the logs.
@@ -108,9 +115,10 @@ export function start(config) {
       const expected = pendingConfirmations.shift();
       let chainId = message.chainId; // Later set to null when the chain is removed.
 
-      if (chainsJsonRpcCallbacks.has(chainId)) // Sanity check.
+      if (chainsJsonRpcCallbacks.has(chainId) || chainsDatabaseContentPromises.has(chainId)) // Sanity check.
         throw 'Unexpected reuse of a chain ID';
       chainsJsonRpcCallbacks.set(chainId, expected.jsonRpcCallback);
+      chainsDatabaseContentPromises.set(chainId, new Array());
 
       // `expected` was pushed by the `addChain` method.
       // Resolve the promise that `addChain` returned to the user.
@@ -124,6 +132,28 @@ export function start(config) {
             throw new JsonRpcDisabledError();
           worker.postMessage({ ty: 'request', request, chainId });
         },
+        databaseContent: (maxUtf8BytesSize) => {
+          if (workerError)
+            return Promise.reject(workerError);
+          if (chainId === null)
+            return Promise.reject(new AlreadyDestroyedError());
+
+          let resolve;
+          let reject;
+          const promise = new Promise((res, rej) => {
+            resolve = res;
+            reject = rej;
+          });
+          chainsDatabaseContentPromises.get(chainId).push({ resolve, reject });
+
+          const twoPower32 = (1 << 30) * 4;  // `1 << 31` and `1 << 32` in JavaScript don't give the value that you expect.
+          const maxSize = maxUtf8BytesSize || (twoPower32 - 1);
+          const cappedMaxSize = (maxSize >= twoPower32) ? (twoPower32 - 1) : maxSize;
+
+          worker.postMessage({ ty: 'databaseContent', chainId, maxUtf8BytesSize: cappedMaxSize });
+
+          return promise;
+        },
         remove: () => {
           if (workerError)
             throw workerError;
@@ -132,9 +162,10 @@ export function start(config) {
           pendingConfirmations.push({ ty: 'chainRemoved', chainId });
           worker.postMessage({ ty: 'removeChain', chainId });
           // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
-          // response concerning that `chainId` to arrive after the `remove` function has
-          // returned. We solve that by removing the callback immediately.
+          // response or database content concerning that `chainId` to arrive after the `remove`
+          // function has returned. We solve that by removing the callback immediately.
           chainsJsonRpcCallbacks.delete(chainId);
+          chainsDatabaseContentPromises.delete(chainId);
           chainId = null;
         },
         // Hacky internal method that later lets us access the `chainId` of this chain for
@@ -150,6 +181,10 @@ export function start(config) {
 
     } else if (message.kind == 'chainRemoved') {
       pendingConfirmations.shift();
+
+    } else if (message.kind == 'databaseContent') {
+      const promises = chainsDatabaseContentPromises.get(message.chainId);
+      if (promises) promises.shift().resolve(message.data);
 
     } else if (message.kind == 'log') {
       logCallback(message.level, message.target, message.message);
@@ -178,6 +213,12 @@ export function start(config) {
         pending.reject(workerError);
     }
     pendingConfirmations = [];
+
+    // Reject all promises for database contents.
+    chainsDatabaseContentPromises.forEach((chain) => {
+      chain.forEach((promise) => promise.reject(workerError));
+    });
+    chainsDatabaseContentPromises.clear();
   });
 
   // The first message expected by the worker contains the configuration.
@@ -187,6 +228,7 @@ export function start(config) {
     maxLogLevel: config.maxLogLevel || 3,
     forbidTcp: config.forbidTcp,
     forbidWs: config.forbidWs,
+    forbidNonLocalWs: config.forbidNonLocalWs,
     forbidWss: config.forbidWss,
   });
 
@@ -226,6 +268,7 @@ export function start(config) {
       worker.postMessage({
         ty: 'addChain',
         chainSpec: options.chainSpec,
+        databaseContent: typeof options.databaseContent === 'string' ? options.databaseContent : "",
         potentialRelayChains: potentialRelayChainsIds,
         jsonRpcRunning: !!options.jsonRpcCallback,
       });

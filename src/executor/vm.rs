@@ -49,21 +49,6 @@
 //! is returned and the virtual machine is now paused. Once the logic of the host function has
 //! been executed, call `run` again, passing the return value of that host function.
 //!
-//! # About heap pages
-//!
-//! In the WebAssembly specification, the memory available in the WebAssembly virtual machine has
-//! an initial size and a maximum size. One of the instructions available in WebAssembly code is
-//! [the `memory.grow` instruction](https://webassembly.github.io/spec/core/bikeshed/#-hrefsyntax-instr-memorymathsfmemorygrow),
-//! which allows increasing the size of the memory.
-//!
-//! The Substrate/Polkadot runtime environment, however, differs. Rather than having a resizable
-//! memory, memory has a fixed size that consists of its initial size plus a number of pages equal
-//! to the value of `heap_pages` passed as parameter. It is forbidden for the WebAssembly code
-//! to use `memory.grow`.
-//!
-//! See also the [`../externals`] module for more information about how memory works in the
-//! context of the Substrate/Polkadot runtime.
-//!
 //! # About `__indirect_function_table`
 //!
 //! At initialization, the virtual machine will look for a table named `__indirect_function_table`.
@@ -154,18 +139,17 @@ impl VirtualMachinePrototype {
     /// See [the module-level documentation](..) for an explanation of the parameters.
     pub fn new(
         module: &Module,
-        heap_pages: HeapPages,
         symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
         Ok(VirtualMachinePrototype {
             inner: match &module.inner {
                 ModuleInner::Interpreter(module) => VirtualMachinePrototypeInner::Interpreter(
-                    interpreter::InterpreterPrototype::new(module, heap_pages, symbols)?,
+                    interpreter::InterpreterPrototype::new(module, symbols)?,
                 ),
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
-                ModuleInner::Jit(module) => VirtualMachinePrototypeInner::Jit(
-                    jit::JitPrototype::new(module, heap_pages, symbols)?,
-                ),
+                ModuleInner::Jit(module) => {
+                    VirtualMachinePrototypeInner::Jit(jit::JitPrototype::new(module, symbols)?)
+                }
             },
         })
     }
@@ -181,10 +165,26 @@ impl VirtualMachinePrototype {
         }
     }
 
+    /// Returns the maximum number of pages that the memory can have.
+    ///
+    /// `None` if there is no limit.
+    pub fn memory_max_pages(&self) -> Option<HeapPages> {
+        match &self.inner {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            VirtualMachinePrototypeInner::Jit(inner) => inner.memory_max_pages(),
+            VirtualMachinePrototypeInner::Interpreter(inner) => inner.memory_max_pages(),
+        }
+    }
+
     /// Turns this prototype into an actual virtual machine. This requires choosing which function
     /// to execute.
+    ///
+    /// The `min_memory_pages` value describes the minimum number of pages of Wasm memory that
+    /// should be initially available to the Wasm function call. In other words, the Wasm code
+    /// must be able to write to any memory location inferior to `min_memory_pages * 64 * 1024`.
     pub fn start(
         mut self,
+        min_memory_pages: HeapPages,
         function_name: &str,
         params: &[WasmValue],
     ) -> Result<VirtualMachine, (StartErr, Self)> {
@@ -201,7 +201,7 @@ impl VirtualMachinePrototype {
                     }
                 }
                 VirtualMachinePrototypeInner::Interpreter(inner) => {
-                    match inner.start(function_name, params) {
+                    match inner.start(min_memory_pages, function_name, params) {
                         Ok(vm) => VirtualMachineInner::Interpreter(vm),
                         Err((err, proto)) => {
                             self.inner = VirtualMachinePrototypeInner::Interpreter(proto);
@@ -253,7 +253,7 @@ impl VirtualMachine {
     /// Returns the size of the memory, in bytes.
     ///
     /// > **Note**: This can change over time if the Wasm code uses the `grow` opcode.
-    pub fn memory_size(&self) -> u32 {
+    pub fn memory_size(&self) -> HeapPages {
         match &self.inner {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachineInner::Jit(inner) => inner.memory_size(),
@@ -289,6 +289,18 @@ impl VirtualMachine {
             #[cfg(all(target_arch = "x86_64", feature = "std"))]
             VirtualMachineInner::Jit(inner) => inner.write_memory(offset, value),
             VirtualMachineInner::Interpreter(inner) => inner.write_memory(offset, value),
+        }
+    }
+
+    /// Increases the size of the memory by the given number of pages.
+    ///
+    /// Returns an error if the size of the memory can't be expanded more. This can be known ahead
+    /// of time by using [`VirtualMachinePrototype::memory_max_pages`].
+    pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
+        match &mut self.inner {
+            #[cfg(all(target_arch = "x86_64", feature = "std"))]
+            VirtualMachineInner::Jit(inner) => inner.grow_memory(additional),
+            VirtualMachineInner::Interpreter(inner) => inner.grow_memory(additional),
         }
     }
 
@@ -333,7 +345,11 @@ pub enum ExecHint {
 }
 
 /// Number of heap pages available to the Wasm code.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// Each page is 64kiB.
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, derive_more::Add, derive_more::Sub,
+)]
 pub struct HeapPages(u32);
 
 impl HeapPages {
@@ -631,6 +647,9 @@ pub enum NewErr {
 /// Error that can happen when calling [`VirtualMachinePrototype::start`].
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum StartErr {
+    /// Number of heap pages that have been required is above the limits imposed by the Wasm
+    /// module.
+    RequiredMemoryTooLarge,
     /// Couldn't find the requested function.
     #[display(fmt = "Function to start was not found.")]
     FunctionNotFound,

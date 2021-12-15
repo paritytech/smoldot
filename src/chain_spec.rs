@@ -35,7 +35,7 @@
 //!
 
 use crate::chain::chain_information::{
-    aura_genesis_config, babe_genesis_config, grandpa_genesis_config, BabeEpochInformation,
+    aura_config, babe_genesis_config, grandpa_genesis_config, BabeEpochInformation,
     ChainInformation, ChainInformationConsensus, ChainInformationFinality,
 };
 
@@ -83,10 +83,9 @@ impl ChainSpec {
         };
 
         let consensus = {
-            let aura_genesis_config =
-                aura_genesis_config::AuraGenesisConfiguration::from_genesis_storage(|k| {
-                    genesis_storage.value(k).map(|v| v.to_owned())
-                });
+            let aura_genesis_config = aura_config::AuraConfiguration::from_storage(|k| {
+                genesis_storage.value(k).map(|v| v.to_owned())
+            });
 
             let babe_genesis_config =
                 babe_genesis_config::BabeGenesisConfiguration::from_genesis_storage(|k| {
@@ -388,7 +387,7 @@ pub enum FromGenesisStorageError {
     /// Error when retrieving the GrandPa configuration.
     GrandpaConfigLoad(grandpa_genesis_config::FromGenesisStorageError),
     /// Error when retrieving the Aura algorithm configuration.
-    AuraConfigLoad(aura_genesis_config::FromGenesisStorageError),
+    AuraConfigLoad(aura_config::FromStorageError),
     /// Error when retrieving the Babe algorithm configuration.
     BabeConfigLoad(babe_genesis_config::FromGenesisStorageError),
     /// Multiple consensus algorithms have been detected.

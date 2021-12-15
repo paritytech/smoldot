@@ -27,7 +27,7 @@
 use crate::run::{database_thread, jaeger_service, network_service};
 
 use core::num::NonZeroU32;
-use futures::{channel::mpsc, lock::Mutex, prelude::*};
+use futures::{lock::Mutex, prelude::*};
 use smoldot::{
     author,
     chain::chain_information,
@@ -69,6 +69,24 @@ pub struct Config<'a> {
 
     /// Service to use to report traces.
     pub jaeger_service: Arc<jaeger_service::JaegerService>,
+
+    /// A node has the authorization to author a block during a slot.
+    ///
+    /// In order for the network to perform well, a block should be authored and propagated
+    /// throughout the peer-to-peer network before the end of the slot. In order for this to
+    /// happen, the block creation process itself should end a few seconds before the end of the
+    /// slot. This threshold after which the block creation should end is determined by this value.
+    ///
+    /// The moment in the slot when the authoring ends is determined by
+    /// `slot_duration * slot_duration_author_ratio / u16::max_value()`.
+    /// For example, passing `u16::max_value()` means that the entire slot is used. Passing
+    /// `u16::max_value() / 2` means that half of the slot is used.
+    ///
+    /// A typical value is `43691_u16`, representing 2/3rds of a slot.
+    ///
+    /// Note that this value doesn't determine the moment when creating the block has ended, but
+    /// the moment when creating the block should start its final phase.
+    pub slot_duration_author_ratio: u16,
 }
 
 /// Identifier for a blocks request to be performed.
@@ -147,10 +165,6 @@ impl ConsensusService {
             finalized_block_number,
         }));
 
-        // Channel that sends blocks to the database for the database to write them.
-        // Writing blocks asynchronously considerably speeds up the syncing.
-        let (to_database, messages_rx) = mpsc::channel(4);
-
         // Spawn the background task that synchronizes blocks and updates the database.
         (config.tasks_executor)({
             let mut sync = all::AllSync::new(all::Config {
@@ -200,13 +214,14 @@ impl ConsensusService {
                 block_author_sync_source,
                 block_authoring: None,
                 authored_block: None,
+                slot_duration_author_ratio: config.slot_duration_author_ratio,
                 keystore: config.keystore,
                 finalized_block_storage,
                 sync_state: sync_state.clone(),
                 network_service: config.network_service.0,
                 network_chain_index: config.network_service.1,
                 from_network_service: config.network_events_receiver,
-                to_database,
+                database: config.database,
                 peers_source_id_map: Default::default(),
                 block_requests_finished: stream::FuturesUnordered::new(),
                 jaeger_service: config.jaeger_service,
@@ -216,13 +231,6 @@ impl ConsensusService {
                 tracing::trace_span!(parent: None, "sync-background", root = %HashDisplay(&finalized_block_hash)),
             ))
         });
-
-        // Spawn the background task that writes blocks to the database.
-        (config.tasks_executor)(Box::pin(
-            run_database_write(config.database, messages_rx).instrument(
-                tracing::trace_span!(parent: None, "database-write", root = %HashDisplay(&finalized_block_hash)),
-            ),
-        ));
 
         Arc::new(ConsensusService { sync_state })
     }
@@ -235,10 +243,6 @@ impl ConsensusService {
     pub async fn sync_state(&self) -> SyncState {
         self.sync_state.lock().await.clone()
     }
-}
-
-enum ToDatabase {
-    FinalizedBlocks(Vec<all::Block<()>>),
 }
 
 struct SyncBackground {
@@ -269,6 +273,9 @@ struct SyncBackground {
     /// to `Idle` so as to avoid trying to create a block over and over again.
     // TODO: this list of public keys is a bit hacky
     block_authoring: Option<(author::build::Builder, Vec<[u8; 32]>)>,
+
+    /// See [`Config::slot_duration_author_ratio`].
+    slot_duration_author_ratio: u16,
 
     /// After a block has been authored, it is inserted here while waiting for the `sync` to
     /// import it. Contains the block height, the block hash, the SCALE-encoded block header, and
@@ -319,9 +326,8 @@ struct SyncBackground {
         >,
     >,
 
-    /// Channel to send messages to the background task dedicated to writing to the database
-    /// asynchronously.
-    to_database: mpsc::Sender<ToDatabase>,
+    /// See [`Config::database`].
+    database: Arc<database_thread::DatabaseThread>,
 
     /// How to report events about blocks.
     jaeger_service: Arc<jaeger_service::JaegerService>,
@@ -478,16 +484,15 @@ impl SyncBackground {
                                 .block_span(&decoded.header.hash(), "block-announce-process");
 
                             let id = *self.peers_source_id_map.get(&peer_id).unwrap();
-                            // TODO: stupid to re-encode header
                             // TODO: log the outcome
-                            match self.sync.block_announce(id, decoded.header.scale_encoding_vec(), decoded.is_best) {
+                            match self.sync.block_announce(id, decoded.scale_encoded_header.to_owned(), decoded.is_best) {
                                 all::BlockAnnounceOutcome::HeaderVerify => {},
                                 all::BlockAnnounceOutcome::TooOld { .. } => {},
                                 all::BlockAnnounceOutcome::AlreadyInChain => {},
                                 all::BlockAnnounceOutcome::NotFinalizedChain => {},
-                                all::BlockAnnounceOutcome::InvalidHeader(_) => {},
                                 all::BlockAnnounceOutcome::Discarded => {},
                                 all::BlockAnnounceOutcome::Disjoint {} => {},
+                                all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(),
                             }
                         },
                         _ => {
@@ -554,27 +559,31 @@ impl SyncBackground {
         // the block hash, which is only known at the end.
         let block_author_jaeger_start_time = mick_jaeger::StartTime::now();
 
+        // Determine when the block should stop being authored.
+        //
+        // In order for the network to perform well, a block should be authored and propagated
+        // throughout the peer-to-peer network before the end of the slot. In order for this
+        // to happen, the block creation process itself should end a few seconds before the
+        // end of the slot.
+        //
+        // Most parts of the block authorship can't be accelerated, in particular the
+        // initialization and the signing at the end. This end of authoring threshold is only
+        // checked when deciding whether to continue including more transactions in the block.
+        // TODO: use this
+        // TODO: Substrate nodes increase the time available for authoring if it detects that slots have been skipped, in order to account for the possibility that the initialization of a block or the inclusion of an extrinsic takes too long
+        let authoring_end = {
+            let start = authoring_start.slot_start_from_unix_epoch();
+            let end = authoring_start.slot_end_from_unix_epoch();
+            debug_assert!(start < end);
+            debug_assert!(SystemTime::now() >= SystemTime::UNIX_EPOCH + start);
+            SystemTime::UNIX_EPOCH
+                + start
+                + (end - start) * u32::from(self.slot_duration_author_ratio)
+                    / u32::from(u16::max_value())
+        };
+
         // Actual block production now happening.
         let block = {
-            // Determine when the block should stop being authored.
-            //
-            // In order for the network to perform well, a block should be authored and propagated
-            // throughout the peer-to-peer network before the end of the slot. In order for this
-            // to happen, the block creation process itself should end a few seconds before the
-            // end of the slot. This threshold after which the block creation should end is
-            // arbitrary, but we define it here as 2/3rds of the block duration.
-            //
-            // Most parts of the block authorship can't be accelerated, in particular the
-            // initialization and the signing at the end. This end of authoring threshold is only
-            // checked when deciding whether to continue including more transactions in the block.
-            // TODO: use this
-            let _authoring_end = {
-                let start = authoring_start.slot_start_from_unix_epoch();
-                let end = authoring_start.slot_end_from_unix_epoch();
-                debug_assert!(start < end);
-                SystemTime::UNIX_EPOCH + start + (end - start) * 2 / 3
-            };
-
             // Start the block authoring process.
             let mut block_authoring = {
                 let best_block_storage_access = self.sync.best_block_storage().unwrap();
@@ -714,6 +723,18 @@ impl SyncBackground {
             .jaeger_service
             .block_span(&new_block_hash, "author")
             .with_start_time_override(block_author_jaeger_start_time);
+
+        // Print a warning if generating the block has taken more time than expected.
+        // This can happen because the node is completely overloaded, is running on a slow machine,
+        // or if the runtime code being executed contains a very heavy operation.
+        // In any case, there is not much that a node operator can do except try increase the
+        // performance of their machine.
+        match authoring_end.elapsed() {
+            Ok(now_minus_end) if now_minus_end < Duration::from_millis(500) => {}
+            _ => {
+                tracing::warn!(hash = %HashDisplay(&new_block_hash), "block-generation-too-long");
+            }
+        }
 
         // Switch the block authoring to a state where we won't try to generate a new block again
         // until something new happens.
@@ -1068,11 +1089,10 @@ impl SyncBackground {
                                 }
                             }
 
-                            self.to_database
-                                .send(ToDatabase::FinalizedBlocks(finalized_blocks))
-                                .await
-                                .unwrap();
-
+                            let new_finalized_hash =
+                                finalized_blocks.last().map(|lf| lf.header.hash()).unwrap();
+                            database_blocks(&self.database, finalized_blocks).await;
+                            database_set_finalized(&self.database, new_finalized_hash).await;
                             continue;
                         }
                         (sync_out, all::JustificationVerifyOutcome::Error(error)) => {
@@ -1123,54 +1143,47 @@ impl SyncBackground {
     }
 }
 
-/// Runs the task that writes blocks to the database.
-#[tracing::instrument(level = "trace", skip(database, messages_rx))]
-async fn run_database_write(
-    database: Arc<database_thread::DatabaseThread>,
-    mut messages_rx: mpsc::Receiver<ToDatabase>,
-) {
-    loop {
-        match messages_rx.next().await {
-            None => break,
-            Some(ToDatabase::FinalizedBlocks(finalized_blocks)) => {
-                let span = tracing::debug_span!("blocks-db-write", len = finalized_blocks.len());
+/// Writes blocks to the database
+async fn database_blocks(database: &database_thread::DatabaseThread, blocks: Vec<all::Block<()>>) {
+    database
+        .with_database_detached(|database| {
+            for block in blocks {
+                // TODO: overhead for building the SCALE encoding of the header
+                let result = database.insert(
+                    &block.header.scale_encoding().fold(Vec::new(), |mut a, b| {
+                        a.extend_from_slice(b.as_ref());
+                        a
+                    }),
+                    true, // TODO: is_new_best?
+                    block.full.as_ref().unwrap().body.iter(),
+                    block
+                        .full
+                        .as_ref()
+                        .unwrap()
+                        .storage_top_trie_changes
+                        .iter()
+                        .map(|(k, v)| (k, v.as_ref())),
+                );
 
-                database
-                    .with_database(|database| {
-                        let new_finalized_hash = finalized_blocks.last().map(|lf| lf.header.hash());
-
-                        for block in finalized_blocks {
-                            // TODO: overhead for building the SCALE encoding of the header
-                            let result = database.insert(
-                                &block.header.scale_encoding().fold(Vec::new(), |mut a, b| {
-                                    a.extend_from_slice(b.as_ref());
-                                    a
-                                }),
-                                true, // TODO: is_new_best?
-                                block.full.as_ref().unwrap().body.iter(),
-                                block
-                                    .full
-                                    .as_ref()
-                                    .unwrap()
-                                    .storage_top_trie_changes
-                                    .iter()
-                                    .map(|(k, v)| (k, v.as_ref())),
-                            );
-
-                            match result {
-                                Ok(()) => {}
-                                Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
-                                Err(err) => panic!("{}", err),
-                            }
-                        }
-
-                        if let Some(new_finalized_hash) = new_finalized_hash {
-                            database.set_finalized(&new_finalized_hash).unwrap();
-                        }
-                    })
-                    .instrument(span)
-                    .await;
+                match result {
+                    Ok(()) => {}
+                    Err(full_sqlite::InsertError::Duplicate) => {} // TODO: this should be an error ; right now we silence them because non-finalized blocks aren't loaded from the database at startup, resulting in them being downloaded again
+                    Err(err) => panic!("{}", err),
+                }
             }
-        }
-    }
+        })
+        .await
+}
+
+/// Writes blocks to the database
+async fn database_set_finalized(
+    database: &database_thread::DatabaseThread,
+    finalized_block_hash: [u8; 32],
+) {
+    // TODO: what if best block changed?
+    database
+        .with_database_detached(move |database| {
+            database.set_finalized(&finalized_block_hash).unwrap();
+        })
+        .await
 }

@@ -103,7 +103,7 @@ pub enum DecodeFindNodeResponseError {
     /// Error while parsing a [`peer_id::PeerId`] in the response.
     BadPeerId(peer_id::FromBytesError),
     /// Error while parsing a [`multiaddr::Multiaddr`] in the response.
-    BadMultiaddr(multiaddr::Error),
+    BadMultiaddr(multiaddr::FromVecError),
 }
 
 /// Error while decoding the protobuf encoding.

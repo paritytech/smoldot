@@ -25,7 +25,7 @@ use super::{
 use alloc::{boxed::Box, rc::Rc, string::String, vec::Vec};
 use core::{
     cell::RefCell,
-    cmp, fmt,
+    fmt,
     task::{Context, Poll, Waker},
 };
 
@@ -72,6 +72,7 @@ pub struct JitPrototype {
     shared: Rc<RefCell<Shared>>,
 
     /// Reference to the memory used by the module, if any.
+    // TODO: shouldn't be an Option? just return error if no memory?
     memory: Option<wasmtime::Memory>,
 
     /// Reference to the table of indirect functions, in case we need to access it.
@@ -83,7 +84,6 @@ impl JitPrototype {
     /// See [`super::VirtualMachinePrototype::new`].
     pub fn new(
         module: &Module,
-        heap_pages: HeapPages,
         mut symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
         let store = wasmtime::Store::new(module.inner.engine());
@@ -189,20 +189,15 @@ impl JitPrototype {
                         )));
                     }
                     wasmtime::ExternType::Memory(m) => {
-                        let limits = {
-                            let heap_pages = u32::from(heap_pages);
-                            let min = cmp::max(m.limits().min(), heap_pages);
-                            let _max = m.limits().max(); // TODO: make sure it's > to min, otherwise error
-                            let num = min + heap_pages;
-                            wasmtime::Limits::new(num, Some(num))
-                        };
-
                         // TODO: check name and all?
                         // TODO: proper error instead of asserting?
                         assert!(imported_memory.is_none());
                         imported_memory = Some(
-                            wasmtime::Memory::new(&store, wasmtime::MemoryType::new(limits))
-                                .map_err(|_| NewErr::CouldntAllocateMemory)?,
+                            wasmtime::Memory::new(
+                                &store,
+                                wasmtime::MemoryType::new(m.limits().clone()),
+                            )
+                            .map_err(|_| NewErr::CouldntAllocateMemory)?,
                         );
                         imports.push(wasmtime::Extern::Memory(
                             imported_memory.as_ref().unwrap().clone(),
@@ -223,8 +218,6 @@ impl JitPrototype {
 
         let exported_memory = if let Some(mem) = instance.get_export("memory") {
             if let Some(mem) = mem.into_memory() {
-                // TODO: do this properly
-                mem.grow(u32::try_from(heap_pages).unwrap()).unwrap();
                 Some(mem)
             } else {
                 return Err(NewErr::MemoryIsntMemory);
@@ -266,6 +259,15 @@ impl JitPrototype {
                 _ => Err(GlobalValueErr::Invalid),
             },
             _ => Err(GlobalValueErr::NotFound),
+        }
+    }
+
+    /// See [`super::VirtualMachinePrototype::memory_max_pages`].
+    pub fn memory_max_pages(&self) -> Option<HeapPages> {
+        if let Some(memory) = &self.memory {
+            memory.ty().limits().max().map(HeapPages::new)
+        } else {
+            None
         }
     }
 
@@ -430,13 +432,13 @@ impl Jit {
     }
 
     /// See [`super::VirtualMachine::memory_size`].
-    pub fn memory_size(&self) -> u32 {
+    pub fn memory_size(&self) -> HeapPages {
         let mem = match self.memory.as_ref() {
             Some(m) => m,
-            None => return 0,
+            None => return HeapPages::new(0),
         };
 
-        u32::try_from(mem.data_size()).unwrap()
+        HeapPages::new(u32::try_from(mem.size()).unwrap())
     }
 
     /// See [`super::VirtualMachine::read_memory`].
@@ -464,6 +466,7 @@ impl Jit {
         // Soundness: the documentation of wasmtime precisely explains what is safe or not.
         // Basically, we are safe as long as we are sure that we don't potentially grow the
         // buffer (which would invalidate the buffer pointer).
+        // This is safe because `Jit` doesn't implement `Sync`.
         unsafe {
             if end > mem.data_unchecked().len() {
                 return Err(OutOfBoundsError);
@@ -501,6 +504,22 @@ impl Jit {
                 mem.data_unchecked_mut()[start..end].copy_from_slice(value);
             }
         }
+
+        Ok(())
+    }
+
+    /// See [`super::VirtualMachine::grow_memory`].
+    pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
+        let mem = match self.memory.as_ref() {
+            Some(m) => m,
+            None => return Err(OutOfBoundsError),
+        };
+
+        // Note that `grow` invalidates the pointer returned by `read_memory` above.
+        // This is safe because `Jit` doesn't implement `Sync`.
+        // TODO: maybe write a test for not implementing Sync? sounds kind of complicated
+        mem.grow(u32::from(additional))
+            .map_err(|_| OutOfBoundsError)?;
 
         Ok(())
     }
