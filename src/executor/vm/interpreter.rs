@@ -24,7 +24,6 @@ use super::{
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::ToString as _, sync::Arc, vec::Vec};
 use core::{cell::RefCell, fmt};
-use wasmi::memory_units::ByteSize as _;
 
 /// See [`super::Module`].
 #[derive(Clone)]
@@ -58,6 +57,7 @@ pub struct InterpreterPrototype {
     /// Right now we only support one unique `Memory` object per process. This is it.
     /// Contains `None` if the process doesn't export any memory object, which means it doesn't
     /// use any memory.
+    // TODO: should just return an error instead of None
     memory: Option<wasmi::MemoryRef>,
 
     /// Table of the indirect function calls.
@@ -71,13 +71,11 @@ impl InterpreterPrototype {
     /// See [`super::VirtualMachinePrototype::new`].
     pub fn new(
         module: &Module,
-        heap_pages: HeapPages,
         mut symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
         struct ImportResolve<'a> {
             functions: RefCell<&'a mut dyn FnMut(&str, &str, &Signature) -> Result<usize, ()>>,
             import_memory: RefCell<&'a mut Option<wasmi::MemoryRef>>,
-            heap_pages: usize,
         }
 
         impl<'a> wasmi::ImportResolver for ImportResolve<'a> {
@@ -139,32 +137,14 @@ impl InterpreterPrototype {
                         "Memory can not be imported twice!".into(),
                     )),
                     memory_ref @ None => {
-                        if memory_type
-                            .maximum()
-                            .map(|m| m.saturating_sub(memory_type.initial()))
-                            .map(|m| self.heap_pages > m as usize)
-                            .unwrap_or(false)
-                        {
-                            Err(wasmi::Error::Instantiation(format!(
-                                "Heap pages ({}) is greater than imported memory maximum ({}).",
-                                self.heap_pages,
-                                memory_type
-                                    .maximum()
-                                    .map(|m| m.saturating_sub(memory_type.initial()))
-                                    .unwrap(),
-                            )))
-                        } else {
-                            let memory = wasmi::MemoryInstance::alloc(
-                                wasmi::memory_units::Pages(
-                                    memory_type.initial() as usize + self.heap_pages,
-                                ),
-                                Some(wasmi::memory_units::Pages(
-                                    memory_type.initial() as usize + self.heap_pages,
-                                )),
-                            )?;
-                            **memory_ref = Some(memory.clone());
-                            Ok(memory)
-                        }
+                        let memory = wasmi::MemoryInstance::alloc(
+                            wasmi::memory_units::Pages(memory_type.initial() as usize),
+                            memory_type
+                                .maximum()
+                                .map(|hp| wasmi::memory_units::Pages(hp as usize)),
+                        )?;
+                        **memory_ref = Some(memory.clone());
+                        Ok(memory)
                     }
                 }
             }
@@ -181,14 +161,11 @@ impl InterpreterPrototype {
             }
         }
 
-        let heap_pages = usize::try_from(u32::from(heap_pages)).unwrap_or(usize::max_value());
-
         let mut import_memory = None;
         let not_started = {
             let resolver = ImportResolve {
                 functions: RefCell::new(&mut symbols),
                 import_memory: RefCell::new(&mut import_memory),
-                heap_pages,
             };
             wasmi::ModuleInstance::new(&module.inner, &resolver)
                 .map_err(|err| ModuleError(err.to_string()))
@@ -201,8 +178,6 @@ impl InterpreterPrototype {
             Some(import_memory)
         } else if let Some(mem) = module.export_by_name("memory") {
             if let Some(mem) = mem.as_memory() {
-                // TODO: don't unwrap /!\ need to figure out how heap_pages really works
-                mem.grow(wasmi::memory_units::Pages(heap_pages)).unwrap();
                 Some(mem.clone())
             } else {
                 return Err(NewErr::MemoryIsntMemory);
@@ -230,7 +205,7 @@ impl InterpreterPrototype {
 
     /// See [`super::VirtualMachinePrototype::global_value`].
     pub fn global_value(&self, name: &str) -> Result<u32, GlobalValueErr> {
-        let heap_base_val = self
+        let value = self
             .module
             .export_by_name(name)
             .ok_or(GlobalValueErr::NotFound)?
@@ -238,7 +213,7 @@ impl InterpreterPrototype {
             .ok_or(GlobalValueErr::Invalid)?
             .get();
 
-        match heap_base_val {
+        match value {
             wasmi::RuntimeValue::I32(v) => match u32::try_from(v) {
                 Ok(v) => Ok(v),
                 Err(_) => Err(GlobalValueErr::Invalid),
@@ -247,12 +222,37 @@ impl InterpreterPrototype {
         }
     }
 
+    /// See [`super::VirtualMachinePrototype::memory_max_pages`].
+    pub fn memory_max_pages(&self) -> Option<HeapPages> {
+        match &self.memory {
+            Some(memory) => memory
+                .maximum()
+                .and_then(|hp| u32::try_from(hp.0).ok()) // An overflow in the maximum leads to returning `None`
+                .map(|hp| HeapPages(hp)),
+            None => None,
+        }
+    }
+
     /// See [`super::VirtualMachinePrototype::start`].
     pub fn start(
         self,
+        min_memory_pages: HeapPages,
         function_name: &str,
         params: &[WasmValue],
     ) -> Result<Interpreter, (StartErr, Self)> {
+        if let Some(memory) = &self.memory {
+            let min_memory_pages = match usize::try_from(min_memory_pages.0) {
+                Ok(hp) => hp,
+                Err(_) => return Err((StartErr::RequiredMemoryTooLarge, self)),
+            };
+
+            if let Some(to_grow) = min_memory_pages.checked_sub(memory.current_size().0) {
+                if memory.grow(wasmi::memory_units::Pages(to_grow)).is_err() {
+                    return Err((StartErr::RequiredMemoryTooLarge, self));
+                }
+            }
+        }
+
         let execution = match self.module.export_by_name(function_name) {
             Some(wasmi::ExternVal::Func(f)) => {
                 // Try to convert the signature of the function to call, in order to make sure
@@ -441,13 +441,15 @@ impl Interpreter {
     }
 
     /// See [`super::VirtualMachine::memory_size`].
-    pub fn memory_size(&self) -> u32 {
+    pub fn memory_size(&self) -> HeapPages {
         let mem = match self.memory.as_ref() {
             Some(m) => m,
-            None => return 0,
+            None => return HeapPages(0), // TODO: correct? we promise things in the API of new() regarding this, and it seems incoherent
         };
 
-        u32::try_from(mem.current_size().0 * wasmi::memory_units::Pages::byte_size().0).unwrap()
+        // Being a 32bits platform, it's impossible that the vm has a number of currently
+        // allocated pages that can't fit in 32bits, so this unwrap can't fail.
+        HeapPages(u32::try_from(mem.current_size().0).unwrap())
     }
 
     /// See [`super::VirtualMachine::read_memory`].
@@ -523,6 +525,18 @@ impl Interpreter {
         };
 
         mem.set(offset, value).map_err(|_| OutOfBoundsError)
+    }
+
+    /// See [`super::VirtualMachine::write_memory`].
+    pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
+        if let Some(mem) = &self.memory {
+            mem.grow(wasmi::memory_units::Pages(
+                usize::try_from(additional.0).unwrap(),
+            ))
+            .map_err(|_| OutOfBoundsError)?;
+        }
+
+        Ok(())
     }
 
     /// See [`super::VirtualMachine::into_prototype`].
