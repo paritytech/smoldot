@@ -20,8 +20,7 @@ use crate::{network_service, Platform};
 
 use futures::{channel::mpsc, prelude::*};
 use smoldot::{
-    chain,
-    header,
+    chain, header,
     informant::HashDisplay,
     libp2p,
     network::{self, protocol},
