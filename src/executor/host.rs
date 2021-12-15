@@ -78,12 +78,6 @@
 //! machine is always fixed, and is equal to the initial size of the memory plus the value of
 //! `heap_pages` that is passed as parameter to [`HostVmPrototype::new`].
 //!
-//! Note that the WebAssembly code can also itself contain a maximum number of memory pages. While
-//! it would in principle make sense to check at initialization that
-//! `maximum_pages >= __heap_base + heap_pages`, in practice this check fails for most runtimes
-//! and is therefore not performed. Reaching the maximum number of pages is considered as an out
-//! of memory error.
-//!
 //! ## Entry points
 //!
 //! All entry points that can be called from the host (using, for example,
@@ -190,7 +184,7 @@ use super::{allocator, vm};
 use crate::{trie, util};
 
 use alloc::{borrow::ToOwned as _, format, string::String, vec, vec::Vec};
-use core::{cmp, fmt, hash::Hasher as _, iter, str};
+use core::{fmt, hash::Hasher as _, iter, str};
 use sha2::Digest as _;
 use tiny_keccak::Hasher as _;
 
@@ -228,7 +222,7 @@ pub struct HostVmPrototype {
     heap_pages: HeapPages,
 
     /// Total number of pages of Wasm memory. This is equal to `heap_base / 64k` (rounded up) plus
-    /// `heap_pages`, capped at the maximum enforced by the Wasm module.
+    /// `heap_pages`.
     memory_total_pages: HeapPages,
 }
 
@@ -282,17 +276,18 @@ impl HostVmPrototype {
             .global_value("__heap_base")
             .map_err(|_| NewErr::HeapBaseNotFound)?;
 
-        let memory_total_pages = {
-            let base = if heap_base == 0 {
-                heap_pages
-            } else {
-                HeapPages::new((heap_base - 1) / (64 * 1024)) + heap_pages + HeapPages::new(1)
-            };
-
-            vm_proto
-                .memory_max_pages()
-                .map_or(base, |limit| cmp::min(limit, base))
+        let memory_total_pages = if heap_base == 0 {
+            heap_pages
+        } else {
+            HeapPages::new((heap_base - 1) / (64 * 1024)) + heap_pages + HeapPages::new(1)
         };
+
+        if vm_proto
+            .memory_max_pages()
+            .map_or(false, |max| max < memory_total_pages)
+        {
+            return Err(NewErr::MemoryMaxSizeTooLow);
+        }
 
         Ok(HostVmPrototype {
             module,
@@ -2345,8 +2340,8 @@ impl Inner {
             // in case `last_byte_memory_page` is the maximum possible value.
             let to_grow = last_byte_memory_page - current_num_pages + HeapPages::new(1);
 
-            // We tell the allocator how much the memory of the virtual machine is capable of
-            // growing. A panic here indicates a bug either in the allocator or this module.
+            // We check at initialization that the virtual machine is capable of growing up to
+            // `memory_total_pages`, meaning that this `unwrap` can't panic.
             self.vm.grow_memory(to_grow).unwrap();
         }
 
@@ -2377,6 +2372,9 @@ pub enum NewErr {
     BadFormat(ModuleFormatError),
     /// Couldn't find the `__heap_base` symbol in the Wasm code.
     HeapBaseNotFound,
+    /// Maximum size of the Wasm memory found in the module is too low to provide the requested
+    /// number of heap pages.
+    MemoryMaxSizeTooLow,
 }
 
 /// Error that can happen when starting a VM.
@@ -2841,8 +2839,8 @@ impl<'a> allocator::Memory for MemAccess<'a> {
             // in case `written_memory_page` is the maximum possible value.
             let to_grow = written_memory_page - current_num_pages + HeapPages::new(1);
 
-            // We tell the allocator how much the memory of the virtual machine is capable of
-            // growing. A panic here indicates a bug either in the allocator or this module.
+            // We check at initialization that the virtual machine is capable of growing up to
+            // `memory_total_pages`, meaning that this `unwrap` can't panic.
             self.vm.grow_memory(to_grow).unwrap();
         }
 
