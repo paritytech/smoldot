@@ -1385,12 +1385,12 @@ impl<TPlat: Platform> Background<TPlat> {
                 .await;
             }
             methods::MethodCall::chainHead_unstable_header {
-                followSubscriptionId,
+                follow_subscription_id,
                 hash,
             } => {
                 let response = {
                     let lock = self.subscriptions.lock().await;
-                    if let Some(subscription) = lock.chain_head_follow.get(followSubscriptionId) {
+                    if let Some(subscription) = lock.chain_head_follow.get(follow_subscription_id) {
                         if subscription.cancel.is_canceled() {
                             Some(None)
                         } else {
@@ -1429,7 +1429,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 }
             }
             methods::MethodCall::chainHead_unstable_unpin {
-                followSubscriptionId,
+                follow_subscription_id: followSubscriptionId,
                 hash,
             } => {
                 let invalid = {
@@ -1468,7 +1468,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 }
             }
             methods::MethodCall::chainHead_unstable_unfollow {
-                followSubscriptionId,
+                follow_subscription_id: followSubscriptionId,
             } => {
                 if let Some(subscription) = self
                     .subscriptions
