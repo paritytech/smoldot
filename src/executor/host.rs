@@ -69,14 +69,14 @@
 //! `ext_allocator_malloc_version_1` and `ext_allocator_free_version_1` host functions for this
 //! purpose. Calling `memory.grow` is forbidden.
 //!
-//! Consequently, the size of the memory available to the WebAssembly virtual machine is always
-//! fixed, and is equal to the initial size of the memory plus the value of `heap_pages` that is
-//! passed as parameter to [`HostVmPrototype::new`].
-//!
-//! Additionally, the runtime code must export a global symbol named `__heap_base` of type `i32`.
+//! Consequently, the runtime code must export a global symbol named `__heap_base` of type `i32`.
 //! Any memory whose offset is below the value of `__heap_base` can be used at will by the
 //! program, while any memory above this value is available for use by the implementation of
 //! `ext_allocator_malloc_version_1`.
+//!
+//! The size of the memory available above `__heap_base` available to the WebAssembly virtual
+//! machine is always fixed, and is equal to the initial size of the memory plus the value of
+//! `heap_pages` that is passed as parameter to [`HostVmPrototype::new`].
 //!
 //! ## Entry points
 //!
@@ -220,6 +220,10 @@ pub struct HostVmPrototype {
 
     /// Value of `heap_pages` passed to [`HostVmPrototype::new`].
     heap_pages: HeapPages,
+
+    /// Total number of pages of Wasm memory. This is equal to `heap_base / 64k` (rounded up) plus
+    /// `heap_pages`.
+    memory_total_pages: HeapPages,
 }
 
 impl HostVmPrototype {
@@ -248,7 +252,6 @@ impl HostVmPrototype {
             let mut registered_functions = Vec::new();
             let vm_proto = vm::VirtualMachinePrototype::new(
                 &module,
-                heap_pages,
                 // This closure is called back for each function that the runtime imports.
                 |mod_name, f_name, _signature| {
                     if mod_name != "env" {
@@ -273,12 +276,26 @@ impl HostVmPrototype {
             .global_value("__heap_base")
             .map_err(|_| NewErr::HeapBaseNotFound)?;
 
+        let memory_total_pages = if heap_base == 0 {
+            heap_pages
+        } else {
+            HeapPages::new((heap_base - 1) / (64 * 1024)) + heap_pages + HeapPages::new(1)
+        };
+
+        if vm_proto
+            .memory_max_pages()
+            .map_or(false, |max| max < memory_total_pages)
+        {
+            return Err(NewErr::MemoryMaxSizeTooLow);
+        }
+
         Ok(HostVmPrototype {
             module,
             vm_proto,
             heap_base,
             registered_functions,
             heap_pages,
+            memory_total_pages,
         })
     }
 
@@ -319,6 +336,7 @@ impl HostVmPrototype {
         // Now create the actual virtual machine. We pass as parameter `heap_base` as the location
         // of the input data.
         let mut vm = match self.vm_proto.start(
+            vm::HeapPages::new(1 + self.heap_base / (64 * 1024)), // TODO: `1 + ` is a hack for the start value; solve with https://github.com/paritytech/smoldot/issues/132
             function_to_call,
             &[
                 vm::WasmValue::I32(i32::from_ne_bytes(self.heap_base.to_ne_bytes())),
@@ -353,6 +371,7 @@ impl HostVmPrototype {
                 vm,
                 heap_base: self.heap_base,
                 heap_pages: self.heap_pages,
+                memory_total_pages: self.memory_total_pages,
                 registered_functions: self.registered_functions,
                 within_storage_transaction: false,
                 allocator,
@@ -520,7 +539,9 @@ impl ReadyToRun {
                 let value_size = u32::try_from(ret >> 32).unwrap();
                 let value_ptr = u32::try_from(ret & 0xffffffff).unwrap();
 
-                if value_size.saturating_add(value_ptr) <= self.inner.vm.memory_size() {
+                if value_size.saturating_add(value_ptr)
+                    <= u32::from(self.inner.vm.memory_size()) * 64 * 1024
+                {
                     return HostVm::Finished(Finished {
                         inner: self.inner,
                         value_ptr,
@@ -530,7 +551,7 @@ impl ReadyToRun {
                     let error = Error::ReturnedPtrOutOfRange {
                         pointer: value_ptr,
                         size: value_size,
-                        memory_size: self.inner.vm.memory_size(),
+                        memory_size: u32::from(self.inner.vm.memory_size()) * 64 * 1024,
                     };
 
                     return HostVm::Error {
@@ -656,7 +677,7 @@ impl ReadyToRun {
                 let len = u32::try_from(val >> 32).unwrap();
                 let ptr = u32::try_from(val & 0xffffffff).unwrap();
 
-                if len.saturating_add(ptr) > self.inner.vm.memory_size() {
+                if len.saturating_add(ptr) > u32::from(self.inner.vm.memory_size()) * 64 * 1024 {
                     return HostVm::Error {
                         error: Error::ParamOutOfRange {
                             function: host_fn.name(),
@@ -1407,18 +1428,11 @@ impl ReadyToRun {
             HostFunction::ext_allocator_malloc_version_1 => {
                 let size = expect_u32!(0);
 
-                let ptr = match self
-                    .inner
-                    .allocator
-                    .allocate(&mut MemAccess(&mut self.inner.vm), size)
-                {
+                let ptr = match self.inner.alloc(host_fn.name(), size) {
                     Ok(p) => p,
-                    Err(_) => {
+                    Err(error) => {
                         return HostVm::Error {
-                            error: Error::OutOfMemory {
-                                function: host_fn.name(),
-                                requested_size: size,
-                            },
+                            error,
                             prototype: self.inner.into_prototype(),
                         }
                     }
@@ -1432,11 +1446,13 @@ impl ReadyToRun {
             }
             HostFunction::ext_allocator_free_version_1 => {
                 let pointer = expect_u32!(0);
-                match self
-                    .inner
-                    .allocator
-                    .deallocate(&mut MemAccess(&mut self.inner.vm), pointer)
-                {
+                match self.inner.allocator.deallocate(
+                    &mut MemAccess {
+                        vm: &mut self.inner.vm,
+                        memory_total_pages: self.inner.memory_total_pages,
+                    },
+                    pointer,
+                ) {
                     Ok(()) => {}
                     Err(_) => {
                         return HostVm::Error {
@@ -2166,6 +2182,9 @@ struct Inner {
     /// Value of `heap_pages` passed to [`HostVmPrototype::new`].
     heap_pages: HeapPages,
 
+    /// See [`HostVmPrototype::memory_total_pages`].
+    memory_total_pages: HeapPages,
+
     /// If true, a transaction has been started using `ext_storage_start_transaction_version_1`.
     /// No further transaction start is allowed before the current one ends.
     within_storage_transaction: bool,
@@ -2200,17 +2219,11 @@ impl Inner {
                 .saturating_add(u32::try_from(chunk.as_ref().len()).unwrap_or(u32::max_value()));
         }
 
-        let dest_ptr = match self
-            .allocator
-            .allocate(&mut MemAccess(&mut self.vm), data_len)
-        {
+        let dest_ptr = match self.alloc(function_name, data_len) {
             Ok(p) => p,
-            Err(_) => {
+            Err(error) => {
                 return HostVm::Error {
-                    error: Error::OutOfMemory {
-                        function: function_name,
-                        requested_size: data_len,
-                    },
+                    error,
                     prototype: self.into_prototype(),
                 }
             }
@@ -2255,17 +2268,11 @@ impl Inner {
                 .saturating_add(u32::try_from(chunk.as_ref().len()).unwrap_or(u32::max_value()));
         }
 
-        let dest_ptr = match self
-            .allocator
-            .allocate(&mut MemAccess(&mut self.vm), data_len)
-        {
+        let dest_ptr = match self.alloc(function_name, data_len) {
             Ok(p) => p,
-            Err(_) => {
+            Err(error) => {
                 return HostVm::Error {
-                    error: Error::OutOfMemory {
-                        function: function_name,
-                        requested_size: data_len,
-                    },
+                    error,
                     prototype: self.into_prototype(),
                 }
             }
@@ -2286,6 +2293,61 @@ impl Inner {
         .into()
     }
 
+    /// Uses the memory allocator to allocate some memory.
+    ///
+    /// The function name passed as parameter is used for error-reporting reasons.
+    ///
+    /// # Panic
+    ///
+    /// Must only be called while the Wasm is handling an host_fn.
+    ///
+    fn alloc(&mut self, function_name: &'static str, size: u32) -> Result<u32, Error> {
+        // Use the allocator to decide where the value will be written.
+        let dest_ptr = match self.allocator.allocate(
+            &mut MemAccess {
+                vm: &mut self.vm,
+                memory_total_pages: self.memory_total_pages,
+            },
+            size,
+        ) {
+            Ok(p) => p,
+            Err(_) => {
+                return Err(Error::OutOfMemory {
+                    function: function_name,
+                    requested_size: size,
+                })
+            }
+        };
+
+        // Unfortunately this function doesn't stop here.
+        // We lie to the allocator. The allocator thinks that there are `self.memory_total_pages`
+        // allocated and available, while in reality it can be less.
+        // The allocator might thus allocate memory at a location above the current memory size.
+        // To handle this, we grow the memory.
+
+        // Offset of the memory page where the last allocated byte is found.
+        let last_byte_memory_page = HeapPages::new((dest_ptr + size - 1) / (64 * 1024));
+
+        // Grow the memory more if necessary.
+        // Please note the `=`. For example if we write to page 0, we want to have at least 1 page
+        // allocated.
+        let current_num_pages = self.vm.memory_size();
+        debug_assert!(current_num_pages <= self.memory_total_pages);
+        if current_num_pages <= last_byte_memory_page {
+            // For now, we grow the memory just enough to fit.
+            // TODO: do better
+            // Note the order of operations: we add 1 at the end to avoid a potential overflow
+            // in case `last_byte_memory_page` is the maximum possible value.
+            let to_grow = last_byte_memory_page - current_num_pages + HeapPages::new(1);
+
+            // We check at initialization that the virtual machine is capable of growing up to
+            // `memory_total_pages`, meaning that this `unwrap` can't panic.
+            self.vm.grow_memory(to_grow).unwrap();
+        }
+
+        Ok(dest_ptr)
+    }
+
     /// Turns the virtual machine back into a prototype.
     fn into_prototype(self) -> HostVmPrototype {
         HostVmPrototype {
@@ -2294,6 +2356,7 @@ impl Inner {
             heap_base: self.heap_base,
             registered_functions: self.registered_functions,
             heap_pages: self.heap_pages,
+            memory_total_pages: self.memory_total_pages,
         }
     }
 }
@@ -2309,6 +2372,9 @@ pub enum NewErr {
     BadFormat(ModuleFormatError),
     /// Couldn't find the `__heap_base` symbol in the Wasm code.
     HeapBaseNotFound,
+    /// Maximum size of the Wasm memory found in the module is too low to provide the requested
+    /// number of heap pages.
+    MemoryMaxSizeTooLow,
 }
 
 /// Error that can happen when starting a VM.
@@ -2697,23 +2763,96 @@ impl HostFunction {
 }
 
 // Glue between the `allocator` module and the `vm` module.
-struct MemAccess<'a>(&'a mut vm::VirtualMachine);
+//
+// The allocator believes that there are `memory_total_pages` pages available and allocated, where
+// `memory_total_pages` is equal to `heap_base + heap_pages`, while in reality, because we grow
+// memory lazily, there might be fewer.
+struct MemAccess<'a> {
+    vm: &'a mut vm::VirtualMachine,
+    memory_total_pages: HeapPages,
+}
+
 impl<'a> allocator::Memory for MemAccess<'a> {
     fn read_le_u64(&self, ptr: u32) -> Result<u64, allocator::Error> {
-        let bytes = self.0.read_memory(ptr, 8).unwrap(); // TODO: convert error
-        Ok(u64::from_le_bytes(
-            <[u8; 8]>::try_from(bytes.as_ref()).unwrap(),
-        ))
+        if (ptr + 8) > u32::from(self.memory_total_pages) * 64 * 1024 {
+            return Err(allocator::Error::Other("out of bounds access"));
+        }
+
+        // Note that this function (`read_le_u64`) really should take ̀`&mut self` but that is
+        // unfortunately not the case, meaning that we can't "just" grow the memory if trying
+        // to access an out of bound location.
+        //
+        // Additionally, the value being read can in theory overlap between an allocated and
+        // non-allocated parts of the memory, making this more complicated.
+
+        // Offset of the memory page where the first byte of the value will be read.
+        let accessed_memory_page_start = HeapPages::new(ptr / (64 * 1024));
+        // Offset of the memory page where the last byte of the value will be read.
+        let accessed_memory_page_end = HeapPages::new((ptr + 7) / (64 * 1024));
+        // Number of pages currently allocated.
+        let current_num_pages = self.vm.memory_size();
+        debug_assert!(current_num_pages <= self.memory_total_pages);
+
+        if accessed_memory_page_end < current_num_pages {
+            // This is the simple case: the memory access is in bounds.
+            let bytes = self.vm.read_memory(ptr, 8).unwrap();
+            Ok(u64::from_le_bytes(
+                <[u8; 8]>::try_from(bytes.as_ref()).unwrap(),
+            ))
+        } else if accessed_memory_page_start < current_num_pages {
+            // Memory access is partially in bounds. This is the most complicated situation.
+            let partial_bytes = self
+                .vm
+                .read_memory(ptr, u32::from(current_num_pages) * 64 * 1024 - ptr)
+                .unwrap();
+            let partial_bytes = partial_bytes.as_ref();
+            debug_assert!(partial_bytes.len() < 8);
+
+            let mut out = [0; 8];
+            out[..partial_bytes.len()].copy_from_slice(partial_bytes);
+            Ok(u64::from_le_bytes(out))
+        } else {
+            // Everything out bounds. Memory is zero.
+            Ok(0)
+        }
     }
 
     fn write_le_u64(&mut self, ptr: u32, val: u64) -> Result<(), allocator::Error> {
+        if (ptr + 8) > u32::from(self.memory_total_pages) * 64 * 1024 {
+            return Err(allocator::Error::Other("out of bounds access"));
+        }
+
         let bytes = val.to_le_bytes();
-        self.0.write_memory(ptr, &bytes).unwrap(); // TODO: convert error instead
+
+        // Offset of the memory page where the last byte of the value will be written.
+        let written_memory_page = HeapPages::new((ptr + 7) / (64 * 1024));
+
+        // Grow the memory more if necessary.
+        // Please note the `=`. For example if we write to page 0, we want to have at least 1 page
+        // allocated.
+        let current_num_pages = self.vm.memory_size();
+        debug_assert!(current_num_pages <= self.memory_total_pages);
+        if current_num_pages <= written_memory_page {
+            // For now, we grow the memory just enough to fit.
+            // TODO: do better
+            // Note the order of operations: we add 1 at the end to avoid a potential overflow
+            // in case `written_memory_page` is the maximum possible value.
+            let to_grow = written_memory_page - current_num_pages + HeapPages::new(1);
+
+            // We check at initialization that the virtual machine is capable of growing up to
+            // `memory_total_pages`, meaning that this `unwrap` can't panic.
+            self.vm.grow_memory(to_grow).unwrap();
+        }
+
+        self.vm.write_memory(ptr, &bytes).unwrap();
         Ok(())
     }
 
     fn size(&self) -> u32 {
-        self.0.memory_size()
+        // Lie to the allocator to pretend that `memory_total_pages` are available.
+        u32::from(self.memory_total_pages)
+            .saturating_mul(64)
+            .saturating_mul(1024)
     }
 }
 
