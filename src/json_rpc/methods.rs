@@ -650,7 +650,7 @@ pub struct RuntimeSpec<'a> {
     pub impl_version: u64,
     #[serde(rename = "transactionVersion", skip_serializing_if = "Option::is_none")]
     pub transaction_version: Option<u64>,
-    pub apis: HashMap<HexString, u32>,
+    pub apis: HashMap<HexString, u32, fnv::FnvBuildHasher>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

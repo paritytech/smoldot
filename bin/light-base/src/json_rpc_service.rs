@@ -2167,9 +2167,9 @@ impl<TPlat: Platform> Background<TPlat> {
         assert!(!runtime_updates); // TODO: not correctly supported yet
 
         let mut subscribe_all = if runtime_updates {
-            self.runtime_service.subscribe_all(32).await
+            either::Left(self.runtime_service.subscribe_all(32).await)
         } else {
-            self.sync_service.subscribe_all(32).await
+            either::Right(self.sync_service.subscribe_all(32, false).await)
         };
 
         let (subscription, mut unsubscribe_rx) = {
@@ -2199,18 +2199,38 @@ impl<TPlat: Platform> Background<TPlat> {
 
             let mut pinned_blocks_headers =
                 HashMap::with_capacity_and_hasher(0, Default::default());
-            pinned_blocks_headers.insert(
-                header::hash_from_scale_encoded_header(
-                    &subscribe_all.finalized_block_scale_encoded_header,
-                ),
-                subscribe_all.finalized_block_scale_encoded_header.clone(),
-            );
-            for block in &subscribe_all.non_finalized_blocks_ancestry_order {
-                let _was_in = pinned_blocks_headers.insert(
-                    header::hash_from_scale_encoded_header(&block.scale_encoded_header),
-                    block.scale_encoded_header.clone(),
-                );
-                debug_assert!(_was_in.is_none());
+
+            match &subscribe_all {
+                either::Left(subscribe_all) => {
+                    pinned_blocks_headers.insert(
+                        header::hash_from_scale_encoded_header(
+                            &subscribe_all.finalized_block_scale_encoded_header,
+                        ),
+                        subscribe_all.finalized_block_scale_encoded_header.clone(),
+                    );
+                    for block in &subscribe_all.non_finalized_blocks_ancestry_order {
+                        let _was_in = pinned_blocks_headers.insert(
+                            header::hash_from_scale_encoded_header(&block.scale_encoded_header),
+                            block.scale_encoded_header.clone(),
+                        );
+                        debug_assert!(_was_in.is_none());
+                    }
+                }
+                either::Right(subscribe_all) => {
+                    pinned_blocks_headers.insert(
+                        header::hash_from_scale_encoded_header(
+                            &subscribe_all.finalized_block_scale_encoded_header,
+                        ),
+                        subscribe_all.finalized_block_scale_encoded_header.clone(),
+                    );
+                    for block in &subscribe_all.non_finalized_blocks_ancestry_order {
+                        let _was_in = pinned_blocks_headers.insert(
+                            header::hash_from_scale_encoded_header(&block.scale_encoded_header),
+                            block.scale_encoded_header.clone(),
+                        );
+                        debug_assert!(_was_in.is_none());
+                    }
+                }
             }
 
             lock.chain_head_follow.insert(
@@ -2218,7 +2238,6 @@ impl<TPlat: Platform> Background<TPlat> {
                 FollowSubscription {
                     finalized_pinned_blocks: slab::Slab::new(),
                     non_finalized_pinned_blocks: fork_tree::ForkTree::new(),
-                    // TODO: insert finalized block and all
                     pinned_blocks_headers,
                     cancel: unsubscribe_tx,
                 },
@@ -2234,9 +2253,14 @@ impl<TPlat: Platform> Background<TPlat> {
             subscription: &subscription,
             result: methods::FollowEvent::Initialized {
                 finalized_block_hash: methods::HashHexString(
-                    header::hash_from_scale_encoded_header(
-                        &subscribe_all.finalized_block_scale_encoded_header[..],
-                    ),
+                    header::hash_from_scale_encoded_header(match &subscribe_all {
+                        either::Left(subscribe_all) => {
+                            &subscribe_all.finalized_block_scale_encoded_header[..]
+                        }
+                        either::Right(subscribe_all) => {
+                            &subscribe_all.finalized_block_scale_encoded_header[..]
+                        }
+                    }),
                 ),
                 finalized_block_runtime: None,
             },
@@ -2260,10 +2284,18 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 loop {
                     // Wait for either a new block, or for the subscription to be canceled.
-                    let next_block = subscribe_all.new_blocks.next();
+                    let next_block = match &mut subscribe_all {
+                        either::Left(subscribe_all) => {
+                            future::Either::Left(subscribe_all.new_blocks.next().map(either::Left))
+                        }
+                        either::Right(subscribe_all) => future::Either::Right(
+                            subscribe_all.new_blocks.next().map(either::Right),
+                        ),
+                    };
                     futures::pin_mut!(next_block);
+
                     match future::select(next_block, &mut unsubscribe_rx).await {
-                        future::Either::Left((None, _)) => {
+                        future::Either::Left((either::Left(None) | either::Right(None), _)) => {
                             log_and_respond_no_mutex(
                                 &mut responses_sender,
                                 &log_target,
@@ -2277,10 +2309,10 @@ impl<TPlat: Platform> Background<TPlat> {
                             break;
                         }
                         future::Either::Left((
-                            Some(sync_service::Notification::Finalized {
+                            either::Left(Some(runtime_service::Notification::Finalized {
                                 hash,
                                 best_block_hash,
-                            }),
+                            })),
                             _,
                         )) => {
                             // TODO: don't always generate
@@ -2300,7 +2332,79 @@ impl<TPlat: Platform> Background<TPlat> {
                             // TODO: finalized event
                         }
                         future::Either::Left((
-                            Some(sync_service::Notification::Block(block)),
+                            either::Left(Some(runtime_service::Notification::Block(block))),
+                            _,
+                        )) => {
+                            let hash =
+                                header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+
+                            let mut subscriptions = me.subscriptions.lock().await;
+                            if let Some(sub) =
+                                subscriptions.chain_head_follow.get_mut(&subscription)
+                            {
+                                let _was_in = sub
+                                    .pinned_blocks_headers
+                                    .insert(hash, block.scale_encoded_header);
+                                debug_assert!(_was_in.is_none());
+                            }
+
+                            log_and_respond_no_mutex(
+                                &mut responses_sender,
+                                &log_target,
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: &subscription,
+                                    result: methods::FollowEvent::NewBlock {
+                                        block_hash: methods::HashHexString(hash),
+                                        parent_block_hash: methods::HashHexString(
+                                            block.parent_hash,
+                                        ),
+                                        new_runtime: None, // TODO:
+                                    },
+                                }
+                                .to_json_call_object_parameters(None),
+                            )
+                            .await;
+
+                            if block.is_new_best {
+                                log_and_respond_no_mutex(
+                                    &mut responses_sender,
+                                    &log_target,
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                        subscription: &subscription,
+                                        result: methods::FollowEvent::BestBlockChanged {
+                                            best_block_hash: methods::HashHexString(hash),
+                                        },
+                                    }
+                                    .to_json_call_object_parameters(None),
+                                )
+                                .await;
+                            }
+                        }
+                        future::Either::Left((
+                            either::Right(Some(sync_service::Notification::Finalized {
+                                hash,
+                                best_block_hash,
+                            })),
+                            _,
+                        )) => {
+                            // TODO: don't always generate
+                            log_and_respond_no_mutex(
+                                &mut responses_sender,
+                                &log_target,
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: &subscription,
+                                    result: methods::FollowEvent::BestBlockChanged {
+                                        best_block_hash: methods::HashHexString(best_block_hash),
+                                    },
+                                }
+                                .to_json_call_object_parameters(None),
+                            )
+                            .await;
+
+                            // TODO: finalized event
+                        }
+                        future::Either::Left((
+                            either::Right(Some(sync_service::Notification::Block(block))),
                             _,
                         )) => {
                             let hash =
