@@ -183,7 +183,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             chain_is_live: config.chain_spec.has_live_network(),
             chain_properties_json: config.chain_spec.properties().to_owned(),
             peer_id_base58: config.peer_id.to_base58(),
-            chainspec_chain_name: config.system_name,
+            system_name: config.system_name,
             system_version: config.system_version,
             sync_service: config.sync_service,
             runtime_service: config.runtime_service,
@@ -442,8 +442,8 @@ struct Background<TPlat: Platform> {
     /// See [`Config::peer_id`]. The only use for this field is to send the base58 encoding of
     /// the [`PeerId`]. Consequently, we store the conversion to base58 ahead of time.
     peer_id_base58: String,
-    /// Value to return when the `chainSpec_*_chainName` RPC is called.
-    chainspec_chain_name: String,
+    /// Value to return when the `system_name` RPC is called.
+    system_name: String,
     /// Value to return when the `system_version` RPC is called.
     system_version: String,
 
@@ -1322,7 +1322,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 log_and_respond(
                     &self.responses_sender,
                     &self.log_target,
-                    methods::Response::system_name(&self.chainspec_chain_name).to_json_response(request_id),
+                    methods::Response::system_name(&self.system_name).to_json_response(request_id),
                 )
                 .await;
             }
@@ -1503,7 +1503,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 log_and_respond(
                     &self.responses_sender,
                     &self.log_target,
-                    methods::Response::chainSpec_unstable_chainName(&self.chainspec_chain_name)
+                    methods::Response::chainSpec_unstable_chainName(&self.chain_name)
                         .to_json_response(request_id),
                 )
                 .await;
