@@ -1370,8 +1370,8 @@ impl<TPlat: Platform> Background<TPlat> {
                 .await;
             }
 
-            methods::MethodCall::chainHead_unstable_follow { runtimeUpdates } => {
-                self.chain_head_follow(request_id, runtimeUpdates).await;
+            methods::MethodCall::chainHead_unstable_follow { runtime_updates } => {
+                self.chain_head_follow(request_id, runtime_updates).await;
             }
             methods::MethodCall::chainHead_unstable_genesisHash {} => {
                 log_and_respond(
@@ -1429,12 +1429,13 @@ impl<TPlat: Platform> Background<TPlat> {
                 }
             }
             methods::MethodCall::chainHead_unstable_unpin {
-                follow_subscription_id: followSubscriptionId,
+                follow_subscription_id,
                 hash,
             } => {
                 let invalid = {
                     let mut lock = self.subscriptions.lock().await;
-                    if let Some(subscription) = lock.chain_head_follow.get_mut(followSubscriptionId)
+                    if let Some(subscription) =
+                        lock.chain_head_follow.get_mut(follow_subscription_id)
                     {
                         if subscription.cancel.is_canceled() {
                             false
@@ -1468,14 +1469,14 @@ impl<TPlat: Platform> Background<TPlat> {
                 }
             }
             methods::MethodCall::chainHead_unstable_unfollow {
-                follow_subscription_id: followSubscriptionId,
+                follow_subscription_id,
             } => {
                 if let Some(subscription) = self
                     .subscriptions
                     .lock()
                     .await
                     .chain_head_follow
-                    .remove(followSubscriptionId)
+                    .remove(follow_subscription_id)
                 {
                     if subscription.cancel.send(request_id.to_owned()).is_err() {
                         log_and_respond(
