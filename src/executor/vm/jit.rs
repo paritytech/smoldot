@@ -265,7 +265,7 @@ impl JitPrototype {
     /// See [`super::VirtualMachinePrototype::memory_max_pages`].
     pub fn memory_max_pages(&self) -> Option<HeapPages> {
         if let Some(memory) = &self.memory {
-            Some(HeapPages::new(memory.size()))
+            memory.ty().limits().max().map(HeapPages::new)
         } else {
             None
         }
