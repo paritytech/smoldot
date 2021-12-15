@@ -495,6 +495,41 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         subscription.next().await.unwrap()
     }
 
+    /// Returns the value of the `:code` and `:heap_pages` storage items of the given block.
+    ///
+    /// Returns `None` if the runtime of that block isn't known by the runtime service, for
+    /// example because the block itself isn't known or because the runtime hasn't been downloaded
+    /// yet.
+    pub async fn block_runtime_code_heap_pages(
+        &self,
+        block_hash: &[u8; 32],
+    ) -> Option<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+        let guarded = self.guarded.lock().await;
+        let guarded = &*guarded;
+
+        let runtime_index = match &guarded.tree {
+            GuardedInner::FinalizedBlockRuntimeKnown {
+                tree: Some(tree),
+                finalized_block,
+            } if finalized_block.hash == *block_hash => *tree.finalized_async_user_data(),
+            GuardedInner::FinalizedBlockRuntimeKnown {
+                tree: Some(tree), ..
+            } => *tree
+                .input_iter_unordered()
+                .find(|block| block.user_data.hash == *block_hash)
+                .and_then(|block| block.async_op_user_data)?,
+            GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => tree
+                .input_iter_unordered()
+                .find(|block| block.user_data.hash == *block_hash)
+                .and_then(|block| block.async_op_user_data)?
+                .unwrap(),
+            _ => unreachable!(),
+        };
+
+        let runtime = &guarded.runtimes[runtime_index];
+        Some((runtime.runtime_code.clone(), runtime.heap_pages.clone()))
+    }
+
     /// Returns the SCALE-encoded header of the current finalized block, plus an unlimited stream
     /// that produces one item every time the finalized block is changed.
     pub async fn subscribe_finalized(
@@ -2184,7 +2219,9 @@ struct Runtime {
     ///
     /// Can be `None` if the storage is empty, in which case the runtime will have failed to
     /// build.
-    // TODO: consider storing hash instead
+    ///
+    /// > **Note**: This value is kept unhashed because it can be serialized on disk and reloaded
+    /// >           on startup. See [`RuntimeService::block_runtime_code_heap_pages`].
     runtime_code: Option<Vec<u8>>,
 
     /// Undecoded storage value of `:heappages` corresponding to the
@@ -2192,7 +2229,6 @@ struct Runtime {
     ///
     /// Can be `None` if the storage is empty, in which case the runtime will have failed to
     /// build.
-    // TODO: consider storing hash instead
     heap_pages: Option<Vec<u8>>,
 }
 
