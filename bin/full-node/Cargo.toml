@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 async-std = "1.10.0"
 atty = "0.2.14"
+blake2-rfc = { version = "0.2.18", default-features = false }
 ctrlc = "3.2.1"
 derive_more = "0.99.17"
 directories = "4.0.1"
