@@ -42,7 +42,7 @@ pub enum CliOptions {
     Run(CliOptionsRun),
     /// Connects to an IP address and prints some information about the node.
     NodeInfo(CliOptionsNodeInfo),
-    /// Computes the two-x 64 hash of a string payload and prints the hexadecimal-encoded hash.
+    /// Computes the 64bits blake2 hash of a string payload and prints the hexadecimal-encoded hash.
     #[structopt(name = "blake2-64bits-hash")]
     Blake264BitsHash(CliOptionsBlake264Hash),
 }
