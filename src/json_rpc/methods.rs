@@ -401,20 +401,55 @@ define_methods! {
     system_version() -> &'a str,
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
-    chainHead_unstable_body(#[rename = "followSubscriptionId"] follow_subscription_id: &'a str, hash: HashHexString, #[rename = "networkConfig"] network_config: Option<NetworkConfig>) -> &'a str,
-    chainHead_unstable_bodyEnd(#[rename = "subscriptionId"] subscription_id: &'a str) -> (),
-    chainHead_unstable_call(#[rename = "followSubscriptionId"] follow_subscription_id: &'a str, hash: HashHexString, function: &'a str, #[rename = "callParameters"] call_parameters: Vec<HexString>, #[rename = "networkConfig"] network_config: Option<NetworkConfig>) -> &'a str,
-    chainHead_unstable_callEnd(#[rename = "subscriptionId"] subscription_id: &'a str) -> (),
-    chainHead_unstable_follow(#[rename = "runtimeUpdates"] runtime_updates: bool) -> &'a str,
+    chainHead_unstable_body(
+        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
+        hash: HashHexString,
+        #[rename = "networkConfig"] network_config: Option<NetworkConfig>
+    ) -> &'a str,
+    chainHead_unstable_bodyEnd(
+        #[rename = "subscriptionId"] subscription_id: &'a str
+    ) -> (),
+    chainHead_unstable_call(
+        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
+        hash: HashHexString,
+        function: &'a str,
+        #[rename = "callParameters"] call_parameters: Vec<HexString>,
+        #[rename = "networkConfig"] network_config: Option<NetworkConfig>
+    ) -> &'a str,
+    chainHead_unstable_callEnd(
+        #[rename = "subscriptionId"] subscription_id: &'a str
+    ) -> (),
+    chainHead_unstable_follow(
+        #[rename = "runtimeUpdates"] runtime_updates: bool
+    ) -> &'a str,
     chainHead_unstable_genesisHash() -> HashHexString,
-    chainHead_unstable_header(#[rename = "followSubscriptionId"] follow_subscription_id: &'a str, hash: HashHexString) -> Option<HexString>,
-    chainHead_unstable_storage(#[rename = "followSubscriptionId"] follow_subscription_id: &'a str, hash: HashHexString, key: HexString, #[rename = "childKey"] child_key: Option<HexString>, r#type: StorageQueryType, #[rename = "networkConfig"] network_config: Option<NetworkConfig>) -> &'a str,
-    chainHead_unstable_storageEnd(#[rename = "subscriptionId"] subscription_id: &'a str) -> (),
-    chainHead_unstable_unfollow(#[rename = "followSubscriptionId"] follow_subscription_id: &'a str) -> (),
-    chainHead_unstable_unpin(#[rename = "followSubscriptionId"] follow_subscription_id: &'a str, hash: HashHexString) -> (),
+    chainHead_unstable_header(
+        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
+        hash: HashHexString
+    ) -> Option<HexString>,
+    chainHead_unstable_storage(
+        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
+        hash: HashHexString,
+        key: HexString,
+        #[rename = "childKey"] child_key: Option<HexString>,
+        r#type: StorageQueryType,
+        #[rename = "networkConfig"] network_config: Option<NetworkConfig>
+    ) -> &'a str,
+    chainHead_unstable_storageEnd(
+        #[rename = "subscriptionId"] subscription_id: &'a str
+    ) -> (),
+    chainHead_unstable_unfollow(
+        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str
+    ) -> (),
+    chainHead_unstable_unpin(
+        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
+        hash: HashHexString
+    ) -> (),
+
     chainSpec_unstable_chainName() -> &'a str,
     chainSpec_unstable_genesisHash() -> HashHexString,
     chainSpec_unstable_properties() -> Box<serde_json::value::RawValue>,
+
     sudo_unstable_p2pDiscover(multiaddr: &'a str) -> (),
     sudo_unstable_version() -> &'a str,
 }
