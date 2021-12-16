@@ -1,3 +1,5 @@
 prepare.js
-smoldot-demo-db.json
 test
+demo
+src/index.test-d.ts
+src/tsconfig.json
