@@ -38,7 +38,7 @@ use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Debug, structopt::StructOpt)]
 pub enum CliOptions {
-    /// Connect to the chain and synchronize the local database with the network.
+    /// Connects to the chain and synchronizes the local database with the network.
     Run(CliOptionsRun),
     /// Connects to an IP address and prints some information about the node.
     NodeInfo(CliOptionsNodeInfo),
