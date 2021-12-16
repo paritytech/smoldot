@@ -67,8 +67,8 @@ child_process.execSync(
     { 'stdio': 'inherit' }
 );
 
-// The code below will write a variable number of iles to the `src/autogen` directory. Start by
-// clearing all existing files from there in case there are some left from past builds.
+// The code below will write a variable number of files to the `src/autogen` directory. Start by
+// clearing all existing files from this directory in case there are some left from past builds.
 const filesToRemove = fs.readdirSync('./src/autogen');
 for (const file of filesToRemove) {
     if (!file.startsWith('.')) // Don't want to remove the `.gitignore` or `.npmignore` or similar
