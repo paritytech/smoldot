@@ -106,6 +106,7 @@ jobs:
       image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
+    - uses: Swatinem/rust-cache@v1
     - run: cargo doc --verbose --workspace --all-features --no-deps --document-private-items
 
   fmt:
