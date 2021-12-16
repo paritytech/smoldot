@@ -51,7 +51,7 @@ use smoldot::{
     executor::{host, read_only_runtime_host},
     header,
     json_rpc::{self, methods},
-    libp2p::PeerId,
+    libp2p::{multiaddr, PeerId},
     network::protocol,
 };
 use std::{
@@ -1530,6 +1530,29 @@ impl<TPlat: Platform> Background<TPlat> {
                     .to_json_response(request_id),
                 )
                 .await;
+            }
+            methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } => {
+                let response = match multiaddr.parse::<multiaddr::Multiaddr>() {
+                    Ok(addr)
+                        if matches!(addr.iter().last(), Some(multiaddr::ProtocolRef::P2p(_))) =>
+                    {
+                        // TODO: actually use address
+                        methods::Response::sudo_unstable_p2pDiscover(())
+                            .to_json_response(request_id)
+                    }
+                    Ok(_) => json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::InvalidParams,
+                        Some(&serde_json::to_string("multiaddr doesn't end with /p2p").unwrap()),
+                    ),
+                    Err(err) => json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::InvalidParams,
+                        Some(&serde_json::to_string(&err.to_string()).unwrap()),
+                    ),
+                };
+
+                log_and_respond(&self.responses_sender, &self.log_target, response).await;
             }
             methods::MethodCall::sudo_unstable_version {} => {
                 log_and_respond(

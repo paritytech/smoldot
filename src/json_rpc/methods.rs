@@ -415,6 +415,7 @@ define_methods! {
     chainSpec_unstable_chainName() -> &'a str,
     chainSpec_unstable_genesisHash() -> HashHexString,
     chainSpec_unstable_properties() -> Box<serde_json::value::RawValue>,
+    sudo_unstable_p2pDiscover(multiaddr: &'a str) -> (),
     sudo_unstable_version() -> &'a str,
 }
 
