@@ -1535,8 +1535,11 @@ impl<TPlat: Platform> Background<TPlat> {
                 log_and_respond(
                     &self.responses_sender,
                     &self.log_target,
-                    methods::Response::sudo_unstable_version("smoldot v0.1") // TODO:
-                        .to_json_response(request_id),
+                    methods::Response::sudo_unstable_version(&format!(
+                        "{} {}",
+                        self.system_name, self.system_version
+                    ))
+                    .to_json_response(request_id),
                 )
                 .await;
             }
