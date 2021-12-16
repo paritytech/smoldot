@@ -2371,6 +2371,7 @@ version = "0.1.0"
 dependencies = [
  "async-std",
  "atty",
+ "blake2-rfc",
  "ctrlc",
  "derive_more",
  "directories",
@@ -2780,7 +2781,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f559b464de2e2bdabcac6a210d12e9b5a5973c251e102c44c585c71d51bd78e"
 dependencies = [
  "cfg-if",
- "rand 0.8.4",
  "static_assertions",
 ]
 
