@@ -129,12 +129,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2.4.0
-      - uses: Swatinem/rust-cache@v1
       - uses: actions-rs/toolchain@v1
         with:
             toolchain: nightly
             components: clippy
             override: true
+      - uses: Swatinem/rust-cache@v1  # Note that this is done after switching the compiler version to nightly
       - uses: actions-rs/clippy@master
         with:
           args: --all-features --all-targets
