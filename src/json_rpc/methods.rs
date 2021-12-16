@@ -586,6 +586,7 @@ pub enum FollowEvent<'a> {
         #[serde(rename = "parentBlockHash")]
         parent_block_hash: HashHexString,
         #[serde(rename = "newRuntime", borrow)]
+        // TODO: must not be present if runtime_updates: false
         new_runtime: Option<MaybeRuntimeSpec<'a>>,
     },
     #[serde(rename = "bestBlockChanged")]

@@ -2222,8 +2222,6 @@ impl<TPlat: Platform> Background<TPlat> {
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_follow`].
     async fn chain_head_follow(self: &Arc<Self>, request_id: &str, runtime_updates: bool) {
-        assert!(!runtime_updates); // TODO: not correctly supported yet
-
         let mut subscribe_all = if runtime_updates {
             either::Left(self.runtime_service.subscribe_all(32).await)
         } else {
