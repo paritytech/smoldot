@@ -56,3 +56,35 @@ test('chainHead_unstable_follow works', async t => {
     .then(() => t.pass())
     .then(() => client.terminate());
 });
+
+test('chainHead_unstable_unfollow works', async t => {
+  let promiseResolve;
+  let promiseReject;
+  const promise = new Promise((resolve, reject) => { promiseResolve = resolve; promiseReject = reject; });
+
+  let chain;
+
+  const client = start({ logCallback: () => { } });
+  await client
+    .addChain({
+      chainSpec: westendSpec,
+      jsonRpcCallback: (resp) => {
+        const parsed = JSON.parse(resp);
+
+        if (parsed.id == 1) {
+          chain.sendJsonRpc('{"jsonrpc":"2.0","id":2,"method":"chainHead_unstable_unfollow","params":[' + JSON.stringify(parsed.result) + ']}', 0, 0);
+        } else if (parsed.id == 2 && parsed.result == null) {
+          promiseResolve();
+        } else if (parsed.method != "chainHead_unstable_followEvent") { // Don't fail the promise on follow event
+          promiseReject(resp);
+        }
+      }
+    })
+    .then((c) => {
+      chain = c;
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainHead_unstable_follow","params":[false]}', 0, 0);
+    })
+    .then(() => promise)
+    .then(() => t.pass())
+    .then(() => client.terminate());
+});
