@@ -350,7 +350,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             ),
             move |(mut stream, previously_reported)| async move {
                 loop {
-                    let item = stream.next().await?;
+                    let item = stream.next().await.unwrap();
                     match (&item, &previously_reported) {
                         (Ok(a), Ok(b)) if a == b => continue,
                         _ => {} // TODO: what about errors? do we not deduplicate them?
