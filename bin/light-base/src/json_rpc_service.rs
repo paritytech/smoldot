@@ -55,7 +55,7 @@ use smoldot::{
     network::protocol,
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     iter,
     marker::PhantomData,
     num::NonZeroU32,
@@ -477,11 +477,8 @@ struct Subscriptions {
 }
 
 struct FollowSubscription {
-    /// List of finalized blocks that are pinned by the subscription.
-    finalized_pinned_blocks: slab::Slab<()>,
-
-    /// Tree of non-finalized blocks that are pinned by the subscription.
-    non_finalized_pinned_blocks: fork_tree::ForkTree<()>,
+    /// Tree of hashes of all the current non-finalized blocks. This includes unpinned blocks.
+    non_finalized_blocks: fork_tree::ForkTree<[u8; 32]>,
 
     /// For each pinned block hash, the SCALE-encoded header of the block.
     pinned_blocks_headers: HashMap<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
@@ -2228,7 +2225,7 @@ impl<TPlat: Platform> Background<TPlat> {
             either::Right(self.sync_service.subscribe_all(32, false).await)
         };
 
-        let (subscription, mut unsubscribe_rx) = {
+        let (subscription, confirmations, mut unsubscribe_rx) = {
             let subscription = self
                 .next_subscription
                 .fetch_add(1, atomic::Ordering::Relaxed)
@@ -2253,38 +2250,161 @@ impl<TPlat: Platform> Background<TPlat> {
                 return;
             }
 
+            let mut confirmations = Vec::with_capacity(match &subscribe_all {
+                either::Left(sa) => 2 + sa.non_finalized_blocks_ancestry_order.len(),
+                either::Right(sa) => 2 + sa.non_finalized_blocks_ancestry_order.len(),
+            });
+
+            confirmations.push(
+                methods::Response::chainHead_unstable_follow(&subscription)
+                    .to_json_response(request_id),
+            );
+
             let mut pinned_blocks_headers =
                 HashMap::with_capacity_and_hasher(0, Default::default());
+            let mut non_finalized_blocks = fork_tree::ForkTree::new();
 
             match &subscribe_all {
                 either::Left(subscribe_all) => {
+                    let finalized_block_hash = header::hash_from_scale_encoded_header(
+                        &subscribe_all.finalized_block_scale_encoded_header[..],
+                    );
+
                     pinned_blocks_headers.insert(
-                        header::hash_from_scale_encoded_header(
-                            &subscribe_all.finalized_block_scale_encoded_header,
-                        ),
+                        finalized_block_hash,
                         subscribe_all.finalized_block_scale_encoded_header.clone(),
                     );
+
+                    confirmations.push(
+                        methods::ServerToClient::chainHead_unstable_followEvent {
+                            subscription: &subscription,
+                            result: methods::FollowEvent::Initialized {
+                                finalized_block_hash: methods::HashHexString(finalized_block_hash),
+                                finalized_block_runtime: None, // FIXME: /!\ /!\
+                            },
+                        }
+                        .to_json_call_object_parameters(None),
+                    );
+
                     for block in &subscribe_all.non_finalized_blocks_ancestry_order {
                         let _was_in = pinned_blocks_headers.insert(
                             header::hash_from_scale_encoded_header(&block.scale_encoded_header),
                             block.scale_encoded_header.clone(),
                         );
                         debug_assert!(_was_in.is_none());
+
+                        for block in &subscribe_all.non_finalized_blocks_ancestry_order {
+                            let hash =
+                                header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+
+                            let _was_in = pinned_blocks_headers
+                                .insert(hash, block.scale_encoded_header.clone());
+                            debug_assert!(_was_in.is_none());
+
+                            let parent_node_index = if block.parent_hash == finalized_block_hash {
+                                None
+                            } else {
+                                // TODO: O(n)
+                                Some(
+                                    non_finalized_blocks
+                                        .find(|b| *b == block.parent_hash)
+                                        .unwrap(),
+                                )
+                            };
+                            non_finalized_blocks.insert(parent_node_index, hash);
+
+                            confirmations.push(
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: &subscription,
+                                    result: methods::FollowEvent::NewBlock {
+                                        block_hash: methods::HashHexString(hash),
+                                        new_runtime: None, // TODO: /!\
+                                        parent_block_hash: methods::HashHexString(
+                                            block.parent_hash,
+                                        ),
+                                    },
+                                }
+                                .to_json_call_object_parameters(None),
+                            );
+
+                            if block.is_new_best {
+                                confirmations.push(
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                        subscription: &subscription,
+                                        result: methods::FollowEvent::BestBlockChanged {
+                                            best_block_hash: methods::HashHexString(hash),
+                                        },
+                                    }
+                                    .to_json_call_object_parameters(None),
+                                );
+                            }
+                        }
                     }
                 }
                 either::Right(subscribe_all) => {
+                    let finalized_block_hash = header::hash_from_scale_encoded_header(
+                        &subscribe_all.finalized_block_scale_encoded_header[..],
+                    );
+
                     pinned_blocks_headers.insert(
-                        header::hash_from_scale_encoded_header(
-                            &subscribe_all.finalized_block_scale_encoded_header,
-                        ),
+                        finalized_block_hash,
                         subscribe_all.finalized_block_scale_encoded_header.clone(),
                     );
+
+                    confirmations.push(
+                        methods::ServerToClient::chainHead_unstable_followEvent {
+                            subscription: &subscription,
+                            result: methods::FollowEvent::Initialized {
+                                finalized_block_hash: methods::HashHexString(finalized_block_hash),
+                                finalized_block_runtime: None,
+                            },
+                        }
+                        .to_json_call_object_parameters(None),
+                    );
+
                     for block in &subscribe_all.non_finalized_blocks_ancestry_order {
-                        let _was_in = pinned_blocks_headers.insert(
-                            header::hash_from_scale_encoded_header(&block.scale_encoded_header),
-                            block.scale_encoded_header.clone(),
-                        );
+                        let hash =
+                            header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+
+                        let _was_in =
+                            pinned_blocks_headers.insert(hash, block.scale_encoded_header.clone());
                         debug_assert!(_was_in.is_none());
+
+                        let parent_node_index = if block.parent_hash == finalized_block_hash {
+                            None
+                        } else {
+                            // TODO: O(n)
+                            Some(
+                                non_finalized_blocks
+                                    .find(|b| *b == block.parent_hash)
+                                    .unwrap(),
+                            )
+                        };
+                        non_finalized_blocks.insert(parent_node_index, hash);
+
+                        confirmations.push(
+                            methods::ServerToClient::chainHead_unstable_followEvent {
+                                subscription: &subscription,
+                                result: methods::FollowEvent::NewBlock {
+                                    block_hash: methods::HashHexString(hash),
+                                    new_runtime: None,
+                                    parent_block_hash: methods::HashHexString(block.parent_hash),
+                                },
+                            }
+                            .to_json_call_object_parameters(None),
+                        );
+
+                        if block.is_new_best {
+                            confirmations.push(
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: &subscription,
+                                    result: methods::FollowEvent::BestBlockChanged {
+                                        best_block_hash: methods::HashHexString(hash),
+                                    },
+                                }
+                                .to_json_call_object_parameters(None),
+                            );
+                        }
                     }
                 }
             }
@@ -2292,36 +2412,14 @@ impl<TPlat: Platform> Background<TPlat> {
             lock.chain_head_follow.insert(
                 subscription.clone(),
                 FollowSubscription {
-                    finalized_pinned_blocks: slab::Slab::new(),
-                    non_finalized_pinned_blocks: fork_tree::ForkTree::new(),
+                    non_finalized_blocks,
                     pinned_blocks_headers,
                     cancel: unsubscribe_tx,
                 },
             );
 
-            (subscription, unsubscribe_rx)
+            (subscription, confirmations, unsubscribe_rx)
         };
-
-        let confirmation = methods::Response::chainHead_unstable_follow(&subscription)
-            .to_json_response(request_id);
-        // TODO: do correctly
-        let confirmation2 = methods::ServerToClient::chainHead_unstable_followEvent {
-            subscription: &subscription,
-            result: methods::FollowEvent::Initialized {
-                finalized_block_hash: methods::HashHexString(
-                    header::hash_from_scale_encoded_header(match &subscribe_all {
-                        either::Left(subscribe_all) => {
-                            &subscribe_all.finalized_block_scale_encoded_header[..]
-                        }
-                        either::Right(subscribe_all) => {
-                            &subscribe_all.finalized_block_scale_encoded_header[..]
-                        }
-                    }),
-                ),
-                finalized_block_runtime: None,
-            },
-        }
-        .to_json_call_object_parameters(None);
 
         let mut responses_sender = self.responses_sender.lock().await.clone();
         let log_target = self.log_target.clone();
@@ -2332,11 +2430,11 @@ impl<TPlat: Platform> Background<TPlat> {
             .lock()
             .await
             .unbounded_send(Box::pin(async move {
-                // Send back to the user the confirmation of the registration.
-                log_and_respond_no_mutex(&mut responses_sender, &log_target, confirmation).await;
-                log_and_respond_no_mutex(&mut responses_sender, &log_target, confirmation2).await;
-
-                // TODO: report all existing blocks
+                // Send back to the user the confirmations of the registration.
+                for confirmation in confirmations {
+                    log_and_respond_no_mutex(&mut responses_sender, &log_target, confirmation)
+                        .await;
+                }
 
                 loop {
                     // Wait for either a new block, or for the subscription to be canceled.
@@ -2366,11 +2464,35 @@ impl<TPlat: Platform> Background<TPlat> {
                         }
                         future::Either::Left((
                             either::Left(Some(runtime_service::Notification::Finalized {
-                                hash,
                                 best_block_hash,
+                                hash,
+                            }))
+                            | either::Right(Some(sync_service::Notification::Finalized {
+                                best_block_hash,
+                                hash,
                             })),
                             _,
                         )) => {
+                            let mut finalized_blocks_hashes = Vec::new();
+                            let mut pruned_blocks_hashes = Vec::new();
+
+                            let mut subscriptions = me.subscriptions.lock().await;
+                            if let Some(sub) =
+                                subscriptions.chain_head_follow.get_mut(&subscription)
+                            {
+                                let node_index =
+                                    sub.non_finalized_blocks.find(|b| *b == hash).unwrap();
+                                for pruned in sub.non_finalized_blocks.prune_ancestors(node_index) {
+                                    if pruned.is_prune_target_ancestor {
+                                        finalized_blocks_hashes
+                                            .push(methods::HashHexString(pruned.user_data));
+                                    } else {
+                                        pruned_blocks_hashes
+                                            .push(methods::HashHexString(pruned.user_data));
+                                    }
+                                }
+                            }
+
                             // TODO: don't always generate
                             log_and_respond_no_mutex(
                                 &mut responses_sender,
@@ -2385,7 +2507,19 @@ impl<TPlat: Platform> Background<TPlat> {
                             )
                             .await;
 
-                            // TODO: finalized event
+                            log_and_respond_no_mutex(
+                                &mut responses_sender,
+                                &log_target,
+                                methods::ServerToClient::chainHead_unstable_followEvent {
+                                    subscription: &subscription,
+                                    result: methods::FollowEvent::Finalized {
+                                        finalized_blocks_hashes,
+                                        pruned_blocks_hashes,
+                                    },
+                                }
+                                .to_json_call_object_parameters(None),
+                            )
+                            .await;
                         }
                         future::Either::Left((
                             either::Left(Some(runtime_service::Notification::Block(block))),
@@ -2402,6 +2536,12 @@ impl<TPlat: Platform> Background<TPlat> {
                                     .pinned_blocks_headers
                                     .insert(hash, block.scale_encoded_header);
                                 debug_assert!(_was_in.is_none());
+
+                                // TODO: check if it matches current finalized block
+                                // TODO: O(n)
+                                let parent_node_index =
+                                    sub.non_finalized_blocks.find(|b| *b == block.parent_hash);
+                                sub.non_finalized_blocks.insert(parent_node_index, hash);
                             }
 
                             log_and_respond_no_mutex(
@@ -2437,29 +2577,6 @@ impl<TPlat: Platform> Background<TPlat> {
                             }
                         }
                         future::Either::Left((
-                            either::Right(Some(sync_service::Notification::Finalized {
-                                hash,
-                                best_block_hash,
-                            })),
-                            _,
-                        )) => {
-                            // TODO: don't always generate
-                            log_and_respond_no_mutex(
-                                &mut responses_sender,
-                                &log_target,
-                                methods::ServerToClient::chainHead_unstable_followEvent {
-                                    subscription: &subscription,
-                                    result: methods::FollowEvent::BestBlockChanged {
-                                        best_block_hash: methods::HashHexString(best_block_hash),
-                                    },
-                                }
-                                .to_json_call_object_parameters(None),
-                            )
-                            .await;
-
-                            // TODO: finalized event
-                        }
-                        future::Either::Left((
                             either::Right(Some(sync_service::Notification::Block(block))),
                             _,
                         )) => {
@@ -2474,6 +2591,12 @@ impl<TPlat: Platform> Background<TPlat> {
                                     .pinned_blocks_headers
                                     .insert(hash, block.scale_encoded_header);
                                 debug_assert!(_was_in.is_none());
+
+                                // TODO: check if it matches current finalized block
+                                // TODO: O(n)
+                                let parent_node_index =
+                                    sub.non_finalized_blocks.find(|b| *b == block.parent_hash);
+                                sub.non_finalized_blocks.insert(parent_node_index, hash);
                             }
 
                             log_and_respond_no_mutex(
