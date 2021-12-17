@@ -675,7 +675,7 @@ pub enum MaybeRuntimeSpec<'a> {
         spec: RuntimeSpec<'a>,
     },
     #[serde(rename = "invalid")]
-    Invalid { error: String },  // TODO: String because it's more convenient; improve
+    Invalid { error: String }, // TODO: String because it's more convenient; improve
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
