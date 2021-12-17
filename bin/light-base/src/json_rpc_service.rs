@@ -1771,20 +1771,36 @@ impl<TPlat: Platform> Background<TPlat> {
         // Build a stream of `methods::StorageChangeSet` items to send back to the user.
         let storage_updates = {
             let known_values = (0..list.len()).map(|_| None).collect::<Vec<_>>();
-            let (block_header, blocks_subscription) = self.runtime_service.subscribe_best().await;
-            let blocks_stream =
-                stream::once(future::ready(block_header)).chain(blocks_subscription);
+            let runtime_service = self.runtime_service.clone();
             let sync_service = self.sync_service.clone();
             let log_target = self.log_target.clone();
 
             stream::unfold(
-                (blocks_stream, list, known_values),
+                (None, list, known_values),
                 move |(mut blocks_stream, list, mut known_values)| {
                     let sync_service = sync_service.clone();
+                    let runtime_service = runtime_service.clone();
                     let log_target = log_target.clone();
                     async move {
                         loop {
-                            let block = blocks_stream.next().await?;
+                            if blocks_stream.is_none() {
+                                // TODO: why is this done against the runtime_service and not the sync_service? clarify
+                                let (block_header, blocks_subscription) =
+                                    runtime_service.subscribe_best().await;
+                                blocks_stream = Some(
+                                    stream::once(future::ready(block_header))
+                                        .chain(blocks_subscription),
+                                );
+                            }
+
+                            let block = match blocks_stream.as_mut().unwrap().next().await {
+                                Some(b) => b,
+                                None => {
+                                    blocks_stream = None;
+                                    continue;
+                                }
+                            };
+
                             let block_hash = header::hash_from_scale_encoded_header(&block);
                             let state_trie_root = header::decode(&block).unwrap().state_root;
 
@@ -1871,7 +1887,8 @@ impl<TPlat: Platform> Background<TPlat> {
                             .await;
                         }
                         future::Either::Left((None, _)) => {
-                            // TODO: do something?
+                            // The stream created above is infinite.
+                            unreachable!()
                         }
                         future::Either::Right((Ok(unsub_request_id), _)) => {
                             let response = methods::Response::state_unsubscribeStorage(true)
