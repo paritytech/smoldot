@@ -19,7 +19,7 @@ import test from 'ava';
 import * as fs from 'fs';
 import { start } from "../src/index.js";
 
-const westendSpec = fs.readFileSync('../../westend.json', 'utf8');
+const westendSpec = fs.readFileSync('./test/westend.json', 'utf8');
 
 test('invalid chain spec throws error', async t => {
   const client = start({ logCallback: () => { } });

@@ -26,6 +26,7 @@ use alloc::{
     string::{String, ToString as _},
     vec::Vec,
 };
+use hashbrown::HashMap;
 
 /// Parses a JSON call (usually received from a JSON-RPC server).
 ///
@@ -156,11 +157,11 @@ pub struct InvalidParameterError(serde_json::Error);
 macro_rules! define_methods {
     ($rq_name:ident, $rp_name:ident $(<$l:lifetime>)*, $(
         $(#[$attrs:meta])*
-        $name:ident ($($p_name:ident: $p_ty:ty),*) -> $ret_ty:ty
+        $name:ident ($($(#[rename = $p_rpc_name:expr])* $p_name:ident: $p_ty:ty),*) -> $ret_ty:ty
             $([$($alias:ident),*])*
         ,
     )*) => {
-        #[allow(non_camel_case_types)]
+        #[allow(non_camel_case_types, non_snake_case)]
         #[derive(Debug, Clone)]
         pub enum $rq_name<'a> {
             $(
@@ -191,6 +192,7 @@ macro_rules! define_methods {
                         #[derive(serde::Serialize)]
                         struct Params<'a> {
                             $(
+                                $(#[serde(rename = $p_rpc_name)])*
                                 $p_name: &'a $p_ty,
                             )*
 
@@ -233,6 +235,7 @@ macro_rules! define_methods {
                         #[derive(serde::Deserialize)]
                         struct Params<'a> {
                             $(
+                                $(#[serde(rename = $p_rpc_name)])*
                                 $p_name: $p_ty,
                             )*
 
@@ -396,6 +399,59 @@ define_methods! {
     system_removeReservedPeer() -> (), // TODO:
     /// Returns, as an opaque string, the version of the client serving these JSON-RPC requests.
     system_version() -> &'a str,
+
+    // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
+    chainHead_unstable_body(
+        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
+        hash: HashHexString,
+        #[rename = "networkConfig"] network_config: Option<NetworkConfig>
+    ) -> &'a str,
+    chainHead_unstable_bodyEnd(
+        #[rename = "subscriptionId"] subscription_id: &'a str
+    ) -> (),
+    chainHead_unstable_call(
+        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
+        hash: HashHexString,
+        function: &'a str,
+        #[rename = "callParameters"] call_parameters: Vec<HexString>,
+        #[rename = "networkConfig"] network_config: Option<NetworkConfig>
+    ) -> &'a str,
+    chainHead_unstable_callEnd(
+        #[rename = "subscriptionId"] subscription_id: &'a str
+    ) -> (),
+    chainHead_unstable_follow(
+        #[rename = "runtimeUpdates"] runtime_updates: bool
+    ) -> &'a str,
+    chainHead_unstable_genesisHash() -> HashHexString,
+    chainHead_unstable_header(
+        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
+        hash: HashHexString
+    ) -> Option<HexString>,
+    chainHead_unstable_storage(
+        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
+        hash: HashHexString,
+        key: HexString,
+        #[rename = "childKey"] child_key: Option<HexString>,
+        r#type: StorageQueryType,
+        #[rename = "networkConfig"] network_config: Option<NetworkConfig>
+    ) -> &'a str,
+    chainHead_unstable_storageEnd(
+        #[rename = "subscriptionId"] subscription_id: &'a str
+    ) -> (),
+    chainHead_unstable_unfollow(
+        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str
+    ) -> (),
+    chainHead_unstable_unpin(
+        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
+        hash: HashHexString
+    ) -> (),
+
+    chainSpec_unstable_chainName() -> &'a str,
+    chainSpec_unstable_genesisHash() -> HashHexString,
+    chainSpec_unstable_properties() -> Box<serde_json::value::RawValue>,
+
+    sudo_unstable_p2pDiscover(multiaddr: &'a str) -> (),
+    sudo_unstable_version() -> &'a str,
 }
 
 define_methods! {
@@ -406,9 +462,12 @@ define_methods! {
     chain_newHead(subscription: &'a str, result: Header) -> (),
     state_runtimeVersion(subscription: &'a str, result: Option<RuntimeVersion<'a>>) -> (), // TODO: the Option is a custom addition
     state_storage(subscription: &'a str, result: StorageChangeSet) -> (),
+
+    // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
+    chainHead_unstable_followEvent(subscription: &'a str, result: FollowEvent<'a>) -> (),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HexString(pub Vec<u8>);
 
 // TODO: not great for type in public API
@@ -508,6 +567,45 @@ pub struct Block {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event")]
+pub enum FollowEvent<'a> {
+    #[serde(rename = "initialized")]
+    Initialized {
+        #[serde(rename = "finalizedBlockHash")]
+        finalized_block_hash: HashHexString,
+        #[serde(
+            rename = "finalizedBlockRuntime",
+            skip_serializing_if = "Option::is_none"
+        )]
+        finalized_block_runtime: Option<MaybeRuntimeSpec<'a>>,
+    },
+    #[serde(rename = "newBlock")]
+    NewBlock {
+        #[serde(rename = "blockHash")]
+        block_hash: HashHexString,
+        #[serde(rename = "parentBlockHash")]
+        parent_block_hash: HashHexString,
+        #[serde(rename = "newRuntime", borrow)]
+        // TODO: must not be present if runtime_updates: false
+        new_runtime: Option<MaybeRuntimeSpec<'a>>,
+    },
+    #[serde(rename = "bestBlockChanged")]
+    BestBlockChanged {
+        #[serde(rename = "bestBlockHash")]
+        best_block_hash: HashHexString,
+    },
+    #[serde(rename = "finalized")]
+    Finalized {
+        #[serde(rename = "finalizedBlocksHashes")]
+        finalized_blocks_hashes: Vec<HashHexString>,
+        #[serde(rename = "prunedBlocksHashes")]
+        pruned_blocks_hashes: Vec<HashHexString>,
+    },
+    #[serde(rename = "stop")]
+    Stop {},
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Header {
     #[serde(rename = "parentHash")]
     pub parent_hash: HashHexString,
@@ -552,10 +650,49 @@ pub struct HeaderDigest {
     pub logs: Vec<HexString>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct NetworkConfig {
+    #[serde(rename = "totalAttempts")]
+    pub total_attempts: u32,
+    #[serde(rename = "maxParallel")]
+    pub max_parallel: u32,
+    #[serde(rename = "timeoutMs")]
+    pub timeout_ms: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct RpcMethods {
     pub version: u64,
     pub methods: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
+pub enum MaybeRuntimeSpec<'a> {
+    #[serde(rename = "valid")]
+    Valid {
+        #[serde(borrow)]
+        spec: RuntimeSpec<'a>,
+    },
+    #[serde(rename = "invalid")]
+    Invalid { error: String }, // TODO: String because it's more convenient; improve
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeSpec<'a> {
+    #[serde(rename = "specName")]
+    pub spec_name: &'a str,
+    #[serde(rename = "implName")]
+    pub impl_name: &'a str,
+    #[serde(rename = "authoringVersion")]
+    pub authoring_version: u32,
+    #[serde(rename = "specVersion")]
+    pub spec_version: u32,
+    #[serde(rename = "implVersion")]
+    pub impl_version: u32,
+    #[serde(rename = "transactionVersion", skip_serializing_if = "Option::is_none")]
+    pub transaction_version: Option<u32>,
+    pub apis: HashMap<HexString, u32, fnv::FnvBuildHasher>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -594,6 +731,16 @@ pub enum DispatchClass {
 pub struct StorageChangeSet {
     pub block: HashHexString,
     pub changes: Vec<(HexString, Option<HexString>)>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum StorageQueryType {
+    #[serde(rename = "value")]
+    Value,
+    #[serde(rename = "hash")]
+    Hash,
+    #[serde(rename = "size")]
+    Size,
 }
 
 #[derive(Debug, Clone)]
