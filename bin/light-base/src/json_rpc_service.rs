@@ -988,9 +988,6 @@ impl<TPlat: Platform> Background<TPlat> {
                         }
                     };
 
-                let (current_specs, spec_changes) =
-                    self.runtime_service.subscribe_runtime_version().await;
-
                 log_and_respond(
                     &self.responses_sender,
                     &self.log_target,
@@ -999,50 +996,21 @@ impl<TPlat: Platform> Background<TPlat> {
                 )
                 .await;
 
-                if let Some(current_specs) = current_specs {
-                    let notification = if let Ok(runtime_spec) = current_specs {
-                        let runtime_spec = runtime_spec.decode();
-                        methods::ServerToClient::state_runtimeVersion {
-                            subscription: &subscription,
-                            result: Some(methods::RuntimeVersion {
-                                spec_name: runtime_spec.spec_name.into(),
-                                impl_name: runtime_spec.impl_name.into(),
-                                authoring_version: u64::from(runtime_spec.authoring_version),
-                                spec_version: u64::from(runtime_spec.spec_version),
-                                impl_version: u64::from(runtime_spec.impl_version),
-                                transaction_version: runtime_spec
-                                    .transaction_version
-                                    .map(u64::from),
-                                apis: runtime_spec
-                                    .apis
-                                    .map(|api| {
-                                        (methods::HexString(api.name_hash.to_vec()), api.version)
-                                    })
-                                    .collect(),
-                            }),
-                        }
-                        .to_json_call_object_parameters(None)
-                    } else {
-                        methods::ServerToClient::state_runtimeVersion {
-                            subscription: &subscription,
-                            result: None,
-                        }
-                        .to_json_call_object_parameters(None)
-                    };
-
-                    log_and_respond(&self.responses_sender, &self.log_target, notification).await;
-                }
-
                 let mut responses_sender = self.responses_sender.lock().await.clone();
                 let log_target = self.log_target.clone();
+                let runtime_service = self.runtime_service.clone();
                 self.new_child_tasks_tx
                     .lock()
                     .await
                     .unbounded_send(Box::pin(async move {
+                        let (current_spec, spec_changes) =
+                            runtime_service.subscribe_runtime_version().await;
+                        let spec_changes =
+                            stream::iter(iter::once(current_spec)).chain(spec_changes);
                         futures::pin_mut!(spec_changes);
 
                         loop {
-                            // Wait for either a new storage update, or for the subscription to be canceled.
+                            // Wait for either a new runtime upgrade, or for the subscription to be canceled.
                             let next_change = spec_changes.next();
                             futures::pin_mut!(next_change);
                             match future::select(next_change, &mut unsubscribe_rx).await {
