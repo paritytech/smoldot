@@ -174,16 +174,16 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// Returns the current runtime version, plus an unlimited stream that produces one item every
     /// time the specs of the runtime of the best block are changed.
     ///
-    /// The future returned by this function is expected to finish relatively quickly and is
-    /// necessary only for locking purposes.
-    ///
-    /// The current runtime version can be `None` in case it isn't known yet.
+    /// The future returned by this function waits until the runtime is available. This can take
+    /// a long time.
     ///
     /// The stream can generate an `Err` if the runtime in the best block is invalid.
+    ///
+    /// The stream is infinite. In other words it is guaranteed to never return `None`.
     pub async fn subscribe_runtime_version(
         self: &Arc<RuntimeService<TPlat>>,
     ) -> (
-        Option<Result<executor::CoreVersion, RuntimeError>>,
+        Result<executor::CoreVersion, RuntimeError>,
         stream::BoxStream<'static, Result<executor::CoreVersion, RuntimeError>>,
     ) {
         let subscribe_all = self.subscribe_all(8).await;
@@ -235,7 +235,6 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                     match notif {
                         None => {
                             let subscribe_all = runtime_service.subscribe_all(8).await;
-                            let finalized_runtime = subscribe_all.finalized_block_runtime.unwrap(); // TODO: unwrap() ?!
 
                             let new_blocks = Some(
                                 stream::iter(
@@ -253,7 +252,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                             );
 
                             break Some((
-                                finalized_runtime,
+                                subscribe_all.finalized_block_runtime,
                                 (
                                     runtime_service,
                                     new_blocks,
@@ -351,12 +350,12 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             ),
             move |(mut stream, previously_reported)| async move {
                 loop {
-                    let item = stream.next().await?;
+                    let item = stream.next().await.unwrap();
                     match (&item, &previously_reported) {
-                        (Ok(a), Some(Ok(b))) if a == b => continue,
+                        (Ok(a), Ok(b)) if a == b => continue,
                         _ => {} // TODO: what about errors? do we not deduplicate them?
                     }
-                    break Some((item.clone(), (stream, Some(item))));
+                    break Some((item.clone(), (stream, item)));
                 }
             },
         );
@@ -488,12 +487,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     pub async fn best_block_runtime(
         self: &Arc<RuntimeService<TPlat>>,
     ) -> Result<executor::CoreVersion, RuntimeError> {
-        let (current, mut subscription) = self.subscribe_runtime_version().await;
-        if let Some(current) = current {
-            return current;
-        }
-
-        subscription.next().await.unwrap()
+        self.subscribe_all(0).await.finalized_block_runtime
     }
 
     /// Returns the SCALE-encoded header of the current finalized block, plus an unlimited stream
@@ -554,8 +548,23 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         self: &Arc<RuntimeService<TPlat>>,
         buffer_size: usize,
     ) -> SubscribeAll {
+        // First, lock `guarded` and wait for the tree to be in `FinalizedBlockRuntimeKnown` mode.
+        // This can take a long time.
+        let mut guarded = loop {
+            let mut guarded = self.guarded.lock().await;
+
+            match &guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown { .. } => break guarded,
+                GuardedInner::FinalizedBlockRuntimeUnknown { .. } => {
+                    let (tx, mut rx) = mpsc::channel(0);
+                    guarded.all_blocks_subscriptions.push(tx);
+                    drop(guarded);
+                    let _ = rx.next().await;
+                }
+            }
+        };
+
         let (tx, new_blocks) = mpsc::channel(buffer_size);
-        let mut guarded = self.guarded.lock().await;
         guarded.all_blocks_subscriptions.push(tx);
 
         let non_finalized_blocks_ancestry_order: Vec<_> = match &guarded.tree {
@@ -602,7 +611,6 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                     })
                     .collect()
             }
-            GuardedInner::FinalizedBlockRuntimeUnknown { .. } => Vec::new(),
             _ => unreachable!(),
         };
 
@@ -619,26 +627,20 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 GuardedInner::FinalizedBlockRuntimeKnown {
                     finalized_block, ..
                 } => finalized_block.scale_encoded_header.clone(),
-                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
-                    debug_assert_eq!(tree.children(None).count(), 1);
-                    tree.block_user_data(tree.children(None).next().unwrap())
-                        .scale_encoded_header
-                        .clone()
-                }
                 _ => unreachable!(),
             },
-            finalized_block_runtime: match &guarded.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown {
-                    tree: Some(tree), ..
-                } => Some(
-                    guarded.runtimes[*tree.finalized_async_user_data()]
-                        .runtime
-                        .as_ref()
-                        .map(|rt| rt.runtime_spec.clone())
-                        .map_err(|err| err.clone()),
-                ),
-                GuardedInner::FinalizedBlockRuntimeUnknown { .. } => None,
-                _ => unreachable!(),
+            finalized_block_runtime: if let GuardedInner::FinalizedBlockRuntimeKnown {
+                tree: Some(tree),
+                ..
+            } = &guarded.tree
+            {
+                guarded.runtimes[*tree.finalized_async_user_data()]
+                    .runtime
+                    .as_ref()
+                    .map(|rt| rt.runtime_spec.clone())
+                    .map_err(|err| err.clone())
+            } else {
+                unreachable!()
             },
             new_blocks,
             non_finalized_blocks_ancestry_order,
@@ -839,11 +841,7 @@ pub struct SubscribeAll {
     pub finalized_block_scale_encoded_header: Vec<u8>,
 
     /// If the runtime of the finalized block is known, contains the information about it.
-    ///
-    /// If this contains `None`, it is guaranteed that [`SubscribeAll::new_blocks`] won't
-    /// generate any notification.
-    // TODO: stronger typing? remove the `new_blocks` field if `None`?
-    pub finalized_block_runtime: Option<Result<executor::CoreVersion, RuntimeError>>,
+    pub finalized_block_runtime: Result<executor::CoreVersion, RuntimeError>,
 
     /// List of all known non-finalized blocks at the time of subscription.
     ///
@@ -2012,6 +2010,9 @@ impl<TPlat: Platform> Background<TPlat> {
                         ..
                     }) => {
                         debug_assert!(former_finalized_async_op_user_data.is_none());
+
+                        // TODO: this is a hack to make the implementation of `subscribe_all` work and because the rest of this block doesn't properly report blocks
+                        guarded.all_blocks_subscriptions.clear();
 
                         best_block_updated = true;
                         finalized_block_updated = true;
