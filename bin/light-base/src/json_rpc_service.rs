@@ -48,7 +48,7 @@ use futures::{
 use smoldot::{
     chain::fork_tree,
     chain_spec,
-    executor::{host, read_only_runtime_host},
+    executor::{self, host, read_only_runtime_host},
     header,
     json_rpc::{self, methods},
     libp2p::{multiaddr, PeerId},
@@ -2260,16 +2260,18 @@ impl<TPlat: Platform> Background<TPlat> {
                         subscribe_all.finalized_block_scale_encoded_header.clone(),
                     );
 
-                    confirmations.push(
+                    confirmations.push({
                         methods::ServerToClient::chainHead_unstable_followEvent {
                             subscription: &subscription,
                             result: methods::FollowEvent::Initialized {
                                 finalized_block_hash: methods::HashHexString(finalized_block_hash),
-                                finalized_block_runtime: None, // FIXME: /!\ /!\
+                                finalized_block_runtime: Some(convert_runtime_spec(
+                                    &subscribe_all.finalized_block_runtime,
+                                )),
                             },
                         }
-                        .to_json_call_object_parameters(None),
-                    );
+                        .to_json_call_object_parameters(None)
+                    });
 
                     for block in &subscribe_all.non_finalized_blocks_ancestry_order {
                         let _was_in = pinned_blocks_headers.insert(
@@ -2303,7 +2305,11 @@ impl<TPlat: Platform> Background<TPlat> {
                                     subscription: &subscription,
                                     result: methods::FollowEvent::NewBlock {
                                         block_hash: methods::HashHexString(hash),
-                                        new_runtime: None, // TODO: /!\
+                                        new_runtime: if let Some(new_runtime) = &block.new_runtime {
+                                            Some(convert_runtime_spec(new_runtime))
+                                        } else {
+                                            None
+                                        },
                                         parent_block_hash: methods::HashHexString(
                                             block.parent_hash,
                                         ),
@@ -2539,7 +2545,11 @@ impl<TPlat: Platform> Background<TPlat> {
                                         parent_block_hash: methods::HashHexString(
                                             block.parent_hash,
                                         ),
-                                        new_runtime: None, // TODO:
+                                        new_runtime: if let Some(new_runtime) = &block.new_runtime {
+                                            Some(convert_runtime_spec(new_runtime))
+                                        } else {
+                                            None
+                                        },
                                     },
                                 }
                                 .to_json_call_object_parameters(None),
@@ -2649,6 +2659,33 @@ impl<TPlat: Platform> Background<TPlat> {
         lock.misc.insert((subscription.clone(), ty), unsubscribe_tx);
 
         Ok((subscription, unsubscribe_rx))
+    }
+}
+
+fn convert_runtime_spec(
+    runtime: &Result<executor::CoreVersion, runtime_service::RuntimeError>,
+) -> methods::MaybeRuntimeSpec {
+    match &runtime {
+        Ok(runtime) => {
+            let runtime = runtime.decode();
+            methods::MaybeRuntimeSpec::Valid {
+                spec: methods::RuntimeSpec {
+                    impl_name: runtime.impl_name,
+                    spec_name: runtime.spec_name,
+                    impl_version: runtime.impl_version,
+                    spec_version: runtime.spec_version,
+                    authoring_version: runtime.authoring_version,
+                    transaction_version: runtime.transaction_version,
+                    apis: runtime
+                        .apis
+                        .map(|api| (methods::HexString(api.name_hash.to_vec()), api.version))
+                        .collect(),
+                },
+            }
+        }
+        Err(error) => methods::MaybeRuntimeSpec::Invalid {
+            error: error.to_string(),
+        },
     }
 }
 

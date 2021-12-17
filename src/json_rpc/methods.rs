@@ -675,7 +675,7 @@ pub enum MaybeRuntimeSpec<'a> {
         spec: RuntimeSpec<'a>,
     },
     #[serde(rename = "invalid")]
-    Invalid { error: &'a str },
+    Invalid { error: String },  // TODO: String because it's more convenient; improve
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -685,13 +685,13 @@ pub struct RuntimeSpec<'a> {
     #[serde(rename = "implName")]
     pub impl_name: &'a str,
     #[serde(rename = "authoringVersion")]
-    pub authoring_version: u64,
+    pub authoring_version: u32,
     #[serde(rename = "specVersion")]
-    pub spec_version: u64,
+    pub spec_version: u32,
     #[serde(rename = "implVersion")]
-    pub impl_version: u64,
+    pub impl_version: u32,
     #[serde(rename = "transactionVersion", skip_serializing_if = "Option::is_none")]
-    pub transaction_version: Option<u64>,
+    pub transaction_version: Option<u32>,
     pub apis: HashMap<HexString, u32, fnv::FnvBuildHasher>,
 }
 
