@@ -17,6 +17,8 @@
 
 import * as child_process from 'child_process';
 import * as fs from 'fs';
+import * as path from 'path';
+import * as zlib from 'zlib';
 
 // Which Cargo profile to use to compile the Rust. Should be either `debug` or `release`, based
 // on the CLI options passed by the user.
@@ -62,9 +64,17 @@ child_process.execSync(
 // code. This generates a `wasm` file in `target/wasm32-wasi`.
 child_process.execSync(
     "cargo +" + rust_version + " build --package smoldot-light-wasm --target wasm32-wasi --no-default-features " +
-        (build_profile == 'debug' ? '' : ("--profile " + build_profile)),
+    (build_profile == 'debug' ? '' : ("--profile " + build_profile)),
     { 'stdio': 'inherit' }
 );
+
+// The code below will write a variable number of files to the `src/autogen` directory. Start by
+// clearing all existing files from this directory in case there are some left from past builds.
+const filesToRemove = fs.readdirSync('./src/autogen');
+for (const file of filesToRemove) {
+    if (!file.startsWith('.')) // Don't want to remove the `.gitignore` or `.npmignore` or similar
+        fs.unlinkSync(path.join("./src/autogen", file));
+}
 
 // It is then picked up by `wasm-opt`, which optimizes it and generates `./src/autogen/tmp.wasm`.
 // `wasm_opt` is purely about optimizing. If it isn't available, it is also possible to directly
@@ -89,13 +99,27 @@ if (fallback_copy) {
     fs.copyFileSync("../../../target/wasm32-wasi/" + build_profile + "/smoldot_light_wasm.wasm", "./src/autogen/tmp.wasm");
 }
 
-// We then base64-encode the `.wasm` file, and put this base64 string as a constant in
-// `./src/autogen/wasm.js`. It will be decoded at runtime.
-let wasm_opt_out = fs.readFileSync('./src/autogen/tmp.wasm');
-let base64_data = wasm_opt_out.toString('base64');
-fs.writeFileSync('./src/autogen/wasm.js', 'export default "' + base64_data + '";');
+// At the time of writing, there is unfortunately no standard cross-platform solution to the
+// problem of importing WebAssembly files. We base64-encode the .wasm file and integrate it as a
+// string. It is the safe but non-optimal solution.
+// Because raw .wasm compresses better than base64-encoded .wasm, we gzip the .wasm before base64
+// encoding it. For some reason, `gzip(base64(gzip(wasm)))` is 15% to 20% smaller than
+// `gzip(base64(wasm))`.
+// Additionally, because the Mozilla extension store refuses packages containing individual files
+// that are more than 4 MiB, we have to split our base64-encoded gzip-encoded wasm into multiple
+// small size files.
+const wasm_opt_out = fs.readFileSync('./src/autogen/tmp.wasm');
+let base64Data = zlib.deflateSync(wasm_opt_out).toString('base64');
+let imports = '';
+let fileNum = 0;
+let chunksSum = '""';
+while (base64Data.length != 0) {
+    const chunk = base64Data.slice(0, 1024 * 1024);
+    fs.writeFileSync('./src/autogen/wasm' + fileNum + '.js', 'export default "' + chunk + '";');
+    imports += 'import { default as wasm' + fileNum + ' } from \'./wasm' + fileNum + '.js\';\n';
+    chunksSum += ' + wasm' + fileNum;
+    fileNum += 1;
+    base64Data = base64Data.slice(1024 * 1024);
+}
+fs.writeFileSync('./src/autogen/wasm.js', imports + 'export default ' + chunksSum + ';');
 fs.unlinkSync("./src/autogen/tmp.wasm");
-
-// The reason for this script is that at the time of writing, there isn't any standard
-// cross-platform solution to the problem of importing WebAssembly files. Base64-encoding the
-// .wasm file and integrating it as a string is the safe but non-optimal solution.

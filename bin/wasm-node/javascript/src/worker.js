@@ -16,6 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { Buffer } from 'buffer';
+import { default as pako } from 'pako';
 import * as compat from './compat-nodejs.js';
 import { default as smoldot_light_builder } from './bindings-smoldot-light.js';
 import { default as wasi_builder } from './bindings-wasi.js';
@@ -107,10 +108,11 @@ const injectMessage = (instance, message) => {
 };
 
 const startInstance = async (config) => {
-  // The actual Wasm bytecode is base64-decoded from a constant found in a different file.
+  // The actual Wasm bytecode is base64-decoded then gzip-decoded from a constant found in a
+  // different file.
   // This is suboptimal compared to using `instantiateStreaming`, but it is the most
   // cross-platform cross-bundler approach.
-  const wasmBytecode = new Uint8Array(Buffer.from(wasm_base64, 'base64'));
+  const wasmBytecode = pako.inflate(new Uint8Array(Buffer.from(wasm_base64, 'base64')));
 
   // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
   const smoldotJsConfig = {
