@@ -174,10 +174,12 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// Returns the current runtime version, plus an unlimited stream that produces one item every
     /// time the specs of the runtime of the best block are changed.
     ///
-    /// The future returned by this function is expected to finish relatively quickly and is
-    /// necessary only for locking purposes.
+    /// The future returned by this function waits until the runtime is available. This can take
+    /// a long time.
     ///
     /// The stream can generate an `Err` if the runtime in the best block is invalid.
+    ///
+    /// The stream is infinite. In other words it is guaranteed to never return `None`.
     pub async fn subscribe_runtime_version(
         self: &Arc<RuntimeService<TPlat>>,
     ) -> (
