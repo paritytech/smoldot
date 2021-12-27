@@ -22,7 +22,7 @@ use crate::libp2p::{
     PeerId,
 };
 use crate::network::{kademlia, protocol};
-use crate::util;
+use crate::util::{self, SipHasherBuild};
 
 use alloc::{
     borrow::Cow,
@@ -41,7 +41,7 @@ use futures::{
     lock::{Mutex, MutexGuard},
     prelude::*,
 };
-use rand::{seq::SliceRandom as _, Rng as _, RngCore as _, SeedableRng as _};
+use rand::{seq::SliceRandom as _, Rng as _, SeedableRng as _};
 
 pub use crate::libp2p::{
     collection::ReadWrite,
@@ -207,13 +207,13 @@ struct NextEventGuarded {
     /// This is a subset of the block announce notification protocol substreams that are open.
     /// Some substreams might have been opened and have been left out of this map if their
     /// handshake was invalid, or had a different genesis hash, or similar problem.
-    open_chains: hashbrown::HashSet<(PeerId, usize), ahash::RandomState>,
+    open_chains: hashbrown::HashSet<(PeerId, usize), SipHasherBuild>,
 }
 
 /// See [`ChainNetwork::ephemeral_guarded`].
 struct EphemeralGuarded<TNow> {
     /// For each peer, the number of pending attempts.
-    num_pending_per_peer: hashbrown::HashMap<PeerId, NonZeroUsize, ahash::RandomState>,
+    num_pending_per_peer: hashbrown::HashMap<PeerId, NonZeroUsize, SipHasherBuild>,
 
     /// Keys of this slab are [`PendingId`]s. Values are the parameters associated to that
     /// [`PendingId`].
@@ -222,7 +222,7 @@ struct EphemeralGuarded<TNow> {
     pending_ids: slab::Slab<(PeerId, multiaddr::Multiaddr, TNow)>,
 
     /// List of all open connections.
-    connections: hashbrown::HashSet<PeerId, ahash::RandomState>,
+    connections: hashbrown::HashSet<PeerId, SipHasherBuild>,
 
     /// For each item in [`Config::chains`], the corresponding chain state.
     ///
@@ -236,12 +236,12 @@ struct EphemeralGuardedChain<TNow> {
 
     /// List of peers with an inbound slot attributed to them. Only includes peers the local node
     /// is connected to and who have opened a block announces substream with the local node.
-    in_peers: hashbrown::HashSet<PeerId, ahash::RandomState>,
+    in_peers: hashbrown::HashSet<PeerId, SipHasherBuild>,
 
     /// List of peers with an outbound slot attributed to them. Can include peers not connected to
     /// the local node yet. The peers in this list are always marked as desired in the underlying
     /// state machine.
-    out_peers: hashbrown::HashSet<PeerId, ahash::RandomState>,
+    out_peers: hashbrown::HashSet<PeerId, SipHasherBuild>,
 
     /// Kademlia k-buckets of this chain.
     ///
@@ -370,38 +370,20 @@ where
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
         let inner_randomness_seed = randomness.sample(rand::distributions::Standard);
 
-        let connections = {
-            let k0 = randomness.next_u64();
-            let k1 = randomness.next_u64();
-            let k2 = randomness.next_u64();
-            let k3 = randomness.next_u64();
-            hashbrown::HashSet::with_capacity_and_hasher(
-                config.peers_capacity,
-                ahash::RandomState::with_seeds(k0, k1, k2, k3),
-            )
-        };
+        let connections = hashbrown::HashSet::with_capacity_and_hasher(
+            config.peers_capacity,
+            SipHasherBuild::new(randomness.gen()),
+        );
 
-        let peers = {
-            let k0 = randomness.next_u64();
-            let k1 = randomness.next_u64();
-            let k2 = randomness.next_u64();
-            let k3 = randomness.next_u64();
-            hashbrown::HashMap::with_capacity_and_hasher(
-                config.peers_capacity,
-                ahash::RandomState::with_seeds(k0, k1, k2, k3),
-            )
-        };
+        let peers = hashbrown::HashMap::with_capacity_and_hasher(
+            config.peers_capacity,
+            SipHasherBuild::new(randomness.gen()),
+        );
 
-        let open_chains = {
-            let k0 = randomness.next_u64();
-            let k1 = randomness.next_u64();
-            let k2 = randomness.next_u64();
-            let k3 = randomness.next_u64();
-            hashbrown::HashSet::with_capacity_and_hasher(
-                config.peers_capacity * config.chains.len(),
-                ahash::RandomState::with_seeds(k0, k1, k2, k3),
-            )
-        };
+        let open_chains = hashbrown::HashSet::with_capacity_and_hasher(
+            config.peers_capacity * config.chains.len(),
+            SipHasherBuild::new(randomness.gen()),
+        );
 
         let mut initial_desired_substreams = BTreeSet::new();
 
@@ -444,26 +426,14 @@ where
                 }
 
                 EphemeralGuardedChain {
-                    in_peers: {
-                        let k0 = randomness.next_u64();
-                        let k1 = randomness.next_u64();
-                        let k2 = randomness.next_u64();
-                        let k3 = randomness.next_u64();
-                        hashbrown::HashSet::with_capacity_and_hasher(
-                            usize::try_from(chain.in_slots).unwrap_or(0),
-                            ahash::RandomState::with_seeds(k0, k1, k2, k3),
-                        )
-                    },
-                    out_peers: {
-                        let k0 = randomness.next_u64();
-                        let k1 = randomness.next_u64();
-                        let k2 = randomness.next_u64();
-                        let k3 = randomness.next_u64();
-                        hashbrown::HashSet::with_capacity_and_hasher(
-                            usize::try_from(chain.out_slots).unwrap_or(0),
-                            ahash::RandomState::with_seeds(k0, k1, k2, k3),
-                        )
-                    },
+                    in_peers: hashbrown::HashSet::with_capacity_and_hasher(
+                        usize::try_from(chain.in_slots).unwrap_or(0),
+                        SipHasherBuild::new(randomness.gen()),
+                    ),
+                    out_peers: hashbrown::HashSet::with_capacity_and_hasher(
+                        usize::try_from(chain.out_slots).unwrap_or(0),
+                        SipHasherBuild::new(randomness.gen()),
+                    ),
                     chain_config: chain,
                     kbuckets,
                 }

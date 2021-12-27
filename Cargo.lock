@@ -2302,6 +2302,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "siphasher"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "533494a8f9b724d33625ab53c6c4800f7cc445895924a8ef649222dcb76e938b"
+
+[[package]]
 name = "slab"
 version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2317,7 +2323,6 @@ checksum = "1ecab6c735a6bb4139c0caafd0cc3635748bbb3acf4550e8138122099251f309"
 name = "smoldot"
 version = "0.2.0"
 dependencies = [
- "ahash",
  "arrayvec 0.7.2",
  "async-std",
  "bip39",
@@ -2354,6 +2359,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.0",
+ "siphasher",
  "slab",
  "smallvec",
  "snow",
