@@ -1094,7 +1094,7 @@ pub struct Config<TNow> {
     /// Time after which an outgoing ping is considered failed.
     pub ping_timeout: Duration,
     /// Entropy used for the randomness specific to this connection.
-    pub randomness_seed: [u8; 32],
+    pub randomness_seed: [u8; 16],
 }
 
 /// Configuration for a request-response protocol.
