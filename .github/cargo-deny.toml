@@ -15,5 +15,9 @@ name = "openssl"
 [[bans.deny]]
 name = "ring"
 
+# The `ahash` library algorithm isn't really proven. Nothing bad about it, but let's be cautious.
+[[bans.deny]]
+name = "ahash"
+
 [sources]
 unknown-git = "deny"
