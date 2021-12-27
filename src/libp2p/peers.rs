@@ -46,6 +46,7 @@
 //!
 
 use crate::libp2p::{self, collection, PeerId};
+use crate::util::SipHasherBuild;
 
 use alloc::{
     collections::{btree_map, BTreeMap, BTreeSet, VecDeque},
@@ -136,12 +137,7 @@ where
         let mut peer_indices = {
             hashbrown::HashMap::with_capacity_and_hasher(
                 config.peers_capacity,
-                ahash::RandomState::with_seeds(
-                    randomness.sample(rand::distributions::Standard),
-                    randomness.sample(rand::distributions::Standard),
-                    randomness.sample(rand::distributions::Standard),
-                    randomness.sample(rand::distributions::Standard),
-                ),
+                SipHasherBuild::new(randomness.sample(rand::distributions::Standard)),
             )
         };
 
@@ -1655,7 +1651,7 @@ struct Guarded<TConn> {
     peers: slab::Slab<Peer>,
 
     /// For each known peer, the corresponding index within [`Guarded::peers`].
-    peer_indices: hashbrown::HashMap<PeerId, usize, ahash::RandomState>,
+    peer_indices: hashbrown::HashMap<PeerId, usize, SipHasherBuild>,
 
     /// Each connection (handshaking or established) stored in [`Peers::inner`] has a `usize` user
     /// data that is an index within this slab.

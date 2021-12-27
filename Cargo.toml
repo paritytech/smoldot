@@ -40,7 +40,6 @@ std = [
 # Before adding a crate here, please make sure that it is `no_std`-compatible. If a crate should
 # theoretically be `no_std`-compatible (i.e. doesn't need the help of the operating system) but is
 # not, or if things are sketchy, please leave a comment next to it.
-ahash = { version = "0.7.6", default-features = false }
 arrayvec = { version = "0.7.2", default-features = false }
 bip39 = { version = "1.0.1", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
@@ -74,6 +73,7 @@ schnorrkel = { version = "0.10.2", default-features = false, features = ["preaud
 serde = { version = "1.0.130", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.72", default-features = false, features = ["alloc", "raw_value"] }
 sha2 = { version = "0.10.0", default-features = false }
+siphasher = { version = "0.3.7", default-features = false }
 slab = { version = "0.4.5", default-features = false }
 smallvec = "1.7.0"
 snow = { version = "0.8.0", default-features = false, features = ["default-resolver"] }
