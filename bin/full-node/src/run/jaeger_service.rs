@@ -176,6 +176,10 @@ impl JaegerService {
     }
 
     /// Creates a new `Span` that refers to an event about a given block.
+    ///
+    /// This function is private so that only the code in the `jaeger_service` module decides
+    /// which names and labels to apply to spans. This makes it possible to easily ensure some
+    /// consistency in these names and labels.
     fn block_span(
         &self,
         block_hash: &[u8; 32],
@@ -189,6 +193,10 @@ impl JaegerService {
     }
 
     /// Creates a new `Span` that refers to a specific network connection between two nodes.
+    ///
+    /// This function is private so that only the code in the `jaeger_service` module decides
+    /// which names and labels to apply to spans. This makes it possible to easily ensure some
+    /// consistency in these names and labels.
     fn net_connection_span(
         &self,
         local_peer_id: &PeerId,
