@@ -244,17 +244,13 @@ impl NetworkService {
                             } => {
                                 let decoded = announce.decode();
 
-                                let mut _jaeger_span = inner.jaeger_service.net_connection_span(
-                                    &inner.local_peer_id,
-                                    &peer_id,
-                                    "block-announce-received",
-                                );
-                                _jaeger_span.add_int_tag(
-                                    "number",
-                                    i64::try_from(decoded.header.number).unwrap(),
-                                );
-                                _jaeger_span
-                                    .add_string_tag("hash", &hex::encode(&decoded.header.hash()));
+                                let mut _jaeger_span =
+                                    inner.jaeger_service.block_announce_receive_span(
+                                        &inner.local_peer_id,
+                                        &peer_id,
+                                        decoded.header.number,
+                                        &decoded.header.hash(),
+                                    );
 
                                 tracing::debug!(
                                     %chain_index, %peer_id,
@@ -319,29 +315,21 @@ impl NetworkService {
                                 request,
                             } => {
                                 tracing::debug!(%peer_id, "incoming-blocks-request");
-                                let mut _jaeger_span1 = inner.jaeger_service.net_connection_span(
-                                    &inner.local_peer_id,
-                                    &peer_id,
-                                    "incoming-blocks-request",
-                                );
-                                _jaeger_span1
-                                    .add_int_tag("num-blocks", config.desired_count.get().into());
-                                let _jaeger_span2 = if let (
-                                    1,
-                                    protocol::BlocksRequestConfigStart::Hash(block_hash),
-                                ) =
-                                    (config.desired_count.get(), &config.start)
-                                {
-                                    let mut span = inner
-                                        .jaeger_service
-                                        .block_span(block_hash, "incoming-blocks-request");
-                                    let hex = hex::encode(block_hash);
-                                    span.add_string_tag("hash", &hex);
-                                    _jaeger_span1.add_string_tag("hash", &hex);
-                                    Some(span)
-                                } else {
-                                    None
-                                };
+                                let mut _jaeger_span =
+                                    inner.jaeger_service.incoming_block_request_span(
+                                        &inner.local_peer_id,
+                                        &peer_id,
+                                        config.desired_count.get(),
+                                        if let (
+                                            1,
+                                            protocol::BlocksRequestConfigStart::Hash(block_hash),
+                                        ) = (config.desired_count.get(), &config.start)
+                                        {
+                                            Some(block_hash)
+                                        } else {
+                                            None
+                                        },
+                                    );
 
                                 let response =
                                     blocks_request_response(&inner.databases[chain_index], config)
@@ -715,12 +703,18 @@ impl NetworkService {
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, service::BlocksRequestError> {
-        let mut _jaeger_span = self.inner.jaeger_service.net_connection_span(
+        let mut _jaeger_span = self.inner.jaeger_service.outgoing_block_request_span(
             &self.inner.local_peer_id,
             &target,
-            "outgoing-blocks-request",
+            config.desired_count.get(),
+            if let (1, protocol::BlocksRequestConfigStart::Hash(block_hash)) =
+                (config.desired_count.get(), &config.start)
+            {
+                Some(block_hash)
+            } else {
+                None
+            },
         );
-        _jaeger_span.add_int_tag("num-blocks", config.desired_count.get().into());
 
         self.inner
             .network
