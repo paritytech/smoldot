@@ -34,16 +34,16 @@ use core::{
 use futures::lock::Mutex;
 
 #[derive(Clone)]
-pub struct ClientId(u64, Weak<ClientInner>);
+pub struct ClientId(u64, Weak<Mutex<ClientInner>>);
 
 #[derive(Clone)]
-pub struct RequestId(u64, Weak<ClientInner>);
+pub struct RequestId(u64, Weak<Mutex<ClientInner>>);
 
 #[derive(Clone)]
-pub struct SubscriptionId(u64, Weak<ClientInner>);
+pub struct SubscriptionId(u64, Weak<Mutex<ClientInner>>);
 
 pub struct RequestsSubscriptions {
-    clients: Mutex<hashbrown::HashMap<u64, Arc<ClientInner>, fnv::FnvBuildHasher>>,
+    clients: Mutex<Clients>,
 
     /// Every time an element is pushed in [`ClientInnerQueue::unpulled_requests`], the client in
     /// question is also pushed here. Similarly, elements removed from one are also removed from
@@ -54,7 +54,7 @@ pub struct RequestsSubscriptions {
 
     /// Next identifier to assign to the next request.
     ///
-    /// Matches the values found in [`ClientInner::pending_requests`].
+    /// Matches the values found in [`Mutex<ClientInnerQueue>::pending_requests`].
     next_request_id: atomic::Atomic<u64>,
 
     /// Next identifier to assign to the next subscription.
@@ -75,7 +75,6 @@ pub struct RequestsSubscriptions {
     /// rejected.
     max_subscriptions_per_client: usize,
 }
-
 impl RequestsSubscriptions {
     /// Creates a new empty state machine.
     pub fn new() -> Self {
@@ -84,10 +83,10 @@ impl RequestsSubscriptions {
         let max_subscriptions_per_client = 32;
 
         Self {
-            clients: Mutex::new(hashbrown::HashMap::with_capacity_and_hasher(
-                8,
-                Default::default(),
-            )),
+            clients: Mutex::new(Clients {
+                list: hashbrown::HashMap::with_capacity_and_hasher(8, Default::default()),
+                next_id: 0,
+            }),
             unpulled_requests: Mutex::new(UnpulledRequests {
                 queue: VecDeque::with_capacity(max_requests_per_client * 8),
                 new_queue_element: event_listener::Event::new(),
@@ -123,32 +122,31 @@ impl RequestsSubscriptions {
     /// [`ClientId`].
     pub async fn add_client(&self) -> Result<ClientId, ()> {
         let mut clients = self.clients.lock().await;
-        if clients.len() == self.max_clients.load(Ordering::Relaxed) {
+        if clients.list.len() == self.max_clients.load(Ordering::Relaxed) {
             return Err(());
         }
 
-        let arc = Arc::new(ClientInner {
-            queue: Mutex::new(ClientInnerQueue {
-                unpulled_requests: VecDeque::with_capacity(self.max_requests_per_client),
-                pending_requests: hashbrown::HashSet::with_capacity_and_hasher(
-                    self.max_requests_per_client,
-                    Default::default(),
-                ),
-                request_answered: event_listener::Event::new(),
-                responses_send_back: VecDeque::with_capacity(self.max_requests_per_client),
-                notification_messages: BTreeMap::new(),
-                message_pushed: event_listener::Event::new(),
-                active_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
-                    self.max_subscriptions_per_client,
-                    Default::default(),
-                ),
-            }),
-        });
+        let arc = Arc::new(Mutex::new(ClientInner {
+            unpulled_requests: VecDeque::with_capacity(self.max_requests_per_client),
+            pending_requests: hashbrown::HashSet::with_capacity_and_hasher(
+                self.max_requests_per_client,
+                Default::default(),
+            ),
+            request_answered: event_listener::Event::new(),
+            responses_send_back: VecDeque::with_capacity(self.max_requests_per_client),
+            notification_messages: BTreeMap::new(),
+            message_pushed: event_listener::Event::new(),
+            active_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
+                self.max_subscriptions_per_client,
+                Default::default(),
+            ),
+        }));
 
-        let new_client_id = 0; // TODO:
+        let new_client_id = clients.next_id;
+        clients.next_id += 1;
 
         let ret = ClientId(new_client_id, Arc::downgrade(&arc));
-        clients.insert(new_client_id, arc);
+        clients.list.insert(new_client_id, arc);
         Ok(ret)
     }
 
@@ -159,32 +157,31 @@ impl RequestsSubscriptions {
     pub fn add_client_mut(&mut self) -> Result<ClientId, ()> {
         // TODO: DRY with add_client
         let clients = self.clients.get_mut();
-        if clients.len() == self.max_clients.load(Ordering::Relaxed) {
+        if clients.list.len() == self.max_clients.load(Ordering::Relaxed) {
             return Err(());
         }
 
-        let arc = Arc::new(ClientInner {
-            queue: Mutex::new(ClientInnerQueue {
-                unpulled_requests: VecDeque::with_capacity(self.max_requests_per_client),
-                pending_requests: hashbrown::HashSet::with_capacity_and_hasher(
-                    self.max_requests_per_client,
-                    Default::default(),
-                ),
-                request_answered: event_listener::Event::new(),
-                responses_send_back: VecDeque::with_capacity(self.max_requests_per_client),
-                notification_messages: BTreeMap::new(),
-                message_pushed: event_listener::Event::new(),
-                active_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
-                    self.max_subscriptions_per_client,
-                    Default::default(),
-                ),
-            }),
-        });
+        let arc = Arc::new(Mutex::new(ClientInner {
+            unpulled_requests: VecDeque::with_capacity(self.max_requests_per_client),
+            pending_requests: hashbrown::HashSet::with_capacity_and_hasher(
+                self.max_requests_per_client,
+                Default::default(),
+            ),
+            request_answered: event_listener::Event::new(),
+            responses_send_back: VecDeque::with_capacity(self.max_requests_per_client),
+            notification_messages: BTreeMap::new(),
+            message_pushed: event_listener::Event::new(),
+            active_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
+                self.max_subscriptions_per_client,
+                Default::default(),
+            ),
+        }));
 
-        let new_client_id = 0; // TODO:
+        let new_client_id = clients.next_id;
+        clients.next_id += 1;
 
         let ret = ClientId(new_client_id, Arc::downgrade(&arc));
-        clients.insert(new_client_id, arc);
+        clients.list.insert(new_client_id, arc);
         Ok(ret)
     }
 
@@ -202,14 +199,14 @@ impl RequestsSubscriptions {
     pub async fn remove_client(&self, client: &ClientId) {
         let mut clients = self.clients.lock().await;
 
-        if let Some(removed) = clients.remove(&client.0) {
+        if let Some(removed) = clients.list.remove(&client.0) {
             debug_assert!(Arc::ptr_eq(&removed, &client.1.upgrade().unwrap()));
         }
 
-        // Shrink `clients` in order to potentially reclaim memory after a huge spike in number of
-        // clients.
-        if clients.capacity() >= clients.len() * 2 {
-            clients.shrink_to_fit();
+        // Shrink `clients.list` in order to potentially reclaim memory after a huge spike in
+        // number of clients.
+        if clients.list.capacity() >= clients.list.len() * 2 {
+            clients.list.shrink_to_fit();
         }
     }
 
@@ -234,7 +231,7 @@ impl RequestsSubscriptions {
             };
 
             let sleep_until = {
-                let mut queue_lock = client.queue.lock().await;
+                let mut queue_lock = client.lock().await;
 
                 // TODO: this order where we always try requests_send_back first is sketchy and might cause races when subscribing/unsubscribing
                 if let Some(message) = queue_lock.responses_send_back.pop_front() {
@@ -263,7 +260,6 @@ impl RequestsSubscriptions {
     /// available.
     ///
     /// Has no effect if the [`ClientId`] is stale or invalid.
-    // TODO: provide a non-async alternative?
     pub async fn queue_client_request(&self, client: &ClientId, request: String) {
         let client = match client.1.upgrade() {
             Some(c) => c,
@@ -273,7 +269,7 @@ impl RequestsSubscriptions {
         // Try insert the request in that client's queue. Can take a long time.
         loop {
             let sleep_until = {
-                let mut lock = client.queue.lock().await;
+                let mut lock = client.lock().await;
 
                 if lock
                     .pending_requests
@@ -307,7 +303,45 @@ impl RequestsSubscriptions {
     /// Similar to [`RequestsSubscriptions::queue_client_request`], but succeeds or fails
     /// instantly depending on whether there is enough room in the queue.
     pub fn try_queue_client_request(&self, client: &ClientId, request: String) -> Result<(), ()> {
+        // TODO: DRY
         todo!()
+        /*let client = match client.1.upgrade() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // Try insert the request in that client's queue. Can take a long time.
+        loop {
+            let sleep_until = {
+                let mut lock = client.lock().await;
+
+                if lock
+                    .pending_requests
+                    .len()
+                    .saturating_add(lock.unpulled_requests.len())
+                    < self.max_requests_per_client
+                {
+                    lock.unpulled_requests.push_back(request);
+                    debug_assert_eq!(
+                        lock.unpulled_requests.capacity(),
+                        self.max_requests_per_client
+                    );
+                    break;
+                }
+
+                lock.request_answered.listen()
+            };
+
+            sleep_until.await
+        }
+
+        // Now that the request is in the client's queue, add a corresponding entry in the global
+        // queue of requests.
+        let mut unpulled_requests = self.unpulled_requests.lock().await;
+        unpulled_requests.queue.push_back(Arc::downgrade(&client));
+        unpulled_requests
+            .new_queue_element
+            .notify_additional_relaxed(1);*/
     }
 
     /// Waits until a request has been queued using
@@ -347,7 +381,7 @@ impl RequestsSubscriptions {
 
         // Insert the new request in that client's state, and extract the body of the request.
         let request_message = {
-            let mut client_lock = client_with_request.queue.lock().await;
+            let mut client_lock = client_with_request.lock().await;
             debug_assert_eq!(
                 client_lock.unpulled_requests.capacity(),
                 self.max_requests_per_client
@@ -379,7 +413,7 @@ impl RequestsSubscriptions {
             None => return,
         };
 
-        let mut lock = client.queue.lock().await;
+        let mut lock = client.lock().await;
 
         debug_assert_eq!(
             lock.pending_requests.capacity(),
@@ -420,7 +454,7 @@ impl RequestsSubscriptions {
             }
         };
 
-        let lock = client_arc.queue.lock().await;
+        let lock = client_arc.lock().await;
         debug_assert_eq!(
             lock.active_subscriptions.capacity(),
             self.max_subscriptions_per_client
@@ -464,20 +498,22 @@ impl RequestsSubscriptions {
     }
 }
 
+struct Clients {
+    list: hashbrown::HashMap<u64, Arc<Mutex<ClientInner>>, fnv::FnvBuildHasher>,
+
+    next_id: u64,
+}
+
 struct UnpulledRequests {
     /// Queue of clients with an element in [`ClientInnerQueue::unpulled_requests`]. Can contain
     /// obsolete clients, in which case the queue element should be ignored.
-    queue: VecDeque<Weak<ClientInner>>,
+    queue: VecDeque<Weak<Mutex<ClientInner>>>,
 
     /// Event notified whenever an element is pushed to [`UnpulledRequests::queue`].
     new_queue_element: event_listener::Event,
 }
 
 struct ClientInner {
-    queue: Mutex<ClientInnerQueue>,
-}
-
-struct ClientInnerQueue {
     /// List of requests sent by the client and not yet pulled by
     /// [`RequestsSubscriptions::next_request`].
     unpulled_requests: VecDeque<String>,

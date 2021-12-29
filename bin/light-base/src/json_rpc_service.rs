@@ -1407,25 +1407,21 @@ impl<TPlat: Platform> Background<TPlat> {
                     )
                     .await;
             }
-            // TODO:
-            /*methods::MethodCall::chainHead_unstable_header {
+            methods::MethodCall::chainHead_unstable_header {
                 follow_subscription_id,
                 hash,
             } => {
+                // TODO: some fixes needed in json-rpc-interface spec repo
                 let response = {
                     let lock = self.subscriptions.lock().await;
                     if let Some(subscription) = lock.chain_head_follow.get(follow_subscription_id) {
-                        if subscription.cancel.is_canceled() {
-                            Some(None)
-                        } else {
-                            subscription
-                                .pinned_blocks_headers
-                                .get(&hash.0)
-                                .cloned()
-                                .map(Some)
-                        }
+                        subscription
+                            .pinned_blocks_headers
+                            .get(&hash.0)
+                            .cloned()
+                            .map(Some)
                     } else {
-                        None
+                        Some(None)
                     }
                 };
 
@@ -1440,6 +1436,8 @@ impl<TPlat: Platform> Background<TPlat> {
                         )
                         .await;
                 } else {
+                    // Reached if the subscription is valid but the block couldn't be found in
+                    // `pinned_blocks_headers`.
                     self.requests_subscriptions
                         .respond(
                             &state_machine_request_id,
@@ -1456,16 +1454,13 @@ impl<TPlat: Platform> Background<TPlat> {
                 follow_subscription_id,
                 hash,
             } => {
+                // TODO: some fixes needed in json-rpc-interface spec repo
                 let invalid = {
                     let mut lock = self.subscriptions.lock().await;
                     if let Some(subscription) =
                         lock.chain_head_follow.get_mut(follow_subscription_id)
                     {
-                        if subscription.cancel.is_canceled() {
-                            false
-                        } else {
-                            subscription.pinned_blocks_headers.remove(&hash.0).is_some()
-                        }
+                        subscription.pinned_blocks_headers.remove(&hash.0).is_some()
                     } else {
                         true
                     }
@@ -1495,6 +1490,7 @@ impl<TPlat: Platform> Background<TPlat> {
             methods::MethodCall::chainHead_unstable_unfollow {
                 follow_subscription_id,
             } => {
+                // TODO: some fixes needed in json-rpc-interface spec repo
                 if let Some(subscription) = self
                     .subscriptions
                     .lock()
@@ -1502,28 +1498,17 @@ impl<TPlat: Platform> Background<TPlat> {
                     .chain_head_follow
                     .remove(follow_subscription_id)
                 {
-                    if subscription.cancel.send(request_id.to_owned()).is_err() {
-                        self.requests_subscriptions
-                            .respond(
-                                &state_machine_request_id,
-                                methods::Response::chainHead_unstable_unfollow(())
-                                    .to_json_response(request_id),
-                            )
-                            .await;
-                    }
-                } else {
-                    self.requests_subscriptions
-                        .respond(
-                            &state_machine_request_id,
-                            json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::InvalidParams,
-                                None,
-                            ),
-                        )
-                        .await;
+                    subscription.abort_handle.abort();
                 }
-            }*/
+
+                self.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        methods::Response::chainHead_unstable_unfollow(())
+                            .to_json_response(request_id),
+                    )
+                    .await;
+            }
             methods::MethodCall::chainSpec_unstable_chainName {} => {
                 self.requests_subscriptions
                     .respond(
@@ -2827,6 +2812,13 @@ impl<TPlat: Platform> Background<TPlat> {
                             .to_json_call_object_parameters(None),
                         )
                         .await;
+
+                    let _ = me
+                        .subscriptions
+                        .lock()
+                        .await
+                        .chain_head_follow
+                        .remove(&subscription_id);
                 }
             }
         };
