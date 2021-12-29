@@ -86,6 +86,22 @@ pub fn build_block_request(config: BlocksRequestConfig) -> impl Iterator<Item = 
                     Some(schema::block_request::FromBlock::Hash(h.to_vec()))
                 }
                 BlocksRequestConfigStart::Number(n) => Some(
+                    // The exact format is the SCALE encoding of a block number.
+                    // The block number can have a varying number of bytes, and it is therefore
+                    // not really possible to know how many bytes to send here.
+                    // Fortunately, Substrate uses the `Decode` method of `parity_scale_codec`
+                    // instead of `DecodeAll`, meaning that it will ignore any extra byte after
+                    // the decoded value. We can thus send as many bytes as we want, as long as
+                    // there are enough bytes Substrate will accept the request.
+                    // Since the SCALE encoding of a number is in little endian, it's the higher
+                    // bytes that get will discarded. These higher bytes are most likely 0s,
+                    // otherwise the blockchain in question has a big problem.
+                    // In other words, we send the bytes containing the little endian block number
+                    // followed with enough 0s to make Substrate accept the request.
+                    // This is a hack, but it is not really fixable in smoldot alone and shows a
+                    // bigger problem in the Substrate network protocol/architecture. A better
+                    // protocol would for example use the SCALE-compact encoding, which doesn't
+                    // have this issue.
                     schema::block_request::FromBlock::Number(n.to_le_bytes().to_vec()),
                 ),
             },
@@ -124,10 +140,27 @@ pub fn decode_block_request(
                     .map_err(|_| DecodeBlockRequestError::InvalidBlockHashLength)?,
             ),
             Some(schema::block_request::FromBlock::Number(n)) => {
-                BlocksRequestConfigStart::Number(u64::from_le_bytes(
-                    <[u8; 8]>::try_from(&n[..])
-                        .map_err(|_| DecodeBlockRequestError::InvalidBlockNumber)?,
-                ))
+                // The exact format is the SCALE encoding of a block number.
+                // The block number can have a varying number of bytes, and it is therefore
+                // not really possible to know how many bytes to expect here.
+                // Because the SCALE encoding of a number is the number in little endian format,
+                // we decode the bytes in little endian format in a way that works no matter the
+                // number of bytes.
+                let mut num = 0u64;
+                let mut shift = 0u32;
+                for byte in n {
+                    let shifted = u64::from(byte)
+                        .checked_mul(1 << shift)
+                        .ok_or(DecodeBlockRequestError::InvalidBlockNumber)?;
+                    num = num
+                        .checked_add(shifted)
+                        .ok_or(DecodeBlockRequestError::InvalidBlockNumber)?;
+                    shift = shift
+                        .checked_add(8)
+                        .ok_or(DecodeBlockRequestError::InvalidBlockNumber)?;
+                }
+
+                BlocksRequestConfigStart::Number(num)
             }
             None => return Err(DecodeBlockRequestError::MissingStartBlock),
         },
