@@ -34,7 +34,13 @@ use std::{
     task,
 };
 
-pub(crate) fn init(max_log_level: u32) {
+pub(crate) struct Client<TChain, TPlat: smoldot_light_base::Platform> {
+    pub(crate) smoldot: smoldot_light_base::Client<TChain, TPlat>,
+
+    pub(crate) new_tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
+}
+
+pub(crate) fn init<TChain, TPlat: smoldot_light_base::Platform>(max_log_level: u32) -> Client<TChain, TPlat> {
     // Try initialize the logging and the panic hook.
     let _ = log::set_boxed_logger(Box::new(Logger)).map(|()| {
         log::set_max_level(match max_log_level {
@@ -141,9 +147,10 @@ pub(crate) fn init(max_log_level: u32) {
         env!("CARGO_PKG_VERSION").to_owned(),
     );
 
-    let mut client_lock = crate::CLIENT.lock().unwrap();
-    assert!(client_lock.is_none());
-    *client_lock = Some((client, new_task_tx));
+    Client {
+        smoldot: client,
+        new_tasks_spawner: new_task_tx,
+    }
 }
 
 /// Stops execution, providing a string explaining what happened.

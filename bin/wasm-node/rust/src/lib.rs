@@ -113,7 +113,15 @@ impl Sub<Instant> for Instant {
 }
 
 lazy_static::lazy_static! {
-    static ref CLIENT: Mutex<Option<(smoldot_light_base::Client<Vec<future::AbortHandle>, platform::Platform>, mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>)>> = Mutex::new(None);
+    static ref CLIENT: Mutex<Option<init::Client<Vec<future::AbortHandle>, platform::Platform>>> = Mutex::new(None);
+}
+
+fn init(max_log_level: u32) {
+    let init_out = init::init(max_log_level);
+
+    let mut client_lock = crate::CLIENT.lock().unwrap();
+    assert!(client_lock.is_none());
+    *client_lock = Some(init_out);
 }
 
 fn add_chain(
@@ -132,7 +140,7 @@ fn add_chain(
     // OOM errors. The threshold is completely empirical and should probably be updated
     // regularly to account for changes in the implementation.
     if alloc::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
-        let chain_id = client_lock.as_mut().unwrap().0.add_erroneous_chain(
+        let chain_id = client_lock.as_mut().unwrap().smoldot.add_erroneous_chain(
             "Wasm node is running low on memory and will prevent any new chain from being added"
                 .into(),
             Vec::new(),
@@ -204,17 +212,18 @@ fn add_chain(
     };
 
     // Insert the chain in the client.
-    let chain_id = client_lock
-        .as_mut()
-        .unwrap()
-        .0
-        .add_chain(smoldot_light_base::AddChainConfig {
-            user_data: abort_handle.into_iter().collect(),
-            specification: str::from_utf8(&chain_spec).unwrap(),
-            database_content: str::from_utf8(&database_content).unwrap(),
-            json_rpc_responses,
-            potential_relay_chains: potential_relay_chains.into_iter(),
-        });
+    let chain_id =
+        client_lock
+            .as_mut()
+            .unwrap()
+            .smoldot
+            .add_chain(smoldot_light_base::AddChainConfig {
+                user_data: abort_handle.into_iter().collect(),
+                specification: str::from_utf8(&chain_spec).unwrap(),
+                database_content: str::from_utf8(&database_content).unwrap(),
+                json_rpc_responses,
+                potential_relay_chains: potential_relay_chains.into_iter(),
+            });
 
     // Spawn the task if necessary.
     // See explanations above.
@@ -228,7 +237,7 @@ fn add_chain(
         client_lock
             .as_mut()
             .unwrap()
-            .1
+            .new_tasks_spawner
             .unbounded_send((
                 "json-rpc-messages-out".to_owned(),
                 future::Abortable::new(messages_out_task, abort_registration)
@@ -247,7 +256,7 @@ fn remove_chain(chain_id: u32) {
     let abort_handles = client_lock
         .as_mut()
         .unwrap()
-        .0
+        .smoldot
         .remove_chain(smoldot_light_base::ChainId::from(chain_id));
 
     // Abort the tasks that retrieve the database content or poll the channel and send out the
@@ -267,7 +276,7 @@ fn chain_is_ok(chain_id: u32) -> u32 {
     if client_lock
         .as_mut()
         .unwrap()
-        .0
+        .smoldot
         .chain_is_erroneous(smoldot_light_base::ChainId::from(chain_id))
         .is_some()
     {
@@ -282,7 +291,7 @@ fn chain_error_len(chain_id: u32) -> u32 {
     let len = client_lock
         .as_mut()
         .unwrap()
-        .0
+        .smoldot
         .chain_is_erroneous(smoldot_light_base::ChainId::from(chain_id))
         .map(|msg| msg.as_bytes().len())
         .unwrap_or(0);
@@ -294,7 +303,7 @@ fn chain_error_ptr(chain_id: u32) -> u32 {
     let ptr = client_lock
         .as_mut()
         .unwrap()
-        .0
+        .smoldot
         .chain_is_erroneous(smoldot_light_base::ChainId::from(chain_id))
         .map(|msg| msg.as_bytes().as_ptr() as usize)
         .unwrap_or(0);
@@ -318,7 +327,7 @@ fn json_rpc_send(ptr: u32, len: u32, chain_id: u32) {
     if let Err(err) = client_lock
         .as_mut()
         .unwrap()
-        .0
+        .smoldot
         .json_rpc_request(json_rpc_request, chain_id)
     {
         if let Some(response) = err.into_json_rpc_error() {
@@ -331,7 +340,10 @@ fn database_content(chain_id: u32, max_size: u32) {
     let client_chain_id = smoldot_light_base::ChainId::from(chain_id);
 
     let mut client_lock = CLIENT.lock().unwrap();
-    let (client, tasks_spawner) = client_lock.as_mut().unwrap();
+    let init::Client {
+        smoldot: client,
+        new_tasks_spawner,
+    } = client_lock.as_mut().unwrap();
 
     let task = {
         let max_size = usize::try_from(max_size).unwrap();
@@ -353,7 +365,7 @@ fn database_content(chain_id: u32, max_size: u32) {
         .chain_user_data_mut(client_chain_id)
         .push(abort_handle);
 
-    tasks_spawner
+    new_tasks_spawner
         .unbounded_send((
             "database_content-output".to_owned(),
             future::Abortable::new(task, abort_registration)
