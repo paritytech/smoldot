@@ -49,8 +49,10 @@ static ALLOCATOR: AllocCounter = AllocCounter {
 unsafe impl alloc::GlobalAlloc for AllocCounter {
     unsafe fn alloc(&self, layout: alloc::Layout) -> *mut u8 {
         let ret = self.inner.alloc(layout);
-        self.total
-            .fetch_add(layout.size(), atomic::Ordering::Relaxed);
+        if !ret.is_null() {
+            self.total
+                .fetch_add(layout.size(), atomic::Ordering::Relaxed);
+        }
         ret
     }
 
