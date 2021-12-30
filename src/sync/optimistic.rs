@@ -56,6 +56,7 @@ use alloc::{borrow::ToOwned as _, boxed::Box, collections::BTreeMap, vec::Vec};
 use core::{
     cmp, fmt, iter, mem,
     num::{NonZeroU32, NonZeroU64},
+    ops,
     time::Duration,
 };
 use hashbrown::{HashMap, HashSet};
@@ -447,14 +448,6 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         self.inner.sources.keys().copied()
     }
 
-    pub fn source_user_data(&self, source_id: SourceId) -> &TSrc {
-        &self.inner.sources.get(&source_id).unwrap().user_data
-    }
-
-    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        &mut self.inner.sources.get_mut(&source_id).unwrap().user_data
-    }
-
     /// Returns the number of ongoing requests that concern this source.
     ///
     /// # Panic
@@ -629,6 +622,22 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         } else {
             ProcessOne::Idle { sync: self }
         }
+    }
+}
+
+impl<TRq, TSrc, TBl> ops::Index<SourceId> for OptimisticSync<TRq, TSrc, TBl> {
+    type Output = TSrc;
+
+    #[track_caller]
+    fn index(&self, source_id: SourceId) -> &TSrc {
+        &self.inner.sources.get(&source_id).unwrap().user_data
+    }
+}
+
+impl<TRq, TSrc, TBl> ops::IndexMut<SourceId> for OptimisticSync<TRq, TSrc, TBl> {
+    #[track_caller]
+    fn index_mut(&mut self, source_id: SourceId) -> &mut TSrc {
+        &mut self.inner.sources.get_mut(&source_id).unwrap().user_data
     }
 }
 

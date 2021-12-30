@@ -854,7 +854,7 @@ impl SyncBackground {
                     request_bodies,
                     request_justification,
                 } => {
-                    let peer_id = self.sync.source_user_data_mut(source_id).clone().unwrap();
+                    let peer_id = self.sync[source_id].clone().unwrap();
 
                     // TODO: add jaeger span
 

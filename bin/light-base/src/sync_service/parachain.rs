@@ -383,7 +383,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             // sources whose best block is superior to `block_number` have it.
                             let list = if block_number > sync_sources.finalized_block_height() {
                                 sync_sources.knows_non_finalized_block(block_number, &block_hash)
-                                    .map(|local_id| sync_sources.user_data(local_id).0.clone())
+                                    .map(|local_id| sync_sources[local_id].0.clone())
                                     .collect()
                             } else {
                                 sync_sources
@@ -391,7 +391,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                     .filter(|local_id| {
                                         sync_sources.best_block(*local_id).0 >= block_number
                                     })
-                                    .map(|local_id| sync_sources.user_data(local_id).0.clone())
+                                    .map(|local_id| sync_sources[local_id].0.clone())
                                     .collect()
                             };
 
@@ -400,7 +400,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         ToBackground::SyncingPeers { send_back } => {
                             let _ = send_back.send(sync_sources.keys().map(|local_id| {
                                 let (height, hash) = sync_sources.best_block(local_id);
-                                let (peer_id, role) = sync_sources.user_data(local_id).clone();
+                                let (peer_id, role) = sync_sources[local_id].clone();
                                 (peer_id, role, height, *hash)
                             }).collect());
                         }
