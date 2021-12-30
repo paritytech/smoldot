@@ -598,6 +598,10 @@ impl<'a, T> Iterator for PruneAncestorsIter<'a, T> {
             }
 
             // Actually remove the node.
+            debug_assert!(self
+                .tree
+                .first_root
+                .map_or(true, |n| n != maybe_removed_node_index.0));
             let iter_node = self.tree.nodes.remove(maybe_removed_node_index.0);
 
             break Some(PrunedNode {
@@ -624,8 +628,19 @@ impl<'a, T> Drop for PruneAncestorsIter<'a, T> {
 
         if self.uncles_only {
             debug_assert!(self.tree.first_root.is_some());
-            debug_assert!(self.tree.nodes.get(self.tree.first_root.unwrap()).is_some());
         }
+
+        debug_assert!(self
+            .tree
+            .first_root
+            .map_or(true, |fr| self.tree.nodes.contains(fr)));
+
+        debug_assert!(self
+            .tree
+            .nodes
+            .iter()
+            .all(|(_, n)| !n.is_prune_target_ancestor));
+
         debug_assert_eq!(self.uncles_only, self.tree.get(self.new_final).is_some());
     }
 }
