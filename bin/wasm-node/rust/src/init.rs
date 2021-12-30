@@ -40,7 +40,9 @@ pub(crate) struct Client<TChain, TPlat: smoldot_light_base::Platform> {
     pub(crate) new_tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
 }
 
-pub(crate) fn init<TChain, TPlat: smoldot_light_base::Platform>(max_log_level: u32) -> Client<TChain, TPlat> {
+pub(crate) fn init<TChain, TPlat: smoldot_light_base::Platform>(
+    max_log_level: u32,
+) -> Client<TChain, TPlat> {
     // Try initialize the logging and the panic hook.
     let _ = log::set_boxed_logger(Box::new(Logger)).map(|()| {
         log::set_max_level(match max_log_level {
