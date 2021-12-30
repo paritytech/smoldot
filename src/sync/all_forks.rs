@@ -270,7 +270,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Inform the [`AllForksSync`] of a new potential source of blocks.
     ///
     /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
-    /// retrieved using [`AllForksSync::source_user_data`].
+    /// retrieved using the `Index` trait implementation of this container.
     ///
     /// Returns the newly-created source entry, plus optionally a request that should be started
     /// towards this source.

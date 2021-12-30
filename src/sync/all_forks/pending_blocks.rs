@@ -254,7 +254,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Add a new source to the container.
     ///
     /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
-    /// retrieved using [`PendingBlocks::source_user_data`].
+    /// retrieved using the `Index` trait implementation of this container.
     ///
     /// Returns the newly-created source entry.
     pub fn add_source(
