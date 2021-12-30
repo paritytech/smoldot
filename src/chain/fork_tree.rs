@@ -136,17 +136,24 @@ impl<T> ForkTree<T> {
     }
 
     fn ancestry_order_next(&self, node_index: NodeIndex) -> Option<NodeIndex> {
+        debug_assert!(!self.nodes[node_index.0].is_prune_target_ancestor);
+
         if let Some(idx) = self.nodes[node_index.0].first_child {
+            debug_assert_eq!(self.nodes[idx].parent, Some(node_index.0));
             return Some(NodeIndex(idx));
         }
 
         if let Some(idx) = self.nodes[node_index.0].next_sibling {
+            debug_assert_eq!(self.nodes[idx].previous_sibling, Some(node_index.0));
+            debug_assert_eq!(self.nodes[idx].parent, self.nodes[node_index.0].parent);
             return Some(NodeIndex(idx));
         }
 
         let mut return_value = self.nodes[node_index.0].parent;
         while let Some(idx) = return_value {
             if let Some(next_sibling) = self.nodes[idx].next_sibling {
+                debug_assert_eq!(self.nodes[next_sibling].previous_sibling, Some(idx));
+                debug_assert_eq!(self.nodes[next_sibling].parent, self.nodes[idx].parent);
                 return Some(NodeIndex(next_sibling));
             }
             return_value = self.nodes[idx].parent;
@@ -635,13 +642,11 @@ impl<'a, T> Drop for PruneAncestorsIter<'a, T> {
             .first_root
             .map_or(true, |fr| self.tree.nodes.contains(fr)));
 
-        debug_assert!(self
-            .tree
-            .nodes
-            .iter()
-            .all(|(_, n)| !n.is_prune_target_ancestor));
-
         debug_assert_eq!(self.uncles_only, self.tree.get(self.new_final).is_some());
+
+        // Do a full pass on the tree. This triggers a lot of debug assertions.
+        #[cfg(debug_assertions)]
+        for _ in self.tree.iter_ancestry_order() {}
     }
 }
 
