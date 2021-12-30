@@ -26,7 +26,7 @@
 //!
 
 use alloc::{collections::BTreeSet, vec::Vec};
-use core::fmt;
+use core::{fmt, ops};
 
 /// Identifier for a source in the [`AllForksSources`].
 //
@@ -120,7 +120,7 @@ impl<TSrc> AllForksSources<TSrc> {
     /// Add a new source to the container.
     ///
     /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
-    /// retrieved using [`AllForksSources::user_data`].
+    /// retrieved using the `Index` trait implementation of this container.
     ///
     /// Returns the newly-created source entry.
     pub fn add_source(
@@ -357,30 +357,22 @@ impl<TSrc> AllForksSources<TSrc> {
     pub fn contains(&self, source_id: SourceId) -> bool {
         self.sources.contains_key(&source_id)
     }
+}
 
-    /// Returns the user data associated to the source. This is the value originally passed
-    /// through [`AllForksSources::add_source`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is out of range.
-    ///
+impl<TSrc> ops::Index<SourceId> for AllForksSources<TSrc> {
+    type Output = TSrc;
+
     #[track_caller]
-    pub fn user_data(&self, source_id: SourceId) -> &TSrc {
-        let source = self.sources.get(&source_id).unwrap();
+    fn index(&self, id: SourceId) -> &TSrc {
+        let source = self.sources.get(&id).unwrap();
         &source.user_data
     }
+}
 
-    /// Returns the user data associated to the source. This is the value originally passed
-    /// through [`AllForksSources::add_source`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is out of range.
-    ///
+impl<TSrc> ops::IndexMut<SourceId> for AllForksSources<TSrc> {
     #[track_caller]
-    pub fn user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        let source = self.sources.get_mut(&source_id).unwrap();
+    fn index_mut(&mut self, id: SourceId) -> &mut TSrc {
+        let source = self.sources.get_mut(&id).unwrap();
         &mut source.user_data
     }
 }

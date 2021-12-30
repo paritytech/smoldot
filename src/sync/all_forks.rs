@@ -88,7 +88,7 @@ use crate::{
 };
 
 use alloc::vec::Vec;
-use core::{num::NonZeroU32, time::Duration};
+use core::{num::NonZeroU32, ops, time::Duration};
 
 mod disjoint;
 mod pending_blocks;
@@ -270,7 +270,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Inform the [`AllForksSync`] of a new potential source of blocks.
     ///
     /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
-    /// retrieved using [`AllForksSync::source_user_data`].
+    /// retrieved using the `Index` trait implementation of this container.
     ///
     /// Returns the newly-created source entry, plus optionally a request that should be started
     /// towards this source.
@@ -395,28 +395,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         self.inner.blocks.source_best_block(source_id)
     }
 
-    /// Returns the user data associated to the source. This is the value originally passed
-    /// through [`AllForksSync::add_source`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is out of range.
-    ///
-    pub fn source_user_data(&self, source_id: SourceId) -> &TSrc {
-        self.inner.blocks.source_user_data(source_id)
-    }
-
-    /// Returns the user data associated to the source. This is the value originally passed
-    /// through [`AllForksSync::add_source`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is out of range.
-    ///
-    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        self.inner.blocks.source_user_data_mut(source_id)
-    }
-
     /// Returns the number of ongoing requests that concern this source.
     ///
     /// # Panic
@@ -447,7 +425,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             .map(move |rq| {
                 (
                     rq.source_id,
-                    self.inner.blocks.source_user_data(rq.source_id),
+                    &self.inner.blocks[rq.source_id],
                     rq.request_params,
                 )
             })
@@ -928,6 +906,22 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             }
         }*/
     }*/
+}
+
+impl<TBl, TRq, TSrc> ops::Index<SourceId> for AllForksSync<TBl, TRq, TSrc> {
+    type Output = TSrc;
+
+    #[track_caller]
+    fn index(&self, id: SourceId) -> &TSrc {
+        &self.inner.blocks[id]
+    }
+}
+
+impl<TBl, TRq, TSrc> ops::IndexMut<SourceId> for AllForksSync<TBl, TRq, TSrc> {
+    #[track_caller]
+    fn index_mut(&mut self, id: SourceId) -> &mut TSrc {
+        &mut self.inner.blocks[id]
+    }
 }
 
 /// Struct to pass back when a block request has succeeded.

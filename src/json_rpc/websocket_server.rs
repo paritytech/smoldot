@@ -117,7 +117,7 @@
 mod tests;
 
 use async_std::net::{TcpListener, TcpStream};
-use core::{fmt, str};
+use core::{fmt, ops, str};
 use futures::{channel::mpsc, prelude::*};
 use soketto::handshake::{server::Response, Server};
 use std::{io, net::SocketAddr};
@@ -343,24 +343,6 @@ impl<T> WsServer<T> {
         self.connections.len()
     }
 
-    /// Returns the user data associated to a connection.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`ConnectionId`] is invalid.
-    pub fn connection_user_data(&self, id: ConnectionId) -> &T {
-        &self.connections.get(id.0).unwrap().user_data
-    }
-
-    /// Returns the user data associated to a connection.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`ConnectionId`] is invalid.
-    pub fn connection_mut_user_data(&mut self, id: ConnectionId) -> &mut T {
-        &mut self.connections.get_mut(id.0).unwrap().user_data
-    }
-
     /// Destroys a connection.
     ///
     /// The connection will be cleanly shut down in the background, but for API purposes this
@@ -533,6 +515,22 @@ impl<T: fmt::Debug> fmt::Debug for WsServer<T> {
                     .map(|c| (ConnectionId(c.0), &c.1.user_data)),
             )
             .finish()
+    }
+}
+
+impl<T> ops::Index<ConnectionId> for WsServer<T> {
+    type Output = T;
+
+    #[track_caller]
+    fn index(&self, id: ConnectionId) -> &T {
+        &self.connections.get(id.0).unwrap().user_data
+    }
+}
+
+impl<T> ops::IndexMut<ConnectionId> for WsServer<T> {
+    #[track_caller]
+    fn index_mut(&mut self, id: ConnectionId) -> &mut T {
+        &mut self.connections.get_mut(id.0).unwrap().user_data
     }
 }
 

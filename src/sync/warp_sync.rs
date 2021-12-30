@@ -71,6 +71,7 @@ use crate::{
 };
 
 use alloc::vec::Vec;
+use core::ops;
 
 pub use warp_sync::Error as FragmentError;
 
@@ -337,50 +338,6 @@ impl<TSrc> InProgressWarpSync<TSrc> {
         sources.iter().map(|(id, _)| SourceId(id))
     }
 
-    /// Returns the user data (`TSrc`) corresponding to the given source.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is invalid.
-    ///
-    pub fn source_user_data(&self, source_id: SourceId) -> &TSrc {
-        let sources = match self {
-            Self::StorageGet(storage_get) => &storage_get.state.sources,
-            Self::NextKey(next_key) => &next_key.state.sources,
-            Self::Verifier(verifier) => &verifier.sources,
-            Self::WarpSyncRequest(warp_sync_request) => &warp_sync_request.sources,
-            Self::VirtualMachineParamsGet(virtual_machine_params_get) => {
-                &virtual_machine_params_get.state.sources
-            }
-            Self::WaitingForSources(waiting_for_sources) => &waiting_for_sources.sources,
-        };
-
-        debug_assert!(sources.contains(source_id.0));
-        &sources[source_id.0].user_data
-    }
-
-    /// Returns the user data (`TSrc`) corresponding to the given source.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is invalid.
-    ///
-    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        let sources = match self {
-            Self::StorageGet(storage_get) => &mut storage_get.state.sources,
-            Self::NextKey(next_key) => &mut next_key.state.sources,
-            Self::Verifier(verifier) => &mut verifier.sources,
-            Self::WarpSyncRequest(warp_sync_request) => &mut warp_sync_request.sources,
-            Self::VirtualMachineParamsGet(virtual_machine_params_get) => {
-                &mut virtual_machine_params_get.state.sources
-            }
-            Self::WaitingForSources(waiting_for_sources) => &mut waiting_for_sources.sources,
-        };
-
-        debug_assert!(sources.contains(source_id.0));
-        &mut sources[source_id.0].user_data
-    }
-
     fn warp_sync_request_from_next_source(
         mut sources: slab::Slab<Source<TSrc>>,
         state: PreVerificationState,
@@ -464,6 +421,46 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                 }
             }
         }
+    }
+}
+
+impl<TSrc> ops::Index<SourceId> for InProgressWarpSync<TSrc> {
+    type Output = TSrc;
+
+    #[track_caller]
+    fn index(&self, source_id: SourceId) -> &TSrc {
+        let sources = match self {
+            Self::StorageGet(storage_get) => &storage_get.state.sources,
+            Self::NextKey(next_key) => &next_key.state.sources,
+            Self::Verifier(verifier) => &verifier.sources,
+            Self::WarpSyncRequest(warp_sync_request) => &warp_sync_request.sources,
+            Self::VirtualMachineParamsGet(virtual_machine_params_get) => {
+                &virtual_machine_params_get.state.sources
+            }
+            Self::WaitingForSources(waiting_for_sources) => &waiting_for_sources.sources,
+        };
+
+        debug_assert!(sources.contains(source_id.0));
+        &sources[source_id.0].user_data
+    }
+}
+
+impl<TSrc> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc> {
+    #[track_caller]
+    fn index_mut(&mut self, source_id: SourceId) -> &mut TSrc {
+        let sources = match self {
+            Self::StorageGet(storage_get) => &mut storage_get.state.sources,
+            Self::NextKey(next_key) => &mut next_key.state.sources,
+            Self::Verifier(verifier) => &mut verifier.sources,
+            Self::WarpSyncRequest(warp_sync_request) => &mut warp_sync_request.sources,
+            Self::VirtualMachineParamsGet(virtual_machine_params_get) => {
+                &mut virtual_machine_params_get.state.sources
+            }
+            Self::WaitingForSources(waiting_for_sources) => &mut waiting_for_sources.sources,
+        };
+
+        debug_assert!(sources.contains(source_id.0));
+        &mut sources[source_id.0].user_data
     }
 }
 
