@@ -77,6 +77,7 @@ pub struct RequestsSubscriptions {
     /// rejected.
     max_subscriptions_per_client: usize,
 }
+
 impl RequestsSubscriptions {
     /// Creates a new empty state machine.
     pub fn new() -> Self {
@@ -140,6 +141,7 @@ impl RequestsSubscriptions {
                 responses_send_back: VecDeque::with_capacity(self.max_requests_per_client),
                 notification_messages: BTreeMap::new(),
                 message_pushed: event_listener::Event::new(),
+                message_pulled: event_listener::Event::new(),
                 active_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
                     self.max_subscriptions_per_client,
                     Default::default(),
@@ -178,6 +180,7 @@ impl RequestsSubscriptions {
                 responses_send_back: VecDeque::with_capacity(self.max_requests_per_client),
                 notification_messages: BTreeMap::new(),
                 message_pushed: event_listener::Event::new(),
+                message_pulled: event_listener::Event::new(),
                 active_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
                     self.max_subscriptions_per_client,
                     Default::default(),
@@ -243,18 +246,22 @@ impl RequestsSubscriptions {
                 let mut guarded_lock = client.guarded.lock().await;
 
                 debug_assert!(
-                    !guarded_lock.responses_send_back.len()
+                    guarded_lock.responses_send_back.len()
                         <= self.max_requests_per_client + guarded_lock.notification_messages.len(),
                 );
 
                 match guarded_lock.responses_send_back.pop_front() {
                     Some(ResponseSendBack::Response(message)) => {
+                        guarded_lock.message_pulled.notify_additional(1);
+
                         let _new_val = client.total_requests_in_fly.fetch_sub(1, Ordering::Release);
                         debug_assert_ne!(_new_val, usize::max_value()); // Check for underflows
                         client.request_answered.notify_additional(1);
                         return message;
                     }
                     Some(ResponseSendBack::SubscriptionMessage(sub_id, index)) => {
+                        guarded_lock.message_pulled.notify_additional(1);
+
                         let message = guarded_lock
                             .notification_messages
                             .remove(&(sub_id, index))
@@ -362,7 +369,11 @@ impl RequestsSubscriptions {
     /// instantly depending on whether there is enough room in the queue.
     ///
     /// Returns `Ok` if the [`ClientId`] is stale or invalid.
-    pub fn try_queue_client_request(&self, client: &ClientId, request: String) -> Result<(), ()> {
+    pub fn try_queue_client_request(
+        &self,
+        client: &ClientId,
+        request: String,
+    ) -> Result<(), TryQueueClientRequestError> {
         let client = match client.1.upgrade() {
             Some(c) => c,
             None => return Ok(()),
@@ -382,7 +393,7 @@ impl RequestsSubscriptions {
             })
             .is_err()
         {
-            return Err(());
+            return Err(TryQueueClientRequestError { request });
         }
 
         // TODO: what if failure? failures could happen because the queue can contain obsolete entries
@@ -611,9 +622,11 @@ impl RequestsSubscriptions {
         }
     }
 
-    // TODO: is this a good function?
     pub async fn push_notification(&self, subscription: &SubscriptionId, message: String) {
-        todo!()
+        let _result = self
+            .try_push_notification_inner(subscription, message, false)
+            .await;
+        debug_assert!(_result.is_ok());
     }
 
     // TODO: doc
@@ -621,6 +634,20 @@ impl RequestsSubscriptions {
         &self,
         subscription: &SubscriptionId,
         message: String,
+    ) -> Result<(), ()> {
+        self.try_push_notification_inner(subscription, message, true)
+            .await
+    }
+
+    /// Internal implementation for pushing a message.
+    ///
+    /// If `try_only` is `false`, then this function waits for a slot to be available and always
+    /// succeeds.
+    async fn try_push_notification_inner(
+        &self,
+        subscription: &SubscriptionId,
+        message: String,
+        try_only: bool,
     ) -> Result<(), ()> {
         let client_arc = match subscription.1.upgrade() {
             Some(c) => c,
@@ -637,26 +664,33 @@ impl RequestsSubscriptions {
         };
 
         // TODO: this is O(n)
-        let index = {
-            let control_flow = lock
-                .notification_messages
-                .range((subscription.0, usize::min_value())..=(subscription.0, usize::max_value()))
-                .map(|((_, idx), _)| *idx)
-                .try_fold(0, |maybe_free_index, index| {
-                    if maybe_free_index == index {
-                        ops::ControlFlow::Continue(index + 1)
-                    } else {
-                        ops::ControlFlow::Break(maybe_free_index)
+        let index = loop {
+            let sleep_until = {
+                let control_flow = lock
+                    .notification_messages
+                    .range(
+                        (subscription.0, usize::min_value())..=(subscription.0, usize::max_value()),
+                    )
+                    .map(|((_, idx), _)| *idx)
+                    .try_fold(0, |maybe_free_index, index| {
+                        if maybe_free_index == index {
+                            ops::ControlFlow::Continue(index + 1)
+                        } else {
+                            ops::ControlFlow::Break(maybe_free_index)
+                        }
+                    });
+                match control_flow {
+                    ops::ControlFlow::Break(idx) => {
+                        debug_assert!(idx < messages_capacity);
+                        break idx;
                     }
-                });
-            match control_flow {
-                ops::ControlFlow::Break(idx) => {
-                    debug_assert!(idx < messages_capacity);
-                    idx
+                    ops::ControlFlow::Continue(idx) if idx < messages_capacity => break idx,
+                    ops::ControlFlow::Continue(_) if try_only => return Err(()),
+                    ops::ControlFlow::Continue(_) => lock.message_pulled.listen(),
                 }
-                ops::ControlFlow::Continue(idx) if idx < messages_capacity => idx,
-                ops::ControlFlow::Continue(_) => return Err(()),
-            }
+            };
+
+            sleep_until.await
         };
 
         // Inserts or replaces the current value under the key `(subscription, index)`.
@@ -672,6 +706,14 @@ impl RequestsSubscriptions {
 
         Ok(())
     }
+}
+
+/// Error returned by [`RequestsSubscriptions::try_queue_client_request`].
+#[derive(Debug, derive_more::Display, Clone)]
+#[display(fmt = "Queue of unpulled requests full")]
+pub struct TryQueueClientRequestError {
+    /// Original request, passed as parameter to the function.
+    pub request: String,
 }
 
 /// Error returned by [`RequestsSubscriptions::add_client`] and
@@ -745,6 +787,12 @@ struct ClientInnerGuarded {
     ///
     /// Also notified if the client is destroyed. TODO: necessary?
     message_pushed: event_listener::Event,
+
+    /// Every time an entry is pulled from [`ClientInnerQueue::responses_send_back`], one listener
+    /// of this event is notified.
+    ///
+    /// Also notified if the client is destroyed. TODO: necessary?
+    message_pulled: event_listener::Event,
 
     /// List of active subscriptions. In other words, subscriptions that have been started but
     /// having been stopped with [`RequestsSubscriptions::stop_subscription`] yet.

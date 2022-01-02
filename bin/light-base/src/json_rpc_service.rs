@@ -250,7 +250,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                                 if message.len() > 100 { "…" } else { "" }
                             );
 
-                            responses_sender.send(message).await;
+                            let _ = responses_sender.send(message).await;
                         }
                     }
                     .boxed()
@@ -345,10 +345,9 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             .try_queue_client_request(&self.client_id, json_rpc_request)
         {
             Ok(()) => Ok(()),
-            Err(err) => {
-                todo!()
-                //Err(HandleRpcError::Overloaded { json_rpc_request })
-            }
+            Err(err) => Err(HandleRpcError::Overloaded {
+                json_rpc_request: err.request,
+            }),
         }
     }
 }
@@ -537,7 +536,10 @@ impl<TPlat: Platform> Background<TPlat> {
 
         // Check whether the JSON-RPC request is correct, and bail out if it isn't.
         let (request_id, call) = match methods::parse_json_call(&json_rpc_request) {
-            Ok(v) => v,
+            Ok((request_id, call)) => {
+                log::debug!("Handler <= Request({:?}, {:?})", request_id, call);
+                (request_id, call)
+            }
             Err(methods::ParseError::Method { request_id, error }) => {
                 log::warn!(
                     target: &self.log_target,
