@@ -718,6 +718,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-queue"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b10ddc024425c88c2ad148c1b0fd53f4c6d38db9697c9f1588381212fa657c9"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-utils"
 version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2290,6 +2300,8 @@ dependencies = [
  "blake2-rfc",
  "bs58",
  "criterion",
+ "crossbeam-queue",
+ "crossbeam-utils",
  "derive_more",
  "ed25519-zebra",
  "either",

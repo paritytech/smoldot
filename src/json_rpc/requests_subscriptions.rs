@@ -34,23 +34,25 @@ use core::{
 use futures::lock::Mutex;
 
 #[derive(Clone)]
-pub struct ClientId(u64, Weak<Mutex<ClientInner>>);
+pub struct ClientId(u64, Weak<ClientInner>);
 
 #[derive(Clone)]
-pub struct RequestId(u64, Weak<Mutex<ClientInner>>);
+pub struct RequestId(u64, Weak<ClientInner>);
 
 #[derive(Clone)]
-pub struct SubscriptionId(u64, Weak<Mutex<ClientInner>>);
+pub struct SubscriptionId(u64, Weak<ClientInner>);
 
 pub struct RequestsSubscriptions {
     clients: Mutex<Clients>,
 
-    /// Every time an element is pushed in [`ClientInnerQueue::unpulled_requests`], the client in
-    /// question is also pushed here. Similarly, elements removed from one are also removed from
-    /// the other.
-    /// This allows knowing in `O(1)` complexity which client has a request available for
-    /// processing.
-    unpulled_requests: Mutex<UnpulledRequests>,
+    /// List of requests sent by a client and not yet pulled by
+    /// [`RequestsSubscriptions::next_request`].
+    ///
+    /// Can contain obsolete clients, in which case the entry should simply be ignored.
+    unpulled_requests: crossbeam_queue::ArrayQueue<(String, Weak<ClientInner>)>,
+
+    /// Event notified whenever an element is pushed to [`RequestsSubscriptions::unpulled_requests`].
+    new_unpulled_request: event_listener::Event,
 
     /// Next identifier to assign to the next request.
     ///
@@ -87,10 +89,10 @@ impl RequestsSubscriptions {
                 list: hashbrown::HashMap::with_capacity_and_hasher(8, Default::default()),
                 next_id: 0,
             }),
-            unpulled_requests: Mutex::new(UnpulledRequests {
-                queue: VecDeque::with_capacity(max_requests_per_client * 8),
-                new_queue_element: event_listener::Event::new(),
-            }),
+            unpulled_requests: crossbeam_queue::ArrayQueue::new(
+                max_requests_per_client * max_clients,
+            ),
+            new_unpulled_request: event_listener::Event::new(),
             next_request_id: atomic::Atomic::new(0),
             next_subscription_id: atomic::Atomic::new(0),
             max_clients: AtomicUsize::new(max_clients),
@@ -111,6 +113,7 @@ impl RequestsSubscriptions {
     /// > **Note**: This function can typically be used at runtime to adjust the maximum number
     /// >           of clients based on the resource consumptions of the binary.
     pub fn set_max_clients(&self, max_clients: usize) {
+        // TODO: this doesn't update the capacityu of `unpulled_requests`; is this a problem?
         self.max_clients.store(max_clients, Ordering::Relaxed)
     }
 
@@ -120,27 +123,29 @@ impl RequestsSubscriptions {
     ///
     /// A single instance of [`RequestsSubscriptions`] will never allocate multiple times the same
     /// [`ClientId`].
-    pub async fn add_client(&self) -> Result<ClientId, ()> {
+    pub async fn add_client(&self) -> Result<ClientId, AddClientError> {
         let mut clients = self.clients.lock().await;
         if clients.list.len() == self.max_clients.load(Ordering::Relaxed) {
-            return Err(());
+            return Err(AddClientError::LimitReached);
         }
 
-        let arc = Arc::new(Mutex::new(ClientInner {
-            unpulled_requests: VecDeque::with_capacity(self.max_requests_per_client),
-            pending_requests: hashbrown::HashSet::with_capacity_and_hasher(
-                self.max_requests_per_client,
-                Default::default(),
-            ),
+        let arc = Arc::new(ClientInner {
             request_answered: event_listener::Event::new(),
-            responses_send_back: VecDeque::with_capacity(self.max_requests_per_client),
-            notification_messages: BTreeMap::new(),
-            message_pushed: event_listener::Event::new(),
-            active_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
-                self.max_subscriptions_per_client,
-                Default::default(),
-            ),
-        }));
+            total_requests_in_fly: AtomicUsize::new(0),
+            guarded: Mutex::new(ClientInnerGuarded {
+                pending_requests: hashbrown::HashSet::with_capacity_and_hasher(
+                    self.max_requests_per_client,
+                    Default::default(),
+                ),
+                responses_send_back: VecDeque::with_capacity(self.max_requests_per_client),
+                notification_messages: BTreeMap::new(),
+                message_pushed: event_listener::Event::new(),
+                active_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
+                    self.max_subscriptions_per_client,
+                    Default::default(),
+                ),
+            }),
+        });
 
         let new_client_id = clients.next_id;
         clients.next_id += 1;
@@ -154,28 +159,30 @@ impl RequestsSubscriptions {
     ///
     /// > **Note**: This function is notably useful for adding clients at initialization, when
     /// >           outside of an asynchronous context.
-    pub fn add_client_mut(&mut self) -> Result<ClientId, ()> {
+    pub fn add_client_mut(&mut self) -> Result<ClientId, AddClientError> {
         // TODO: DRY with add_client
         let clients = self.clients.get_mut();
         if clients.list.len() == self.max_clients.load(Ordering::Relaxed) {
-            return Err(());
+            return Err(AddClientError::LimitReached);
         }
 
-        let arc = Arc::new(Mutex::new(ClientInner {
-            unpulled_requests: VecDeque::with_capacity(self.max_requests_per_client),
-            pending_requests: hashbrown::HashSet::with_capacity_and_hasher(
-                self.max_requests_per_client,
-                Default::default(),
-            ),
+        let arc = Arc::new(ClientInner {
             request_answered: event_listener::Event::new(),
-            responses_send_back: VecDeque::with_capacity(self.max_requests_per_client),
-            notification_messages: BTreeMap::new(),
-            message_pushed: event_listener::Event::new(),
-            active_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
-                self.max_subscriptions_per_client,
-                Default::default(),
-            ),
-        }));
+            total_requests_in_fly: AtomicUsize::new(0),
+            guarded: Mutex::new(ClientInnerGuarded {
+                pending_requests: hashbrown::HashSet::with_capacity_and_hasher(
+                    self.max_requests_per_client,
+                    Default::default(),
+                ),
+                responses_send_back: VecDeque::with_capacity(self.max_requests_per_client),
+                notification_messages: BTreeMap::new(),
+                message_pushed: event_listener::Event::new(),
+                active_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
+                    self.max_subscriptions_per_client,
+                    Default::default(),
+                ),
+            }),
+        });
 
         let new_client_id = clients.next_id;
         clients.next_id += 1;
@@ -231,7 +238,7 @@ impl RequestsSubscriptions {
             };
 
             let sleep_until = {
-                let mut queue_lock = client.lock().await;
+                let mut queue_lock = client.guarded.lock().await;
 
                 // TODO: this order where we always try requests_send_back first is sketchy and might cause races when subscribing/unsubscribing
                 if let Some(message) = queue_lock.responses_send_back.pop_front() {
@@ -266,82 +273,60 @@ impl RequestsSubscriptions {
             None => return,
         };
 
-        // Try insert the request in that client's queue. Can take a long time.
+        // Try increase `client.total_requests_in_fly`. If the limit is reached, wait until
+        // `request_answered`.
+        //
+        // Because `request_answered` is notified *after* `total_requests_in_fly` is decremented,
+        // we *must* check the value of `total_requests_in_fly` after calling
+        // `request_answered.listen()` and before sleeping.
+        // However, since `listen()` is rather heavy, we try to avoid calling it as much as
+        // possible.
+        //
+        // This has been implemented as a loop, so that the behaviour is:
+        //
+        // - Try increase counter.
+        // - If limit is reached, call `listen()`.
+        // - Try increase counter again (mandatory to prevent race conditions).
+        // - Actually wait for the notification, and jump back to step 1.
+        let mut sleep_until = None;
         loop {
-            let sleep_until = {
-                let mut lock = client.lock().await;
+            if atomic_inc_cap(&client.total_requests_in_fly, self.max_requests_per_client) {
+                break;
+            }
 
-                if lock
-                    .pending_requests
-                    .len()
-                    .saturating_add(lock.unpulled_requests.len())
-                    < self.max_requests_per_client
-                {
-                    lock.unpulled_requests.push_back(request);
-                    debug_assert_eq!(
-                        lock.unpulled_requests.capacity(),
-                        self.max_requests_per_client
-                    );
-                    break;
-                }
-
-                lock.request_answered.listen()
-            };
-
-            sleep_until.await
+            if let Some(sleep_until) = sleep_until.take() {
+                sleep_until.await
+            } else {
+                sleep_until = Some(client.request_answered.listen());
+            }
         }
 
-        // Now that the request is in the client's queue, add a corresponding entry in the global
-        // queue of requests.
-        let mut unpulled_requests = self.unpulled_requests.lock().await;
-        unpulled_requests.queue.push_back(Arc::downgrade(&client));
-        unpulled_requests
-            .new_queue_element
-            .notify_additional_relaxed(1);
+        // We can now insert the request.
+        // TODO: what if failure? failures could happen because the queue can contain obsolete entries
+        self.unpulled_requests
+            .push((request, Arc::downgrade(&client)));
+        self.new_unpulled_request.notify_additional(1);
     }
 
     /// Similar to [`RequestsSubscriptions::queue_client_request`], but succeeds or fails
     /// instantly depending on whether there is enough room in the queue.
+    ///
+    /// Returns `Ok` if the [`ClientId`] is stale or invalid.
     pub fn try_queue_client_request(&self, client: &ClientId, request: String) -> Result<(), ()> {
-        // TODO: DRY
-        todo!()
-        /*let client = match client.1.upgrade() {
+        let client = match client.1.upgrade() {
             Some(c) => c,
-            None => return,
+            None => return Ok(()),
         };
 
-        // Try insert the request in that client's queue. Can take a long time.
-        loop {
-            let sleep_until = {
-                let mut lock = client.lock().await;
-
-                if lock
-                    .pending_requests
-                    .len()
-                    .saturating_add(lock.unpulled_requests.len())
-                    < self.max_requests_per_client
-                {
-                    lock.unpulled_requests.push_back(request);
-                    debug_assert_eq!(
-                        lock.unpulled_requests.capacity(),
-                        self.max_requests_per_client
-                    );
-                    break;
-                }
-
-                lock.request_answered.listen()
-            };
-
-            sleep_until.await
+        if !atomic_inc_cap(&client.total_requests_in_fly, self.max_requests_per_client) {
+            return Err(());
         }
 
-        // Now that the request is in the client's queue, add a corresponding entry in the global
-        // queue of requests.
-        let mut unpulled_requests = self.unpulled_requests.lock().await;
-        unpulled_requests.queue.push_back(Arc::downgrade(&client));
-        unpulled_requests
-            .new_queue_element
-            .notify_additional_relaxed(1);*/
+        // TODO: what if failure? failures could happen because the queue can contain obsolete entries
+        self.unpulled_requests
+            .push((request, Arc::downgrade(&client)));
+        self.new_unpulled_request.notify_additional(1);
+        Ok(())
     }
 
     /// Waits until a request has been queued using
@@ -352,53 +337,53 @@ impl RequestsSubscriptions {
     /// simply the value that was passed to [`RequestsSubscriptions::queue_client_request`] and
     /// isn't parsed or validated by the state machine in any way.
     pub async fn next_request(&self) -> (String, RequestId) {
-        // Find which client, if any, has a request available.
-        let client_with_request = loop {
-            let sleep_until = {
-                let mut unpulled_requests = self.unpulled_requests.lock().await;
-                if let Some(client) = unpulled_requests.queue.pop_front() {
-                    // Shrink `unpulled_requests.queue` in order to potentially recover memory
-                    // after a big spike of requests.
-                    if unpulled_requests.queue.len() * 2 < unpulled_requests.queue.capacity() {
-                        unpulled_requests.queue.shrink_to_fit();
-                    }
-
-                    match client.upgrade() {
-                        Some(c) => break c,
-                        None => continue,
-                    }
+        // Try to pull a request from the queue. If there is none, wait for
+        // `new_unpulled_request`.
+        let (request_message, client) = loop {
+            // Because `new_unpulled_request` is notified *after* new items are pushed to the queue,
+            // we *must* check the queue after calling `new_unpulled_request.listen()` and before
+            // sleeping.
+            // However, since `listen()` is rather heavy, we try to avoid calling it as much as
+            // possible.
+            //
+            // This has been implemented as a loop, so that the behaviour is:
+            //
+            // - Try pull from queue.
+            // - If limit is reached, call `listen()`.
+            // - Try pull from queue again (mandatory to prevent race conditions).
+            // - Actually wait for the notification, and jump back to step 1.
+            let mut sleep_until = None;
+            let (request_message, client) = loop {
+                if let Some(item) = self.unpulled_requests.pop() {
+                    break item;
                 }
-                unpulled_requests.new_queue_element.listen()
+
+                if let Some(sleep_until) = sleep_until.take() {
+                    sleep_until.await
+                } else {
+                    sleep_until = Some(self.new_unpulled_request.listen());
+                }
             };
 
-            sleep_until.await
+            // The queue might contain obsolete entries. Check that the client still exist, and
+            // if not throw away the entry and pull another one.
+            if let Some(client) = client.upgrade() {
+                break (request_message, client);
+            }
         };
-
-        // Found a client with a request available.
 
         // Allocate a new identifier for this request.
         let request_id_num = self.next_request_id.fetch_add(1, Ordering::Relaxed);
 
-        // Insert the new request in that client's state, and extract the body of the request.
-        let request_message = {
-            let mut client_lock = client_with_request.lock().await;
-            debug_assert_eq!(
-                client_lock.unpulled_requests.capacity(),
-                self.max_requests_per_client
-            );
-            debug_assert_eq!(
-                client_lock.pending_requests.capacity(),
-                self.max_requests_per_client
-            );
-            let _was_inserted = client_lock.pending_requests.insert(request_id_num);
+        // Insert the request in the client's state.
+        {
+            let mut lock = client.guarded.lock().await;
+            let _was_inserted = lock.pending_requests.insert(request_id_num);
             debug_assert!(_was_inserted);
-            // Because it was found in an entry of `unpulled_requests`, then this client **must**
-            // always have an entry in its local `unpulled_requests`.
-            client_lock.unpulled_requests.pop_front().unwrap()
-        };
+        }
 
         // Success.
-        let request_id = RequestId(request_id_num, Arc::downgrade(&client_with_request));
+        let request_id = RequestId(request_id_num, Arc::downgrade(&client));
         (request_message, request_id)
     }
 
@@ -413,22 +398,19 @@ impl RequestsSubscriptions {
             None => return,
         };
 
-        let mut lock = client.lock().await;
+        {
+            let mut lock = client.guarded.lock().await;
+            if !lock.pending_requests.remove(&request.0) {
+                // The request ID is invalid.
+                return;
+            }
 
-        debug_assert_eq!(
-            lock.pending_requests.capacity(),
-            self.max_requests_per_client
-        );
-
-        if !lock.pending_requests.remove(&request.0) {
-            // The request ID is invalid.
-            return;
+            lock.responses_send_back.push_back(response);
+            lock.message_pushed.notify_additional(1);
         }
 
-        lock.responses_send_back.push_back(response);
-
-        lock.request_answered.notify_additional_relaxed(1);
-        lock.message_pushed.notify_additional_relaxed(1);
+        client.total_requests_in_fly.fetch_sub(1, Ordering::Release);
+        client.request_answered.notify_additional(1);
     }
 
     /// Adds a new subscription to the state machine, associated with the client that started
@@ -439,12 +421,11 @@ impl RequestsSubscriptions {
     ///
     /// If the given [`RequestId`] is stale or invalid, this function always succeeds and returns
     /// a stale [`SubscriptionId`].
-    // TODO: return error if limit to number of subscriptions
     pub async fn start_subscription(
         &self,
         client: &RequestId,
         messages_capacity: usize,
-    ) -> Result<SubscriptionId, ()> {
+    ) -> Result<SubscriptionId, StartSubscriptionError> {
         let client_arc = match client.1.upgrade() {
             Some(c) => c,
             None => {
@@ -454,18 +435,19 @@ impl RequestsSubscriptions {
             }
         };
 
-        let lock = client_arc.lock().await;
-        debug_assert_eq!(
-            lock.active_subscriptions.capacity(),
-            self.max_subscriptions_per_client
-        );
+        let mut lock = client_arc.guarded.lock().await;
         if lock.active_subscriptions.len() >= self.max_subscriptions_per_client {
-            return Err(());
+            return Err(StartSubscriptionError::LimitReached);
         }
 
         let new_subscription_num = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
+        let _was_inserted = lock.active_subscriptions.insert(new_subscription_num);
+        debug_assert!(_was_inserted);
 
-        todo!()
+        Ok(SubscriptionId(
+            new_subscription_num,
+            Arc::downgrade(&client_arc),
+        ))
     }
 
     /// Destroys the given subscription.
@@ -498,8 +480,21 @@ impl RequestsSubscriptions {
     }
 }
 
+/// Error returned by [`RequestsSubscriptions::add_client`] and
+/// [`RequestsSubscriptions::add_client_mut`].
+pub enum AddClientError {
+    /// Reached maximum number of allowed clients.
+    LimitReached,
+}
+
+/// Error returned by [`RequestsSubscriptions::start_subscription`].
+pub enum StartSubscriptionError {
+    /// Reached maximum number of subscriptions allowed per user.
+    LimitReached,
+}
+
 struct Clients {
-    list: hashbrown::HashMap<u64, Arc<Mutex<ClientInner>>, fnv::FnvBuildHasher>,
+    list: hashbrown::HashMap<u64, Arc<ClientInner>, fnv::FnvBuildHasher>,
 
     next_id: u64,
 }
@@ -507,24 +502,36 @@ struct Clients {
 struct UnpulledRequests {
     /// Queue of clients with an element in [`ClientInnerQueue::unpulled_requests`]. Can contain
     /// obsolete clients, in which case the queue element should be ignored.
-    queue: VecDeque<Weak<Mutex<ClientInner>>>,
+    queue: VecDeque<Weak<ClientInner>>,
 
     /// Event notified whenever an element is pushed to [`UnpulledRequests::queue`].
     new_queue_element: event_listener::Event,
 }
 
 struct ClientInner {
-    /// List of requests sent by the client and not yet pulled by
-    /// [`RequestsSubscriptions::next_request`].
-    unpulled_requests: VecDeque<String>,
+    /// Fields that are behind a `Mutex`.
+    guarded: Mutex<ClientInnerGuarded>,
 
+    /// Total number of requests that are either unpulled or pending.
+    /// In other words, this is the number of requests that have been injected in this state
+    /// machine but not processed yet.
+    ///
+    /// Due to the racy nature of everything, a request might have increased the counter here but
+    /// not be present yet in [`RequestsSubscriptions::unpulled_requests`].
+    total_requests_in_fly: AtomicUsize,
+
+    /// Notified every time [`ClientInner::total_requests_in_fly`] is decremented.
+    ///
+    /// Note that the notification is done *after* the decrementation.
+    request_answered: event_listener::Event,
+}
+
+struct ClientInnerGuarded {
     /// List of requests that have been pulled by [`RequestsSubscriptions::next_request`] and
     /// waiting to be responded.
+    ///
+    /// A FNV hasher is used because the keys of this map are allocated locally.
     pending_requests: hashbrown::HashSet<u64, fnv::FnvBuildHasher>,
-
-    /// Every time an entry is pushed on [`ClientInnerQueue::requests_send_back`] or
-    /// [`ClientInnerQueue::notification_messages`], one listener of this event is notified.
-    request_answered: event_listener::Event,
 
     /// Queue of responses to regular requests to send back to the client.
     responses_send_back: VecDeque<String>,
@@ -539,6 +546,8 @@ struct ClientInner {
     message_pushed: event_listener::Event,
 
     /// List of active subscriptions.
+    ///
+    /// A FNV hasher is used because the keys of this map are allocated locally.
     active_subscriptions: hashbrown::HashSet<u64, fnv::FnvBuildHasher>,
 }
 
@@ -585,3 +594,25 @@ macro_rules! traits_impl {
 traits_impl!(ClientId);
 traits_impl!(RequestId);
 traits_impl!(SubscriptionId);
+
+fn atomic_inc_cap(target: &AtomicUsize, max: usize) -> bool {
+    let old_value = target.load(Ordering::SeqCst);
+    if old_value >= max {
+        return false;
+    }
+
+    let backoff = crossbeam_utils::Backoff::new();
+    let new_value = old_value.checked_add(1).unwrap();
+    debug_assert!(new_value <= max);
+
+    loop {
+        if target
+            .compare_exchange(old_value, new_value, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return true;
+        }
+
+        backoff.spin();
+    }
+}
