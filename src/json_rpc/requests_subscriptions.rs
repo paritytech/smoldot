@@ -239,16 +239,17 @@ impl RequestsSubscriptions {
 
             let sleep_until = {
                 let mut queue_lock = client.guarded.lock().await;
-
-                // TODO: this order where we always try requests_send_back first is sketchy and might cause races when subscribing/unsubscribing
-                if let Some(message) = queue_lock.responses_send_back.pop_front() {
-                    return message;
-                }
-
-                // TODO: instead use `BTreeMap::pop_first` after it is stabilized: https://github.com/rust-lang/rust/issues/62924
-                if let Some(key) = queue_lock.notification_messages.keys().next().cloned() {
-                    let message = queue_lock.notification_messages.remove(&key).unwrap();
-                    return message;
+                match queue_lock.responses_send_back.pop_front() {
+                    Some(ResponseSendBack::Response(message)) => {
+                        let _new_val = client.total_requests_in_fly.fetch_sub(1, Ordering::Release);
+                        debug_assert_ne!(_new_val, usize::max_value()); // Check for underflows
+                        client.request_answered.notify_additional(1);
+                        return message;
+                    }
+                    Some(ResponseSendBack::SubscriptionMessage(index)) => {
+                        todo!()
+                    }
+                    None => {}
                 }
 
                 queue_lock.message_pushed.listen()
@@ -290,7 +291,20 @@ impl RequestsSubscriptions {
         // - Actually wait for the notification, and jump back to step 1.
         let mut sleep_until = None;
         loop {
-            if atomic_inc_cap(&client.total_requests_in_fly, self.max_requests_per_client) {
+            if client
+                .total_requests_in_fly
+                .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |old_value| {
+                    if old_value >= self.max_requests_per_client {
+                        return None;
+                    }
+
+                    // Considering that `old_value < max`, and `max` fits in a `usize` by
+                    // definition, then `old_value + 1` also always fits in a `usize`. QED.
+                    // There's no risk of overflow.
+                    Some(old_value + 1)
+                })
+                .is_ok()
+            {
                 break;
             }
 
@@ -318,7 +332,20 @@ impl RequestsSubscriptions {
             None => return Ok(()),
         };
 
-        if !atomic_inc_cap(&client.total_requests_in_fly, self.max_requests_per_client) {
+        if client
+            .total_requests_in_fly
+            .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |old_value| {
+                if old_value >= self.max_requests_per_client {
+                    return None;
+                }
+
+                // Considering that `old_value < max`, and `max` fits in a `usize` by
+                // definition, then `old_value + 1` also always fits in a `usize`. QED.
+                // There's no risk of overflow.
+                Some(old_value + 1)
+            })
+            .is_err()
+        {
             return Err(());
         }
 
@@ -405,12 +432,10 @@ impl RequestsSubscriptions {
                 return;
             }
 
-            lock.responses_send_back.push_back(response);
+            lock.responses_send_back
+                .push_back(ResponseSendBack::Response(response));
             lock.message_pushed.notify_additional(1);
         }
-
-        client.total_requests_in_fly.fetch_sub(1, Ordering::Release);
-        client.request_answered.notify_additional(1);
     }
 
     /// Adds a new subscription to the state machine, associated with the client that started
@@ -455,7 +480,8 @@ impl RequestsSubscriptions {
     /// All messages already queued will still be available through
     /// [`RequestsSubscriptions::next_response`].
     ///
-    /// This function should be seen as a way to clean up the internal state of the state machine.
+    /// This function should be seen as a way to clean up the internal state of the state machine
+    /// and prevent new notifications from being pushed.
     pub async fn stop_subscription(&self, subscription: &SubscriptionId) {}
 
     /// If the queue.
@@ -499,22 +525,15 @@ struct Clients {
     next_id: u64,
 }
 
-struct UnpulledRequests {
-    /// Queue of clients with an element in [`ClientInnerQueue::unpulled_requests`]. Can contain
-    /// obsolete clients, in which case the queue element should be ignored.
-    queue: VecDeque<Weak<ClientInner>>,
-
-    /// Event notified whenever an element is pushed to [`UnpulledRequests::queue`].
-    new_queue_element: event_listener::Event,
-}
-
 struct ClientInner {
     /// Fields that are behind a `Mutex`.
     guarded: Mutex<ClientInnerGuarded>,
 
     /// Total number of requests that are either unpulled or pending.
     /// In other words, this is the number of requests that have been injected in this state
-    /// machine but not processed yet.
+    /// machine but not fully processed yet. They can be in one of
+    /// [`RequestsSubscriptions::unpulled_requests`], [`ClientInnerGuarded::pending_requests`],
+    /// or [`ClientInnerGuarded::responses_send_back`].
     ///
     /// Due to the racy nature of everything, a request might have increased the counter here but
     /// not be present yet in [`RequestsSubscriptions::unpulled_requests`].
@@ -534,7 +553,7 @@ struct ClientInnerGuarded {
     pending_requests: hashbrown::HashSet<u64, fnv::FnvBuildHasher>,
 
     /// Queue of responses to regular requests to send back to the client.
-    responses_send_back: VecDeque<String>,
+    responses_send_back: VecDeque<ResponseSendBack>,
 
     /// Queue of notification messages to send back to the client.
     notification_messages: BTreeMap<(u64, usize), String>,
@@ -549,6 +568,11 @@ struct ClientInnerGuarded {
     ///
     /// A FNV hasher is used because the keys of this map are allocated locally.
     active_subscriptions: hashbrown::HashSet<u64, fnv::FnvBuildHasher>,
+}
+
+enum ResponseSendBack {
+    Response(String),
+    SubscriptionMessage(usize),
 }
 
 // Common traits derivation on the id types.
@@ -594,25 +618,3 @@ macro_rules! traits_impl {
 traits_impl!(ClientId);
 traits_impl!(RequestId);
 traits_impl!(SubscriptionId);
-
-fn atomic_inc_cap(target: &AtomicUsize, max: usize) -> bool {
-    let old_value = target.load(Ordering::SeqCst);
-    if old_value >= max {
-        return false;
-    }
-
-    let backoff = crossbeam_utils::Backoff::new();
-    let new_value = old_value.checked_add(1).unwrap();
-    debug_assert!(new_value <= max);
-
-    loop {
-        if target
-            .compare_exchange(old_value, new_value, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            return true;
-        }
-
-        backoff.spin();
-    }
-}
