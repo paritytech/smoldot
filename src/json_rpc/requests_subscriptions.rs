@@ -19,8 +19,63 @@
 //! pending requests, and active subscriptions.
 //!
 //! The code in this module is the frontline of the JSON-RPC server. It can be subject to DoS
-//! attacks, and should therefore make sure to properly distribute resources between JSON-RPC
-//! clients.
+//! attacks, and is therefore designed to properly distribute resources between JSON-RPC clients.
+//!
+//! # Usage
+//!
+//! The [`RequestsSubscriptions`] is meant to be shared (through an `Arc` or similar) between many
+//! different asynchronous tasks that call its methods.
+//!
+//! > **Note**: While off-topic for this module, you are strongly encouraged to put all these
+//! >           asynchronous tasks within a single `FuturesUnordered`. This ensure that no two
+//! >           tasks can be processed at the same time, and thus limits the total CPU usage of
+//! >           all these tasks combined to `1.0` CPU cores. This leaves other CPU cores free for
+//! >           the more urgent processing.
+//!
+//! There should be:
+//!
+//! - One lightweight task for each client currently connected to the server.
+//! - A reasonable number of lightweight tasks (e.g. 8) dedicated to answering reqsuests.
+//!
+//! ## Clients
+//!
+//! Whenever a new client connects to the server, spawn a new task dedicated to this client, that:
+//!
+//! - Calls [`RequestsSubscriptions::add_client`], denying the client if the function returns an
+//!   error.
+//! - Repeatedly polls the socket for a new request then calls
+//!   [`RequestsSubscriptions::queue_client_request`].
+//! - At the same time (for example in a `select!` block) calls
+//!   [`RequestsSubscriptions::next_response`] then sends the response to the socket.
+//! - When the client disconnects, calls [`RequestsSubscriptions::remove_client`].
+//!
+//! It is important that no new request is polled from the socket as long as
+//! [`RequestsSubscriptions::queue_client_request`] hasn't been able to queue the previous
+//! request. This makes it possible to back-pressure the JSON-RPC client in case when the queue
+//! is slow to be processed.
+//!
+//! Similarly, do not call [`RequestsSubscriptions::next_response`] before the socket has been
+//! able to send the previous response. Not calling [`RequestsSubscriptions::next_response`] often
+//! enough will lead to back-pressure being applied onto
+//! [`RequestsSubscriptions::queue_client_request`], which will in turn back-pressure the sending
+//! side of the JSON-RPC client.
+//!
+//! ## Requests
+//!
+//! There should be a certain number of lightweight tasks dedicated to pulling requests from the
+//! state machine and answering them.
+//!
+//! Each of these lightweight tasks should:
+//!
+//! - Call [`RequestsSubscriptions::next_request`]. This function call sleeps until there is a
+//! request available.
+//! - Parse the request that was returned and generate its response. This step should be relatively
+//! fast (e.g. not more than one second), but can liberally perform asynchronous requests, lock
+//! mutexes, etc.
+//! - Call [`RequestsSubscriptions::respond`].
+//! - Jump back to step 1.
+//!
+// TODO: document subscriptions
 
 use alloc::{
     collections::{BTreeMap, VecDeque},
@@ -60,13 +115,19 @@ pub struct Config {
 }
 
 pub struct RequestsSubscriptions {
+    /// List of all clients of the state machine. Locked only when adding and removing clients.
     clients: Mutex<Clients>,
 
     /// List of requests sent by a client and not yet pulled by
     /// [`RequestsSubscriptions::next_request`].
     ///
     /// Can contain obsolete clients, in which case the entry should simply be ignored.
-    unpulled_requests: crossbeam_queue::ArrayQueue<(String, Weak<ClientInner>)>,
+    ///
+    /// We use an unbounded list because the maximum number of clients can be changed dynamically
+    /// using [`RequestsSubscriptions::set_max_clients`], in which case it would be impossible
+    /// to update the size of this list.
+    // TODO: what about entries of obsolete clients clogging the queue? how do we deal with this?
+    unpulled_requests: crossbeam_queue::SegQueue<(String, Weak<ClientInner>)>,
 
     /// Event notified whenever an element is pushed to [`RequestsSubscriptions::unpulled_requests`].
     new_unpulled_request: event_listener::Event,
@@ -113,9 +174,7 @@ impl RequestsSubscriptions {
                 list: hashbrown::HashMap::with_capacity_and_hasher(8, Default::default()),
                 next_id: 0,
             }),
-            unpulled_requests: crossbeam_queue::ArrayQueue::new(
-                max_requests_per_client * max_clients,
-            ),
+            unpulled_requests: crossbeam_queue::SegQueue::new(),
             new_unpulled_request: event_listener::Event::new(),
             next_request_id: atomic::Atomic::new(0),
             next_subscription_id: atomic::Atomic::new(0),
@@ -137,7 +196,6 @@ impl RequestsSubscriptions {
     /// > **Note**: This function can typically be used at runtime to adjust the maximum number
     /// >           of clients based on the resource consumptions of the binary.
     pub fn set_max_clients(&self, max_clients: usize) {
-        // TODO: this doesn't update the capacityu of `unpulled_requests`; is this a problem?
         self.max_clients.store(max_clients, Ordering::Relaxed)
     }
 
@@ -186,7 +244,7 @@ impl RequestsSubscriptions {
     /// > **Note**: This function is notably useful for adding clients at initialization, when
     /// >           outside of an asynchronous context.
     pub fn add_client_mut(&mut self) -> Result<ClientId, AddClientError> {
-        // TODO: DRY with add_client
+        // TODO: DRY with add_client? not really an actual problem, just a bit annoying
         let clients = self.clients.get_mut();
         if clients.list.len() == self.max_clients.load(Ordering::Relaxed) {
             return Err(AddClientError::LimitReached);
@@ -222,27 +280,51 @@ impl RequestsSubscriptions {
 
     /// Removes from the state machine the client with the given id.
     ///
-    /// This function invalidates all active requests and subscriptions that related to this
+    /// Returns `None` if this [`ClientId`] is stale or invalid.
+    ///
+    /// This function invalidates all active requests and subscriptions that relate to this
     /// client. The concerned [`RequestId`]s and [`SubscriptionId`]s are returned by this
     /// function.
     ///
     /// Note however that functions such as [`RequestSubscriptions::respond`] and
-    /// [`RequestSubscriptions::push_notification`] have no effect if you pass an invalid
-    /// [`RequestId`] or [`SubscriptionId`]. There is therefore no need to cancel any parallel
-    /// task that might currently be responding to requests or pushing notification messages.
-    // TODO: return all active requests and subscriptions
-    pub async fn remove_client(&self, client: &ClientId) {
-        let mut clients = self.clients.lock().await;
+    /// [`RequestSubscriptions::push_notification`] intentionally have no effect if you pass an
+    /// invalid [`RequestId`] or [`SubscriptionId`]. There is therefore no need to cancel any
+    /// parallel task that might currently be responding to requests or pushing notification
+    /// messages.
+    pub async fn remove_client(
+        &self,
+        client: &ClientId,
+    ) -> Option<(Vec<RequestId>, Vec<SubscriptionId>)> {
+        // Try remove the client from the list. Returns if it doesn't exist.
+        let removed = {
+            let mut clients = self.clients.lock().await;
 
-        if let Some(removed) = clients.list.remove(&client.0) {
+            let removed = clients.list.remove(&client.0)?;
             debug_assert!(Arc::ptr_eq(&removed, &client.1.upgrade().unwrap()));
-        }
 
-        // Shrink `clients.list` in order to potentially reclaim memory after a huge spike in
-        // number of clients.
-        if clients.list.capacity() >= clients.list.len() * 2 {
-            clients.list.shrink_to_fit();
-        }
+            // Shrink `clients.list` in order to potentially reclaim memory after a potential
+            // spike in number of clients.
+            if clients.list.capacity() >= 16 && clients.list.capacity() >= clients.list.len() * 2 {
+                clients.list.shrink_to_fit();
+            }
+
+            removed
+        };
+
+        // Note that `self.clients` is no longer locked here.
+
+        let guarded_lock = removed.guarded.lock().await;
+        let requests_list = guarded_lock
+            .pending_requests
+            .iter()
+            .map(|n| RequestId(*n, client.1.clone()))
+            .collect();
+        let subscriptions_list = guarded_lock
+            .active_subscriptions
+            .keys()
+            .map(|n| SubscriptionId(*n, client.1.clone()))
+            .collect();
+        Some((requests_list, subscriptions_list))
     }
 
     /// Waits until a message is available in the queue of messages to send back to the given
@@ -333,6 +415,9 @@ impl RequestsSubscriptions {
     /// This asynchronous function can take a long time, as it blocks until a queue entry is
     /// available.
     ///
+    /// Slots in the queue of requests are only reclaimed after
+    /// [`RequestSubscriptions::next_response`] has returned a response to a previous request.
+    ///
     /// Has no effect if the [`ClientId`] is stale or invalid.
     pub async fn queue_client_request(&self, client: &ClientId, request: String) {
         let client = match client.1.upgrade() {
@@ -382,7 +467,6 @@ impl RequestsSubscriptions {
         }
 
         // We can now insert the request.
-        // TODO: what if failure? failures could happen because the queue can contain obsolete entries
         self.unpulled_requests
             .push((request, Arc::downgrade(&client)));
         self.new_unpulled_request.notify_additional(1);
@@ -391,7 +475,10 @@ impl RequestsSubscriptions {
     /// Similar to [`RequestsSubscriptions::queue_client_request`], but succeeds or fails
     /// instantly depending on whether there is enough room in the queue.
     ///
-    /// Returns `Ok` if the [`ClientId`] is stale or invalid.
+    /// Slots in the queue of requests are only reclaimed after
+    /// [`RequestSubscriptions::next_response`] has returned a response to a previous request.
+    ///
+    /// Returns `Ok` and silently discards the request if the [`ClientId`] is stale or invalid.
     pub fn try_queue_client_request(
         &self,
         client: &ClientId,
@@ -419,7 +506,6 @@ impl RequestsSubscriptions {
             return Err(TryQueueClientRequestError { request });
         }
 
-        // TODO: what if failure? failures could happen because the queue can contain obsolete entries
         self.unpulled_requests
             .push((request, Arc::downgrade(&client)));
         self.new_unpulled_request.notify_additional(1);
@@ -612,10 +698,33 @@ impl RequestsSubscriptions {
         );
     }
 
-    // TODO: doc
-    /// If the queue.
+    /// Overwrites the notification whose index is `index` in the queue of notifications destined
+    /// for the user.
+    ///
+    /// The queue of notifications can be sent as equivalent to a `Vec<Option<String>>` whose
+    /// length is equal to the `messages_capacity` that was passed to
+    /// [`RequestsSubscriptions::start_subscription`], and this function does
+    /// `queue[index] = Some(message);`. It discards the message that was previously there, and
+    /// works no matter the presence or not of other messages in the queue.
+    ///
+    /// Note that notifications are not provided to [`RequestsSubscriptions::next_response`]
+    /// in the order of their index, but in the order in which they entered the queue. If there
+    /// was no notification overwritten, then this notification is now at the end of the list
+    /// of notifications to send back. If a notification is overwritten, then only its content
+    /// is modified but not its position in the queue.
+    ///
+    /// This function isn't meant to interact well with
+    /// [`RequestsSubscriptions::try_push_notification`]. For each subscription, you are expected
+    /// to either push notifications one behind the other, or track which notification queue index
+    /// corresponds to what, but not both at the same time.
     ///
     /// Has no effect if the [`SubscriptionId`] is stale or invalid.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the `index` is superior or equal to the `messages_capacity` that was passed to
+    /// [`RequestsSubscriptions::start_subscription`].
+    ///
     pub async fn set_queued_notification(
         &self,
         subscription: &SubscriptionId,
@@ -628,9 +737,16 @@ impl RequestsSubscriptions {
         };
 
         let mut lock = client_arc.guarded.lock().await;
-        if !lock.active_subscriptions.contains_key(&subscription.0) {
-            return;
-        }
+
+        // Two in one: check whether this subscription is indeed valid, and at the same time get
+        // the messages capacity.
+        let messages_capacity = match lock.active_subscriptions.get(&subscription.0) {
+            Some(l) => *l,
+            None => return,
+        };
+
+        // As documented.
+        assert!(index < messages_capacity);
 
         // Inserts or replaces the current value under the key `(subscription, index)`.
         let previous_message = lock
@@ -645,6 +761,23 @@ impl RequestsSubscriptions {
         }
     }
 
+    /// Adds the given notification to the queue of notifications to send out for this
+    /// subscription.
+    ///
+    /// This function will choose an index with no notification, and write the notification to it.
+    /// If the queue is full, this function will wait for a slot to be available. Slots will only
+    /// become available if [`RequestsSubscriptions::next_response`] is called in parallel.
+    ///
+    /// This function isn't meant to interact well with
+    /// [`RequestsSubscriptions::set_queued_notification`]. For each subscription, you are expected
+    /// to either push notifications one behind the other, or track which notification queue index
+    /// corresponds to what, but not both at the same time.
+    ///
+    /// If the [`SubscriptionId`] no longer exists because
+    /// [`RequestsSubscriptions::stop_subscription`] has been called, then this function never
+    /// returns. It is the responsibility of the API user to not call this function or to
+    /// interrupt a pending function call with a stale [`SubscriptionId`].
+    // TODO: ^ this is actually not a great behavior
     pub async fn push_notification(&self, subscription: &SubscriptionId, message: String) {
         let _result = self
             .try_push_notification_inner(subscription, message, false)
@@ -652,7 +785,22 @@ impl RequestsSubscriptions {
         debug_assert!(_result.is_ok());
     }
 
-    // TODO: doc
+    /// Adds the given notification to the queue of notifications to send out for this
+    /// subscription.
+    ///
+    /// This function will choose an index with no notification, and write the notification to it.
+    /// Returns an error if the queue is full.
+    ///
+    /// This function isn't meant to interact well with
+    /// [`RequestsSubscriptions::set_queued_notification`]. For each subscription, you are expected
+    /// to either push notifications one behind the other, or track which notification queue index
+    /// corresponds to what, but not both at the same time.
+    ///
+    /// Note that notifications are not provided to [`RequestsSubscriptions::next_response`]
+    /// in the order of their index, but in the order in which they entered the queue.
+    ///
+    /// Returns `Ok` and silently discards the message if the [`SubscriptionId`] is stale or
+    /// invalid.
     pub async fn try_push_notification(
         &self,
         subscription: &SubscriptionId,
@@ -755,8 +903,10 @@ pub enum StartSubscriptionError {
 }
 
 struct Clients {
+    /// Actual list of all the clients currently part of the state machine.
     list: hashbrown::HashMap<u64, Arc<ClientInner>, fnv::FnvBuildHasher>,
 
+    /// Identifier to assign to the next client. Always increasing. Ids are never reused.
     next_id: u64,
 }
 
@@ -836,7 +986,12 @@ struct ClientInnerGuarded {
 }
 
 enum ResponseSendBack {
+    /// Message to send back is a response to a request. Pulling out this message decrements
+    /// [`ClientInner::total_requests_in_fly`].
     Response(String),
+
+    /// Message to send back is a subscription notification. It can be found in
+    /// [`ClientInnerGuarded::notification_messages`] at the given key.
     SubscriptionMessage(u64, usize),
 }
 
