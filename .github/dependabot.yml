@@ -1,5 +1,13 @@
 version: 2
 updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    labels: []
+    schedule:
+      interval: "daily"
+    rebase-strategy: disabled  # Redundant with mergify
+    open-pull-requests-limit: 4
+
   - package-ecosystem: "npm"
     directory: "/bin/wasm-node/javascript"
     labels: []

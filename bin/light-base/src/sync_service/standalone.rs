@@ -393,7 +393,7 @@ impl<TPlat: Platform> Task<TPlat> {
                     request_bodies,
                     request_justification,
                 } => {
-                    let peer_id = self.sync.source_user_data_mut(source_id).0.clone(); // TODO: why does this require cloning? weird borrow chk issue
+                    let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                     let block_request = self.network_service.clone().blocks_request(
                         peer_id,
@@ -433,7 +433,7 @@ impl<TPlat: Platform> Task<TPlat> {
                 all::RequestDetail::GrandpaWarpSync {
                     sync_start_block_hash,
                 } => {
-                    let peer_id = self.sync.source_user_data_mut(source_id).0.clone(); // TODO: why does this require cloning? weird borrow chk issue
+                    let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                     let grandpa_request = self.network_service.clone().grandpa_warp_sync_request(
                         peer_id,
@@ -453,7 +453,7 @@ impl<TPlat: Platform> Task<TPlat> {
                     state_trie_root,
                     ref keys,
                 } => {
-                    let peer_id = self.sync.source_user_data_mut(source_id).0.clone(); // TODO: why does this require cloning? weird borrow chk issue
+                    let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
 
                     let storage_request = self.network_service.clone().storage_proof_request(
                         self.network_chain_index,
@@ -694,14 +694,14 @@ impl<TPlat: Platform> Task<TPlat> {
                             source_best.0 > block_number
                                 || (source_best.0 == block_number && *source_best.1 == block_hash)
                         })
-                        .map(|id| self.sync.source_user_data(id).0.clone())
+                        .map(|id| self.sync[id].0.clone())
                         .collect()
                 } else {
                     // As documented, `knows_non_finalized_block` would panic if the
                     // block height was below the one of the known finalized block.
                     self.sync
                         .knows_non_finalized_block(block_number, &block_hash)
-                        .map(|id| self.sync.source_user_data(id).0.clone())
+                        .map(|id| self.sync[id].0.clone())
                         .collect()
                 };
                 let _ = send_back.send(outcome);
@@ -712,7 +712,7 @@ impl<TPlat: Platform> Task<TPlat> {
                     .sync
                     .sources()
                     .map(|src| {
-                        let (peer_id, role) = self.sync.source_user_data(src).clone();
+                        let (peer_id, role) = self.sync[src].clone();
                         let (height, hash) = self.sync.source_best_block(src);
                         (peer_id, role, height, *hash)
                     })
