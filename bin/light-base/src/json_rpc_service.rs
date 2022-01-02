@@ -324,9 +324,8 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
     /// isn't polled often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
     /// JSON-RPC response to immediately send back to the user.
     pub fn queue_rpc_request(&mut self, json_rpc_request: String) -> Result<(), HandleRpcError> {
-        log::log!(
+        log::debug!(
             target: &self.log_target,
-            log::Level::Debug,
             "JSON-RPC => {:?}{}",
             if json_rpc_request.len() > 100 {
                 &json_rpc_request[..100]
@@ -345,9 +344,17 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             .try_queue_client_request(&self.client_id, json_rpc_request)
         {
             Ok(()) => Ok(()),
-            Err(err) => Err(HandleRpcError::Overloaded {
-                json_rpc_request: err.request,
-            }),
+            Err(err) => {
+                log::warn!(
+                    target: &self.log_target,
+                    "Request denied due to JSON-RPC service being overloaded. This will likely \n
+                    cause the JSON-RPC client to malfunction."
+                );
+
+                Err(HandleRpcError::Overloaded {
+                    json_rpc_request: err.request,
+                })
+            }
         }
     }
 }
@@ -537,7 +544,7 @@ impl<TPlat: Platform> Background<TPlat> {
         // Check whether the JSON-RPC request is correct, and bail out if it isn't.
         let (request_id, call) = match methods::parse_json_call(&json_rpc_request) {
             Ok((request_id, call)) => {
-                log::debug!("Handler <= Request({:?}, {:?})", request_id, call);
+                log::debug!(target: &self.log_target, "Handler <= Request(id_json={:?})", request_id);
                 (request_id, call)
             }
             Err(methods::ParseError::Method { request_id, error }) => {
