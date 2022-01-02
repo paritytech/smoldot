@@ -42,6 +42,7 @@ use alloc::{collections::BTreeMap, vec, vec::Vec};
 use core::{
     cmp, iter, mem,
     num::{NonZeroU32, NonZeroU64},
+    ops,
     time::Duration,
 };
 use hashbrown::HashMap;
@@ -495,93 +496,18 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn sources(&'_ self) -> impl Iterator<Item = SourceId> + '_ {
         match &self.inner {
             AllSyncInner::GrandpaWarpSync { inner: sync } => {
-                let iter = sync
-                    .sources()
-                    .map(move |id| sync.source_user_data(id).outer_source_id);
+                let iter = sync.sources().map(move |id| sync[id].outer_source_id);
                 either::Left(either::Left(iter))
             }
             AllSyncInner::Optimistic { inner: sync } => {
-                let iter = sync
-                    .sources()
-                    .map(move |id| sync.source_user_data(id).outer_source_id);
+                let iter = sync.sources().map(move |id| sync[id].outer_source_id);
                 either::Left(either::Right(iter))
             }
             AllSyncInner::AllForks(sync) => {
-                let iter = sync
-                    .sources()
-                    .map(move |id| sync.source_user_data(id).outer_source_id);
+                let iter = sync.sources().map(move |id| sync[id].outer_source_id);
                 either::Right(iter)
             }
             AllSyncInner::Poisoned => unreachable!(),
-        }
-    }
-
-    /// Returns the user data (`TSrc`) corresponding to the given source.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is invalid.
-    ///
-    pub fn source_user_data(&self, source_id: SourceId) -> &TSrc {
-        debug_assert!(self.shared.sources.contains(source_id.0));
-        match (&self.inner, self.shared.sources.get(source_id.0).unwrap()) {
-            (AllSyncInner::AllForks(sync), SourceMapping::AllForks(src)) => {
-                &sync.source_user_data(*src).user_data
-            }
-            (AllSyncInner::Optimistic { inner }, SourceMapping::Optimistic(src)) => {
-                &inner.source_user_data(*src).user_data
-            }
-            (
-                AllSyncInner::GrandpaWarpSync { inner: sync },
-                SourceMapping::GrandpaWarpSync(src),
-            ) => &sync.source_user_data(*src).user_data,
-
-            (AllSyncInner::Poisoned, _) => unreachable!(),
-            // Invalid combinations of syncing state machine and source id.
-            // This indicates a internal bug during the switch from one state machine to the
-            // other.
-            (AllSyncInner::GrandpaWarpSync { .. }, SourceMapping::AllForks(_)) => unreachable!(),
-            (AllSyncInner::AllForks(_), SourceMapping::GrandpaWarpSync(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::AllForks(_)) => unreachable!(),
-            (AllSyncInner::AllForks(_), SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::GrandpaWarpSync { .. }, SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::GrandpaWarpSync(_)) => unreachable!(),
-        }
-    }
-
-    /// Returns the user data (`TSrc`) corresponding to the given source.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is invalid.
-    ///
-    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        debug_assert!(self.shared.sources.contains(source_id.0));
-        match (
-            &mut self.inner,
-            self.shared.sources.get(source_id.0).unwrap(),
-        ) {
-            (AllSyncInner::AllForks(sync), SourceMapping::AllForks(src)) => {
-                &mut sync.source_user_data_mut(*src).user_data
-            }
-            (AllSyncInner::Optimistic { inner }, SourceMapping::Optimistic(src)) => {
-                &mut inner.source_user_data_mut(*src).user_data
-            }
-            (
-                AllSyncInner::GrandpaWarpSync { inner: sync },
-                SourceMapping::GrandpaWarpSync(src),
-            ) => &mut sync.source_user_data_mut(*src).user_data,
-
-            (AllSyncInner::Poisoned, _) => unreachable!(),
-            // Invalid combinations of syncing state machine and source id.
-            // This indicates a internal bug during the switch from one state machine to the
-            // other.
-            (AllSyncInner::GrandpaWarpSync { .. }, SourceMapping::AllForks(_)) => unreachable!(),
-            (AllSyncInner::AllForks(_), SourceMapping::GrandpaWarpSync(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::AllForks(_)) => unreachable!(),
-            (AllSyncInner::AllForks(_), SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::GrandpaWarpSync { .. }, SourceMapping::Optimistic(_)) => unreachable!(),
-            (AllSyncInner::Optimistic { .. }, SourceMapping::GrandpaWarpSync(_)) => unreachable!(),
         }
     }
 
@@ -643,14 +569,14 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             }
             (AllSyncInner::Optimistic { inner }, SourceMapping::Optimistic(src)) => {
                 let height = inner.source_best_block(*src);
-                let hash = &inner.source_user_data(*src).best_block_hash;
+                let hash = &inner[*src].best_block_hash;
                 (height, hash)
             }
             (
                 AllSyncInner::GrandpaWarpSync { inner: sync },
                 SourceMapping::GrandpaWarpSync(src),
             ) => {
-                let ud = sync.source_user_data(*src);
+                let ud = &sync[*src];
                 (ud.best_block_number, &ud.best_block_hash)
             }
 
@@ -706,7 +632,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             .number
                 );
 
-                let user_data = sync.source_user_data(*src);
+                let user_data = &sync[*src];
                 user_data.best_block_hash == *hash && user_data.best_block_number == height
             }
 
@@ -752,17 +678,17 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let iter = sync
                     .sources()
                     .filter(move |source_id| {
-                        let user_data = sync.source_user_data(*source_id);
+                        let user_data = &sync[*source_id];
                         user_data.best_block_hash == hash && user_data.best_block_number == height
                     })
-                    .map(move |id| sync.source_user_data(id).outer_source_id);
+                    .map(move |id| sync[id].outer_source_id);
 
                 either::Right(either::Left(iter))
             }
             AllSyncInner::AllForks(sync) => {
                 let iter = sync
                     .knows_non_finalized_block(height, hash)
-                    .map(move |id| sync.source_user_data(id).outer_source_id);
+                    .map(move |id| sync[id].outer_source_id);
                 either::Left(iter)
             }
             AllSyncInner::Optimistic { inner } => {
@@ -770,7 +696,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let iter = inner
                     .sources()
                     .filter(move |source_id| inner.source_best_block(*source_id) >= height)
-                    .map(move |source_id| inner.source_user_data(source_id).outer_source_id);
+                    .map(move |source_id| inner[source_id].outer_source_id);
                 either::Right(either::Right(iter))
             }
             AllSyncInner::Poisoned => unreachable!(),
@@ -789,7 +715,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let iter = sync.desired_requests().map(
                     move |(inner_source_id, src_user_data, rq_params)| {
                         (
-                            sync.source_user_data(inner_source_id).outer_source_id,
+                            sync[inner_source_id].outer_source_id,
                             &src_user_data.user_data,
                             all_forks_request_convert(rq_params, self.shared.is_full),
                         )
@@ -801,8 +727,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             AllSyncInner::Optimistic { inner } => {
                 let iter = inner.desired_requests().map(move |rq_detail| {
                     (
-                        inner.source_user_data(rq_detail.source_id).outer_source_id,
-                        &inner.source_user_data(rq_detail.source_id).user_data,
+                        inner[rq_detail.source_id].outer_source_id,
+                        &inner[rq_detail.source_id].user_data,
                         optimistic_request_convert(rq_detail, self.shared.is_full),
                     )
                 });
@@ -1088,7 +1014,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     Ok(header) => {
                         if is_best {
                             inner.raise_source_best_block(source_id, header.number);
-                            inner.source_user_data_mut(source_id).best_block_hash =
+                            inner[source_id].best_block_hash =
                                 header::hash_from_scale_encoded_header(
                                     &announced_scale_encoded_header,
                                 );
@@ -1109,7 +1035,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         // in the user data. It will be useful later when transitioning to another
                         // syncing strategy.
                         if is_best {
-                            let mut user_data = sync.source_user_data_mut(source_id);
+                            let mut user_data = &mut sync[source_id];
                             user_data.best_block_number = header.number;
                             user_data.best_block_hash = header.hash();
                         }
@@ -1391,6 +1317,69 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     finalized_storage_heap_pages,
                 }
             }
+        }
+    }
+}
+
+impl<TRq, TSrc, TBl> ops::Index<SourceId> for AllSync<TRq, TSrc, TBl> {
+    type Output = TSrc;
+
+    #[track_caller]
+    fn index(&self, source_id: SourceId) -> &TSrc {
+        debug_assert!(self.shared.sources.contains(source_id.0));
+        match (&self.inner, self.shared.sources.get(source_id.0).unwrap()) {
+            (AllSyncInner::AllForks(sync), SourceMapping::AllForks(src)) => &sync[*src].user_data,
+            (AllSyncInner::Optimistic { inner }, SourceMapping::Optimistic(src)) => {
+                &inner[*src].user_data
+            }
+            (
+                AllSyncInner::GrandpaWarpSync { inner: sync },
+                SourceMapping::GrandpaWarpSync(src),
+            ) => &sync[*src].user_data,
+
+            (AllSyncInner::Poisoned, _) => unreachable!(),
+            // Invalid combinations of syncing state machine and source id.
+            // This indicates a internal bug during the switch from one state machine to the
+            // other.
+            (AllSyncInner::GrandpaWarpSync { .. }, SourceMapping::AllForks(_)) => unreachable!(),
+            (AllSyncInner::AllForks(_), SourceMapping::GrandpaWarpSync(_)) => unreachable!(),
+            (AllSyncInner::Optimistic { .. }, SourceMapping::AllForks(_)) => unreachable!(),
+            (AllSyncInner::AllForks(_), SourceMapping::Optimistic(_)) => unreachable!(),
+            (AllSyncInner::GrandpaWarpSync { .. }, SourceMapping::Optimistic(_)) => unreachable!(),
+            (AllSyncInner::Optimistic { .. }, SourceMapping::GrandpaWarpSync(_)) => unreachable!(),
+        }
+    }
+}
+
+impl<TRq, TSrc, TBl> ops::IndexMut<SourceId> for AllSync<TRq, TSrc, TBl> {
+    #[track_caller]
+    fn index_mut(&mut self, source_id: SourceId) -> &mut TSrc {
+        debug_assert!(self.shared.sources.contains(source_id.0));
+        match (
+            &mut self.inner,
+            self.shared.sources.get(source_id.0).unwrap(),
+        ) {
+            (AllSyncInner::AllForks(sync), SourceMapping::AllForks(src)) => {
+                &mut sync[*src].user_data
+            }
+            (AllSyncInner::Optimistic { inner }, SourceMapping::Optimistic(src)) => {
+                &mut inner[*src].user_data
+            }
+            (
+                AllSyncInner::GrandpaWarpSync { inner: sync },
+                SourceMapping::GrandpaWarpSync(src),
+            ) => &mut sync[*src].user_data,
+
+            (AllSyncInner::Poisoned, _) => unreachable!(),
+            // Invalid combinations of syncing state machine and source id.
+            // This indicates a internal bug during the switch from one state machine to the
+            // other.
+            (AllSyncInner::GrandpaWarpSync { .. }, SourceMapping::AllForks(_)) => unreachable!(),
+            (AllSyncInner::AllForks(_), SourceMapping::GrandpaWarpSync(_)) => unreachable!(),
+            (AllSyncInner::Optimistic { .. }, SourceMapping::AllForks(_)) => unreachable!(),
+            (AllSyncInner::AllForks(_), SourceMapping::Optimistic(_)) => unreachable!(),
+            (AllSyncInner::GrandpaWarpSync { .. }, SourceMapping::Optimistic(_)) => unreachable!(),
+            (AllSyncInner::Optimistic { .. }, SourceMapping::GrandpaWarpSync(_)) => unreachable!(),
         }
     }
 }

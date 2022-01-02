@@ -51,7 +51,7 @@ jobs:
     steps:
     - uses: actions/checkout@v2.4.0
     - uses: Swatinem/rust-cache@v1
-    - uses: actions/setup-node@v2.5.0
+    - uses: actions/setup-node@v2.5.1
       with:
         node-version: '12'
     - run: apt-get update && apt install -y binaryen # For `wasm-opt`
@@ -66,7 +66,7 @@ jobs:
       with:
         fetch-depth: 0  # Necessary to fetch pull request base below
     - uses: Swatinem/rust-cache@v1
-    - uses: actions/setup-node@v2.5.0
+    - uses: actions/setup-node@v2.5.1
       with:
         node-version: '12'
     - run: cargo install twiggy  # TODO: somehow cache this in order to not compile twiggy every single time
@@ -117,6 +117,7 @@ jobs:
       image: rust:1.57
     steps:
     - uses: actions/checkout@v2.4.0
+    - uses: Swatinem/rust-cache@v1
     - run: cargo doc --verbose --workspace --all-features --no-deps --document-private-items
 
   fmt:
@@ -139,12 +140,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2.4.0
-      - uses: Swatinem/rust-cache@v1
       - uses: actions-rs/toolchain@v1
         with:
             toolchain: nightly
             components: clippy
             override: true
+      - uses: Swatinem/rust-cache@v1  # Note that this is done after switching the compiler version to nightly
       - uses: actions-rs/clippy@master
         with:
           args: --all-features --all-targets

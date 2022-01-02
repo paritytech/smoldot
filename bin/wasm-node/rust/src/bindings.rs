@@ -223,7 +223,7 @@ extern "C" {
 /// inferior or equal to the value of `max_log_level` passed here.
 #[no_mangle]
 pub extern "C" fn init(max_log_level: u32) {
-    crate::init::init(max_log_level)
+    crate::init(max_log_level)
 }
 
 /// Allocates a buffer of the given length, with an alignment of 1.

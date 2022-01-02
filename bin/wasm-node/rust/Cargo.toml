@@ -1,6 +1,6 @@
 [package]
 name = "smoldot-light-wasm"
-version = "0.5.8"
+version = "0.5.11"
 authors = ["Parity Technologies <admin@parity.io>", "Pierre Krieger <pierre.krieger1708@gmail.com>"]
 description = "Browser bindings to a light client for Substrate-based blockchains"
 repository = "https://github.com/paritytech/smoldot"
@@ -13,7 +13,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 event-listener = { version = "2.5.1" }
-futures = "0.3.18"
+futures = "0.3.17"
 lazy_static = "1.4.0"
 log = { version = "0.4.14", features = ["std"] }
 pin-project = "1.0.8"

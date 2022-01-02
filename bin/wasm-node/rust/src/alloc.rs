@@ -49,8 +49,10 @@ static ALLOCATOR: AllocCounter = AllocCounter {
 unsafe impl alloc::GlobalAlloc for AllocCounter {
     unsafe fn alloc(&self, layout: alloc::Layout) -> *mut u8 {
         let ret = self.inner.alloc(layout);
-        self.total
-            .fetch_add(layout.size(), atomic::Ordering::Relaxed);
+        if !ret.is_null() {
+            self.total
+                .fetch_add(layout.size(), atomic::Ordering::Relaxed);
+        }
         ret
     }
 
@@ -58,5 +60,28 @@ unsafe impl alloc::GlobalAlloc for AllocCounter {
         self.total
             .fetch_sub(layout.size(), atomic::Ordering::Relaxed);
         self.inner.dealloc(ptr, layout);
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: alloc::Layout) -> *mut u8 {
+        let ret = self.inner.alloc_zeroed(layout);
+        if !ret.is_null() {
+            self.total
+                .fetch_add(layout.size(), atomic::Ordering::Relaxed);
+        }
+        ret
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: alloc::Layout, new_size: usize) -> *mut u8 {
+        let ret = self.inner.realloc(ptr, layout, new_size);
+        if !ret.is_null() {
+            if new_size >= layout.size() {
+                self.total
+                    .fetch_add(new_size - layout.size(), atomic::Ordering::Relaxed);
+            } else {
+                self.total
+                    .fetch_sub(layout.size() - new_size, atomic::Ordering::Relaxed);
+            }
+        }
+        ret
     }
 }

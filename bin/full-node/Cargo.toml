@@ -16,12 +16,13 @@ path = "src/main.rs"
 [dependencies]
 async-std = "1.10.0"
 atty = "0.2.14"
+blake2-rfc = { version = "0.2.18", default-features = false }
 ctrlc = "3.2.1"
 derive_more = "0.99.17"
 directories = "4.0.1"
 either = { version = "1.6.1", default-features = false }
 fnv = { version = "1.0.7", default-features = false }
-futures = { version = "0.3.18", default-features = false, features = ["std", "thread-pool"] }
+futures = { version = "0.3.17", default-features = false, features = ["std", "thread-pool"] }
 futures-timer = "3.0"
 hashbrown = { version = "0.11.2", default-features = false }
 hex = { version = "0.4.3", default-features = false }

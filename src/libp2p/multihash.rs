@@ -18,7 +18,7 @@
 //! A multihash is a small data structure containing a code (an integer) and data. The format of
 //! the data depends on the code.
 //!
-//! See https://github.com/multiformats/multihash
+//! See <https://github.com/multiformats/multihash>
 
 use alloc::vec::Vec;
 use core::fmt;

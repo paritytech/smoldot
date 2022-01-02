@@ -481,7 +481,7 @@ impl SyncBackground {
 
                             let _jaeger_span = self
                                 .jaeger_service
-                                .block_span(&decoded.header.hash(), "block-announce-process");
+                                .block_announce_process_span(&decoded.header.hash());
 
                             let id = *self.peers_source_id_map.get(&peer_id).unwrap();
                             // TODO: log the outcome
@@ -721,8 +721,7 @@ impl SyncBackground {
         );
         let _jaeger_span = self
             .jaeger_service
-            .block_span(&new_block_hash, "author")
-            .with_start_time_override(block_author_jaeger_start_time);
+            .block_authorship_span(&new_block_hash, block_author_jaeger_start_time);
 
         // Print a warning if generating the block has taken more time than expected.
         // This can happen because the node is completely overloaded, is running on a slow machine,
@@ -825,9 +824,7 @@ impl SyncBackground {
                     let (_, block_hash, scale_encoded_header, scale_encoded_extrinsics) =
                         self.authored_block.take().unwrap();
 
-                    let _jaeger_span = self
-                        .jaeger_service
-                        .block_span(&block_hash, "block-import-queue");
+                    let _jaeger_span = self.jaeger_service.block_import_queue_span(&block_hash);
 
                     // Create a request that is immediately answered right below.
                     let request_id = self.sync.add_request(
@@ -857,7 +854,7 @@ impl SyncBackground {
                     request_bodies,
                     request_justification,
                 } => {
-                    let peer_id = self.sync.source_user_data_mut(source_id).clone().unwrap();
+                    let peer_id = self.sync[source_id].clone().unwrap();
 
                     // TODO: add jaeger span
 
@@ -934,9 +931,7 @@ impl SyncBackground {
                         error = tracing::field::Empty,
                     );
                     let _enter = span.enter();
-                    let _jaeger_span = self
-                        .jaeger_service
-                        .block_span(&hash_to_verify, "body-verify");
+                    let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
 
                     let mut verify = verify.start(unix_time, ());
                     loop {
@@ -1116,7 +1111,7 @@ impl SyncBackground {
                     let _enter = span.enter();
                     let _jaeger_span = self
                         .jaeger_service
-                        .block_span(&hash_to_verify, "header-verify");
+                        .block_header_verify_span(&hash_to_verify);
 
                     match verify.perform(unix_time, ()) {
                         all::HeaderVerifyOutcome::Success { sync: sync_out, .. } => {

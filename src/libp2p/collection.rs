@@ -1116,7 +1116,7 @@ where
     fn build_connection_config(
         &self,
         now: &TNow,
-        randomness_seed: [u8; 32],
+        randomness_seed: [u8; 16],
     ) -> established::Config<TNow> {
         established::Config {
             notifications_protocols: self
@@ -1814,7 +1814,7 @@ enum ConnectionInner<TNow> {
         /// While it seems a bit dangerous to leave a randomness seed in plain memory, the
         /// randomness isn't used for anything critical or related to cryptography, but only for
         /// example to avoid hash collision attacks.
-        randomness_seed: [u8; 32],
+        randomness_seed: [u8; 16],
 
         /// When the handshake times out.
         timeout: TNow,
