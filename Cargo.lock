@@ -2301,7 +2301,6 @@ dependencies = [
  "bs58",
  "criterion",
  "crossbeam-queue",
- "crossbeam-utils",
  "derive_more",
  "ed25519-zebra",
  "either",

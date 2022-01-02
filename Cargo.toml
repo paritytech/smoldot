@@ -46,7 +46,6 @@ bip39 = { version = "1.0.1", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
 bs58 = { version = "0.4.0", default-features = false, features = ["alloc"] }
 crossbeam-queue = { version = "0.3.2", default-features = false, features = ["alloc"] }
-crossbeam-utils = { version = "0.8.5", default-features = false }
 derive_more = "0.99.17"
 ed25519-zebra = { version = "3.0.0", default-features = false }
 either = { version = "1.6.1", default-features = false }

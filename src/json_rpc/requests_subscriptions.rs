@@ -28,7 +28,7 @@ use alloc::{
     sync::{Arc, Weak},
 };
 use core::{
-    cmp, fmt, hash,
+    cmp, fmt, hash, ops,
     sync::atomic::{AtomicUsize, Ordering},
 };
 use futures::lock::Mutex;
@@ -140,10 +140,11 @@ impl RequestsSubscriptions {
                 responses_send_back: VecDeque::with_capacity(self.max_requests_per_client),
                 notification_messages: BTreeMap::new(),
                 message_pushed: event_listener::Event::new(),
-                active_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
+                active_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
                     self.max_subscriptions_per_client,
                     Default::default(),
                 ),
+                num_inactive_alive_subscriptions: 0,
             }),
         });
 
@@ -177,10 +178,11 @@ impl RequestsSubscriptions {
                 responses_send_back: VecDeque::with_capacity(self.max_requests_per_client),
                 notification_messages: BTreeMap::new(),
                 message_pushed: event_listener::Event::new(),
-                active_subscriptions: hashbrown::HashSet::with_capacity_and_hasher(
+                active_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
                     self.max_subscriptions_per_client,
                     Default::default(),
                 ),
+                num_inactive_alive_subscriptions: 0,
             }),
         });
 
@@ -238,21 +240,55 @@ impl RequestsSubscriptions {
             };
 
             let sleep_until = {
-                let mut queue_lock = client.guarded.lock().await;
-                match queue_lock.responses_send_back.pop_front() {
+                let mut guarded_lock = client.guarded.lock().await;
+
+                debug_assert!(
+                    !guarded_lock.responses_send_back.len()
+                        <= self.max_requests_per_client + guarded_lock.notification_messages.len(),
+                );
+
+                match guarded_lock.responses_send_back.pop_front() {
                     Some(ResponseSendBack::Response(message)) => {
                         let _new_val = client.total_requests_in_fly.fetch_sub(1, Ordering::Release);
                         debug_assert_ne!(_new_val, usize::max_value()); // Check for underflows
                         client.request_answered.notify_additional(1);
                         return message;
                     }
-                    Some(ResponseSendBack::SubscriptionMessage(index)) => {
-                        todo!()
+                    Some(ResponseSendBack::SubscriptionMessage(sub_id, index)) => {
+                        let message = guarded_lock
+                            .notification_messages
+                            .remove(&(sub_id, index))
+                            .unwrap();
+
+                        // It might be that this subscription message concerns a subscription that
+                        // is already dead. In this case, we try to decrease
+                        // `num_inactive_alive_subscriptions`.
+                        //
+                        // Note that the check `num_inactive_alive_subscriptions > 0` is purely
+                        // for optimization, to avoid doing a hashmap lookup every time.
+                        if guarded_lock.num_inactive_alive_subscriptions > 0 {
+                            if !guarded_lock.active_subscriptions.contains_key(&sub_id) {
+                                if guarded_lock
+                                    .notification_messages
+                                    .range(
+                                        (sub_id, usize::min_value())..=(sub_id, usize::max_value()),
+                                    )
+                                    .next()
+                                    .is_none()
+                                {
+                                    guarded_lock.num_inactive_alive_subscriptions -= 1;
+                                }
+                            }
+                        } else {
+                            debug_assert!(guarded_lock.active_subscriptions.contains_key(&sub_id));
+                        }
+
+                        return message;
                     }
                     None => {}
                 }
 
-                queue_lock.message_pushed.listen()
+                guarded_lock.message_pushed.listen()
             };
 
             sleep_until.await
@@ -446,6 +482,21 @@ impl RequestsSubscriptions {
     ///
     /// If the given [`RequestId`] is stale or invalid, this function always succeeds and returns
     /// a stale [`SubscriptionId`].
+    ///
+    /// # About the messages capacity
+    ///
+    /// The `messages_capacity` parameter contains the number of notifications related to this
+    /// notification that can be queued for send back simultaneously.
+    ///
+    /// This value is one of the parameters that bound the total memory usage of this state
+    /// machine. In other words, if there was no maximum, a malicious JSON-RPC client could
+    /// intentionally create a memory leak on the server.
+    ///
+    /// It is therefore important that this value isn't too large never gets decided by the
+    /// JSON-RPC client.
+    ///
+    /// For some JSON-RPC functions, the value of this constant can easily be deduced from the
+    /// logic of the function. For other functions, the value of this constant should be hardcoded.
     pub async fn start_subscription(
         &self,
         client: &RequestId,
@@ -461,13 +512,26 @@ impl RequestsSubscriptions {
         };
 
         let mut lock = client_arc.guarded.lock().await;
-        if lock.active_subscriptions.len() >= self.max_subscriptions_per_client {
+
+        // Note that the number of subscriptions compared against the limit also includes
+        // subscriptions that have been stopped but still have some pending messages to send
+        // back (`num_inactive_alive_subscriptions`). This ensures that the queue of responses
+        // is properly bounded, and can't overflow because the client repeatedly starts and ends
+        // subscriptions.
+        if lock
+            .active_subscriptions
+            .len()
+            .saturating_add(lock.num_inactive_alive_subscriptions)
+            >= self.max_subscriptions_per_client
+        {
             return Err(StartSubscriptionError::LimitReached);
         }
 
         let new_subscription_num = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
-        let _was_inserted = lock.active_subscriptions.insert(new_subscription_num);
-        debug_assert!(_was_inserted);
+        let _prev_value = lock
+            .active_subscriptions
+            .insert(new_subscription_num, messages_capacity);
+        debug_assert!(_prev_value.is_none());
 
         Ok(SubscriptionId(
             new_subscription_num,
@@ -478,42 +542,148 @@ impl RequestsSubscriptions {
     /// Destroys the given subscription.
     ///
     /// All messages already queued will still be available through
-    /// [`RequestsSubscriptions::next_response`].
+    /// [`RequestsSubscriptions::next_response`], but no new subscription message can be pushed.
     ///
     /// This function should be seen as a way to clean up the internal state of the state machine
     /// and prevent new notifications from being pushed.
-    pub async fn stop_subscription(&self, subscription: &SubscriptionId) {}
+    ///
+    /// Has no effect if the [`SubscriptionId`] is stale or invalid.
+    pub async fn stop_subscription(&self, subscription: &SubscriptionId) {
+        let client_arc = match subscription.1.upgrade() {
+            Some(c) => c,
+            None => return,
+        };
 
+        let mut lock = client_arc.guarded.lock().await;
+
+        if lock.active_subscriptions.remove(&subscription.0).is_none() {
+            return;
+        }
+
+        if lock
+            .notification_messages
+            .range((subscription.0, usize::min_value())..=(subscription.0, usize::max_value()))
+            .next()
+            .is_some()
+        {
+            lock.num_inactive_alive_subscriptions += 1;
+            debug_assert!(
+                lock.num_inactive_alive_subscriptions <= self.max_subscriptions_per_client
+            );
+        }
+
+        debug_assert!(
+            lock.active_subscriptions.len() + lock.num_inactive_alive_subscriptions
+                <= self.max_subscriptions_per_client
+        );
+    }
+
+    // TODO: doc
     /// If the queue.
+    ///
+    /// Has no effect if the [`SubscriptionId`] is stale or invalid.
     pub async fn set_queued_notification(
         &self,
         subscription: &SubscriptionId,
         index: usize,
         message: String,
     ) {
+        let client_arc = match subscription.1.upgrade() {
+            Some(c) => c,
+            None => return,
+        };
+
+        let mut lock = client_arc.guarded.lock().await;
+        if !lock.active_subscriptions.contains_key(&subscription.0) {
+            return;
+        }
+
+        // Inserts or replaces the current value under the key `(subscription, index)`.
+        let previous_message = lock
+            .notification_messages
+            .insert((subscription.0, index), message);
+
+        // Add an entry in `responses_send_back`, or skip this step if not necessary.
+        if previous_message.is_none() {
+            lock.responses_send_back
+                .push_back(ResponseSendBack::SubscriptionMessage(subscription.0, index));
+            lock.message_pushed.notify_additional(1);
+        }
     }
 
+    // TODO: is this a good function?
     pub async fn push_notification(&self, subscription: &SubscriptionId, message: String) {
         todo!()
     }
 
+    // TODO: doc
     pub async fn try_push_notification(
         &self,
         subscription: &SubscriptionId,
         message: String,
     ) -> Result<(), ()> {
+        let client_arc = match subscription.1.upgrade() {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        let mut lock = client_arc.guarded.lock().await;
+
+        // Two in one: check whether this subscription is indeed valid, and at the same time get
+        // the messages capacity.
+        let messages_capacity = match lock.active_subscriptions.get(&subscription.0) {
+            Some(l) => *l,
+            None => return Ok(()),
+        };
+
+        // TODO: this is O(n)
+        let index = {
+            let control_flow = lock
+                .notification_messages
+                .range((subscription.0, usize::min_value())..=(subscription.0, usize::max_value()))
+                .map(|((_, idx), _)| *idx)
+                .try_fold(0, |maybe_free_index, index| {
+                    if maybe_free_index == index {
+                        ops::ControlFlow::Continue(index + 1)
+                    } else {
+                        ops::ControlFlow::Break(maybe_free_index)
+                    }
+                });
+            match control_flow {
+                ops::ControlFlow::Break(idx) => {
+                    debug_assert!(idx < messages_capacity);
+                    idx
+                }
+                ops::ControlFlow::Continue(idx) if idx < messages_capacity => idx,
+                ops::ControlFlow::Continue(_) => return Err(()),
+            }
+        };
+
+        // Inserts or replaces the current value under the key `(subscription, index)`.
+        let _previous_message = lock
+            .notification_messages
+            .insert((subscription.0, index), message);
+        debug_assert!(_previous_message.is_none());
+
+        // Add an entry in `responses_send_back`.
+        lock.responses_send_back
+            .push_back(ResponseSendBack::SubscriptionMessage(subscription.0, index));
+        lock.message_pushed.notify_additional(1);
+
         Ok(())
     }
 }
 
 /// Error returned by [`RequestsSubscriptions::add_client`] and
 /// [`RequestsSubscriptions::add_client_mut`].
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum AddClientError {
     /// Reached maximum number of allowed clients.
     LimitReached,
 }
 
 /// Error returned by [`RequestsSubscriptions::start_subscription`].
+#[derive(Debug, derive_more::Display, Clone)]
 pub enum StartSubscriptionError {
     /// Reached maximum number of subscriptions allowed per user.
     LimitReached,
@@ -553,26 +723,50 @@ struct ClientInnerGuarded {
     pending_requests: hashbrown::HashSet<u64, fnv::FnvBuildHasher>,
 
     /// Queue of responses to regular requests to send back to the client.
+    ///
+    /// It is critical that this list is bounded, in order to prevent malicious clients from
+    /// DoS-attacking the machine by consuming all its available memory. This list is not
+    /// explicitly bounded by its type, but it is bounded thanks to the logic within this module.
+    ///
+    /// In practice, the number of elements never exceeds
+    /// `max_requests_per_client + sum(notification_capacity)`. This can't be verified by a debug
+    /// assertion, because `notification_capacity` might refer to the capacity of subscriptions
+    /// that have been stopped and whose capacity is no longer tracked.
     responses_send_back: VecDeque<ResponseSendBack>,
 
-    /// Queue of notification messages to send back to the client.
+    /// List of notification messages to send back to the client.
+    ///
+    /// Each entry in this map also always has a corresponding entry in
+    /// [`ClientInnerGuarded::responses_send_back`].
     notification_messages: BTreeMap<(u64, usize), String>,
 
-    /// Every time an entry is pushed on [`ClientInnerQueue::requests_send_back`] or
-    /// [`ClientInnerQueue::notification_messages`], one listener of this event is notified.
+    /// Every time an entry is pushed on [`ClientInnerQueue::responses_send_back`], one listener
+    /// of this event is notified.
     ///
     /// Also notified if the client is destroyed. TODO: necessary?
     message_pushed: event_listener::Event,
 
-    /// List of active subscriptions.
+    /// List of active subscriptions. In other words, subscriptions that have been started but
+    /// having been stopped with [`RequestsSubscriptions::stop_subscription`] yet.
+    ///
+    /// This doesn't include subscriptions that have been stopped but still have some entries in
+    /// the list of messages.
+    ///
+    /// For each subscription, contains the maximum number of notifications that can be queued
+    /// at the same time for this subscription.
     ///
     /// A FNV hasher is used because the keys of this map are allocated locally.
-    active_subscriptions: hashbrown::HashSet<u64, fnv::FnvBuildHasher>,
+    active_subscriptions: hashbrown::HashMap<u64, usize, fnv::FnvBuildHasher>,
+
+    /// Returns the number of subscriptions that have been stopped but still have at least one
+    /// entry in [`ClientInnerGuarded::notification_messages`] (and thus also in
+    /// [`ClientInnerGuarded::responses_send_back`]).
+    num_inactive_alive_subscriptions: usize,
 }
 
 enum ResponseSendBack {
     Response(String),
-    SubscriptionMessage(usize),
+    SubscriptionMessage(u64, usize),
 }
 
 // Common traits derivation on the id types.

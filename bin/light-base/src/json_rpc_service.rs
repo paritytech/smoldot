@@ -1033,7 +1033,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await
                 {
                     Ok(v) => v,
-                    Err(()) => {
+                    Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                         self.requests_subscriptions
                             .respond(
                                 &state_machine_request_id,
@@ -1610,7 +1610,7 @@ impl<TPlat: Platform> Background<TPlat> {
             .await
         {
             Ok(v) => v,
-            Err(()) => {
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
                         state_machine_request_id,
@@ -1814,7 +1814,7 @@ impl<TPlat: Platform> Background<TPlat> {
             .await
         {
             Ok(v) => v,
-            Err(()) => {
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
                         state_machine_request_id,
@@ -1919,7 +1919,7 @@ impl<TPlat: Platform> Background<TPlat> {
             .await
         {
             Ok(v) => v,
-            Err(()) => {
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
                         state_machine_request_id,
@@ -2016,7 +2016,7 @@ impl<TPlat: Platform> Background<TPlat> {
             .await
         {
             Ok(v) => v,
-            Err(()) => {
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
                         state_machine_request_id,
@@ -2116,7 +2116,7 @@ impl<TPlat: Platform> Background<TPlat> {
             .await
         {
             Ok(v) => v,
-            Err(()) => {
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
                         state_machine_request_id,
@@ -2362,7 +2362,7 @@ impl<TPlat: Platform> Background<TPlat> {
             .await
         {
             Ok(v) => v,
-            Err(()) => {
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
                 self.requests_subscriptions
                     .respond(
                         state_machine_request_id,
