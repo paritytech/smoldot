@@ -153,7 +153,13 @@ pub struct JsonRpcService<TPlat: Platform> {
 impl<TPlat: Platform> JsonRpcService<TPlat> {
     /// Creates a new JSON-RPC service with the given configuration.
     pub fn new(mut config: Config<'_, TPlat>) -> JsonRpcService<TPlat> {
-        let mut requests_subscriptions = requests_subscriptions::RequestsSubscriptions::new();
+        let mut requests_subscriptions =
+            requests_subscriptions::RequestsSubscriptions::new(requests_subscriptions::Config {
+                max_clients: 1,
+                max_requests_per_client: config.max_pending_requests,
+                max_subscriptions_per_client: config.max_subscriptions,
+            });
+
         let client_id = requests_subscriptions.add_client_mut().unwrap(); // Adding a client can fail only if the limit is reached.
         let requests_subscriptions = Arc::new(requests_subscriptions);
 
@@ -347,7 +353,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             Err(err) => {
                 log::warn!(
                     target: &self.log_target,
-                    "Request denied due to JSON-RPC service being overloaded. This will likely \n
+                    "Request denied due to JSON-RPC service being overloaded. This will likely \
                     cause the JSON-RPC client to malfunction."
                 );
 

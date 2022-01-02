@@ -28,7 +28,9 @@ use alloc::{
     sync::{Arc, Weak},
 };
 use core::{
-    cmp, fmt, hash, ops,
+    cmp, fmt, hash,
+    num::NonZeroU32,
+    ops,
     sync::atomic::{AtomicUsize, Ordering},
 };
 use futures::lock::Mutex;
@@ -41,6 +43,21 @@ pub struct RequestId(u64, Weak<ClientInner>);
 
 #[derive(Clone)]
 pub struct SubscriptionId(u64, Weak<ClientInner>);
+
+/// Configuration to pass to [`RequestsSubscriptions::new`].
+pub struct Config {
+    /// For each client, the maximum number of JSON-RPC requests that can be start at the same
+    /// time before the first one has been responded to. Any additional request will need to wait.
+    pub max_requests_per_client: NonZeroU32,
+
+    /// Maximum number of active subscriptions that each client can start. Any additional
+    /// subscription will be immediately rejected.
+    pub max_subscriptions_per_client: u32,
+
+    /// Maximum number of clients that can be added at the same time. Any additional client will
+    /// be rejected.
+    pub max_clients: u32,
+}
 
 pub struct RequestsSubscriptions {
     clients: Mutex<Clients>,
@@ -80,10 +97,16 @@ pub struct RequestsSubscriptions {
 
 impl RequestsSubscriptions {
     /// Creates a new empty state machine.
-    pub fn new() -> Self {
-        let max_requests_per_client = 8;
-        let max_clients = 128;
-        let max_subscriptions_per_client = 32;
+    pub fn new(config: Config) -> Self {
+        // The fields in the config are `u32`s rather than `usize`s so that they can be the same
+        // on every machine. However, in practice they are queue lengths, and thus are converted
+        // to `usize`s. Capping to `usize::max_value()` is fine considering that it's never
+        // possible to actually have more than `usize` elements in a container.
+        let max_clients = usize::try_from(config.max_clients).unwrap_or(usize::max_value());
+        let max_subscriptions_per_client =
+            usize::try_from(config.max_subscriptions_per_client).unwrap_or(usize::max_value());
+        let max_requests_per_client =
+            usize::try_from(config.max_requests_per_client.get()).unwrap_or(usize::max_value());
 
         Self {
             clients: Mutex::new(Clients {
@@ -97,8 +120,8 @@ impl RequestsSubscriptions {
             next_request_id: atomic::Atomic::new(0),
             next_subscription_id: atomic::Atomic::new(0),
             max_clients: AtomicUsize::new(max_clients),
-            max_requests_per_client,
-            max_subscriptions_per_client,
+            max_requests_per_client: max_requests_per_client,
+            max_subscriptions_per_client: max_subscriptions_per_client,
         }
     }
 
