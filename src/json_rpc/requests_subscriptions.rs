@@ -86,7 +86,24 @@
 //! enough, back-pressure will be applied onto [`RequestsSubscriptions::queue_client_request`],
 //! which in turn applies back-pressure onto the JSON-RPC clients.
 //!
-// TODO: document subscriptions
+//! ## Subscriptions
+//!
+//! If a client-sent request requires starting a subscription, one of the
+//! requests-pulling-dedicated tasks should call [`RequestsSubscriptions::start_subscription`].
+//!
+//! It is the responsibility of the higher-level code to generate the JSON-RPC-client-facing
+//! identifier of the subscription.
+//!
+//! When a subscription is started, the higher-level code should spawn a new task dedicated to
+//! sending back notifications to the client using [`RequestsSubscriptions::push_notification`],
+//! [`RequestsSubscriptions::try_push_notification`], or
+//! [`RequestsSubscriptions::set_queued_notification`].
+//!
+//! The code on top should maintain a map of `JSON-RPC-client-facing identifier` to
+//! [`SubscriptionId`]. When the JSON-RPC client wants to unsubscribe, call
+//! [`RequestsSubscriptions::stop_subscription`]. This map should also contain a way to abort
+//! the task dedicated to that subscription.
+//!
 
 use alloc::{
     collections::{BTreeMap, VecDeque},
@@ -742,6 +759,9 @@ impl RequestsSubscriptions {
             );
         }
 
+        lock.notification_messages_popped_or_dead
+            .notify_relaxed(usize::max_value());
+
         debug_assert!(
             lock.active_subscriptions.len() + lock.num_inactive_alive_subscriptions
                 <= self.max_subscriptions_per_client
@@ -823,11 +843,8 @@ impl RequestsSubscriptions {
     /// to either push notifications one behind the other, or track which notification queue index
     /// corresponds to what, but not both at the same time.
     ///
-    /// If the [`SubscriptionId`] no longer exists because
-    /// [`RequestsSubscriptions::stop_subscription`] has been called, then this function never
-    /// returns. It is the responsibility of the API user to not call this function or to
-    /// interrupt a pending function call with a stale [`SubscriptionId`].
-    // TODO: ^ this is actually not a great behavior
+    /// Has no effect and silently discards the message if the [`SubscriptionId`] is stale or
+    /// invalid.
     pub async fn push_notification(&self, subscription: &SubscriptionId, message: String) {
         let _result = self
             .try_push_notification_inner(subscription, message, false)
@@ -875,22 +892,24 @@ impl RequestsSubscriptions {
             None => return Ok(()),
         };
 
-        let mut lock = client_arc.guarded.lock().await;
-
-        // Two in one: check whether this subscription is indeed valid, and at the same time get
-        // the messages capacity.
-        let messages_capacity = match lock.active_subscriptions.get(&subscription.0) {
-            Some(l) => *l,
-            None => return Ok(()),
-        };
-
         // TODO: this is O(n)
-        let index = loop {
+        let (index, mut lock) = loop {
             if client_arc.dead.load(Ordering::SeqCst) {
                 return Ok(());
             }
 
             let sleep_until = {
+                let lock = client_arc.guarded.lock().await;
+
+                // Two in one: check whether this subscription is indeed valid, and at the same
+                // time get the messages capacity.
+                // This is done at each iteration, to check whether the subscription is still
+                // valid.
+                let messages_capacity = match lock.active_subscriptions.get(&subscription.0) {
+                    Some(l) => *l,
+                    None => return Ok(()),
+                };
+
                 let control_flow = lock
                     .notification_messages
                     .range(
@@ -907,9 +926,11 @@ impl RequestsSubscriptions {
                 match control_flow {
                     ops::ControlFlow::Break(idx) => {
                         debug_assert!(idx < messages_capacity);
-                        break idx;
+                        break (idx, lock);
                     }
-                    ops::ControlFlow::Continue(idx) if idx < messages_capacity => break idx,
+                    ops::ControlFlow::Continue(idx) if idx < messages_capacity => {
+                        break (idx, lock)
+                    }
                     ops::ControlFlow::Continue(_) if try_only => return Err(()),
                     ops::ControlFlow::Continue(_) => {
                         lock.notification_messages_popped_or_dead.listen()
@@ -917,8 +938,6 @@ impl RequestsSubscriptions {
                 }
             };
 
-            // TODO: this sleeps while the lock is held /!\
-            // TODO: will loop forever if client is destroyed
             sleep_until.await
         };
 
@@ -1028,7 +1047,8 @@ struct ClientInnerGuarded {
     /// Every time an entry is removed from [`ClientInnerQueue::notification_messages`], one
     /// listener of this event is notified.
     ///
-    /// All listeners are also notified when [`ClientInner::dead`] is set to `true`.
+    /// All listeners are also notified when [`ClientInner::dead`] is set to `true` and when
+    /// a subscription is removed from [`ClientInner::active_subscriptions`].
     notification_messages_popped_or_dead: event_listener::Event,
 
     /// List of active subscriptions. In other words, subscriptions that have been started but
