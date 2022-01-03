@@ -20,6 +20,7 @@
 //!
 //! The code in this module is the frontline of the JSON-RPC server. It can be subject to DoS
 //! attacks, and is therefore designed to properly distribute resources between JSON-RPC clients.
+//! If you use this data structure as intended, your design is safe from DoS attacks.
 //!
 //! # Usage
 //!
@@ -35,7 +36,7 @@
 //! There should be:
 //!
 //! - One lightweight task for each client currently connected to the server.
-//! - A reasonable number of lightweight tasks (e.g. 8) dedicated to answering reqsuests.
+//! - A fixed number of lightweight tasks (e.g. 16) dedicated to answering reqsuests.
 //!
 //! ## Clients
 //!
@@ -60,10 +61,16 @@
 //! [`RequestsSubscriptions::queue_client_request`], which will in turn back-pressure the sending
 //! side of the JSON-RPC client.
 //!
+//! Note that if a client is removed at the same time as a call to
+//! [`RequestsSubscriptions::next_response`] is in progress, the call will never return  It is
+//! your responsibility to interrupt this function call when the client is disconnected. If,
+//! as advised above, everything is contained within a single task, this is normally not a problem
+//! as you simply stop the task altogether after removing the client.
+//!
 //! ## Requests
 //!
-//! There should be a certain number of lightweight tasks dedicated to pulling requests from the
-//! state machine and answering them.
+//! There should be a certain, fixed, number of lightweight tasks dedicated to pulling requests
+//! from the state machine and answering them.
 //!
 //! Each of these lightweight tasks should:
 //!
@@ -74,6 +81,10 @@
 //! mutexes, etc.
 //! - Call [`RequestsSubscriptions::respond`].
 //! - Jump back to step 1.
+//!
+//! If these tasks are too busy and don't call [`RequestsSubscriptions::next_request`] often
+//! enough, back-pressure will be applied onto [`RequestsSubscriptions::queue_client_request`],
+//! which in turn applies back-pressure onto the JSON-RPC clients.
 //!
 // TODO: document subscriptions
 
@@ -313,6 +324,7 @@ impl RequestsSubscriptions {
 
         // Note that `self.clients` is no longer locked here.
 
+        // TODO: future cancellation issue
         let guarded_lock = removed.guarded.lock().await;
         let requests_list = guarded_lock
             .pending_requests
@@ -440,6 +452,7 @@ impl RequestsSubscriptions {
         // - If limit is reached, call `listen()`.
         // - Try increase counter again (mandatory to prevent race conditions).
         // - Actually wait for the notification, and jump back to step 1.
+        // TODO: might loop forever if client is destroyed
         let mut sleep_until = None;
         loop {
             if client
@@ -560,6 +573,7 @@ impl RequestsSubscriptions {
 
         // Insert the request in the client's state.
         {
+            // TODO: future cancellation issue /!\
             let mut lock = client.guarded.lock().await;
             let _was_inserted = lock.pending_requests.insert(request_id_num);
             debug_assert!(_was_inserted);
@@ -861,6 +875,8 @@ impl RequestsSubscriptions {
                 }
             };
 
+            // TODO: this sleeps while the lock is held /!\
+            // TODO: will loop forever if client is destroyed
             sleep_until.await
         };
 
