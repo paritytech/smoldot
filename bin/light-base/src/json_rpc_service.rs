@@ -39,7 +39,7 @@
 
 use crate::{runtime_service, sync_service, transactions_service, Platform};
 
-use futures::{channel::mpsc, future::FusedFuture as _, lock::Mutex, prelude::*};
+use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
     chain::fork_tree,
     chain_spec,
@@ -56,7 +56,6 @@ use std::{
     num::NonZeroU32,
     str,
     sync::{atomic, Arc},
-    time::Duration,
 };
 
 /// Configuration for a JSON-RPC service.
