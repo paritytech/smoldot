@@ -365,45 +365,6 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
     }
 }
 
-/// Runs a future but prints a warning if it takes a long time to complete.
-fn with_long_time_warning<'a, TPlat: Platform, T: Future + 'a>(
-    future: T,
-    json_rpc_request: &'a str,
-) -> impl Future<Output = T::Output> + 'a {
-    let now = TPlat::now();
-    let mut warn_after = TPlat::sleep(Duration::from_secs(1)).fuse();
-
-    async move {
-        let future = future.fuse();
-        futures::pin_mut!(future);
-
-        loop {
-            futures::select! {
-                _ = warn_after => {
-                    log::warn!(
-                        "JSON-RPC request is taking a long time: {:?}{}",
-                        if json_rpc_request.len() > 100 { &json_rpc_request[..100] }
-                            else { &json_rpc_request[..] },
-                        if json_rpc_request.len() > 100 { "…" } else { "" }
-                    );
-                }
-                out = future => {
-                    if warn_after.is_terminated() {
-                        log::info!(
-                            "JSON-RPC request has finished after {}ms: {:?}{}",
-                            (TPlat::now() - now).as_millis(),
-                            if json_rpc_request.len() > 100 { &json_rpc_request[..100] }
-                                else { &json_rpc_request[..] },
-                            if json_rpc_request.len() > 100 { "…" } else { "" }
-                        );
-                    }
-                    return out
-                },
-            }
-        }
-    }
-}
-
 /// Error potentially returned by [`JsonRpcService::queue_rpc_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum HandleRpcError {
