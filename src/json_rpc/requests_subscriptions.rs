@@ -109,6 +109,7 @@ use alloc::{
     collections::{BTreeMap, VecDeque},
     string::String,
     sync::{Arc, Weak},
+    vec::Vec,
 };
 use core::{
     cmp, fmt, hash,
