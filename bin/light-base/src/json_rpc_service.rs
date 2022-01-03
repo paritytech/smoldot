@@ -1426,7 +1426,6 @@ impl<TPlat: Platform> Background<TPlat> {
                 follow_subscription_id,
                 hash,
             } => {
-                // TODO: some fixes needed in json-rpc-interface spec repo
                 let response = {
                     let lock = self.subscriptions.lock().await;
                     if let Some(subscription) = lock.chain_head_follow.get(follow_subscription_id) {
@@ -1469,7 +1468,6 @@ impl<TPlat: Platform> Background<TPlat> {
                 follow_subscription_id,
                 hash,
             } => {
-                // TODO: some fixes needed in json-rpc-interface spec repo
                 let invalid = {
                     let mut lock = self.subscriptions.lock().await;
                     if let Some(subscription) =
@@ -1477,7 +1475,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     {
                         subscription.pinned_blocks_headers.remove(&hash.0).is_some()
                     } else {
-                        true
+                        false
                     }
                 };
 
@@ -1505,7 +1503,6 @@ impl<TPlat: Platform> Background<TPlat> {
             methods::MethodCall::chainHead_unstable_unfollow {
                 follow_subscription_id,
             } => {
-                // TODO: some fixes needed in json-rpc-interface spec repo
                 if let Some(subscription) = self
                     .subscriptions
                     .lock()
