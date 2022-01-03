@@ -97,7 +97,7 @@ use core::{
     cmp, fmt, hash,
     num::NonZeroU32,
     ops,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use futures::lock::Mutex;
 
@@ -223,7 +223,8 @@ impl RequestsSubscriptions {
         }
 
         let arc = Arc::new(ClientInner {
-            request_answered: event_listener::Event::new(),
+            total_requests_in_fly_dec_or_dead: event_listener::Event::new(),
+            dead: AtomicBool::new(false),
             total_requests_in_fly: AtomicUsize::new(0),
             guarded: Mutex::new(ClientInnerGuarded {
                 pending_requests: hashbrown::HashSet::with_capacity_and_hasher(
@@ -232,8 +233,8 @@ impl RequestsSubscriptions {
                 ),
                 responses_send_back: VecDeque::with_capacity(self.max_requests_per_client),
                 notification_messages: BTreeMap::new(),
-                message_pushed: event_listener::Event::new(),
-                message_pulled: event_listener::Event::new(),
+                responses_send_back_pushed_or_dead: event_listener::Event::new(),
+                notification_messages_popped_or_dead: event_listener::Event::new(),
                 active_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
                     self.max_subscriptions_per_client,
                     Default::default(),
@@ -262,7 +263,8 @@ impl RequestsSubscriptions {
         }
 
         let arc = Arc::new(ClientInner {
-            request_answered: event_listener::Event::new(),
+            total_requests_in_fly_dec_or_dead: event_listener::Event::new(),
+            dead: AtomicBool::new(false),
             total_requests_in_fly: AtomicUsize::new(0),
             guarded: Mutex::new(ClientInnerGuarded {
                 pending_requests: hashbrown::HashSet::with_capacity_and_hasher(
@@ -271,8 +273,8 @@ impl RequestsSubscriptions {
                 ),
                 responses_send_back: VecDeque::with_capacity(self.max_requests_per_client),
                 notification_messages: BTreeMap::new(),
-                message_pushed: event_listener::Event::new(),
-                message_pulled: event_listener::Event::new(),
+                responses_send_back_pushed_or_dead: event_listener::Event::new(),
+                notification_messages_popped_or_dead: event_listener::Event::new(),
                 active_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
                     self.max_subscriptions_per_client,
                     Default::default(),
@@ -324,6 +326,8 @@ impl RequestsSubscriptions {
 
         // Note that `self.clients` is no longer locked here.
 
+        removed.dead.store(true, Ordering::SeqCst);
+
         // TODO: future cancellation issue
         let guarded_lock = removed.guarded.lock().await;
         let requests_list = guarded_lock
@@ -336,6 +340,18 @@ impl RequestsSubscriptions {
             .keys()
             .map(|n| SubscriptionId(*n, client.1.clone()))
             .collect();
+
+        guarded_lock
+            .responses_send_back_pushed_or_dead
+            .notify_relaxed(usize::max_value());
+        guarded_lock
+            .notification_messages_popped_or_dead
+            .notify_relaxed(usize::max_value());
+
+        removed
+            .total_requests_in_fly_dec_or_dead
+            .notify_relaxed(usize::max_value());
+
         Some((requests_list, subscriptions_list))
     }
 
@@ -369,20 +385,21 @@ impl RequestsSubscriptions {
 
                 match guarded_lock.responses_send_back.pop_front() {
                     Some(ResponseSendBack::Response(message)) => {
-                        guarded_lock.message_pulled.notify_additional(1);
-
                         let _new_val = client.total_requests_in_fly.fetch_sub(1, Ordering::Release);
                         debug_assert_ne!(_new_val, usize::max_value()); // Check for underflows
-                        client.request_answered.notify_additional(1);
+                        client
+                            .total_requests_in_fly_dec_or_dead
+                            .notify_additional(1);
                         return message;
                     }
                     Some(ResponseSendBack::SubscriptionMessage(sub_id, index)) => {
-                        guarded_lock.message_pulled.notify_additional(1);
-
                         let message = guarded_lock
                             .notification_messages
                             .remove(&(sub_id, index))
                             .unwrap();
+                        guarded_lock
+                            .notification_messages_popped_or_dead
+                            .notify_additional(1);
 
                         // It might be that this subscription message concerns a subscription that
                         // is already dead. In this case, we try to decrease
@@ -412,7 +429,7 @@ impl RequestsSubscriptions {
                     None => {}
                 }
 
-                guarded_lock.message_pushed.listen()
+                guarded_lock.responses_send_back_pushed_or_dead.listen()
             };
 
             sleep_until.await
@@ -452,9 +469,15 @@ impl RequestsSubscriptions {
         // - If limit is reached, call `listen()`.
         // - Try increase counter again (mandatory to prevent race conditions).
         // - Actually wait for the notification, and jump back to step 1.
-        // TODO: might loop forever if client is destroyed
         let mut sleep_until = None;
         loop {
+            // Make sure to not loop forever.
+            if client.dead.load(Ordering::SeqCst) {
+                return;
+            }
+
+            // Try increment `total_requests_in_fly`, capping at a maximum of
+            // `max_requests_per_client`.
             if client
                 .total_requests_in_fly
                 .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |old_value| {
@@ -475,11 +498,13 @@ impl RequestsSubscriptions {
             if let Some(sleep_until) = sleep_until.take() {
                 sleep_until.await
             } else {
-                sleep_until = Some(client.request_answered.listen());
+                sleep_until = Some(client.total_requests_in_fly_dec_or_dead.listen());
             }
         }
 
         // We can now insert the request.
+        // Note that it is possible for `client.dead` to have become true in the meanwhile, but
+        // this is not a problem as `unpulled_requests` is allowed to contain obsolete requests.
         self.unpulled_requests
             .push((request, Arc::downgrade(&client)));
         self.new_unpulled_request.notify_additional(1);
@@ -502,6 +527,12 @@ impl RequestsSubscriptions {
             None => return Ok(()),
         };
 
+        if client.dead.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        // Try increment `total_requests_in_fly`, capping at a maximum of
+        // `max_requests_per_client`.
         if client
             .total_requests_in_fly
             .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |old_value| {
@@ -519,6 +550,9 @@ impl RequestsSubscriptions {
             return Err(TryQueueClientRequestError { request });
         }
 
+        // We can now insert the request.
+        // Note that it is possible for `client.dead` to have become true in the meanwhile, but
+        // this is not a problem as `unpulled_requests` is allowed to contain obsolete requests.
         self.unpulled_requests
             .push((request, Arc::downgrade(&client)));
         self.new_unpulled_request.notify_additional(1);
@@ -564,7 +598,9 @@ impl RequestsSubscriptions {
             // The queue might contain obsolete entries. Check that the client still exist, and
             // if not throw away the entry and pull another one.
             if let Some(client) = client.upgrade() {
-                break (request_message, client);
+                if !client.dead.load(Ordering::Relaxed) {
+                    break (request_message, client);
+                }
             }
         };
 
@@ -604,7 +640,7 @@ impl RequestsSubscriptions {
 
             lock.responses_send_back
                 .push_back(ResponseSendBack::Response(response));
-            lock.message_pushed.notify_additional(1);
+            lock.responses_send_back_pushed_or_dead.notify_additional(1);
         }
     }
 
@@ -771,7 +807,7 @@ impl RequestsSubscriptions {
         if previous_message.is_none() {
             lock.responses_send_back
                 .push_back(ResponseSendBack::SubscriptionMessage(subscription.0, index));
-            lock.message_pushed.notify_additional(1);
+            lock.responses_send_back_pushed_or_dead.notify_additional(1);
         }
     }
 
@@ -850,6 +886,10 @@ impl RequestsSubscriptions {
 
         // TODO: this is O(n)
         let index = loop {
+            if client_arc.dead.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+
             let sleep_until = {
                 let control_flow = lock
                     .notification_messages
@@ -871,7 +911,9 @@ impl RequestsSubscriptions {
                     }
                     ops::ControlFlow::Continue(idx) if idx < messages_capacity => break idx,
                     ops::ControlFlow::Continue(_) if try_only => return Err(()),
-                    ops::ControlFlow::Continue(_) => lock.message_pulled.listen(),
+                    ops::ControlFlow::Continue(_) => {
+                        lock.notification_messages_popped_or_dead.listen()
+                    }
                 }
             };
 
@@ -889,7 +931,7 @@ impl RequestsSubscriptions {
         // Add an entry in `responses_send_back`.
         lock.responses_send_back
             .push_back(ResponseSendBack::SubscriptionMessage(subscription.0, index));
-        lock.message_pushed.notify_additional(1);
+        lock.responses_send_back_pushed_or_dead.notify_additional(1);
 
         Ok(())
     }
@@ -930,7 +972,11 @@ struct ClientInner {
     /// Fields that are behind a `Mutex`.
     guarded: Mutex<ClientInnerGuarded>,
 
-    /// Total number of requests that are either unpulled or pending.
+    /// Set to `true` whenever the client is removed.
+    dead: AtomicBool,
+
+    /// Total number of requests that are either unpulled, pending, or whose response is queued.
+    ///
     /// In other words, this is the number of requests that have been injected in this state
     /// machine but not fully processed yet. They can be in one of
     /// [`RequestsSubscriptions::unpulled_requests`], [`ClientInnerGuarded::pending_requests`],
@@ -940,10 +986,12 @@ struct ClientInner {
     /// not be present yet in [`RequestsSubscriptions::unpulled_requests`].
     total_requests_in_fly: AtomicUsize,
 
-    /// Notified every time [`ClientInner::total_requests_in_fly`] is decremented.
+    /// One listener is notified every time [`ClientInner::total_requests_in_fly`] is decremented.
     ///
     /// Note that the notification is done *after* the decrementation.
-    request_answered: event_listener::Event,
+    ///
+    /// All listeners are also notified when [`ClientInner::dead`] is set to `true`.
+    total_requests_in_fly_dec_or_dead: event_listener::Event,
 }
 
 struct ClientInnerGuarded {
@@ -965,23 +1013,23 @@ struct ClientInnerGuarded {
     /// that have been stopped and whose capacity is no longer tracked.
     responses_send_back: VecDeque<ResponseSendBack>,
 
+    /// Every time an entry is pushed on [`ClientInnerQueue::responses_send_back`], one listener
+    /// of this event is notified.
+    ///
+    /// All listeners are also notified when [`ClientInner::dead`] is set to `true`.
+    responses_send_back_pushed_or_dead: event_listener::Event,
+
     /// List of notification messages to send back to the client.
     ///
     /// Each entry in this map also always has a corresponding entry in
     /// [`ClientInnerGuarded::responses_send_back`].
     notification_messages: BTreeMap<(u64, usize), String>,
 
-    /// Every time an entry is pushed on [`ClientInnerQueue::responses_send_back`], one listener
-    /// of this event is notified.
+    /// Every time an entry is removed from [`ClientInnerQueue::notification_messages`], one
+    /// listener of this event is notified.
     ///
-    /// Also notified if the client is destroyed. TODO: necessary?
-    message_pushed: event_listener::Event,
-
-    /// Every time an entry is pulled from [`ClientInnerQueue::responses_send_back`], one listener
-    /// of this event is notified.
-    ///
-    /// Also notified if the client is destroyed. TODO: necessary?
-    message_pulled: event_listener::Event,
+    /// All listeners are also notified when [`ClientInner::dead`] is set to `true`.
+    notification_messages_popped_or_dead: event_listener::Event,
 
     /// List of active subscriptions. In other words, subscriptions that have been started but
     /// having been stopped with [`RequestsSubscriptions::stop_subscription`] yet.
