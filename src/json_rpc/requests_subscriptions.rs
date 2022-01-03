@@ -163,7 +163,7 @@ pub struct RequestsSubscriptions {
 
     /// Next identifier to assign to the next request.
     ///
-    /// Matches the values found in [`Mutex<ClientInnerQueue>::pending_requests`].
+    /// Matches the values found in [`ClientInnerGuarded::pending_requests`].
     next_request_id: atomic::Atomic<u64>,
 
     /// Next identifier to assign to the next subscription.
@@ -317,8 +317,8 @@ impl RequestsSubscriptions {
     /// client. The concerned [`RequestId`]s and [`SubscriptionId`]s are returned by this
     /// function.
     ///
-    /// Note however that functions such as [`RequestSubscriptions::respond`] and
-    /// [`RequestSubscriptions::push_notification`] intentionally have no effect if you pass an
+    /// Note however that functions such as [`RequestsSubscriptions::respond`] and
+    /// [`RequestsSubscriptions::push_notification`] intentionally have no effect if you pass an
     /// invalid [`RequestId`] or [`SubscriptionId`]. There is therefore no need to cancel any
     /// parallel task that might currently be responding to requests or pushing notification
     /// messages.
@@ -463,7 +463,7 @@ impl RequestsSubscriptions {
     /// available.
     ///
     /// Slots in the queue of requests are only reclaimed after
-    /// [`RequestSubscriptions::next_response`] has returned a response to a previous request.
+    /// [`RequestsSubscriptions::next_response`] has returned a response to a previous request.
     ///
     /// Has no effect if the [`ClientId`] is stale or invalid.
     pub async fn queue_client_request(&self, client: &ClientId, request: String) {
@@ -532,7 +532,7 @@ impl RequestsSubscriptions {
     /// instantly depending on whether there is enough room in the queue.
     ///
     /// Slots in the queue of requests are only reclaimed after
-    /// [`RequestSubscriptions::next_response`] has returned a response to a previous request.
+    /// [`RequestsSubscriptions::next_response`] has returned a response to a previous request.
     ///
     /// Returns `Ok` and silently discards the request if the [`ClientId`] is stale or invalid.
     pub fn try_queue_client_request(
@@ -1033,7 +1033,7 @@ struct ClientInnerGuarded {
     /// that have been stopped and whose capacity is no longer tracked.
     responses_send_back: VecDeque<ResponseSendBack>,
 
-    /// Every time an entry is pushed on [`ClientInnerQueue::responses_send_back`], one listener
+    /// Every time an entry is pushed on [`ClientInnerGuarded::responses_send_back`], one listener
     /// of this event is notified.
     ///
     /// All listeners are also notified when [`ClientInner::dead`] is set to `true`.
@@ -1045,11 +1045,11 @@ struct ClientInnerGuarded {
     /// [`ClientInnerGuarded::responses_send_back`].
     notification_messages: BTreeMap<(u64, usize), String>,
 
-    /// Every time an entry is removed from [`ClientInnerQueue::notification_messages`], one
+    /// Every time an entry is removed from [`ClientInnerGuarded::notification_messages`], one
     /// listener of this event is notified.
     ///
     /// All listeners are also notified when [`ClientInner::dead`] is set to `true` and when
-    /// a subscription is removed from [`ClientInner::active_subscriptions`].
+    /// a subscription is removed from [`ClientInnerGuarded::active_subscriptions`].
     notification_messages_popped_or_dead: event_listener::Event,
 
     /// List of active subscriptions. In other words, subscriptions that have been started but
