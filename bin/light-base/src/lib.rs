@@ -712,7 +712,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         genesis_block_state_root,
                         responses_sender: json_rpc_responses,
                         max_parallel_requests: NonZeroU32::new(24).unwrap(),
-                        max_pending_requests: NonZeroU32::new(32).unwrap(),
+                        max_pending_requests: NonZeroU32::new(128).unwrap(),
                         max_subscriptions: 1024, // Note: the PolkadotJS UI is very heavy in terms of subscriptions.
                     })
                 };
