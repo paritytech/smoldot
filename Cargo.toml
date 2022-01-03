@@ -41,9 +41,11 @@ std = [
 # theoretically be `no_std`-compatible (i.e. doesn't need the help of the operating system) but is
 # not, or if things are sketchy, please leave a comment next to it.
 arrayvec = { version = "0.7.2", default-features = false }
+atomic = { version = "0.5.1", default-features = false }
 bip39 = { version = "1.0.1", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
 bs58 = { version = "0.4.0", default-features = false, features = ["alloc"] }
+crossbeam-queue = { version = "0.3.2", default-features = false, features = ["alloc"] }
 derive_more = "0.99.17"
 ed25519-zebra = { version = "3.0.0", default-features = false }
 either = { version = "1.6.1", default-features = false }
