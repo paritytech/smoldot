@@ -305,7 +305,6 @@ where
             inbound_config: peers::ConfigRequestResponseIn::Empty,
             max_response_size: 4096,
             inbound_allowed: true,
-            timeout: Duration::from_secs(20),
         })
         .chain(config.chains.iter().flat_map(|chain| {
             // TODO: limits are arbitrary
@@ -314,10 +313,6 @@ where
                 inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
                 max_response_size: 16 * 1024 * 1024,
                 inbound_allowed: chain.allow_inbound_block_requests,
-                // The timeout needs to be long enough to potentially download the maximum
-                // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
-                // TODO: 128 seconds is way too long, so we put 16 seconds instead for now
-                timeout: Duration::from_secs(16),
             })
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/light/2", chain.protocol_id),
@@ -327,10 +322,6 @@ where
                 max_response_size: 10 * 1024 * 1024,
                 // TODO: make this configurable
                 inbound_allowed: false,
-                // The timeout needs to be long enough to potentially download the maximum
-                // response size of 10 MiB. Assuming a 128 kiB/sec connection, that's 80 seconds.
-                // TODO: 80 seconds is too much, reduce these 10 MiB to less?
-                timeout: Duration::from_secs(80),
             }))
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/kad", chain.protocol_id),
@@ -338,9 +329,6 @@ where
                 max_response_size: 1024 * 1024,
                 // TODO: `false` here means we don't insert ourselves in the DHT, which is the polite thing to do for as long as Kad isn't implemented
                 inbound_allowed: false,
-                // The timeout needs to be long enough to potentially download the maximum
-                // response size of 1 MiB. Assuming a 128 kiB/sec connection, that's 8 seconds.
-                timeout: Duration::from_secs(8),
             }))
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/sync/warp", chain.protocol_id),
@@ -348,10 +336,6 @@ where
                 max_response_size: 16 * 1024 * 1024,
                 // We don't support inbound warp sync requests (yet).
                 inbound_allowed: false,
-                // The timeout needs to be long enough to potentially download the maximum
-                // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
-                // TODO: 128 seconds is way too much so we temporarily put less, we need to reduce these 16 MiB to less
-                timeout: Duration::from_secs(32),
             }))
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/state/2", chain.protocol_id),
@@ -359,10 +343,6 @@ where
                 max_response_size: 16 * 1024 * 1024,
                 // We don't support inbound state requests (yet).
                 inbound_allowed: false,
-                // The timeout needs to be long enough to potentially download the maximum
-                // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
-                // TODO: 128 seconds is way too much so we temporarily put less, we need to reduce these 16 MiB to less
-                timeout: Duration::from_secs(32),
             }))
         }))
         .collect();
@@ -708,13 +688,18 @@ where
             a
         });
 
+        // The timeout needs to be long enough to potentially download the maximum
+        // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
+        // TODO: 128 seconds is way too long, so we put 16 seconds instead for now
+        let timeout = now + Duration::from_secs(16);
+
         let response = self
             .inner
             .request(
-                now,
                 target,
                 self.protocol_index(chain_index, 0),
                 request_data,
+                timeout,
             )
             .map_err(BlocksRequestError::Request)
             .await?;
@@ -731,13 +716,18 @@ where
     ) -> Result<protocol::GrandpaWarpSyncResponse, GrandpaWarpSyncRequestError> {
         let request_data = begin_hash.to_vec();
 
+        // The timeout needs to be long enough to potentially download the maximum
+        // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
+        // TODO: 128 seconds is way too much so we temporarily put less, we need to reduce these 16 MiB to less
+        let timeout = now + Duration::from_secs(32);
+
         let response = self
             .inner
             .request(
-                now,
                 target,
                 self.protocol_index(chain_index, 3),
                 request_data,
+                timeout,
             )
             .map_err(GrandpaWarpSyncRequestError::Request)
             .await?;
@@ -775,13 +765,18 @@ where
             a
         });
 
+        // The timeout needs to be long enough to potentially download the maximum
+        // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
+        // TODO: 128 seconds is way too much so we temporarily put less, we need to reduce these 16 MiB to less
+        let timeout = now + Duration::from_secs(32);
+
         let response = self
             .inner
             .request(
-                now,
                 target,
                 self.protocol_index(chain_index, 4),
                 request_data,
+                timeout,
             )
             .map_err(StateRequestError::Request)
             .await?;
@@ -804,13 +799,18 @@ where
                 a
             });
 
+        // The timeout needs to be long enough to potentially download the maximum
+        // response size of 10 MiB. Assuming a 128 kiB/sec connection, that's 80 seconds.
+        // TODO: 80 seconds is too much, reduce these 10 MiB to less?
+        let timeout = now + Duration::from_secs(80);
+
         let response = self
             .inner
             .request(
-                now,
                 target,
                 self.protocol_index(chain_index, 1),
                 request_data,
+                timeout,
             )
             .map_err(StorageProofRequestError::Request)
             .await?;
@@ -841,13 +841,18 @@ where
                 a
             });
 
+        // The timeout needs to be long enough to potentially download the maximum
+        // response size of 10 MiB. Assuming a 128 kiB/sec connection, that's 80 seconds.
+        // TODO: 80 seconds is too much, reduce these 10 MiB to less?
+        let timeout = now + Duration::from_secs(80);
+
         let response = self
             .inner
             .request(
-                now,
                 target,
                 self.protocol_index(chain_index, 1),
                 request_data,
+                timeout,
             )
             .map_err(CallProofRequestError::Request)
             .await?;
@@ -1911,13 +1916,16 @@ where
         close_to_key: &[u8],
     ) -> Result<Vec<(peer_id::PeerId, Vec<multiaddr::Multiaddr>)>, KademliaFindNodeError> {
         let request_data = kademlia::build_find_node_request(close_to_key);
+        // The timeout needs to be long enough to potentially download the maximum
+        // response size of 1 MiB. Assuming a 128 kiB/sec connection, that's 8 seconds.
+        let timeout = now + Duration::from_secs(8);
         let response = self
             .inner
             .request(
-                now,
                 target,
                 self.protocol_index(chain_index, 2),
                 request_data,
+                timeout,
             )
             .await
             .map_err(KademliaFindNodeError::RequestFailed)?;

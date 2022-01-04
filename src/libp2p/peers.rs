@@ -1198,10 +1198,10 @@ where
     ///
     pub async fn request(
         &self,
-        now: TNow,
         target: &PeerId,
         protocol_index: usize,
         request_data: Vec<u8>,
+        timeout: TNow,
     ) -> Result<Vec<u8>, RequestError> {
         let target = {
             let mut guarded = self.guarded.lock().await;
@@ -1213,7 +1213,7 @@ where
 
         let result = self
             .inner
-            .request(now, target, protocol_index, request_data)
+            .request(target, protocol_index, request_data, timeout)
             .await;
 
         match result {
