@@ -1477,9 +1477,9 @@ impl<TPlat: Platform> Background<TPlat> {
                     let me = self.clone();
                     async move {
                         let response = if block_is_valid {
-                            // TODO: this doesn't check the correctness of the body
+                            // TODO: right now we query the header because the underlying function returns an error if we don't
                             let response = me.sync_service.clone()
-                                .block_query(hash.0, protocol::BlocksRequestFields { header: false, body: true, justification: false  }).await;
+                                .block_query(hash.0, protocol::BlocksRequestFields { header: true, body: true, justification: false  }).await;
                             match response {
                                 Ok(block_data) => {
                                     methods::ServerToClient::chainHead_unstable_bodyEvent {
