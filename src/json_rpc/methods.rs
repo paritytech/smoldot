@@ -427,6 +427,15 @@ define_methods! {
         #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
         hash: HashHexString
     ) -> Option<HexString>,
+    chainHead_unstable_stopBody(
+        #[rename = "subscriptionId"] subscription_id: &'a str
+    ) -> (),
+    chainHead_unstable_stopCall(
+        #[rename = "subscriptionId"] subscription_id: &'a str
+    ) -> (),
+    chainHead_unstable_stopStorage(
+        #[rename = "subscriptionId"] subscription_id: &'a str
+    ) -> (),
     chainHead_unstable_storage(
         #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
         hash: HashHexString,
@@ -435,9 +444,6 @@ define_methods! {
         r#type: StorageQueryType,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> &'a str,
-    chainHead_unstable_storageEnd(
-        #[rename = "subscriptionId"] subscription_id: &'a str
-    ) -> (),
     chainHead_unstable_unfollow(
         #[rename = "followSubscriptionId"] follow_subscription_id: &'a str
     ) -> (),
