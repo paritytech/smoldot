@@ -464,7 +464,8 @@ define_methods! {
     state_storage(subscription: &'a str, result: StorageChangeSet) -> (),
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
-    chainHead_unstable_followEvent(subscription: &'a str, result: FollowEvent<'a>) -> (),
+    chainHead_unstable_bodyEvent(#[rename = "subscriptionId"] subscription: &'a str, result: ChainHeadBodyEvent) -> (),
+    chainHead_unstable_followEvent(#[rename = "subscriptionId"] subscription: &'a str, result: FollowEvent<'a>) -> (),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -603,6 +604,17 @@ pub enum FollowEvent<'a> {
     },
     #[serde(rename = "stop")]
     Stop {},
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event")]
+pub enum ChainHeadBodyEvent {
+    #[serde(rename = "done")]
+    Done { value: Vec<HexString> },
+    #[serde(rename = "inaccessible")]
+    Inaccessible {},
+    #[serde(rename = "disjoint")]
+    Disjoint {},
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
