@@ -406,9 +406,6 @@ define_methods! {
         hash: HashHexString,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> &'a str,
-    chainHead_unstable_bodyEnd(
-        #[rename = "subscriptionId"] subscription_id: &'a str
-    ) -> (),
     chainHead_unstable_call(
         #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
         hash: HashHexString,
@@ -416,9 +413,6 @@ define_methods! {
         #[rename = "callParameters"] call_parameters: Vec<HexString>,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> &'a str,
-    chainHead_unstable_callEnd(
-        #[rename = "subscriptionId"] subscription_id: &'a str
-    ) -> (),
     chainHead_unstable_follow(
         #[rename = "runtimeUpdates"] runtime_updates: bool
     ) -> &'a str,
