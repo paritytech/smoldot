@@ -555,7 +555,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
         let non_finalized_blocks_ancestry_order: Vec<_> = match &guarded.tree {
             GuardedInner::FinalizedBlockRuntimeKnown {
-                tree: Some(tree),
+                tree,
                 finalized_block: _finalized_block,
             } => {
                 tree.input_iter_ancestry_order()
@@ -616,8 +616,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 _ => unreachable!(),
             },
             finalized_block_runtime: if let GuardedInner::FinalizedBlockRuntimeKnown {
-                tree: Some(tree),
-                ..
+                tree, ..
             } = &guarded.tree
             {
                 guarded.runtimes[*tree.finalized_async_user_data()]
@@ -643,14 +642,11 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         let (guarded, block_index) = loop {
             let guarded = self.guarded.lock().await;
             match &guarded.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown {
-                    tree: Some(tree), ..
-                } => {
+                GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
                     let index = tree.best_block_index().map(|(idx, _)| idx);
                     break (guarded, index);
                 }
                 GuardedInner::FinalizedBlockRuntimeUnknown { .. } => {}
-                _ => unreachable!(),
             };
 
             // Wait for the best block to change.
@@ -972,9 +968,9 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
                 guarded,
                 block_index,
             } => match &guarded.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown {
-                    tree: Some(tree), ..
-                } => &tree.block_user_data(*block_index).scale_encoded_header[..],
+                GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
+                    &tree.block_user_data(*block_index).scale_encoded_header[..]
+                }
                 GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
                     &tree.block_user_data(*block_index).scale_encoded_header[..]
                 }
@@ -1000,9 +996,9 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
                 guarded,
                 block_index,
             } => match &guarded.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown {
-                    tree: Some(tree), ..
-                } => &tree.block_user_data(*block_index).hash,
+                GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
+                    &tree.block_user_data(*block_index).hash
+                }
                 GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
                     &tree.block_user_data(*block_index).hash
                 }
@@ -1066,7 +1062,7 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
             // has ended.
             let runtime_index = match &guarded.tree {
                 GuardedInner::FinalizedBlockRuntimeKnown {
-                    tree: Some(tree),
+                    tree,
                     finalized_block,
                     ..
                 } => {
@@ -1343,8 +1339,7 @@ enum GuardedInner<TPlat: Platform> {
         ///
         /// The asynchronous operation user data is a `usize` corresponding to the index within
         /// [`Guarded::runtimes`].
-        // TODO: needs to be Option?
-        tree: Option<async_tree::AsyncTree<TPlat::Instant, Block, usize>>,
+        tree: async_tree::AsyncTree<TPlat::Instant, Block, usize>,
 
         /// Finalized block. Outside of the tree.
         finalized_block: Block,
@@ -1370,7 +1365,7 @@ impl<TPlat: Platform> Guarded<TPlat> {
     fn best_block_header(&self) -> &Vec<u8> {
         match &self.tree {
             GuardedInner::FinalizedBlockRuntimeKnown {
-                tree: Some(tree),
+                tree,
                 finalized_block,
             } => tree
                 .best_block_index()
@@ -1539,7 +1534,7 @@ async fn run_background<TPlat: Platform>(
                         hash: finalized_block_hash,
                         scale_encoded_header: subscription.finalized_block_scale_encoded_header,
                     },
-                    tree: Some({
+                    tree: {
                         let mut tree =
                             async_tree::AsyncTree::<_, Block, _>::new(async_tree::Config {
                                 finalized_async_user_data: lock.runtimes.insert(runtime),
@@ -1574,7 +1569,7 @@ async fn run_background<TPlat: Platform>(
                         }
 
                         tree
-                    }),
+                    },
                 };
             } else {
                 lock.tree = GuardedInner::FinalizedBlockRuntimeUnknown {
@@ -1668,7 +1663,7 @@ async fn run_background<TPlat: Platform>(
 
                             match &mut guarded.tree {
                                 GuardedInner::FinalizedBlockRuntimeKnown {
-                                    tree: Some(tree), finalized_block,
+                                    tree, finalized_block,
                                 } => {
                                     let parent_index = if new_block.parent_hash == finalized_block.hash {
                                         if same_runtime_as_parent {
@@ -1726,7 +1721,7 @@ async fn run_background<TPlat: Platform>(
 
                     let concerned_blocks = match &guarded.tree {
                         GuardedInner::FinalizedBlockRuntimeKnown {
-                            tree: Some(tree), ..
+                            tree, ..
                         } => either::Left(tree.async_op_blocks(async_op_id)),
                         GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
                             either::Right(tree.async_op_blocks(async_op_id))
@@ -1766,7 +1761,7 @@ async fn run_background<TPlat: Platform>(
 
                             match &mut guarded.tree {
                                 GuardedInner::FinalizedBlockRuntimeKnown {
-                                    tree: Some(tree), ..
+                                    tree, ..
                                 } => {
                                     tree.async_op_failure(async_op_id, &TPlat::now());
                                 }
@@ -1882,9 +1877,9 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         let num_blocks = match &mut guarded.tree {
-            GuardedInner::FinalizedBlockRuntimeKnown {
-                tree: Some(tree), ..
-            } => tree.async_op_finished(async_op_id, runtime_index),
+            GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
+                tree.async_op_finished(async_op_id, runtime_index)
+            }
             GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
                 tree.async_op_finished(async_op_id, Some(runtime_index))
             }
@@ -1907,7 +1902,7 @@ impl<TPlat: Platform> Background<TPlat> {
         loop {
             let all_blocks_notif = match &mut guarded.tree {
                 GuardedInner::FinalizedBlockRuntimeKnown {
-                    tree: Some(tree),
+                    tree,
                     finalized_block,
                 } => match tree.try_advance_output() {
                     None => break,
@@ -2014,13 +2009,13 @@ impl<TPlat: Platform> Background<TPlat> {
                             HashDisplay(&new_finalized_hash), HashDisplay(&best_block_hash)
                         );
 
-                        guarded.tree =
-                            GuardedInner::FinalizedBlockRuntimeKnown {
-                                tree: Some(tree.take().unwrap().map_async_op_user_data(
-                                    |runtime_index| runtime_index.unwrap(),
-                                )),
-                                finalized_block: new_finalized,
-                            };
+                        guarded.tree = GuardedInner::FinalizedBlockRuntimeKnown {
+                            tree: tree
+                                .take()
+                                .unwrap()
+                                .map_async_op_user_data(|runtime_index| runtime_index.unwrap()),
+                            finalized_block: new_finalized,
+                        };
 
                         // TODO: doesn't report existing blocks /!\
 
@@ -2067,9 +2062,9 @@ impl<TPlat: Platform> Background<TPlat> {
             // If there's nothing more to download, break out of the loop.
             let download_params = {
                 let async_op = match &mut guarded.tree {
-                    GuardedInner::FinalizedBlockRuntimeKnown {
-                        tree: Some(tree), ..
-                    } => tree.next_necessary_async_op(&TPlat::now()),
+                    GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
+                        tree.next_necessary_async_op(&TPlat::now())
+                    }
                     GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
                         tree.next_necessary_async_op(&TPlat::now())
                     }
@@ -2152,7 +2147,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
         match &mut guarded.tree {
             GuardedInner::FinalizedBlockRuntimeKnown {
-                tree: Some(tree),
+                tree,
                 finalized_block,
             } => {
                 // TODO: this if is a small hack because the sync service currently sends multiple identical finalized notifications
