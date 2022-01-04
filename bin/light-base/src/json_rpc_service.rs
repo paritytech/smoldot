@@ -2728,6 +2728,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     };
                     futures::pin_mut!(next_block);
 
+                    // TODO: doesn't enforce any maximum number of pinned blocks
                     match next_block.await {
                         either::Left(None) | either::Right(None) => {
                             // TODO: clear queue of notifications?
@@ -2931,25 +2932,28 @@ impl<TPlat: Platform> Background<TPlat> {
                             }
                         }
                     }
-
-                    me.requests_subscriptions
-                        .push_notification(
-                            &state_machine_subscription,
-                            methods::ServerToClient::chainHead_unstable_followEvent {
-                                subscription: &subscription_id,
-                                result: methods::FollowEvent::Stop {},
-                            }
-                            .to_json_call_object_parameters(None),
-                        )
-                        .await;
-
-                    let _ = me
-                        .subscriptions
-                        .lock()
-                        .await
-                        .chain_head_follow
-                        .remove(&subscription_id);
                 }
+
+                let _ = me
+                    .subscriptions
+                    .lock()
+                    .await
+                    .chain_head_follow
+                    .remove(&subscription_id);
+
+                me.requests_subscriptions
+                    .push_notification(
+                        &state_machine_subscription,
+                        methods::ServerToClient::chainHead_unstable_followEvent {
+                            subscription: &subscription_id,
+                            result: methods::FollowEvent::Stop {},
+                        }
+                        .to_json_call_object_parameters(None),
+                    )
+                    .await;
+                me.requests_subscriptions
+                    .stop_subscription(&state_machine_subscription)
+                    .await;
             }
         };
 
