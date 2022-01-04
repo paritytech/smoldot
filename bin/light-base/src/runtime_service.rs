@@ -23,16 +23,16 @@
 //!
 //! # Usage
 //!
-//! The runtime service lets user subscribe to best and finalized block updates, similar to
-//! the [`sync_service`]. These subscriptions are implemented by subscribing to the underlying
-//! [`sync_service`] and, for each notification, downloading the runtime code of the best or
-//! finalized block. Therefore, these notifications always come with a delay compared to directly
-//! using the [`sync_service`].
+//! The runtime service lets user subscribe to block updates, similar to the [`sync_service`].
+//! These subscriptions are implemented by subscribing to the underlying [`sync_service`] and,
+//! for each notification, checking whether the runtime has changed (thanks to the presence or
+//! absence of a header digest item), and downloading the runtime code if necessary. Therefore,
+//! these notifications might come with a delay compared to directly using the [`sync_service`].
 //!
-//! Furthermore, if it isn't possible to download the runtime code of a block (for example because
-//! peers refuse to answer or have already pruned the block) or if the runtime service already has
-//! too many pending downloads, this block is simply skipped and not reported on the
-//! subscriptions.
+//! If it isn't possible to download the runtime code of a block (for example because peers refuse
+//! to answer or have already pruned the block) or if the runtime service already has too many
+//! pending downloads, this block is simply not reported on the subscriptions. The download will
+//! be repeatedly tried until it succeeds.
 //!
 //! Consequently, you are strongly encouraged to not use both the [`sync_service`] *and* the
 //! [`RuntimeService`] of the same chain. They each provide a consistent view of the chain, but
@@ -52,7 +52,7 @@ use futures::{
 use itertools::Itertools as _;
 use smoldot::{
     chain::{async_tree, fork_tree},
-    chain_spec, executor, header,
+    executor, header,
     informant::{BytesDisplay, HashDisplay},
     metadata,
     network::protocol,
@@ -63,7 +63,7 @@ use std::{iter, mem, pin::Pin, sync::Arc, time::Duration};
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 
 /// Configuration for a runtime service.
-pub struct Config<'a, TPlat: Platform> {
+pub struct Config<TPlat: Platform> {
     /// Name of the chain, for logging purposes.
     ///
     /// > **Note**: This name will be directly printed out. Any special character should already
@@ -76,16 +76,7 @@ pub struct Config<'a, TPlat: Platform> {
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService<TPlat>>,
 
-    /// Specification of the chain.
-    pub chain_spec: &'a chain_spec::ChainSpec,
-
     /// Header of the genesis block of the chain, in SCALE encoding.
-    ///
-    /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
-    /// >           [`RuntimeService::new`] function could in theory use the
-    /// >           [`Config::chain_spec`] parameter to derive this value, doing so is quite
-    /// >           expensive. We prefer to require this value from the upper layer instead, as
-    /// >           it is most likely needed anyway.
     pub genesis_block_scale_encoded_header: Vec<u8>,
 }
 
@@ -109,7 +100,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ///
     /// The future returned by this function is expected to finish relatively quickly and is
     /// necessary only for locking purposes.
-    pub async fn new(mut config: Config<'_, TPlat>) -> Arc<Self> {
+    pub async fn new(mut config: Config<TPlat>) -> Arc<Self> {
         // Target to use for all the logs of this service.
         let log_target = format!("runtime-{}", config.log_name);
 
@@ -145,14 +136,9 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             runtimes: slab::Slab::with_capacity(2),
         }));
 
-        // Spawns a task that downloads the runtime code at every block to check whether it has
-        // changed.
-        //
-        // This is strictly speaking not necessary as long as there is no active subscription.
-        // However, in practice, there is most likely always going to be one. It is way easier to
-        // always have a task active rather than create and destroy it.
+        // Spawns a task that runs in the background and updates the content of the mutex.
         let background_task_abort;
-        (config.tasks_executor)("runtime-download".into(), {
+        (config.tasks_executor)("runtime-service".into(), {
             let log_target = log_target.clone();
             let sync_service = config.sync_service.clone();
             let guarded = guarded.clone();
