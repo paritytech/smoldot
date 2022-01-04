@@ -124,12 +124,18 @@ export function start(config) {
       // Resolve the promise that `addChain` returned to the user.
       expected.resolve({
         sendJsonRpc: (request) => {
+          // Note: this error isn't covered in the TypeScript documentation, as the type is
+          // normally enforced by TypeScript.
+          if (typeof request !== "string" && !(request instanceof String))
+            throw new Error();
           if (workerError)
             throw workerError;
           if (chainId === null)
             throw new AlreadyDestroyedError();
           if (!chainsJsonRpcCallbacks.has(chainId))
             throw new JsonRpcDisabledError();
+          if (request.length >= 8 * 1024 * 1024)
+            return;
           worker.postMessage({ ty: 'request', request, chainId });
         },
         databaseContent: (maxUtf8BytesSize) => {

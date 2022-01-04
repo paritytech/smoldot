@@ -97,7 +97,8 @@ export interface Chain {
    * Be aware that some requests will cause notifications to be sent back using the same callback
    * as the responses.
    *
-   * No response is generated if the request isn't a valid JSON-RPC request. The request is
+   * No response is generated if the request isn't a valid JSON-RPC request or if the request is
+   * unreasonably large (8 MiB at the time of writing of this comment). The request is then
    * silently discarded.
    * If, however, the request is a valid JSON-RPC request but that concerns an unknown method, a
    * error response is properly generated.
