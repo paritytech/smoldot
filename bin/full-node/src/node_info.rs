@@ -116,11 +116,10 @@ pub async fn run(cli_options: cli::CliOptionsNodeInfo) {
             inbound_config: established::ConfigRequestResponseIn::Empty,
             max_response_size: 4096,
             inbound_allowed: false,
-            timeout: Duration::from_secs(20),
         }],
     });
 
-    let _ = established.add_request(Instant::now(), 0, Vec::new(), ());
+    let _ = established.add_request(0, Vec::new(), Instant::now() + Duration::from_secs(20), ());
 
     let identify = 'outer: loop {
         match tcp_socket {
