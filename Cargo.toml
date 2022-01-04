@@ -111,7 +111,7 @@ criterion = "0.3.5"
 targets = ["x86_64-unknown-linux-gnu"]
 
 [profile.dev]
-debug = 1
+debug = 1    # Default value is `2`, which contains the full debug info. `1` is enough for stack traces.
 opt-level = 2
 panic = "abort"
 [profile.dev.package."*"]
