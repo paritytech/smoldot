@@ -23,16 +23,16 @@
 //!
 //! # Usage
 //!
-//! The runtime service lets user subscribe to best and finalized block updates, similar to
-//! the [`sync_service`]. These subscriptions are implemented by subscribing to the underlying
-//! [`sync_service`] and, for each notification, downloading the runtime code of the best or
-//! finalized block. Therefore, these notifications always come with a delay compared to directly
-//! using the [`sync_service`].
+//! The runtime service lets user subscribe to block updates, similar to the [`sync_service`].
+//! These subscriptions are implemented by subscribing to the underlying [`sync_service`] and,
+//! for each notification, checking whether the runtime has changed (thanks to the presence or
+//! absence of a header digest item), and downloading the runtime code if necessary. Therefore,
+//! these notifications might come with a delay compared to directly using the [`sync_service`].
 //!
-//! Furthermore, if it isn't possible to download the runtime code of a block (for example because
-//! peers refuse to answer or have already pruned the block) or if the runtime service already has
-//! too many pending downloads, this block is simply skipped and not reported on the
-//! subscriptions.
+//! If it isn't possible to download the runtime code of a block (for example because peers refuse
+//! to answer or have already pruned the block) or if the runtime service already has too many
+//! pending downloads, this block is simply not reported on the subscriptions. The download will
+//! be repeatedly tried until it succeeds.
 //!
 //! Consequently, you are strongly encouraged to not use both the [`sync_service`] *and* the
 //! [`RuntimeService`] of the same chain. They each provide a consistent view of the chain, but
@@ -52,7 +52,7 @@ use futures::{
 use itertools::Itertools as _;
 use smoldot::{
     chain::{async_tree, fork_tree},
-    chain_spec, executor, header,
+    executor, header,
     informant::{BytesDisplay, HashDisplay},
     metadata,
     network::protocol,
@@ -63,7 +63,7 @@ use std::{iter, mem, pin::Pin, sync::Arc, time::Duration};
 pub use crate::lossy_channel::Receiver as NotificationsReceiver;
 
 /// Configuration for a runtime service.
-pub struct Config<'a, TPlat: Platform> {
+pub struct Config<TPlat: Platform> {
     /// Name of the chain, for logging purposes.
     ///
     /// > **Note**: This name will be directly printed out. Any special character should already
@@ -76,16 +76,7 @@ pub struct Config<'a, TPlat: Platform> {
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService<TPlat>>,
 
-    /// Specification of the chain.
-    pub chain_spec: &'a chain_spec::ChainSpec,
-
     /// Header of the genesis block of the chain, in SCALE encoding.
-    ///
-    /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
-    /// >           [`RuntimeService::new`] function could in theory use the
-    /// >           [`Config::chain_spec`] parameter to derive this value, doing so is quite
-    /// >           expensive. We prefer to require this value from the upper layer instead, as
-    /// >           it is most likely needed anyway.
     pub genesis_block_scale_encoded_header: Vec<u8>,
 }
 
@@ -109,7 +100,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ///
     /// The future returned by this function is expected to finish relatively quickly and is
     /// necessary only for locking purposes.
-    pub async fn new(mut config: Config<'_, TPlat>) -> Arc<Self> {
+    pub async fn new(mut config: Config<TPlat>) -> Arc<Self> {
         // Target to use for all the logs of this service.
         let log_target = format!("runtime-{}", config.log_name);
 
@@ -145,14 +136,9 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             runtimes: slab::Slab::with_capacity(2),
         }));
 
-        // Spawns a task that downloads the runtime code at every block to check whether it has
-        // changed.
-        //
-        // This is strictly speaking not necessary as long as there is no active subscription.
-        // However, in practice, there is most likely always going to be one. It is way easier to
-        // always have a task active rather than create and destroy it.
+        // Spawns a task that runs in the background and updates the content of the mutex.
         let background_task_abort;
-        (config.tasks_executor)("runtime-download".into(), {
+        (config.tasks_executor)("runtime-service".into(), {
             let log_target = log_target.clone();
             let sync_service = config.sync_service.clone();
             let guarded = guarded.clone();
@@ -569,7 +555,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
         let non_finalized_blocks_ancestry_order: Vec<_> = match &guarded.tree {
             GuardedInner::FinalizedBlockRuntimeKnown {
-                tree: Some(tree),
+                tree,
                 finalized_block: _finalized_block,
             } => {
                 tree.input_iter_ancestry_order()
@@ -630,8 +616,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 _ => unreachable!(),
             },
             finalized_block_runtime: if let GuardedInner::FinalizedBlockRuntimeKnown {
-                tree: Some(tree),
-                ..
+                tree, ..
             } = &guarded.tree
             {
                 guarded.runtimes[*tree.finalized_async_user_data()]
@@ -657,14 +642,11 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         let (guarded, block_index) = loop {
             let guarded = self.guarded.lock().await;
             match &guarded.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown {
-                    tree: Some(tree), ..
-                } => {
+                GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
                     let index = tree.best_block_index().map(|(idx, _)| idx);
                     break (guarded, index);
                 }
                 GuardedInner::FinalizedBlockRuntimeUnknown { .. } => {}
-                _ => unreachable!(),
             };
 
             // Wait for the best block to change.
@@ -986,9 +968,9 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
                 guarded,
                 block_index,
             } => match &guarded.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown {
-                    tree: Some(tree), ..
-                } => &tree.block_user_data(*block_index).scale_encoded_header[..],
+                GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
+                    &tree.block_user_data(*block_index).scale_encoded_header[..]
+                }
                 GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
                     &tree.block_user_data(*block_index).scale_encoded_header[..]
                 }
@@ -1014,9 +996,9 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
                 guarded,
                 block_index,
             } => match &guarded.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown {
-                    tree: Some(tree), ..
-                } => &tree.block_user_data(*block_index).hash,
+                GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
+                    &tree.block_user_data(*block_index).hash
+                }
                 GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
                     &tree.block_user_data(*block_index).hash
                 }
@@ -1080,7 +1062,7 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
             // has ended.
             let runtime_index = match &guarded.tree {
                 GuardedInner::FinalizedBlockRuntimeKnown {
-                    tree: Some(tree),
+                    tree,
                     finalized_block,
                     ..
                 } => {
@@ -1357,8 +1339,7 @@ enum GuardedInner<TPlat: Platform> {
         ///
         /// The asynchronous operation user data is a `usize` corresponding to the index within
         /// [`Guarded::runtimes`].
-        // TODO: needs to be Option?
-        tree: Option<async_tree::AsyncTree<TPlat::Instant, Block, usize>>,
+        tree: async_tree::AsyncTree<TPlat::Instant, Block, usize>,
 
         /// Finalized block. Outside of the tree.
         finalized_block: Block,
@@ -1384,7 +1365,7 @@ impl<TPlat: Platform> Guarded<TPlat> {
     fn best_block_header(&self) -> &Vec<u8> {
         match &self.tree {
             GuardedInner::FinalizedBlockRuntimeKnown {
-                tree: Some(tree),
+                tree,
                 finalized_block,
             } => tree
                 .best_block_index()
@@ -1553,7 +1534,7 @@ async fn run_background<TPlat: Platform>(
                         hash: finalized_block_hash,
                         scale_encoded_header: subscription.finalized_block_scale_encoded_header,
                     },
-                    tree: Some({
+                    tree: {
                         let mut tree =
                             async_tree::AsyncTree::<_, Block, _>::new(async_tree::Config {
                                 finalized_async_user_data: lock.runtimes.insert(runtime),
@@ -1588,7 +1569,7 @@ async fn run_background<TPlat: Platform>(
                         }
 
                         tree
-                    }),
+                    },
                 };
             } else {
                 lock.tree = GuardedInner::FinalizedBlockRuntimeUnknown {
@@ -1682,7 +1663,7 @@ async fn run_background<TPlat: Platform>(
 
                             match &mut guarded.tree {
                                 GuardedInner::FinalizedBlockRuntimeKnown {
-                                    tree: Some(tree), finalized_block,
+                                    tree, finalized_block,
                                 } => {
                                     let parent_index = if new_block.parent_hash == finalized_block.hash {
                                         if same_runtime_as_parent {
@@ -1740,7 +1721,7 @@ async fn run_background<TPlat: Platform>(
 
                     let concerned_blocks = match &guarded.tree {
                         GuardedInner::FinalizedBlockRuntimeKnown {
-                            tree: Some(tree), ..
+                            tree, ..
                         } => either::Left(tree.async_op_blocks(async_op_id)),
                         GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
                             either::Right(tree.async_op_blocks(async_op_id))
@@ -1780,7 +1761,7 @@ async fn run_background<TPlat: Platform>(
 
                             match &mut guarded.tree {
                                 GuardedInner::FinalizedBlockRuntimeKnown {
-                                    tree: Some(tree), ..
+                                    tree, ..
                                 } => {
                                     tree.async_op_failure(async_op_id, &TPlat::now());
                                 }
@@ -1896,9 +1877,9 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         let num_blocks = match &mut guarded.tree {
-            GuardedInner::FinalizedBlockRuntimeKnown {
-                tree: Some(tree), ..
-            } => tree.async_op_finished(async_op_id, runtime_index),
+            GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
+                tree.async_op_finished(async_op_id, runtime_index)
+            }
             GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
                 tree.async_op_finished(async_op_id, Some(runtime_index))
             }
@@ -1921,7 +1902,7 @@ impl<TPlat: Platform> Background<TPlat> {
         loop {
             let all_blocks_notif = match &mut guarded.tree {
                 GuardedInner::FinalizedBlockRuntimeKnown {
-                    tree: Some(tree),
+                    tree,
                     finalized_block,
                 } => match tree.try_advance_output() {
                     None => break,
@@ -2028,13 +2009,13 @@ impl<TPlat: Platform> Background<TPlat> {
                             HashDisplay(&new_finalized_hash), HashDisplay(&best_block_hash)
                         );
 
-                        guarded.tree =
-                            GuardedInner::FinalizedBlockRuntimeKnown {
-                                tree: Some(tree.take().unwrap().map_async_op_user_data(
-                                    |runtime_index| runtime_index.unwrap(),
-                                )),
-                                finalized_block: new_finalized,
-                            };
+                        guarded.tree = GuardedInner::FinalizedBlockRuntimeKnown {
+                            tree: tree
+                                .take()
+                                .unwrap()
+                                .map_async_op_user_data(|runtime_index| runtime_index.unwrap()),
+                            finalized_block: new_finalized,
+                        };
 
                         // TODO: doesn't report existing blocks /!\
 
@@ -2081,9 +2062,9 @@ impl<TPlat: Platform> Background<TPlat> {
             // If there's nothing more to download, break out of the loop.
             let download_params = {
                 let async_op = match &mut guarded.tree {
-                    GuardedInner::FinalizedBlockRuntimeKnown {
-                        tree: Some(tree), ..
-                    } => tree.next_necessary_async_op(&TPlat::now()),
+                    GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
+                        tree.next_necessary_async_op(&TPlat::now())
+                    }
                     GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
                         tree.next_necessary_async_op(&TPlat::now())
                     }
@@ -2166,7 +2147,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
         match &mut guarded.tree {
             GuardedInner::FinalizedBlockRuntimeKnown {
-                tree: Some(tree),
+                tree,
                 finalized_block,
             } => {
                 // TODO: this if is a small hack because the sync service currently sends multiple identical finalized notifications

@@ -1043,7 +1043,6 @@ async fn start_services<TPlat: Platform>(
                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
             }),
             sync_service: sync_service.clone(),
-            chain_spec: &chain_spec,
             genesis_block_scale_encoded_header,
         })
         .await;
@@ -1079,7 +1078,6 @@ async fn start_services<TPlat: Platform>(
                 move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
             }),
             sync_service: sync_service.clone(),
-            chain_spec: &chain_spec,
             genesis_block_scale_encoded_header,
         })
         .await;
