@@ -16,10 +16,10 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { Buffer } from 'buffer';
-import * as compat from './../compat/index';
-import * as instance from './instance';
-import * as messages from './messages';
-import { SmoldotWasmInstance } from './bindings';
+import * as compat from './../compat/index.js';
+import * as instance from './instance.js';
+import * as messages from './messages.js';
+import { SmoldotWasmInstance } from './bindings.js';
 
 // This variable represents the state of the worker, and serves three different purposes:
 //

@@ -19,7 +19,7 @@
 //
 // A rule in the `package.json` overrides it with `compat-browser` when in a browser.
 
-import { Timeout, CompatWorker, TcpConnectionOptions } from './index';
+import { Timeout, CompatWorker, TcpConnectionOptions } from './index.js';
 import { parentPort, MessagePort, Worker as NodeJsWorker } from 'worker_threads';
 
 import * as net from 'net';

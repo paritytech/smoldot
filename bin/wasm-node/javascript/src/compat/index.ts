@@ -19,7 +19,7 @@
 
 import { Worker as NodeJsWorker } from 'worker_threads';
 
-export * from './nodejs';
+export * from './nodejs.js';
 export { Socket as NodeJsSocket } from 'net';
 
 export type CompatWorker = NodeJsWorker | Worker;

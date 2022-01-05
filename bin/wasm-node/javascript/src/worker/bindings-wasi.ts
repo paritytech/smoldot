@@ -25,7 +25,7 @@
 
 import { Buffer } from 'buffer';
 import randombytes from 'randombytes';
-import { SmoldotWasmInstance } from './bindings';
+import { SmoldotWasmInstance } from './bindings.js';
 
 export interface Config {
     instance?: SmoldotWasmInstance,

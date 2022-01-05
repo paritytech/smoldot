@@ -19,7 +19,7 @@
 
 // Overrides `compat-nodejs` when in a browser.
 
-import { Timeout, CompatWorker } from './index';
+import { Timeout, CompatWorker } from './index.js';
 
 export function compatSetTimeout(callback: () => void, timeout: number): Timeout {
     return setTimeout(callback, timeout)

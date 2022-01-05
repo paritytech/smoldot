@@ -23,8 +23,8 @@
 import { Buffer } from 'buffer';
 import { w3cwebsocket } from 'websocket';
 import now from 'performance-now';
-import * as compat from '../compat/index';
-import { SmoldotWasmInstance } from './bindings';
+import * as compat from '../compat/index.js';
+import { SmoldotWasmInstance } from './bindings.js';
 
 export interface Config {
     instance?: SmoldotWasmInstance,

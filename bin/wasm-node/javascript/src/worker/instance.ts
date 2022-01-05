@@ -16,12 +16,13 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { default as pako } from 'pako';
-import { Config as SmoldotBindingsConfig, default as smoldot_light_builder } from './bindings-smoldot-light';
-import { Config as WasiConfig, default as wasi_builder } from './bindings-wasi';
 
-import { default as wasm_base64 } from './autogen/wasm';
+import { Config as SmoldotBindingsConfig, default as smoldot_light_builder } from './bindings-smoldot-light.js';
+import { Config as WasiConfig, default as wasi_builder } from './bindings-wasi.js';
 
-import { SmoldotWasmInstance } from './bindings';
+import { default as wasm_base64 } from './autogen/wasm.js';
+
+import { SmoldotWasmInstance } from './bindings.js';
 
 export interface Config {
     logCallback: (level: number, target: string, message: string) => void,

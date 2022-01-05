@@ -15,8 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { compatSetTimeout, compatClearTimeout, Timeout, CompatWorker, workerOnError, workerOnMessage, workerTerminate } from './compat/index';
-import * as messages from './worker/messages';
+import { compatSetTimeout, compatClearTimeout, Timeout, CompatWorker, workerOnError, workerOnMessage, workerTerminate } from './compat/index.js';
+import * as messages from './worker/messages.js';
 
 /**
  * Thrown in case of a problem when initializing the chain.
