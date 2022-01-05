@@ -13,8 +13,8 @@
     "url": "https://github.com/paritytech/smoldot/issues"
   },
   "type": "module",
-  "types": "src/index.d.ts",
-  "main": "src/index.js",
+  "types": "dist/src/index.d.ts",
+  "main": "dist/src/index.js",
   "scripts": {
     "prepublishOnly": "node prepare.js --release",
     "build": "node prepare.js --release && rimraf ./dist && tsc",
