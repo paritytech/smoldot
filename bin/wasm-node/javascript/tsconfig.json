@@ -2,7 +2,8 @@
     "compilerOptions": {
         "strict": true,
         "lib": ["es2015", "es2016"],
-        "target": "es6",
+        "target": "es2020",
+        "module": "es2022",
         "outDir": "./dist",
         "declaration": true,
         "allowJs": true,

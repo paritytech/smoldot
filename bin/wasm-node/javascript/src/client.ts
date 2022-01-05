@@ -16,7 +16,6 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { compatSetTimeout, compatClearTimeout, Timeout, CompatWorker, workerOnError, workerOnMessage, workerTerminate } from './compat/index';
-import { default as spawnWorker } from './spawnWorker.js';
 import * as messages from './worker/messages';
 
 /**
@@ -334,7 +333,10 @@ export function start(options?: ClientOptions): Client {
   });
 
   // The actual execution of Smoldot is performed in a worker thread.
-  const worker = spawnWorker() as CompatWorker;
+  // The line of code below (`new Worker(...)`) is designed to hopefully work across all
+  // platforms and bundlers.
+  // See also the README.md for more context.
+  const worker = new Worker(new URL('./worker/worker.js', import.meta.url));
   let workerError: null | Error = null;
 
   // Whenever an `addChain` or `removeChain` message is sent to the worker, a corresponding entry
