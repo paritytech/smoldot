@@ -6,7 +6,6 @@
         "module": "es2022",
         "outDir": "./dist",
         "declaration": true,
-        "allowJs": true,
         "esModuleInterop": true
     },
     "include": [
