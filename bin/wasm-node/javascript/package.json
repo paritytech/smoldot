@@ -17,12 +17,12 @@
   "main": "src/index.js",
   "scripts": {
     "prepublishOnly": "node prepare.js --release",
-    "build": "node prepare.js --release",
-    "start": "node prepare.js --debug && node demo/demo.js",
-    "test": "node prepare.js --debug && dtslint src/ && ava --timeout=2m --concurrency 2 --no-worker-threads"
+    "build": "node prepare.js --release && tsc",
+    "start": "node prepare.js --debug && tsc && node demo/demo.js",
+    "test": "node prepare.js --debug && tsc && ava --timeout=2m --concurrency 2 --no-worker-threads"
   },
   "browser": {
-    "./src/compat-nodejs.js": "./src/compat-browser.js"
+    "./build/compat/nodejs.js": "./build/compat/browser.js"
   },
   "dependencies": {
     "buffer": "^6.0.1",
@@ -32,8 +32,11 @@
     "websocket": "^1.0.32"
   },
   "devDependencies": {
+    "@types/pako": "^1.0.3",
+    "@types/randombytes": "^2.0.0",
+    "@types/websocket": "^1.0.4",
     "ava": "^4.0.0",
     "dtslint": "^4.0.6",
-    "typescript": "^4.1.4"
+    "typescript": "^4.5.4"
   }
 }

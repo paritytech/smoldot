@@ -1,0 +1,15 @@
+{
+    "compilerOptions": {
+        "strict": true,
+        "lib": ["es2015", "es2016"],
+        "outDir": "./dist",
+        "declaration": true,
+        "allowJs": true,
+        "target": "es5",
+        "esModuleInterop": true
+    },
+    "include": [
+        "src/**/*",
+        "test/**/*"
+    ]
+}
