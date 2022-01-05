@@ -17,9 +17,9 @@
   "main": "src/index.js",
   "scripts": {
     "prepublishOnly": "node prepare.js --release",
-    "build": "node prepare.js --release && tsc",
-    "start": "node prepare.js --debug && tsc && node demo/demo.js",
-    "test": "node prepare.js --debug && tsc && ava --timeout=2m --concurrency 2 --no-worker-threads"
+    "build": "node prepare.js --release && rimraf ./dist && tsc",
+    "start": "node prepare.js --debug && rimraf ./dist && tsc && node demo/demo.js",
+    "test": "node prepare.js --debug && rimraf ./dist && tsc && ava --timeout=2m --concurrency 2 --no-worker-threads"
   },
   "browser": {
     "./build/compat/nodejs.js": "./build/compat/browser.js"
@@ -37,6 +37,7 @@
     "@types/websocket": "^1.0.4",
     "ava": "^4.0.0",
     "dtslint": "^4.0.6",
+    "rimraf": "^3.0.2",
     "typescript": "^4.5.4"
   }
 }

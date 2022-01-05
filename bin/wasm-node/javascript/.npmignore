@@ -1,5 +1,6 @@
 prepare.js
-test
+dist/test
 demo
-src/index.test-d.ts
-src/tsconfig.json
+src
+test
+tsconfig.json
