@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { compatSetTimeout, compatClearTimeout, Timeout, CompatWorker, workerOnError, workerOnMessage, workerTerminate } from './compat';
+import { compatSetTimeout, compatClearTimeout, Timeout, CompatWorker, workerOnError, workerOnMessage, workerTerminate } from './compat/index';
 import { default as spawnWorker } from './spawnWorker.js';
 import * as messages from './worker/messages';
 
@@ -334,14 +334,14 @@ export function start(options?: ClientOptions): Client {
   });
 
   // The actual execution of Smoldot is performed in a worker thread.
-  const worker = spawnWorker() as any as CompatWorker; // TODO: any? :-/
+  const worker = spawnWorker() as CompatWorker;
   let workerError: null | Error = null;
 
   // Whenever an `addChain` or `removeChain` message is sent to the worker, a corresponding entry
   // is pushed to this array. The worker needs to send back a confirmation, which pops the first
   // element of this array. In the case of `addChain`, additional fields are stored in this array
   // to finish the initialization of the chain.
-  let pendingConfirmations = [];
+  let pendingConfirmations: PendingConfirmation[] = [];
 
   // For each chain that is currently running, contains the callback to use to send back JSON-RPC
   // responses corresponding to this chain.
@@ -355,7 +355,10 @@ export function start(options?: ClientOptions): Client {
   // Entries are instantly removed when the user desires to remove a chain even before the worker
   // has confirmed the removal. Doing so avoids a race condition where the worker sends back a
   // database content even though we've already sent a `removeChain` message to it.
-  let chainsDatabaseContentPromises = new Map();
+  //
+  // This map is also used as a way to check whether a chain still exists.
+  // TODO: should be merged with `chainsJsonRpcCallbacks` variable above
+  let chainsDatabaseContentPromises: Map<number, DatabasePromise[]> = new Map();
 
   // The worker periodically sends a message of kind 'livenessPing' in order to notify that it is
   // still alive.
@@ -386,12 +389,13 @@ export function start(options?: ClientOptions): Client {
       if (cb) cb(message.data);
 
     } else if (message.kind == 'chainAddedOk') {
-      const expected = pendingConfirmations.shift();
+      const expected = pendingConfirmations.shift() as PendingConfirmationChainAdded;
       let chainId = message.chainId; // Later set to null when the chain is removed.
 
       if (chainsJsonRpcCallbacks.has(chainId) || chainsDatabaseContentPromises.has(chainId)) // Sanity check.
         throw 'Unexpected reuse of a chain ID';
-      chainsJsonRpcCallbacks.set(chainId, expected.jsonRpcCallback);
+      if (expected.jsonRpcCallback)
+        chainsJsonRpcCallbacks.set(chainId, expected.jsonRpcCallback);
       chainsDatabaseContentPromises.set(chainId, new Array());
 
       // `expected` was pushed by the `addChain` method.
@@ -400,7 +404,7 @@ export function start(options?: ClientOptions): Client {
         sendJsonRpc: (request) => {
           if (workerError)
             throw workerError;
-          if (chainId === null)
+          if (!chainsDatabaseContentPromises.has(chainId))
             throw new AlreadyDestroyedError();
           if (!chainsJsonRpcCallbacks.has(chainId))
             throw new JsonRpcDisabledError();
@@ -411,16 +415,22 @@ export function start(options?: ClientOptions): Client {
         databaseContent: (maxUtf8BytesSize) => {
           if (workerError)
             return Promise.reject(workerError);
-          if (chainId === null)
+
+          const databaseContentPromises = chainsDatabaseContentPromises.get(chainId);
+          if (!databaseContentPromises)
             return Promise.reject(new AlreadyDestroyedError());
 
+          // TODO: because of https://github.com/microsoft/TypeScript/issues/11498 we need to define the callbacks as possibly null, and go through `unknown`
           let resolve;
           let reject;
           const promise: Promise<string> = new Promise((res, rej) => {
             resolve = res;
             reject = rej;
           });
-          chainsDatabaseContentPromises.get(chainId).push({ resolve, reject });
+          databaseContentPromises.push({
+            resolve: resolve as unknown as (data: string) => void,
+            reject: reject as unknown as (error: Error) => void,
+          });
 
           const twoPower32 = (1 << 30) * 4;  // `1 << 31` and `1 << 32` in JavaScript don't give the value that you expect.
           const maxSize = maxUtf8BytesSize || (twoPower32 - 1);
@@ -433,7 +443,7 @@ export function start(options?: ClientOptions): Client {
         remove: () => {
           if (workerError)
             throw workerError;
-          if (chainId === null)
+          if (!chainsDatabaseContentPromises.has(chainId))
             throw new AlreadyDestroyedError();
           pendingConfirmations.push({ ty: 'chainRemoved', chainId });
           worker.postMessage({ ty: 'removeChain', chainId });
@@ -442,7 +452,6 @@ export function start(options?: ClientOptions): Client {
           // function has returned. We solve that by removing the callback immediately.
           chainsJsonRpcCallbacks.delete(chainId);
           chainsDatabaseContentPromises.delete(chainId);
-          chainId = null;
         },
         // Hacky internal method that later lets us access the `chainId` of this chain for
         // implementation reasons.
@@ -451,7 +460,7 @@ export function start(options?: ClientOptions): Client {
       expected.resolve(newChain);
 
     } else if (message.kind == 'chainAddedErr') {
-      const expected = pendingConfirmations.shift();
+      const expected = pendingConfirmations.shift() as PendingConfirmationChainAdded;
       // `expected` was pushed by the `addChain` method.
       // Reject the promise that `addChain` returned to the user.
       expected.reject(message.error as AddChainError);
@@ -461,7 +470,7 @@ export function start(options?: ClientOptions): Client {
 
     } else if (message.kind == 'databaseContent') {
       const promises = chainsDatabaseContentPromises.get(message.chainId);
-      if (promises) promises.shift().resolve(message.data);
+      if (promises) (promises.shift() as DatabasePromise).resolve(message.data);
 
     } else if (message.kind == 'log') {
       logCallback(message.level, message.target, message.message);
@@ -493,7 +502,11 @@ export function start(options?: ClientOptions): Client {
 
     // Reject all promises for database contents.
     chainsDatabaseContentPromises.forEach((chain) => {
-      chain.forEach((promise) => promise.reject(workerError));
+      chain.forEach((promise) => {
+        // TODO: Because of https://github.com/microsoft/TypeScript/issues/11498, TypeScript is unable to know that `workerError` has been set above.
+        const err = workerError as CrashError;
+        promise.reject(err)
+      });
     });
     chainsDatabaseContentPromises.clear();
   });
@@ -528,8 +541,9 @@ export function start(options?: ClientOptions): Client {
       }
 
       // Build a promise that will be resolved or rejected after the chain has been added.
-      let chainAddedPromiseResolve: (c: Chain) => void;
-      let chainAddedPromiseReject: (error: AddChainError) => void;
+      // TODO: because of https://github.com/microsoft/TypeScript/issues/11498 we need to define the callbacks as possibly null, and go through `unknown`
+      let chainAddedPromiseResolve;
+      let chainAddedPromiseReject;
       const chainAddedPromise: Promise<Chain> = new Promise((resolve, reject) => {
         chainAddedPromiseResolve = resolve;
         chainAddedPromiseReject = reject;
@@ -537,8 +551,8 @@ export function start(options?: ClientOptions): Client {
 
       pendingConfirmations.push({
         ty: 'chainAdded',
-        reject: chainAddedPromiseReject,
-        resolve: chainAddedPromiseResolve,
+        reject: chainAddedPromiseReject as unknown as (error: AddChainError) => void,
+        resolve: chainAddedPromiseResolve as unknown as (c: Chain) => void,
         jsonRpcCallback: options.jsonRpcCallback,
       });
 
@@ -563,4 +577,23 @@ export function start(options?: ClientOptions): Client {
       return workerTerminate(worker)
     }
   }
+}
+
+type PendingConfirmation = PendingConfirmationChainAdded | PendingConfirmationChainRemoved;
+
+interface PendingConfirmationChainAdded {
+  ty: 'chainAdded',
+  resolve: (c: Chain) => void,
+  reject: (error: AddChainError) => void,
+  jsonRpcCallback?: JsonRpcCallback,
+}
+
+interface PendingConfirmationChainRemoved {
+  ty: 'chainRemoved',
+  chainId: number,
+}
+
+interface DatabasePromise {
+  resolve: (data: string) => void,
+  reject: (error: Error) => void,
 }

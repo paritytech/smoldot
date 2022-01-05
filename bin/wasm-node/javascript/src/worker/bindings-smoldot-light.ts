@@ -23,7 +23,7 @@
 import { Buffer } from 'buffer';
 import { w3cwebsocket } from 'websocket';
 import now from 'performance-now';
-import * as compat from '../compat';
+import * as compat from '../compat/index';
 import { SmoldotWasmInstance } from './bindings';
 
 export interface Config {
@@ -38,8 +38,6 @@ export interface Config {
 }
 
 class ConnectionError extends Error {
-    isBadAddress: boolean;
-
     constructor(message: string) {
         super(message);
     }
@@ -177,9 +175,7 @@ export default (config: Config): WebAssembly.ModuleImports => {
                         (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && config.forbidNonLocalWs) ||
                         (proto == 'wss' && config.forbidWss)
                     ) {
-                        const error = new ConnectionError('Connection type not allowed');
-                        error.isBadAddress = true;
-                        throw error;
+                        throw new ConnectionError('Connection type not allowed');
                     }
 
                     let url: string;
@@ -215,9 +211,7 @@ export default (config: Config): WebAssembly.ModuleImports => {
                 } else if (tcpParsed != null) {
                     // `net` module will be missing when we're not in NodeJS.
                     if (!compat.isTcpAvailable() || config.forbidTcp) {
-                        const error = new ConnectionError('TCP connections not available');
-                        error.isBadAddress = true;
-                        throw error;
+                        throw new ConnectionError('TCP connections not available');
                     }
 
                     const socket = compat.createTcpConnection({
@@ -251,23 +245,25 @@ export default (config: Config): WebAssembly.ModuleImports => {
                     });
 
                 } else {
-                    const error = new ConnectionError('Unrecognized multiaddr format');
-                    error.isBadAddress = true;
-                    throw error;
+                    throw new ConnectionError('Unrecognized multiaddr format');
                 }
 
                 connections[id] = connection;
                 return 0;
 
             } catch (error) {
-                const errorStr = error.toString();
+                const isBadAddress = error instanceof ConnectionError;
+                let errorStr = "Unknown error";
+                if (error instanceof Error) {
+                    errorStr = error.toString();
+                }
                 const mem = Buffer.from(instance.exports.memory.buffer);
                 const len = Buffer.byteLength(errorStr, 'utf8');
                 const ptr = instance.exports.alloc(len) >>> 0;
                 mem.write(errorStr, ptr);
                 mem.writeUInt32LE(ptr, error_ptr_ptr);
                 mem.writeUInt32LE(len, error_ptr_ptr + 4);
-                mem.writeUInt8(!!error.isBadAddress ? 1 : 0, error_ptr_ptr + 8);
+                mem.writeUInt8(isBadAddress ? 1 : 0, error_ptr_ptr + 8);
                 return 1;
             }
         },
@@ -277,10 +273,12 @@ export default (config: Config): WebAssembly.ModuleImports => {
             let connection = connections[id];
             if (connection.ty == 'websocket') {
                 // WebSocket
-                connection.socket.onopen = null;
-                connection.socket.onclose = null;
-                connection.socket.onmessage = null;
-                connection.socket.onerror = null;
+                // We can't set these fields to null because the TypeScript definitions don't
+                // allow it, but we can set them to dummy values.
+                connection.socket.onopen = () => { };
+                connection.socket.onclose = () => { };
+                connection.socket.onmessage = () => { };
+                connection.socket.onerror = () => { };
                 connection.socket.close();
             } else {
                 // TCP

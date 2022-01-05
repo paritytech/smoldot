@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { Buffer } from 'buffer';
-import * as compat from './../compat';
+import * as compat from './../compat/index';
 import * as instance from './instance';
 import * as messages from './messages';
 import { SmoldotWasmInstance } from './bindings';
