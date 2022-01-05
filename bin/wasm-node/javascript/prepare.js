@@ -116,9 +116,11 @@ let fileNum = 0;
 let chunksSum = '""';
 while (base64Data.length != 0) {
     const chunk = base64Data.slice(0, 1024 * 1024);
-    fs.writeFileSync('./src/worker/autogen/wasm' + fileNum + '.ts', 'export default "' + chunk + '";');
+    // We could simply export the chunk instead of a function that returns the chunk, but that
+    // would cause TypeScript to generate a definitions file containing a copy of the entire chunk.
+    fs.writeFileSync('./src/worker/autogen/wasm' + fileNum + '.ts', 'export default function(): string { return "' + chunk + '"; }');
     imports += 'import { default as wasm' + fileNum + ' } from \'./wasm' + fileNum + '\';\n';
-    chunksSum += ' + wasm' + fileNum;
+    chunksSum += ' + wasm' + fileNum + '()';
     fileNum += 1;
     base64Data = base64Data.slice(1024 * 1024);
 }
