@@ -117,7 +117,7 @@ let chunksSum = '""';
 while (base64Data.length != 0) {
     const chunk = base64Data.slice(0, 1024 * 1024);
     fs.writeFileSync('./src/worker/autogen/wasm' + fileNum + '.ts', 'export default "' + chunk + '";');
-    imports += 'import { default as wasm' + fileNum + ' } from \'./wasm' + fileNum + '.ts\';\n';
+    imports += 'import { default as wasm' + fileNum + ' } from \'./wasm' + fileNum + '\';\n';
     chunksSum += ' + wasm' + fileNum;
     fileNum += 1;
     base64Data = base64Data.slice(1024 * 1024);
