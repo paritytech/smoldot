@@ -264,7 +264,8 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     // Do nothing. This is simply to wake up and loop again.
                 },
 
-                relay_chain_notif = relay_chain_subscribe_all.new_blocks.next() => {
+                // TODO: must unpin blocks
+                relay_chain_notif = relay_chain_subscribe_all.new_blocks.next().fuse() => { // TODO: remove fuse()?
                     let relay_chain_notif = match relay_chain_notif {
                         Some(n) => n,
                         None => break, // Jumps to the outer loop to recreate the channel.

@@ -543,46 +543,56 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// warp syncing.
     ///
     /// See [`SubscribeAll`] for information about the return value.
-    pub async fn subscribe_all(&self, buffer_size: usize) -> SubscribeAll {
+    pub async fn subscribe_all(&self, buffer_size: usize) -> SubscribeAll<TPlat> {
         Self::subscribe_all_inner(&self.guarded, buffer_size).await
     }
 
     async fn subscribe_all_inner(
-        guarded: &Mutex<Guarded<TPlat>>,
+        guarded: &Arc<Mutex<Guarded<TPlat>>>,
         buffer_size: usize,
-    ) -> SubscribeAll {
+    ) -> SubscribeAll<TPlat> {
         // First, lock `guarded` and wait for the tree to be in `FinalizedBlockRuntimeKnown` mode.
         // This can take a long time.
-        let mut guarded = loop {
-            let mut guarded = guarded.lock().await;
+        let mut guarded_lock = loop {
+            let mut guarded_lock = guarded.lock().await;
 
-            match &guarded.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown { .. } => break guarded,
+            match &guarded_lock.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown { .. } => break guarded_lock,
                 GuardedInner::FinalizedBlockRuntimeUnknown { .. } => {
                     let (tx, mut rx) = mpsc::channel(0);
-                    let subscription_id = guarded.next_subscription_id;
-                    guarded.next_subscription_id += 1;
-                    guarded.all_blocks_subscriptions.insert(subscription_id, tx);
-                    drop(guarded);
+                    let subscription_id = guarded_lock.next_subscription_id;
+                    guarded_lock.next_subscription_id += 1;
+                    guarded_lock
+                        .all_blocks_subscriptions
+                        .insert(subscription_id, tx);
+                    drop(guarded_lock);
                     let _ = rx.next().await;
-                    // TODO: rethink just dropping the `rx` w.r.t. blocks pinning
                 }
             }
         };
+        let mut guarded_lock = &mut *guarded_lock;
 
-        let (tx, new_blocks) = mpsc::channel(buffer_size);
-        let subscription_id = guarded.next_subscription_id;
-        guarded.next_subscription_id += 1;
-        guarded.all_blocks_subscriptions.insert(subscription_id, tx);
+        let (tx, new_blocks_channel) = mpsc::channel(buffer_size);
+        let subscription_id = guarded_lock.next_subscription_id;
+        guarded_lock.next_subscription_id += 1;
+        guarded_lock
+            .all_blocks_subscriptions
+            .insert(subscription_id, tx);
 
-        let non_finalized_blocks_ancestry_order: Vec<_> = match &guarded.tree {
+        let non_finalized_blocks_ancestry_order: Vec<_> = match &guarded_lock.tree {
             GuardedInner::FinalizedBlockRuntimeKnown {
                 tree,
-                finalized_block: _finalized_block,
+                finalized_block,
             } => {
+                guarded_lock.pinned_blocks.insert(
+                    (finalized_block.hash, subscription_id),
+                    *tree.finalized_async_user_data(),
+                );
+
                 tree.input_iter_ancestry_order()
                     .filter_map(|block| {
                         let runtime_index = *block.async_op_user_data?;
+                        let block_hash = block.user_data.hash;
                         let parent_runtime_index = tree
                             .parent(block.id)
                             .map_or(*tree.finalized_async_user_data(), |parent_idx| {
@@ -593,12 +603,16 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                             .unwrap()
                             .parent_hash; // TODO: correct? if yes, document
                         debug_assert!(
-                            parent_hash == _finalized_block.hash
+                            parent_hash == finalized_block.hash
                                 || tree
                                     .input_iter_ancestry_order()
                                     .any(|b| parent_hash == b.user_data.hash
                                         && b.async_op_user_data.is_some())
                         );
+
+                        guarded_lock
+                            .pinned_blocks
+                            .insert((block_hash, subscription_id), runtime_index);
 
                         Some(BlockNotification {
                             is_new_best: block.is_output_best,
@@ -606,7 +620,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                             scale_encoded_header: block.user_data.scale_encoded_header.clone(),
                             new_runtime: if runtime_index != parent_runtime_index {
                                 Some(
-                                    guarded.runtimes[runtime_index]
+                                    guarded_lock.runtimes[runtime_index]
                                         .runtime
                                         .as_ref()
                                         .map(|rt| rt.runtime_spec.clone())
@@ -631,7 +645,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         ));
 
         SubscribeAll {
-            finalized_block_scale_encoded_header: match &guarded.tree {
+            finalized_block_scale_encoded_header: match &guarded_lock.tree {
                 GuardedInner::FinalizedBlockRuntimeKnown {
                     finalized_block, ..
                 } => finalized_block.scale_encoded_header.clone(),
@@ -639,9 +653,9 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             },
             finalized_block_runtime: if let GuardedInner::FinalizedBlockRuntimeKnown {
                 tree, ..
-            } = &guarded.tree
+            } = &guarded_lock.tree
             {
-                guarded.runtimes[*tree.finalized_async_user_data()]
+                guarded_lock.runtimes[*tree.finalized_async_user_data()]
                     .runtime
                     .as_ref()
                     .map(|rt| rt.runtime_spec.clone())
@@ -649,19 +663,12 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             } else {
                 unreachable!()
             },
-            new_blocks,
             non_finalized_blocks_ancestry_order,
-        }
-    }
-
-    pub async fn unpin_block(&self, subscription: &(), block_hash: &[u8; 32]) {
-        let mut guarded_lock = self.guarded.lock().await;
-
-        let runtime_index = guarded_lock.pinned_blocks.remove(block_hash).unwrap();
-        if guarded_lock.runtimes[runtime_index].num_references == 1 {
-            guarded_lock.runtimes.remove(runtime_index);
-        } else {
-            guarded_lock.runtimes[runtime_index].num_references -= 1;
+            new_blocks: Subscription {
+                subscription_id,
+                channel: new_blocks_channel,
+                guarded: guarded.clone(),
+            },
         }
     }
 
@@ -844,7 +851,7 @@ impl<TPlat: Platform> Drop for RuntimeService<TPlat> {
 }
 
 /// Return value of [`RuntimeService::subscribe_all`].
-pub struct SubscribeAll {
+pub struct SubscribeAll<TPlat: Platform> {
     /// SCALE-encoded header of the finalized block at the time of the subscription.
     pub finalized_block_scale_encoded_header: Vec<u8>,
 
@@ -861,7 +868,39 @@ pub struct SubscribeAll {
 
     /// Channel onto which new blocks are sent. The channel gets closed if it is full when a new
     /// block needs to be reported.
-    pub new_blocks: mpsc::Receiver<Notification>,
+    pub new_blocks: Subscription<TPlat>,
+}
+
+pub struct Subscription<TPlat: Platform> {
+    subscription_id: u64,
+    channel: mpsc::Receiver<Notification>,
+    guarded: Arc<Mutex<Guarded<TPlat>>>,
+}
+
+impl<TPlat: Platform> Subscription<TPlat> {
+    pub async fn next(&mut self) -> Option<Notification> {
+        self.channel.next().await
+    }
+
+    /// Unpins a block after it has been reported.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the block hash has not been reported or has already been unpinned.
+    ///
+    pub async fn unpin_block(&self, block_hash: &[u8; 32]) {
+        let mut guarded_lock = self.guarded.lock().await;
+
+        let runtime_index = guarded_lock
+            .pinned_blocks
+            .remove(&(*block_hash, self.subscription_id))
+            .unwrap();
+        if guarded_lock.runtimes[runtime_index].num_references == 1 {
+            guarded_lock.runtimes.remove(runtime_index);
+        } else {
+            guarded_lock.runtimes[runtime_index].num_references -= 1;
+        }
+    }
 }
 
 /// Notification about a new block or a new finalized block.
@@ -2035,6 +2074,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         }
                         for to_remove in to_remove {
                             guarded.all_blocks_subscriptions.remove(&to_remove);
+                            // TODO: unpin all blocks for this subscription
                         }
 
                         continue;
