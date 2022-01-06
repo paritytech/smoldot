@@ -1985,17 +1985,26 @@ impl<TPlat: Platform> Background<TPlat> {
             )
             .await;
 
-        let mut blocks_list = {
+        let mut new_blocks = {
             let subscribe_all = self.runtime_service.subscribe_all(16).await;
-            // TODO: is it correct to return all non-finalized blocks first? have to compare with PolkadotJS
-            stream::iter(subscribe_all.non_finalized_blocks_ancestry_order)
-                .chain(subscribe_all.new_blocks.filter_map(|notif| {
-                    future::ready(match notif {
-                        runtime_service::Notification::Block(b) => Some(b),
-                        _ => None,
-                    })
-                }))
-                .map(|notif| notif.scale_encoded_header)
+
+            // We need to unpin
+            subscribe_all
+                .new_blocks
+                .unpin_block(&header::hash_from_scale_encoded_header(
+                    &subscribe_all.finalized_block_scale_encoded_header,
+                ))
+                .await;
+            for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                subscribe_all
+                    .new_blocks
+                    .unpin_block(&header::hash_from_scale_encoded_header(
+                        &block.scale_encoded_header,
+                    ))
+                    .await;
+            }
+
+            subscribe_all.new_blocks
         };
 
         // Spawn a separate task for the subscription.
@@ -2003,22 +2012,30 @@ impl<TPlat: Platform> Background<TPlat> {
             let me = self.clone();
             async move {
                 loop {
-                    match blocks_list.next().await {
-                        Some(block) => {
-                            let header =
-                                methods::Header::from_scale_encoded_header(&block).unwrap();
+                    match new_blocks.next().await {
+                        Some(runtime_service::Notification::Block(block)) => {
+                            new_blocks
+                                .unpin_block(&header::hash_from_scale_encoded_header(
+                                    &block.scale_encoded_header,
+                                ))
+                                .await;
+
                             let _ = me
                                 .requests_subscriptions
                                 .try_push_notification(
                                     &state_machine_subscription,
                                     methods::ServerToClient::chain_newHead {
                                         subscription: &subscription_id,
-                                        result: header,
+                                        result: methods::Header::from_scale_encoded_header(
+                                            &block.scale_encoded_header,
+                                        )
+                                        .unwrap(),
                                     }
                                     .to_json_call_object_parameters(None),
                                 )
                                 .await;
                         }
+                        Some(runtime_service::Notification::Finalized { .. }) => {}
                         None => {
                             // TODO: ?!
                             return;
