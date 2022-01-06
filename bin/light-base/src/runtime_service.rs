@@ -1372,7 +1372,7 @@ struct Guarded<TPlat: Platform> {
     ///
     /// Values are indices within [`Guarded::runtimes`].
     // TODO: docs
-    pinned_blocks: HashMap<[u8; 32], usize, fnv::FnvBuildHasher>,
+    pinned_blocks: HashMap<([u8; 32], u64), usize, fnv::FnvBuildHasher>,
 }
 
 enum GuardedInner<TPlat: Platform> {
@@ -2002,13 +2002,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             is_new_best
                         );
 
-                        // TODO: must insert once per subscription /!\
-                        guarded.runtimes[block_runtime_index].num_references += 1;
-                        guarded
-                            .pinned_blocks
-                            .insert(block_hash, block_runtime_index);
-
-                        Notification::Block(BlockNotification {
+                        let notif = Notification::Block(BlockNotification {
                             parent_hash: tree
                                 .parent(block_index)
                                 .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash),
@@ -2025,7 +2019,25 @@ impl<TPlat: Platform> Background<TPlat> {
                             } else {
                                 None
                             },
-                        })
+                        });
+
+                        let mut to_remove = Vec::new();
+                        for (subscription_id, sender) in guarded.all_blocks_subscriptions.iter_mut()
+                        {
+                            if sender.try_send(notif.clone()).is_ok() {
+                                guarded.runtimes[block_runtime_index].num_references += 1;
+                                guarded
+                                    .pinned_blocks
+                                    .insert((block_hash, *subscription_id), block_runtime_index);
+                            } else {
+                                to_remove.push(*subscription_id);
+                            }
+                        }
+                        for to_remove in to_remove {
+                            guarded.all_blocks_subscriptions.remove(&to_remove);
+                        }
+
+                        continue;
                     }
                 },
                 GuardedInner::FinalizedBlockRuntimeUnknown {
