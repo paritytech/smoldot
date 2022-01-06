@@ -41,6 +41,19 @@
 //! The main service offered by the runtime service is
 //! [`RuntimeService::recent_best_block_runtime_lock`], that performs a runtime call on the latest
 //! reported best block or more recent.
+//!
+//! # Blocks pinning
+//!
+//! Blocks that are reported through [`RuntimeService::subscribe_all`] are automatically *pinned*.
+//! If multiple subscriptions exist, each block is pinned once per subscription.
+//!
+//! As long as a block is pinned, the [`RuntimeService`] is guaranteed to keep in its internal
+//! state the runtime of this block and its properties.
+//!
+//! Blocks must be manually unpinned by calling TODO.
+//! Failing to do so is effectively a memory leak. If the number of pinned blocks becomes too
+//! large, the subscription is force-killed by the [`RuntimeService`].
+//!
 
 use crate::{lossy_channel, sync_service, Platform};
 
@@ -49,6 +62,7 @@ use futures::{
     lock::{Mutex, MutexGuard},
     prelude::*,
 };
+use hashbrown::HashMap;
 use itertools::Itertools as _;
 use smoldot::{
     chain::{async_tree, fork_tree},
@@ -134,6 +148,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             best_near_head_of_chain,
             tree,
             runtimes: slab::Slab::with_capacity(2),
+            pinned_blocks: hashbrown::HashMap::with_capacity_and_hasher(32, Default::default()), // TODO: capacity?
         }));
 
         // Spawns a task that runs in the background and updates the content of the mutex.
@@ -1306,10 +1321,12 @@ struct Guarded<TPlat: Platform> {
 
     /// List of senders that get notified when the finalized block is updated.
     /// See [`RuntimeService::subscribe_finalized`].
+    // TODO: remove in favor of just `all_blocks_subscriptions`
     finalized_blocks_subscriptions: Vec<lossy_channel::Sender<Vec<u8>>>,
 
     /// List of senders that get notified when the best block is updated.
     /// See [`RuntimeService::subscribe_best`].
+    // TODO: remove in favor of just `all_blocks_subscriptions`
     best_blocks_subscriptions: Vec<lossy_channel::Sender<Vec<u8>>>,
 
     /// Return value of calling [`sync_service::SyncService::is_near_head_of_chain_heuristic`]
@@ -1319,8 +1336,17 @@ struct Guarded<TPlat: Platform> {
     /// List of runtimes referenced by the tree in [`GuardedInner`].
     runtimes: slab::Slab<Runtime>,
 
-    /// Tree of blocks.
+    /// Tree of blocks received from the sync service. Keeps track of which block has been
+    /// reported to the outer API.
     tree: GuardedInner<TPlat>,
+
+    /// Pinned blocks
+    ///
+    /// Every time a block is reported to the API user, it is inserted in this map.
+    ///
+    /// Values are indices within [`Guarded::runtimes`].
+    // TODO: docs
+    pinned_blocks: HashMap<[u8; 32], usize, fnv::FnvBuildHasher>,
 }
 
 enum GuardedInner<TPlat: Platform> {
@@ -1932,6 +1958,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     Some(async_tree::OutputUpdate::Block(block)) => {
                         let block_index = block.index;
                         let block_runtime_index = *block.async_op_user_data;
+                        let block_hash = block.user_data.hash;
                         let scale_encoded_header = block.user_data.scale_encoded_header.clone();
                         let is_new_best = block.is_new_best;
 
@@ -1948,6 +1975,12 @@ impl<TPlat: Platform> Background<TPlat> {
                             HashDisplay(&tree.block_user_data(block_index).hash),
                             is_new_best
                         );
+
+                        // TODO: must insert once per subscription /!\
+                        guarded.runtimes[block_runtime_index].num_references += 1;
+                        guarded
+                            .pinned_blocks
+                            .insert(block_hash, block_runtime_index);
 
                         Notification::Block(BlockNotification {
                             parent_hash: tree
@@ -2184,7 +2217,8 @@ impl<TPlat: Platform> Background<TPlat> {
 }
 
 struct Runtime {
-    /// Number of items in [`Guarded::tree`] that reference this runtime.
+    /// Number of items in [`Guarded::tree`] and [`Guarded::pinned_blocks`] that reference this
+    /// runtime.
     num_references: usize,
 
     /// Successfully-compiled runtime and all its information. Can contain an error if an error
