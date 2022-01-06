@@ -15,17 +15,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-/// <reference path="./browser.ts" />
+// TODO: worker shouldn't be any
+export function workerOnMessage(worker: any, callback: (message: any) => void): void;
+export function workerOnError(worker: any, callback: (error: Error) => void): void;
+export function workerTerminate(worker: any): Promise<void>;
 
-import { Worker as NodeJsWorker } from 'worker_threads';
+export function postMessage(message: any): void;
+export function setOnMessage(callback: (message: any) => void): void;
 
-export * from './nodejs.js';
-export { Socket as NodeJsSocket } from 'net';
+export function performanceNow(): number;
 
-export type CompatWorker = NodeJsWorker | Worker;
-export type Timeout = NodeJS.Timeout | number;
-
-export interface TcpConnectionOptions {
-    port: number;
-    host: string;
-}
+export function isTcpAvailable(): boolean;

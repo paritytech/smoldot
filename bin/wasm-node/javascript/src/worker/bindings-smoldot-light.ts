@@ -22,7 +22,6 @@
 
 import { Buffer } from 'buffer';
 import { w3cwebsocket } from 'websocket';
-import now from 'performance-now';
 import * as compat from '../compat/index.js';
 import { SmoldotWasmInstance } from './bindings.js';
 
@@ -120,7 +119,7 @@ export default (config: Config): WebAssembly.ModuleImports => {
         unix_time_ms: () => Date.now(),
 
         // Must return the value of a monotonic clock in milliseconds.
-        monotonic_clock_ms: () => now(),
+        monotonic_clock_ms: () => compat.performanceNow(),
 
         // Must call `timer_finished` after the given number of milliseconds has elapsed.
         start_timer: (id: number, ms: number) => {
