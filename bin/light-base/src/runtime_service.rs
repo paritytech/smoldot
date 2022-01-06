@@ -142,7 +142,11 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         };
 
         let guarded = Arc::new(Mutex::new(Guarded {
-            all_blocks_subscriptions: Vec::new(),
+            all_blocks_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
+                32,
+                Default::default(),
+            ), // TODO: capacity?
+            next_subscription_id: 0,
             finalized_blocks_subscriptions: Vec::new(),
             best_blocks_subscriptions: Vec::new(),
             best_near_head_of_chain,
@@ -556,15 +560,20 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 GuardedInner::FinalizedBlockRuntimeKnown { .. } => break guarded,
                 GuardedInner::FinalizedBlockRuntimeUnknown { .. } => {
                     let (tx, mut rx) = mpsc::channel(0);
-                    guarded.all_blocks_subscriptions.push(tx);
+                    let subscription_id = guarded.next_subscription_id;
+                    guarded.next_subscription_id += 1;
+                    guarded.all_blocks_subscriptions.insert(subscription_id, tx);
                     drop(guarded);
                     let _ = rx.next().await;
+                    // TODO: rethink just dropping the `rx` w.r.t. blocks pinning
                 }
             }
         };
 
         let (tx, new_blocks) = mpsc::channel(buffer_size);
-        guarded.all_blocks_subscriptions.push(tx);
+        let subscription_id = guarded.next_subscription_id;
+        guarded.next_subscription_id += 1;
+        guarded.all_blocks_subscriptions.insert(subscription_id, tx);
 
         let non_finalized_blocks_ancestry_order: Vec<_> = match &guarded.tree {
             GuardedInner::FinalizedBlockRuntimeKnown {
@@ -642,6 +651,17 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             },
             new_blocks,
             non_finalized_blocks_ancestry_order,
+        }
+    }
+
+    pub async fn unpin_block(&self, subscription: &(), block_hash: &[u8; 32]) {
+        let mut guarded_lock = self.guarded.lock().await;
+
+        let runtime_index = guarded_lock.pinned_blocks.remove(block_hash).unwrap();
+        if guarded_lock.runtimes[runtime_index].num_references == 1 {
+            guarded_lock.runtimes.remove(runtime_index);
+        } else {
+            guarded_lock.runtimes[runtime_index].num_references -= 1;
         }
     }
 
@@ -1317,7 +1337,13 @@ pub enum MetadataError {
 struct Guarded<TPlat: Platform> {
     /// List of senders that get notified when new blocks arrive.
     /// See [`RuntimeService::subscribe_all`].
-    all_blocks_subscriptions: Vec<mpsc::Sender<Notification>>,
+    ///
+    /// Keys are assigned from [`Guarded::next_subscription_id`].
+    all_blocks_subscriptions:
+        hashbrown::HashMap<u64, mpsc::Sender<Notification>, fnv::FnvBuildHasher>,
+
+    /// Identifier of the next subscription for [`Guarded::all_blocks_subscriptions`].
+    next_subscription_id: u64,
 
     /// List of senders that get notified when the finalized block is updated.
     /// See [`RuntimeService::subscribe_finalized`].
@@ -2058,14 +2084,14 @@ impl<TPlat: Platform> Background<TPlat> {
                 _ => unreachable!(),
             };
 
-            // Elements are removed one by one and inserted back if the channel is still open.
-            for index in (0..guarded.all_blocks_subscriptions.len()).rev() {
-                let mut subscription = guarded.all_blocks_subscriptions.swap_remove(index);
-                if subscription.try_send(all_blocks_notif.clone()).is_err() {
-                    continue;
+            let mut to_remove = Vec::new();
+            for (subscription_id, sender) in guarded.all_blocks_subscriptions.iter_mut() {
+                if sender.try_send(all_blocks_notif.clone()).is_err() {
+                    to_remove.push(*subscription_id);
                 }
-
-                guarded.all_blocks_subscriptions.push(subscription);
+            }
+            for to_remove in to_remove {
+                guarded.all_blocks_subscriptions.remove(&to_remove);
             }
         }
 
