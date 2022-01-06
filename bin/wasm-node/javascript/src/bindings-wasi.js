@@ -132,27 +132,27 @@ export default (config) => {
 
         // Write the environment variables to the given pointers.
         // `argv` is a pointer to a buffer that must be overwritten with a list of pointers to
-        // environment variables, and `argv_buf` is a pointer to a buffer where to actually store
+        // environment variables, and `argvBuf` is a pointer to a buffer where to actually store
         // the environment variables.
         // The sizes of the buffers were determined by calling `environ_sizes_get`.
-        environ_get: (argv, argv_buf) => {
+        environ_get: (argv, argvBuf) => {
             argv >>>= 0;
-            argv_buf >>>= 0;
+            argvBuf >>>= 0;
 
             const mem = Buffer.from(config.instance.exports.memory.buffer);
 
             let argvPos = 0;
             let argvBufPos = 0;
 
-            envVars.forEach(env_var => {
-                let envVarLen = Buffer.byteLength(e, 'utf8');
+            envVars.forEach(envVar => {
+                let envVarLen = Buffer.byteLength(envVar, 'utf8');
 
-                mem.writeUInt32LE(argv_buf + argvBufPos, argv + argvPos);
+                mem.writeUInt32LE(argvBuf + argvBufPos, argv + argvPos);
                 argvPos += 4;
 
-                mem.write(env_var, argv_buf + argvBufPos, envVarLen, 'utf8');
+                mem.write(envVar, argvBuf + argvBufPos, envVarLen, 'utf8');
                 argvBufPos += envVarLen;
-                mem.writeUInt8(0, argv_buf + argvBufPos);
+                mem.writeUInt8(0, argvBuf + argvBufPos);
                 argvBufPos += 1;
             });
 
