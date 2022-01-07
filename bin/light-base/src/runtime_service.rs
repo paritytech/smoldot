@@ -576,7 +576,10 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 &subscribe_all.finalized_block_scale_encoded_header,
             );
 
-            subscribe_all.new_blocks.unpin_block(&current_finalized_hash).await;
+            subscribe_all
+                .new_blocks
+                .unpin_block(&current_finalized_hash)
+                .await;
 
             non_finalized_headers.insert(
                 current_finalized_hash,
@@ -739,6 +742,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 tree,
                 finalized_block,
             } => {
+                guarded_lock.runtimes[*tree.finalized_async_user_data()].num_references += 1;
                 guarded_lock.pinned_blocks.insert(
                     (finalized_block.hash, subscription_id),
                     *tree.finalized_async_user_data(),
@@ -765,6 +769,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                                         && b.async_op_user_data.is_some())
                         );
 
+                        guarded_lock.runtimes[runtime_index].num_references += 1;
                         guarded_lock
                             .pinned_blocks
                             .insert((block_hash, subscription_id), runtime_index);
