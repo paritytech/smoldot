@@ -477,49 +477,70 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// Returns the SCALE-encoded header of the current finalized block, plus an unlimited stream
     /// that produces one item every time the finalized block is changed.
     pub async fn subscribe_finalized(&self) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
-        let subscribe_all = self.subscribe_all(16).await;
+        let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
+            let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await;
 
-        let mut headers = hashbrown::HashMap::<_, _, fnv::FnvBuildHasher>::with_capacity_and_hasher(
-            16,
-            Default::default(),
-        );
+            // Map of block headers by hash. Contains all non-finalized blocks headers.
+            let mut non_finalized_headers = hashbrown::HashMap::<
+                [u8; 32],
+                Vec<u8>,
+                fnv::FnvBuildHasher,
+            >::with_capacity_and_hasher(
+                16, Default::default()
+            );
 
-        for block in subscribe_all.non_finalized_blocks_ancestry_order {
-            let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-            headers.insert(hash, block.scale_encoded_header);
-        }
+            for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                non_finalized_headers.insert(hash, block.scale_encoded_header);
+            }
 
-        let stream = stream::unfold(
-            (subscribe_all.new_blocks, headers),
-            |(mut new_blocks, mut headers)| async {
-                loop {
-                    let block = new_blocks.next().await?;
-                    match block {
-                        Notification::Block(block) => {
-                            let hash =
-                                header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                            headers.insert(hash, block.scale_encoded_header);
-                        }
-                        Notification::Finalized {
-                            hash,
-                            pruned_blocks,
-                            ..
-                        } => {
-                            for pruned_block in pruned_blocks {
-                                let _was_in = headers.remove(&pruned_block);
-                                debug_assert!(_was_in.is_some());
+            // Turns `subscribe_all.new_blocks` into a stream of headers.
+            let substream = stream::unfold(
+                (subscribe_all.new_blocks, non_finalized_headers),
+                |(mut new_blocks, mut headers)| async {
+                    loop {
+                        match new_blocks.next().await? {
+                            Notification::Block(block) => {
+                                let hash = header::hash_from_scale_encoded_header(
+                                    &block.scale_encoded_header,
+                                );
+                                headers.insert(hash, block.scale_encoded_header);
                             }
+                            Notification::Finalized {
+                                hash,
+                                pruned_blocks,
+                                ..
+                            } => {
+                                // Clean up the headers we won't need anymore.
+                                for pruned_block in pruned_blocks {
+                                    let _was_in = headers.remove(&pruned_block);
+                                    debug_assert!(_was_in.is_some());
+                                }
 
-                            let header = headers.remove(&hash).unwrap();
-                            break Some((header, (new_blocks, headers)));
+                                let header = headers.remove(&hash).unwrap();
+                                break Some((header, (new_blocks, headers)));
+                            }
                         }
                     }
-                }
-            },
-        )
+                },
+            );
+
+            // Prepend the current finalized block to the stream.
+            let substream = stream::once(future::ready(
+                subscribe_all.finalized_block_scale_encoded_header,
+            ))
+            .chain(substream);
+
+            Some((substream, guarded))
+        })
+        .flatten()
         .boxed();
 
-        (subscribe_all.finalized_block_scale_encoded_header, stream)
+        // TODO: we don't dedup blocks; in other words the stream can produce the same block twice if the inner subscription drops
+
+        // Now that we have a stream, extract the first element to be the first value.
+        let first_value = master_stream.next().await.unwrap();
+        (first_value, master_stream)
     }
 
     /// Returns the SCALE-encoded header of the current best block, plus an unlimited stream that
