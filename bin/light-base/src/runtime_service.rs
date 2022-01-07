@@ -65,7 +65,7 @@ use futures::{
 use hashbrown::HashMap;
 use itertools::Itertools as _;
 use smoldot::{
-    chain::{async_tree, fork_tree},
+    chain::async_tree,
     executor, header,
     informant::{BytesDisplay, HashDisplay},
     metadata,
@@ -187,182 +187,152 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         Result<executor::CoreVersion, RuntimeError>,
         stream::BoxStream<'static, Result<executor::CoreVersion, RuntimeError>>,
     ) {
-        let subscribe_all = self.subscribe_all(8).await;
+        let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
+            let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await;
 
-        // TODO: make this code easier to read
-        let stream = stream::unfold(
-            {
-                let blocks =
-                    hashbrown::HashMap::<_, _, fnv::FnvBuildHasher>::with_capacity_and_hasher(
-                        subscribe_all.non_finalized_blocks_ancestry_order.len() + 8,
-                        Default::default(),
-                    );
-                let tree = fork_tree::ForkTree::new();
-                let current_best = None;
-                let finalized_hash = header::hash_from_scale_encoded_header(
-                    &subscribe_all.finalized_block_scale_encoded_header,
-                );
-                let new_blocks = Some(
-                    stream::iter(subscribe_all.non_finalized_blocks_ancestry_order.clone())
-                        .map(Notification::Block)
-                        .chain(subscribe_all.new_blocks),
-                );
+            // Map of runtimes by hash. Contains all non-finalized blocks runtimes.
+            let mut non_finalized_headers =
+                hashbrown::HashMap::<
+                    [u8; 32],
+                    Arc<Result<executor::CoreVersion, RuntimeError>>,
+                    fnv::FnvBuildHasher,
+                >::with_capacity_and_hasher(16, Default::default());
 
+            let current_finalized_hash = header::hash_from_scale_encoded_header(
+                &subscribe_all.finalized_block_scale_encoded_header,
+            );
+
+            non_finalized_headers.insert(
+                current_finalized_hash,
+                Arc::new(subscribe_all.finalized_block_runtime),
+            );
+
+            let mut current_best = None;
+            for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                if let Some(new_runtime) = block.new_runtime {
+                    non_finalized_headers.insert(hash, Arc::new(new_runtime));
+                } else {
+                    let parent_runtime = non_finalized_headers
+                        .get(&block.parent_hash)
+                        .unwrap()
+                        .clone();
+                    non_finalized_headers.insert(hash, parent_runtime);
+                }
+
+                if block.is_new_best {
+                    debug_assert!(current_best.is_none());
+                    current_best = Some(hash);
+                }
+            }
+            let current_best = current_best.unwrap_or(current_finalized_hash);
+            let current_best_runtime =
+                (**non_finalized_headers.get(&current_best).unwrap()).clone();
+
+            // Turns `subscribe_all.new_blocks` into a stream of headers.
+            let substream = stream::unfold(
                 (
-                    self.guarded.clone(),
-                    new_blocks,
-                    blocks,
-                    tree,
+                    subscribe_all.new_blocks,
+                    non_finalized_headers,
+                    current_finalized_hash,
                     current_best,
-                    finalized_hash,
-                )
-            },
-            move |(
-                guarded,
-                mut new_blocks,
-                mut blocks,
-                mut tree,
-                mut current_best,
-                mut finalized_hash,
-            )| async move {
-                loop {
-                    let mut best_runtime_has_changed = false;
+                ),
+                |(
+                    mut new_blocks,
+                    mut non_finalized_headers,
+                    mut current_finalized_hash,
+                    mut current_best,
+                )| async move {
+                    loop {
+                        match new_blocks.next().await? {
+                            Notification::Block(block) => {
+                                let hash = header::hash_from_scale_encoded_header(
+                                    &block.scale_encoded_header,
+                                );
 
-                    let notif = match &mut new_blocks {
-                        Some(b) => b.next().await,
-                        None => None,
-                    };
-
-                    match notif {
-                        None => {
-                            let subscribe_all = Self::subscribe_all_inner(&guarded, 8).await;
-
-                            let new_blocks = Some(
-                                stream::iter(
-                                    subscribe_all.non_finalized_blocks_ancestry_order.clone(),
-                                )
-                                .map(Notification::Block)
-                                .chain(subscribe_all.new_blocks),
-                            );
-
-                            blocks.clear();
-                            tree.clear();
-                            current_best = None;
-                            finalized_hash = header::hash_from_scale_encoded_header(
-                                &subscribe_all.finalized_block_scale_encoded_header,
-                            );
-
-                            break Some((
-                                subscribe_all.finalized_block_runtime,
-                                (
-                                    guarded,
-                                    new_blocks,
-                                    blocks,
-                                    tree,
-                                    current_best,
-                                    finalized_hash,
-                                ),
-                            ));
-                        }
-                        Some(Notification::Block(block)) => {
-                            let hash =
-                                header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-
-                            let new_block_index = tree.insert(
-                                if block.parent_hash == finalized_hash {
-                                    None
+                                if let Some(new_runtime) = block.new_runtime {
+                                    non_finalized_headers.insert(hash, Arc::new(new_runtime));
                                 } else {
-                                    Some(*blocks.get(&block.parent_hash).unwrap())
-                                },
-                                (block.new_runtime, hash),
-                            );
+                                    let parent_runtime = non_finalized_headers
+                                        .get(&block.parent_hash)
+                                        .unwrap()
+                                        .clone();
+                                    non_finalized_headers.insert(hash, parent_runtime);
+                                }
 
-                            let _was_in = blocks.insert(hash, new_block_index);
-                            debug_assert!(_was_in.is_none());
+                                if block.is_new_best {
+                                    let current_best_runtime =
+                                        non_finalized_headers.get(&current_best).unwrap();
+                                    let new_best_runtime =
+                                        non_finalized_headers.get(&hash).unwrap();
+                                    current_best = hash;
 
-                            if block.is_new_best {
-                                best_runtime_has_changed = if let Some(current_best) = current_best
-                                {
-                                    let (ascend, descend) =
-                                        tree.ascend_and_descend(new_block_index, current_best);
-                                    ascend
-                                        .chain(descend)
-                                        .any(|n| tree.get(n).unwrap().0.is_some())
-                                } else {
-                                    tree.node_to_root_path(new_block_index)
-                                        .any(|n| tree.get(n).unwrap().0.is_some())
-                                };
+                                    if !Arc::ptr_eq(&current_best_runtime, new_best_runtime) {
+                                        let runtime = (**new_best_runtime).clone();
+                                        break Some((
+                                            runtime,
+                                            (
+                                                new_blocks,
+                                                non_finalized_headers,
+                                                current_finalized_hash,
+                                                current_best,
+                                            ),
+                                        ));
+                                    }
+                                }
+                            }
+                            Notification::Finalized {
+                                hash,
+                                pruned_blocks,
+                                best_block_hash,
+                            } => {
+                                // Clean up the headers we won't need anymore.
+                                for pruned_block in pruned_blocks {
+                                    let _was_in = non_finalized_headers.remove(&pruned_block);
+                                    debug_assert!(_was_in.is_some());
+                                }
 
-                                current_best = Some(new_block_index);
+                                let _ = non_finalized_headers
+                                    .remove(&current_finalized_hash)
+                                    .unwrap();
+                                current_finalized_hash = hash;
+
+                                let current_best_runtime =
+                                    non_finalized_headers.get(&current_best).unwrap();
+                                let new_best_runtime =
+                                    non_finalized_headers.get(&best_block_hash).unwrap();
+                                current_best = best_block_hash;
+
+                                if !Arc::ptr_eq(&current_best_runtime, new_best_runtime) {
+                                    let runtime = (**new_best_runtime).clone();
+                                    break Some((
+                                        runtime,
+                                        (
+                                            new_blocks,
+                                            non_finalized_headers,
+                                            current_finalized_hash,
+                                            current_best,
+                                        ),
+                                    ));
+                                }
                             }
                         }
-                        Some(Notification::Finalized {
-                            hash,
-                            best_block_hash,
-                            ..
-                        }) => {
-                            finalized_hash = hash;
-
-                            for pruned in tree.prune_ancestors(*blocks.get(&hash).unwrap()) {
-                                let (_, hash) = pruned.user_data;
-                                let _was_in = blocks.remove(&hash);
-                                debug_assert_eq!(_was_in, Some(pruned.index));
-                            }
-
-                            current_best = if best_block_hash == finalized_hash {
-                                None
-                            } else {
-                                Some(*blocks.get(&best_block_hash).unwrap())
-                            };
-
-                            // TODO: handle best block might have changed
-                        }
                     }
+                },
+            );
 
-                    if best_runtime_has_changed {
-                        let best_runtime = if let Some(current_best) = current_best {
-                            tree.node_to_root_path(current_best)
-                                .find_map(|n| tree.get(n).unwrap().0.clone())
-                        } else {
-                            None
-                        }
-                        .unwrap(); // TODO: don't unwrap, use the finalized block runtime instead
+            // Prepend the current best block to the stream.
+            let substream = stream::once(future::ready(current_best_runtime)).chain(substream);
+            Some((substream, guarded))
+        })
+        .flatten()
+        .boxed();
 
-                        break Some((
-                            best_runtime,
-                            (
-                                guarded,
-                                new_blocks,
-                                blocks,
-                                tree,
-                                current_best,
-                                finalized_hash,
-                            ),
-                        ));
-                    }
-                }
-            },
-        );
+        // TODO: we don't dedup blocks; in other words the stream can produce the same block twice if the inner subscription drops
 
-        // Deduplicate the elements in `stream`.
-        let stream = stream::unfold(
-            (
-                stream.boxed(), // There's unfortunately no choice but to box the stream.
-                subscribe_all.finalized_block_runtime.clone(),
-            ),
-            move |(mut stream, previously_reported)| async move {
-                loop {
-                    let item = stream.next().await.unwrap();
-                    match (&item, &previously_reported) {
-                        (Ok(a), Ok(b)) if a == b => continue,
-                        _ => {} // TODO: what about errors? do we not deduplicate them?
-                    }
-                    break Some((item.clone(), (stream, item)));
-                }
-            },
-        );
-
-        (subscribe_all.finalized_block_runtime, stream.boxed())
+        // Now that we have a stream, extract the first element to be the first value.
+        let first_value = master_stream.next().await.unwrap();
+        (first_value, master_stream)
     }
 
     /// Returns the runtime version of the block with the given hash.
