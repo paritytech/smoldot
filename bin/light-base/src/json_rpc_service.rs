@@ -302,7 +302,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                                 None => return,
                             }
                         },
-                        block = finalized_blocks_subscription.next() => {
+                        block = finalized_blocks_subscription.next().fuse() => {
                             match block {
                                 Some(block) => {
                                     let hash = header::hash_from_scale_encoded_header(&block);

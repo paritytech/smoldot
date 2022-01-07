@@ -129,7 +129,6 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
         let guarded = Arc::new(Mutex::new(Guarded {
             all_blocks_subscriptions: Vec::new(),
-            finalized_blocks_subscriptions: Vec::new(),
             best_blocks_subscriptions: Vec::new(),
             best_near_head_of_chain,
             tree,
@@ -477,26 +476,50 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
     /// Returns the SCALE-encoded header of the current finalized block, plus an unlimited stream
     /// that produces one item every time the finalized block is changed.
-    pub async fn subscribe_finalized(&self) -> (Vec<u8>, NotificationsReceiver<Vec<u8>>) {
-        let (tx, rx) = lossy_channel::channel();
+    pub async fn subscribe_finalized(&self) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
+        let subscribe_all = self.subscribe_all(16).await;
 
-        let mut guarded = self.guarded.lock().await;
-        guarded.finalized_blocks_subscriptions.push(tx);
+        let mut headers = hashbrown::HashMap::<_, _, fnv::FnvBuildHasher>::with_capacity_and_hasher(
+            16,
+            Default::default(),
+        );
 
-        let header = match &guarded.tree {
-            GuardedInner::FinalizedBlockRuntimeKnown {
-                finalized_block, ..
-            } => finalized_block.scale_encoded_header.clone(),
-            GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
-                debug_assert_eq!(tree.children(None).count(), 1);
-                tree.block_user_data(tree.children(None).next().unwrap())
-                    .scale_encoded_header
-                    .clone()
-            }
-            _ => unreachable!(),
-        };
+        for block in subscribe_all.non_finalized_blocks_ancestry_order {
+            let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+            headers.insert(hash, block.scale_encoded_header);
+        }
 
-        (header, rx)
+        let stream = stream::unfold(
+            (subscribe_all.new_blocks, headers),
+            |(mut new_blocks, mut headers)| async {
+                loop {
+                    let block = new_blocks.next().await?;
+                    match block {
+                        Notification::Block(block) => {
+                            let hash =
+                                header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                            headers.insert(hash, block.scale_encoded_header);
+                        }
+                        Notification::Finalized {
+                            hash,
+                            pruned_blocks,
+                            ..
+                        } => {
+                            for pruned_block in pruned_blocks {
+                                let _was_in = headers.remove(&pruned_block);
+                                debug_assert!(_was_in.is_some());
+                            }
+
+                            let header = headers.remove(&hash).unwrap();
+                            break Some((header, (new_blocks, headers)));
+                        }
+                    }
+                }
+            },
+        )
+        .boxed();
+
+        (subscribe_all.finalized_block_scale_encoded_header, stream)
     }
 
     /// Returns the SCALE-encoded header of the current best block, plus an unlimited stream that
@@ -1315,10 +1338,6 @@ struct Guarded<TPlat: Platform> {
     /// See [`RuntimeService::subscribe_all`].
     all_blocks_subscriptions: Vec<mpsc::Sender<Notification>>,
 
-    /// List of senders that get notified when the finalized block is updated.
-    /// See [`RuntimeService::subscribe_finalized`].
-    finalized_blocks_subscriptions: Vec<lossy_channel::Sender<Vec<u8>>>,
-
     /// List of senders that get notified when the best block is updated.
     /// See [`RuntimeService::subscribe_best`].
     best_blocks_subscriptions: Vec<lossy_channel::Sender<Vec<u8>>>,
@@ -1388,7 +1407,7 @@ impl<TPlat: Platform> Guarded<TPlat> {
     }
 
     /// Notifies the subscribers about changes to the best and finalized blocks.
-    fn notify_subscribers(&mut self, best_block_updated: bool, finalized_block_updated: bool) {
+    fn notify_subscribers(&mut self, best_block_updated: bool) {
         if best_block_updated {
             // TODO: unwrap? clarify in API
             let best_block_header = self.best_block_header().clone();
@@ -1401,32 +1420,6 @@ impl<TPlat: Platform> Guarded<TPlat> {
                 }
 
                 self.best_blocks_subscriptions.push(subscription);
-            }
-        }
-
-        if finalized_block_updated {
-            let finalized_block_header = match &mut self.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown {
-                    finalized_block, ..
-                } => &finalized_block.scale_encoded_header,
-                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
-                    // TODO: panic here instead?
-                    debug_assert_eq!(tree.children(None).count(), 1);
-                    &tree
-                        .block_user_data(tree.children(None).next().unwrap())
-                        .scale_encoded_header
-                }
-                _ => unreachable!(),
-            };
-
-            // Elements are removed one by one and inserted back if the channel is still open.
-            for index in (0..self.finalized_blocks_subscriptions.len()).rev() {
-                let mut subscription = self.finalized_blocks_subscriptions.swap_remove(index);
-                if subscription.send(finalized_block_header.to_vec()).is_err() {
-                    continue;
-                }
-
-                self.finalized_blocks_subscriptions.push(subscription);
             }
         }
     }
@@ -1480,7 +1473,6 @@ async fn run_background<TPlat: Platform>(
 
             lock.all_blocks_subscriptions.clear();
             lock.best_blocks_subscriptions.clear();
-            lock.finalized_blocks_subscriptions.clear();
             // TODO: restore
             /*lock.best_near_head_of_chain =
             is_near_head_of_chain_heuristic(&sync_service, &guarded).await;*/
@@ -1899,7 +1891,6 @@ impl<TPlat: Platform> Background<TPlat> {
 
     fn advance_and_notify_subscribers(&self, guarded: &mut Guarded<TPlat>) {
         let mut best_block_updated = false;
-        let mut finalized_block_updated = false;
 
         loop {
             let all_blocks_notif = match &mut guarded.tree {
@@ -1916,7 +1907,6 @@ impl<TPlat: Platform> Background<TPlat> {
                         ..
                     }) => {
                         best_block_updated = true;
-                        finalized_block_updated = true;
 
                         *finalized_block = new_finalized;
                         let best_block_hash = best_block_index
@@ -2002,7 +1992,6 @@ impl<TPlat: Platform> Background<TPlat> {
                         guarded.all_blocks_subscriptions.clear();
 
                         best_block_updated = true;
-                        finalized_block_updated = true;
 
                         let best_block_hash = best_block_index.map_or(new_finalized.hash, |idx| {
                             tree.as_ref().unwrap().block_user_data(idx).hash
@@ -2055,7 +2044,7 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         }
 
-        guarded.notify_subscribers(best_block_updated, finalized_block_updated);
+        guarded.notify_subscribers(best_block_updated);
     }
 
     /// Examines the state of `self` and starts downloading runtimes if necessary.
