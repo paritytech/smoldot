@@ -2737,6 +2737,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         either::Left(Some(runtime_service::Notification::Finalized {
                             best_block_hash,
                             hash,
+                            ..
                         }))
                         | either::Right(Some(sync_service::Notification::Finalized {
                             best_block_hash,
