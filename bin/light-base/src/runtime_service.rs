@@ -188,7 +188,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         stream::BoxStream<'static, Result<executor::CoreVersion, RuntimeError>>,
     ) {
         let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
-            let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await; // TODO: must unpin blocks
+            let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await;
 
             // Map of runtimes by hash. Contains all non-finalized blocks runtimes.
             let mut non_finalized_headers =
@@ -201,6 +201,10 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             let current_finalized_hash = header::hash_from_scale_encoded_header(
                 &subscribe_all.finalized_block_scale_encoded_header,
             );
+            subscribe_all
+                .new_blocks
+                .unpin_block(&current_finalized_hash)
+                .await;
 
             non_finalized_headers.insert(
                 current_finalized_hash,
@@ -210,6 +214,8 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             let mut current_best = None;
             for block in subscribe_all.non_finalized_blocks_ancestry_order {
                 let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                subscribe_all.new_blocks.unpin_block(&hash).await;
+
                 if let Some(new_runtime) = block.new_runtime {
                     non_finalized_headers.insert(hash, Arc::new(new_runtime));
                 } else {
@@ -249,6 +255,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                                 let hash = header::hash_from_scale_encoded_header(
                                     &block.scale_encoded_header,
                                 );
+                                new_blocks.unpin_block(&hash).await;
 
                                 if let Some(new_runtime) = block.new_runtime {
                                     non_finalized_headers.insert(hash, Arc::new(new_runtime));
@@ -467,7 +474,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// might take a long time.
     pub async fn subscribe_finalized(&self) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
         let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
-            let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await; // TODO: must unpin blocks
+            let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await;
 
             // Map of block headers by hash. Contains all non-finalized blocks headers.
             let mut non_finalized_headers = hashbrown::HashMap::<
@@ -478,8 +485,16 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 16, Default::default()
             );
 
+            subscribe_all
+                .new_blocks
+                .unpin_block(&header::hash_from_scale_encoded_header(
+                    &subscribe_all.finalized_block_scale_encoded_header,
+                ))
+                .await;
+
             for block in subscribe_all.non_finalized_blocks_ancestry_order {
                 let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                subscribe_all.new_blocks.unpin_block(&hash).await;
                 non_finalized_headers.insert(hash, block.scale_encoded_header);
             }
 
@@ -493,6 +508,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                                 let hash = header::hash_from_scale_encoded_header(
                                     &block.scale_encoded_header,
                                 );
+                                new_blocks.unpin_block(&hash).await;
                                 non_finalized_headers.insert(hash, block.scale_encoded_header);
                             }
                             Notification::Finalized {
@@ -545,7 +561,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// on the best block.
     pub async fn subscribe_best(&self) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
         let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
-            let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await; // TODO: must unpin blocks
+            let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await;
 
             // Map of block headers by hash. Contains all non-finalized blocks headers.
             let mut non_finalized_headers = hashbrown::HashMap::<
@@ -560,6 +576,8 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 &subscribe_all.finalized_block_scale_encoded_header,
             );
 
+            subscribe_all.new_blocks.unpin_block(&current_finalized_hash).await;
+
             non_finalized_headers.insert(
                 current_finalized_hash,
                 subscribe_all.finalized_block_scale_encoded_header,
@@ -568,6 +586,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             let mut current_best = None;
             for block in subscribe_all.non_finalized_blocks_ancestry_order {
                 let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                subscribe_all.new_blocks.unpin_block(&hash).await;
                 non_finalized_headers.insert(hash, block.scale_encoded_header);
 
                 if block.is_new_best {
@@ -598,6 +617,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                                 let hash = header::hash_from_scale_encoded_header(
                                     &block.scale_encoded_header,
                                 );
+                                new_blocks.unpin_block(&hash).await;
                                 non_finalized_headers.insert(hash, block.scale_encoded_header);
 
                                 if block.is_new_best {
