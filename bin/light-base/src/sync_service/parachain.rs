@@ -88,6 +88,10 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         // Each block in the tree has an associated parahead behind an `Option`. This `Option`
         // always contains `Some`, unless the relay chain finalized block hasn't had its parahead
         // fetched yet.
+        //
+        // The set of blocks in this tree whose parahead hasn't been fetched yet is the same as
+        // the set of blocks that is maintained pinned on the runtime service. Blocks are unpinned
+        // when their parahead fetching succeeds.
         let mut async_tree = {
             let mut async_tree =
                 async_tree::AsyncTree::<TPlat::Instant, [u8; 32], _>::new(async_tree::Config {
@@ -264,7 +268,6 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     // Do nothing. This is simply to wake up and loop again.
                 },
 
-                // TODO: must unpin blocks
                 relay_chain_notif = relay_chain_subscribe_all.new_blocks.next().fuse() => { // TODO: remove fuse()?
                     let relay_chain_notif = match relay_chain_notif {
                         Some(n) => n,
@@ -315,6 +318,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                 async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", ")
                             );
 
+                            // TODO: must unpin these blocks
                             async_tree.async_op_finished(async_op_id, Some(parahead));
                         },
                         Err(error) => {
