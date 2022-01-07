@@ -167,6 +167,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     async_tree::OutputUpdate::Finalized {
                         async_op_user_data: new_parahead,
                         former_finalized_async_op_user_data: former_parahead,
+                        pruned_blocks,
                         ..
                     } if *new_parahead != former_parahead => {
                         debug_assert!(new_parahead.is_some());
@@ -178,6 +179,16 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         if let Ok(header) = header::decode(&finalized_parahead) {
                             sync_sources.set_finalized_block_height(header.number);
                             // TODO: what about an `else`? does sync_sources leak if the block can't be decoded?
+                        }
+
+                        // Must unpin the pruned blocks if they haven't already been unpinned.
+                        for (_, hash, pruned_block_parahead) in pruned_blocks {
+                            if pruned_block_parahead.is_none() {
+                                relay_chain_subscribe_all
+                                    .new_blocks
+                                    .unpin_block(&hash)
+                                    .await;
+                            }
                         }
 
                         log::debug!(
