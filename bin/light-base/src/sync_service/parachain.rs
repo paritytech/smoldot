@@ -276,7 +276,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     // Update the local tree of blocks to match the update sent by the relay chain
                     // syncing service.
                     match relay_chain_notif {
-                        runtime_service::Notification::Finalized { hash, best_block_hash } => {
+                        runtime_service::Notification::Finalized { hash, best_block_hash, .. } => {
                             log::debug!(
                                 target: &log_target,
                                 "Relay chain has finalized block 0x{}",

@@ -42,8 +42,6 @@ use smoldot::{
 };
 use std::{fmt, num::NonZeroU32, sync::Arc};
 
-pub use crate::lossy_channel::Receiver as NotificationsReceiver;
-
 mod parachain;
 mod standalone;
 
