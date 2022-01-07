@@ -318,8 +318,11 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                 async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", ")
                             );
 
-                            // TODO: must unpin these blocks
-                            async_tree.async_op_finished(async_op_id, Some(parahead));
+                            // Unpin the relay blocks whose parahead is now known.
+                            for block in async_tree.async_op_finished(async_op_id, Some(parahead)) {
+                                let hash = async_tree.block_user_data(block);
+                                relay_chain_subscribe_all.new_blocks.unpin_block(hash).await;
+                            }
                         },
                         Err(error) => {
                             // Only a debug line is printed if not near the head of the chain,

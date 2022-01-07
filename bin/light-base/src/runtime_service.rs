@@ -2046,7 +2046,7 @@ impl<TPlat: Platform> Background<TPlat> {
             })
         };
 
-        let num_blocks = match &mut guarded.tree {
+        let blocks = match &mut guarded.tree {
             GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
                 tree.async_op_finished(async_op_id, runtime_index)
             }
@@ -2056,9 +2056,9 @@ impl<TPlat: Platform> Background<TPlat> {
             _ => unreachable!(),
         };
 
-        guarded.runtimes[runtime_index].num_references += num_blocks;
+        guarded.runtimes[runtime_index].num_references += blocks.len();
 
-        if num_blocks == 0 {
+        if blocks.is_empty() {
             guarded.runtimes.retain(|_, rt| rt.num_references > 0);
         }
 
