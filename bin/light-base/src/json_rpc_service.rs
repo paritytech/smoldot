@@ -190,8 +190,6 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             transactions_service: config.transactions_service,
             blocks: Mutex::new(Blocks {
                 known_blocks: lru::LruCache::new(256),
-                best_block: [0; 32],      // Filled below.
-                finalized_block: [0; 32], // Filled below.
             }),
             genesis_block: config.genesis_block_hash,
             next_subscription_id: atomic::AtomicU64::new(0),
@@ -212,27 +210,9 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
         (config.tasks_executor)(
             "json-rpc-service".into(),
             async move {
-                // TODO: use subscribe_all?
-                let (finalized_block_header, mut finalized_blocks_subscription) =
-                    background.runtime_service.subscribe_finalized().await;
-                let finalized_block_hash =
-                    header::hash_from_scale_encoded_header(&finalized_block_header);
-                let (best_block_header, mut best_blocks_subscription) =
-                    background.runtime_service.subscribe_best().await;
-                let best_block_hash = header::hash_from_scale_encoded_header(&best_block_header);
-
-                {
-                    let mut blocks = background.blocks.try_lock().unwrap();
-                    blocks
-                        .known_blocks
-                        .put(finalized_block_hash, finalized_block_header);
-                    blocks.known_blocks.put(best_block_hash, best_block_header);
-                    blocks.finalized_block = finalized_block_hash;
-                    blocks.best_block = best_block_hash;
-                }
-
                 let mut main_tasks = stream::FuturesUnordered::new();
                 let mut secondary_tasks = stream::FuturesUnordered::new();
+                let mut new_blocks = None;
 
                 main_tasks.push({
                     let background = background.clone();
@@ -279,6 +259,32 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                         break;
                     }
 
+                    if new_blocks.is_none() {
+                        // Subscribe to new sync service blocks in order to push them in the
+                        // cache as soon as they are available.
+                        // Note that `subscribe_all` on the sync service always returns very
+                        // quickly, as opposed to the runtime service where it waits for the
+                        // runtime to be known.
+                        let subscribe_all = background.sync_service.subscribe_all(8, false).await;
+                        new_blocks = Some(subscribe_all.new_blocks);
+                        
+                            let finalized_block_hash = header::hash_from_scale_encoded_header(
+                                &subscribe_all.finalized_block_scale_encoded_header,
+                            );
+        
+                            let mut blocks = background.blocks.try_lock().unwrap();
+                            blocks.known_blocks.put(
+                                finalized_block_hash,
+                                subscribe_all.finalized_block_scale_encoded_header,
+                            );
+        
+                            for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                                let hash =
+                                    header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                                blocks.known_blocks.put(hash, block.scale_encoded_header);
+                            }
+                    }
+
                     futures::select! {
                         () = main_tasks.select_next_some() => {},
                         () = secondary_tasks.select_next_some() => {},
@@ -286,33 +292,17 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                             let task = task.unwrap();
                             secondary_tasks.push(task);
                         }
-                        block = best_blocks_subscription.next() => {
-                            match block {
-                                Some(block) => {
-                                    let hash = header::hash_from_scale_encoded_header(&block);
-                                    let mut blocks = background.blocks.lock().await;
-                                    let blocks = &mut *blocks;
-                                    blocks.best_block = hash;
-                                    // As a small trick, we re-query the finalized block from
-                                    // `known_blocks` in order to ensure that it never leaves the
-                                    // LRU cache.
-                                    blocks.known_blocks.get(&blocks.finalized_block);
-                                    blocks.known_blocks.put(hash, block);
-                                },
-                                None => return,
+                        notification = new_blocks.as_mut().unwrap().next() => {
+                            match notification {
+                                Some(sync_service::Notification::Block(block)) => {
+                                    let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                                    let mut blocks = background.blocks.try_lock().unwrap();
+                                    blocks.known_blocks.put(hash, block.scale_encoded_header);
+                                }
+                                Some(sync_service::Notification::Finalized { .. }) => {}
+                                None => new_blocks = None,
                             }
-                        },
-                        block = finalized_blocks_subscription.next() => {
-                            match block {
-                                Some(block) => {
-                                    let hash = header::hash_from_scale_encoded_header(&block);
-                                    let mut blocks = background.blocks.lock().await;
-                                    blocks.finalized_block = hash;
-                                    blocks.known_blocks.put(hash, block);
-                                },
-                                None => return,
-                            }
-                        },
+                        }
                     }
                 }
             }
@@ -495,12 +485,6 @@ struct Blocks {
     ///
     /// Always contains `best_block` and `finalized_block`.
     known_blocks: lru::LruCache<[u8; 32], Vec<u8>>,
-
-    /// Hash of the current best block.
-    best_block: [u8; 32],
-
-    /// Hash of the latest finalized block.
-    finalized_block: [u8; 32],
 }
 
 impl<TPlat: Platform> Background<TPlat> {
@@ -619,7 +603,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 // `hash` equal to `None` means "the current best block".
                 let hash = match hash {
                     Some(h) => h.0,
-                    None => self.blocks.lock().await.best_block,
+                    None => header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0),
                 };
 
                 // Block bodies and justifications aren't stored locally. Ask the network.
@@ -665,8 +649,9 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::chain_getFinalizedHead {} => {
+                // TODO: maybe optimize?
                 let response = methods::Response::chain_getFinalizedHead(methods::HashHexString(
-                    self.blocks.lock().await.finalized_block,
+                    header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_finalized().await.0),
                 ))
                 .to_json_response(request_id);
 
@@ -677,7 +662,7 @@ impl<TPlat: Platform> Background<TPlat> {
             methods::MethodCall::chain_getHeader { hash } => {
                 let hash = match hash {
                     Some(h) => h.0,
-                    None => self.blocks.lock().await.best_block,
+                    None => header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0),
                 };
 
                 let fut = self.header_query(&hash);
@@ -856,8 +841,9 @@ impl<TPlat: Platform> Background<TPlat> {
             } => {
                 assert!(hash.is_none()); // TODO: not implemented
 
+                let block_hash = header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
+
                 let mut blocks = self.blocks.lock().await;
-                let block_hash = blocks.best_block;
                 let (state_root, block_number) = {
                     let block = blocks.known_blocks.get(&block_hash).unwrap();
                     match header::decode(block) {
@@ -918,13 +904,15 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::state_queryStorageAt { keys, at } => {
+                let best_block= header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
+
                 let blocks = self.blocks.lock().await;
 
-                let at = at.as_ref().map(|h| h.0).unwrap_or(blocks.best_block);
+                let at = at.as_ref().map(|h| h.0).unwrap_or(best_block);
 
                 // TODO: have no idea what this describes actually
                 let mut out = methods::StorageChangeSet {
-                    block: methods::HashHexString(blocks.best_block),
+                    block: methods::HashHexString(best_block),
                     changes: Vec::new(),
                 };
 
@@ -981,7 +969,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 let hash = hash
                     .as_ref()
                     .map(|h| h.0)
-                    .unwrap_or(self.blocks.lock().await.best_block);
+                    .unwrap_or(header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0));
 
                 let fut = self.storage_query(&key.0, &hash);
                 let response = fut.await;
@@ -1880,42 +1868,17 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         height: Option<u64>,
     ) {
+        // TODO: maybe store values in known_blocks?
         let response = {
-            let mut blocks = self.blocks.lock().await;
-            let blocks = &mut *blocks;
-
             match height {
                 Some(0) => methods::Response::chain_getBlockHash(methods::HashHexString(
                     self.genesis_block,
                 ))
                 .to_json_response(request_id),
                 None => {
-                    methods::Response::chain_getBlockHash(methods::HashHexString(blocks.best_block))
+                    let best_block = header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
+                    methods::Response::chain_getBlockHash(methods::HashHexString(best_block))
                         .to_json_response(request_id)
-                }
-                Some(n)
-                    if blocks
-                        .known_blocks
-                        .get(&blocks.best_block)
-                        .map_or(false, |h| {
-                            header::decode(&h).map_or(false, |h| h.number == n)
-                        }) =>
-                {
-                    methods::Response::chain_getBlockHash(methods::HashHexString(blocks.best_block))
-                        .to_json_response(request_id)
-                }
-                Some(n)
-                    if blocks
-                        .known_blocks
-                        .get(&blocks.finalized_block)
-                        .map_or(false, |h| {
-                            header::decode(&h).map_or(false, |h| h.number == n)
-                        }) =>
-                {
-                    methods::Response::chain_getBlockHash(methods::HashHexString(
-                        blocks.finalized_block,
-                    ))
-                    .to_json_response(request_id)
                 }
                 Some(_) => {
                     // While the block could be found in `known_blocks`, there is no guarantee
