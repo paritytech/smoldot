@@ -284,6 +284,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                         Some(Notification::Finalized {
                             hash,
                             best_block_hash,
+                            ..
                         }) => {
                             finalized_hash = hash;
 
@@ -836,18 +837,21 @@ pub struct SubscribeAll {
 pub enum Notification {
     /// A non-finalized block has been finalized.
     Finalized {
-        /// Blake2 hash of the block that has been finalized.
+        /// Blake2 hash of the header of the block that has been finalized.
         ///
         /// A block with this hash is guaranteed to have earlier been reported in a
         /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
         /// or in a [`Notification::Block`].
         ///
-        /// It is, however, not guaranteed that this block is a child of the previously-finalized
-        /// block. In other words, if multiple blocks are finalized at the same time, only one
+        /// It is also guaranteed that this block is a child of the previously-finalized block. In
+        /// other words, if multiple blocks are finalized at the same time, only one
         /// [`Notification::Finalized`] is generated and contains the highest finalized block.
+        ///
+        /// If it is not possible for the [`RuntimeService`] to avoid a gap in the list of
+        /// finalized blocks, then the [`SubscribeAll::new_blocks`] channel is force-closed.
         hash: [u8; 32],
 
-        /// Hash of the best block after the finalization.
+        /// Hash of the header of the best block after the finalization.
         ///
         /// If the newly-finalized block is an ancestor of the current best block, then this field
         /// contains the hash of this current best block. Otherwise, the best block is now
@@ -857,6 +861,13 @@ pub enum Notification {
         /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
         /// or in a [`Notification::Block`].
         best_block_hash: [u8; 32],
+
+        /// List of blake2 hashes of the headers of the blocks that have been discarded because
+        /// they're not descendants of the newly-finalized block.
+        ///
+        /// This list contains all the siblings of the newly-finalized block and all their
+        /// descendants.
+        pruned_blocks: Vec<[u8; 32]>,
     },
 
     /// A new block has been added to the list of unfinalized blocks.
@@ -1918,8 +1929,8 @@ impl<TPlat: Platform> Background<TPlat> {
                         );
 
                         guarded.runtimes[former_finalized_runtime_index].num_references -= 1;
-                        for (_, _, runtime_index) in pruned_blocks {
-                            if let Some(runtime_index) = runtime_index {
+                        for (_, _, runtime_index) in &pruned_blocks {
+                            if let Some(runtime_index) = *runtime_index {
                                 guarded.runtimes[runtime_index].num_references -= 1;
                             }
                         }
@@ -1927,6 +1938,10 @@ impl<TPlat: Platform> Background<TPlat> {
                         Notification::Finalized {
                             best_block_hash,
                             hash: finalized_block.hash,
+                            pruned_blocks: pruned_blocks
+                                .into_iter()
+                                .map(|(_, b, _)| b.hash)
+                                .collect(),
                         }
                     }
                     Some(async_tree::OutputUpdate::Block(block)) => {
@@ -2010,8 +2025,8 @@ impl<TPlat: Platform> Background<TPlat> {
 
                         // TODO: doesn't report existing blocks /!\
 
-                        for (_, _, runtime_index) in pruned_blocks {
-                            if let Some(Some(runtime_index)) = runtime_index {
+                        for (_, _, runtime_index) in &pruned_blocks {
+                            if let Some(Some(runtime_index)) = *runtime_index {
                                 guarded.runtimes[runtime_index].num_references -= 1;
                             }
                         }
@@ -2019,6 +2034,10 @@ impl<TPlat: Platform> Background<TPlat> {
                         Notification::Finalized {
                             best_block_hash,
                             hash: new_finalized_hash,
+                            pruned_blocks: pruned_blocks
+                                .into_iter()
+                                .map(|(_, b, _)| b.hash)
+                                .collect(),
                         }
                     }
                 },
