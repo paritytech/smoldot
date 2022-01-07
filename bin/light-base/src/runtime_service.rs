@@ -476,6 +476,9 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
     /// Returns the SCALE-encoded header of the current finalized block, plus an unlimited stream
     /// that produces one item every time the finalized block is changed.
+    ///
+    /// This function only returns once the runtime of the current finalized block is known. This
+    /// might take a long time.
     pub async fn subscribe_finalized(&self) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
         let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
             let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await;
@@ -560,6 +563,9 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     }
 
     /// Subscribes to the state of the chain: the current state and the new blocks.
+    ///
+    /// This function only returns once the runtime of the current finalized block is known. This
+    /// might take a long time.
     ///
     /// Contrary to [`RuntimeService::subscribe_best`], *all* new blocks are reported. Only up to
     /// `buffer_size` block notifications are buffered in the channel. If the channel is full
