@@ -1953,7 +1953,8 @@ impl<TPlat: Platform> Background<TPlat> {
         let mut new_blocks = {
             let subscribe_all = self.runtime_service.subscribe_all(16).await;
 
-            // We need to unpin
+            // The finalized and already-known blocks aren't reported to the user, but we need
+            // unpin them on to the runtime service.
             subscribe_all
                 .new_blocks
                 .unpin_block(&header::hash_from_scale_encoded_header(
