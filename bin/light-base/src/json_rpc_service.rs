@@ -2494,6 +2494,7 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         let mut subscribe_all = if runtime_updates {
+            // TODO: must unpin blocks
             either::Left(self.runtime_service.subscribe_all(32).await)
         } else {
             either::Right(self.sync_service.subscribe_all(32, false).await)

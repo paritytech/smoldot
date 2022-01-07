@@ -188,7 +188,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         stream::BoxStream<'static, Result<executor::CoreVersion, RuntimeError>>,
     ) {
         let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
-            let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await;
+            let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await; // TODO: must unpin blocks
 
             // Map of runtimes by hash. Contains all non-finalized blocks runtimes.
             let mut non_finalized_headers =
@@ -467,7 +467,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// might take a long time.
     pub async fn subscribe_finalized(&self) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
         let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
-            let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await;
+            let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await; // TODO: must unpin blocks
 
             // Map of block headers by hash. Contains all non-finalized blocks headers.
             let mut non_finalized_headers = hashbrown::HashMap::<
@@ -545,7 +545,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// on the best block.
     pub async fn subscribe_best(&self) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
         let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
-            let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await;
+            let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await; // TODO: must unpin blocks
 
             // Map of block headers by hash. Contains all non-finalized blocks headers.
             let mut non_finalized_headers = hashbrown::HashMap::<
