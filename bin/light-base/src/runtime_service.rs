@@ -50,7 +50,7 @@
 //! As long as a block is pinned, the [`RuntimeService`] is guaranteed to keep in its internal
 //! state the runtime of this block and its properties.
 //!
-//! Blocks must be manually unpinned by calling TODO.
+//! Blocks must be manually unpinned by calling [`Subscription::unpin_block`].
 //! Failing to do so is effectively a memory leak. If the number of pinned blocks becomes too
 //! large, the subscription is force-killed by the [`RuntimeService`].
 //!
