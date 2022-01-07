@@ -267,22 +267,22 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                         // runtime to be known.
                         let subscribe_all = background.sync_service.subscribe_all(8, false).await;
                         new_blocks = Some(subscribe_all.new_blocks);
-                        
-                            let finalized_block_hash = header::hash_from_scale_encoded_header(
-                                &subscribe_all.finalized_block_scale_encoded_header,
-                            );
-        
-                            let mut blocks = background.blocks.try_lock().unwrap();
-                            blocks.known_blocks.put(
-                                finalized_block_hash,
-                                subscribe_all.finalized_block_scale_encoded_header,
-                            );
-        
-                            for block in subscribe_all.non_finalized_blocks_ancestry_order {
-                                let hash =
-                                    header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                                blocks.known_blocks.put(hash, block.scale_encoded_header);
-                            }
+
+                        let finalized_block_hash = header::hash_from_scale_encoded_header(
+                            &subscribe_all.finalized_block_scale_encoded_header,
+                        );
+
+                        let mut blocks = background.blocks.try_lock().unwrap();
+                        blocks.known_blocks.put(
+                            finalized_block_hash,
+                            subscribe_all.finalized_block_scale_encoded_header,
+                        );
+
+                        for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                            let hash =
+                                header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                            blocks.known_blocks.put(hash, block.scale_encoded_header);
+                        }
                     }
 
                     futures::select! {
@@ -1876,7 +1876,9 @@ impl<TPlat: Platform> Background<TPlat> {
                 ))
                 .to_json_response(request_id),
                 None => {
-                    let best_block = header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
+                    let best_block = header::hash_from_scale_encoded_header(
+                        &self.runtime_service.subscribe_best().await.0,
+                    );
                     methods::Response::chain_getBlockHash(methods::HashHexString(best_block))
                         .to_json_response(request_id)
                 }
