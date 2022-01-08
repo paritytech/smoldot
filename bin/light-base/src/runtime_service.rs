@@ -292,6 +292,11 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                                 pruned_blocks,
                                 best_block_hash,
                             } => {
+                                let current_best_runtime =
+                                    non_finalized_headers.get(&current_best).unwrap().clone();
+                                let new_best_runtime =
+                                    non_finalized_headers.get(&best_block_hash).unwrap().clone();
+
                                 // Clean up the headers we won't need anymore.
                                 for pruned_block in pruned_blocks {
                                     let _was_in = non_finalized_headers.remove(&pruned_block);
@@ -302,15 +307,10 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                                     .remove(&current_finalized_hash)
                                     .unwrap();
                                 current_finalized_hash = hash;
-
-                                let current_best_runtime =
-                                    non_finalized_headers.get(&current_best).unwrap();
-                                let new_best_runtime =
-                                    non_finalized_headers.get(&best_block_hash).unwrap();
                                 current_best = best_block_hash;
 
-                                if !Arc::ptr_eq(&current_best_runtime, new_best_runtime) {
-                                    let runtime = (**new_best_runtime).clone();
+                                if !Arc::ptr_eq(&current_best_runtime, &new_best_runtime) {
+                                    let runtime = (*new_best_runtime).clone();
                                     break Some((
                                         runtime,
                                         (
