@@ -466,6 +466,8 @@ struct FollowSubscription {
     /// For each pinned block hash, the SCALE-encoded header of the block.
     pinned_blocks_headers: HashMap<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
 
+    runtime_subscribe_all: Option<runtime_service::SubscriptionId>,
+
     abort_handle: future::AbortHandle,
 }
 
@@ -1579,7 +1581,14 @@ impl<TPlat: Platform> Background<TPlat> {
                     if let Some(subscription) =
                         lock.chain_head_follow.get_mut(follow_subscription_id)
                     {
-                        subscription.pinned_blocks_headers.remove(&hash.0).is_some()
+                        if subscription.pinned_blocks_headers.remove(&hash.0).is_some() {
+                            if let Some(runtime_subscribe_all) = subscription.runtime_subscribe_all {
+                                self.runtime_service.unpin_block(runtime_subscribe_all, &hash.0).await;
+                            }
+                            true
+                        } else {
+                            false
+                        }
                     } else {
                         true
                     }
@@ -1950,17 +1959,27 @@ impl<TPlat: Platform> Background<TPlat> {
             )
             .await;
 
-        let mut blocks_list = {
+        let mut new_blocks = {
             let subscribe_all = self.runtime_service.subscribe_all(16).await;
-            // TODO: is it correct to return all non-finalized blocks first? have to compare with PolkadotJS
-            stream::iter(subscribe_all.non_finalized_blocks_ancestry_order)
-                .chain(subscribe_all.new_blocks.filter_map(|notif| {
-                    future::ready(match notif {
-                        runtime_service::Notification::Block(b) => Some(b),
-                        _ => None,
-                    })
-                }))
-                .map(|notif| notif.scale_encoded_header)
+
+            // The finalized and already-known blocks aren't reported to the user, but we need
+            // unpin them on to the runtime service.
+            subscribe_all
+                .new_blocks
+                .unpin_block(&header::hash_from_scale_encoded_header(
+                    &subscribe_all.finalized_block_scale_encoded_header,
+                ))
+                .await;
+            for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                subscribe_all
+                    .new_blocks
+                    .unpin_block(&header::hash_from_scale_encoded_header(
+                        &block.scale_encoded_header,
+                    ))
+                    .await;
+            }
+
+            subscribe_all.new_blocks
         };
 
         // Spawn a separate task for the subscription.
@@ -1968,22 +1987,30 @@ impl<TPlat: Platform> Background<TPlat> {
             let me = self.clone();
             async move {
                 loop {
-                    match blocks_list.next().await {
-                        Some(block) => {
-                            let header =
-                                methods::Header::from_scale_encoded_header(&block).unwrap();
+                    match new_blocks.next().await {
+                        Some(runtime_service::Notification::Block(block)) => {
+                            new_blocks
+                                .unpin_block(&header::hash_from_scale_encoded_header(
+                                    &block.scale_encoded_header,
+                                ))
+                                .await;
+
                             let _ = me
                                 .requests_subscriptions
                                 .try_push_notification(
                                     &state_machine_subscription,
                                     methods::ServerToClient::chain_newHead {
                                         subscription: &subscription_id,
-                                        result: header,
+                                        result: methods::Header::from_scale_encoded_header(
+                                            &block.scale_encoded_header,
+                                        )
+                                        .unwrap(),
                                     }
                                     .to_json_call_object_parameters(None),
                                 )
                                 .await;
                         }
+                        Some(runtime_service::Notification::Finalized { .. }) => {}
                         None => {
                             // TODO: ?!
                             return;
@@ -2475,10 +2502,15 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        let mut subscribe_all = if runtime_updates {
-            either::Left(self.runtime_service.subscribe_all(32).await)
+        let (mut subscribe_all, runtime_subscribe_all) = if runtime_updates {
+            let subscribe_all = self.runtime_service.subscribe_all(32).await;
+            let id = subscribe_all.new_blocks.id();
+            (either::Left(subscribe_all), Some(id))
         } else {
-            either::Right(self.sync_service.subscribe_all(32, false).await)
+            (
+                either::Right(self.sync_service.subscribe_all(32, false).await),
+                None,
+            )
         };
 
         let (subscription_id, initial_notifications, abort_registration) = {
@@ -2664,6 +2696,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 FollowSubscription {
                     non_finalized_blocks,
                     pinned_blocks_headers,
+                    runtime_subscribe_all,
                     abort_handle: abort_handle,
                 },
             );

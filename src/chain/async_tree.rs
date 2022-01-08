@@ -395,39 +395,36 @@ where
     ///
     /// This "destroys" the [`AsyncOpId`].
     ///
-    /// Returns the number of blocks whose state was affected by this asynchronous operation. This
-    /// can be more than 1 if blocks were inserted with `same_async_op_as_parent` as `true`.
+    /// Returns the list of blocks whose state was affected by this asynchronous operation. This
+    /// can be zero blocks, or be more than one block if blocks were inserted with
+    /// `same_async_op_as_parent` as `true`.
     ///
     /// # Panic
     ///
     /// Panics if the [`AsyncOpId`] is invalid.
     ///
-    pub fn async_op_finished(&mut self, async_op_id: AsyncOpId, user_data: TAsync) -> usize
+    pub fn async_op_finished(&mut self, async_op_id: AsyncOpId, user_data: TAsync) -> Vec<NodeIndex>
     where
         TAsync: Clone,
     {
-        // Find the number of blocks that are bound to this operation.
-        let num_concerned_blocks = self
+        // TODO: O(n) and allocation
+
+        // Find the list of blocks that are bound to this operation.
+        let list = self
             .non_finalized_blocks
             .iter_unordered()
-            .map(|(_, b)| b)
-            .filter(|b| {
+            .filter(|(_, b)| {
                 matches!(b.async_op,
                 AsyncOpState::InProgress {
                     async_op_id: id, ..
                 } if id == async_op_id)
             })
-            .count();
+            .map(|(b, _)| b)
+            .collect::<Vec<_>>();
 
         // Update the blocks that were performing this operation to become `Finished`.
-        // TODO: O(n) and allocation
-        for index in self
-            .non_finalized_blocks
-            .iter_unordered()
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>()
-        {
-            let block = self.non_finalized_blocks.get_mut(index).unwrap();
+        for index in &list {
+            let block = self.non_finalized_blocks.get_mut(*index).unwrap();
             match block.async_op {
                 AsyncOpState::InProgress {
                     async_op_id: id, ..
@@ -441,7 +438,7 @@ where
             }
         }
 
-        num_concerned_blocks
+        list
     }
 
     /// Injects into the state of the state machine a failed operation.

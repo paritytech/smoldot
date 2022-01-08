@@ -88,6 +88,10 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         // Each block in the tree has an associated parahead behind an `Option`. This `Option`
         // always contains `Some`, unless the relay chain finalized block hasn't had its parahead
         // fetched yet.
+        //
+        // The set of blocks in this tree whose parahead hasn't been fetched yet is the same as
+        // the set of blocks that is maintained pinned on the runtime service. Blocks are unpinned
+        // when their parahead fetching succeeds.
         let mut async_tree = {
             let mut async_tree =
                 async_tree::AsyncTree::<TPlat::Instant, [u8; 32], _>::new(async_tree::Config {
@@ -164,6 +168,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     async_tree::OutputUpdate::Finalized {
                         async_op_user_data: new_parahead,
                         former_finalized_async_op_user_data: former_parahead,
+                        pruned_blocks,
                         ..
                     } if *new_parahead != former_parahead => {
                         debug_assert!(new_parahead.is_some());
@@ -175,6 +180,16 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         if let Ok(header) = header::decode(&finalized_parahead) {
                             sync_sources.set_finalized_block_height(header.number);
                             // TODO: what about an `else`? does sync_sources leak if the block can't be decoded?
+                        }
+
+                        // Must unpin the pruned blocks if they haven't already been unpinned.
+                        for (_, hash, pruned_block_parahead) in pruned_blocks {
+                            if pruned_block_parahead.is_none() {
+                                relay_chain_subscribe_all
+                                    .new_blocks
+                                    .unpin_block(&hash)
+                                    .await;
+                            }
                         }
 
                         log::debug!(
@@ -265,7 +280,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     // Do nothing. This is simply to wake up and loop again.
                 },
 
-                relay_chain_notif = relay_chain_subscribe_all.new_blocks.next() => {
+                relay_chain_notif = relay_chain_subscribe_all.new_blocks.next().fuse() => { // TODO: remove fuse()?
                     let relay_chain_notif = match relay_chain_notif {
                         Some(n) => n,
                         None => break, // Jumps to the outer loop to recreate the channel.
@@ -315,7 +330,11 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                 async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", ")
                             );
 
-                            async_tree.async_op_finished(async_op_id, Some(parahead));
+                            // Unpin the relay blocks whose parahead is now known.
+                            for block in async_tree.async_op_finished(async_op_id, Some(parahead)) {
+                                let hash = async_tree.block_user_data(block);
+                                relay_chain_subscribe_all.new_blocks.unpin_block(hash).await;
+                            }
                         },
                         Err(error) => {
                             // Only a debug line is printed if not near the head of the chain,
