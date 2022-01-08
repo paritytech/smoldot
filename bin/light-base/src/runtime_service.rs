@@ -1098,7 +1098,8 @@ impl<TPlat: Platform> Subscription<TPlat> {
             &self.guarded,
             SubscriptionId(self.subscription_id),
             block_hash,
-        ).await
+        )
+        .await
     }
 }
 
