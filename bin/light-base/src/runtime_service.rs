@@ -62,7 +62,6 @@ use futures::{
     lock::{Mutex, MutexGuard},
     prelude::*,
 };
-use hashbrown::HashMap;
 use itertools::Itertools as _;
 use smoldot::{
     chain::async_tree,
@@ -72,7 +71,7 @@ use smoldot::{
     network::protocol,
     trie::{self, proof_verify},
 };
-use std::{iter, mem, pin::Pin, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, iter, mem, pin::Pin, sync::Arc, time::Duration};
 
 /// Configuration for a runtime service.
 pub struct Config<TPlat: Platform> {
@@ -148,7 +147,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             best_near_head_of_chain,
             tree,
             runtimes: slab::Slab::with_capacity(2),
-            pinned_blocks: hashbrown::HashMap::with_capacity_and_hasher(32, Default::default()), // TODO: capacity?
+            pinned_blocks: BTreeMap::new(),
         }));
 
         // Spawns a task that runs in the background and updates the content of the mutex.
@@ -1580,7 +1579,7 @@ struct Guarded<TPlat: Platform> {
     ///
     /// Values are indices within [`Guarded::runtimes`].
     // TODO: docs
-    pinned_blocks: HashMap<([u8; 32], u64), usize, fnv::FnvBuildHasher>,
+    pinned_blocks: BTreeMap<([u8; 32], u64), usize>,
 }
 
 enum GuardedInner<TPlat: Platform> {
