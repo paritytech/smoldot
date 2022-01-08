@@ -466,6 +466,8 @@ struct FollowSubscription {
     /// For each pinned block hash, the SCALE-encoded header of the block.
     pinned_blocks_headers: HashMap<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
 
+    runtime_subscribe_all: Option<runtime_service::SubscriptionId>,
+
     abort_handle: future::AbortHandle,
 }
 
@@ -1579,7 +1581,14 @@ impl<TPlat: Platform> Background<TPlat> {
                     if let Some(subscription) =
                         lock.chain_head_follow.get_mut(follow_subscription_id)
                     {
-                        subscription.pinned_blocks_headers.remove(&hash.0).is_some()
+                        if subscription.pinned_blocks_headers.remove(&hash.0).is_some() {
+                            if let Some(runtime_subscribe_all) = subscription.runtime_subscribe_all {
+                                self.runtime_service.unpin_block(runtime_subscribe_all, &hash.0).await;
+                            }
+                            true
+                        } else {
+                            false
+                        }
                     } else {
                         true
                     }
@@ -2493,11 +2502,15 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        let mut subscribe_all = if runtime_updates {
-            // TODO: must unpin blocks
-            either::Left(self.runtime_service.subscribe_all(32).await)
+        let (mut subscribe_all, runtime_subscribe_all) = if runtime_updates {
+            let subscribe_all = self.runtime_service.subscribe_all(32).await;
+            let id = subscribe_all.new_blocks.id();
+            (either::Left(subscribe_all), Some(id))
         } else {
-            either::Right(self.sync_service.subscribe_all(32, false).await)
+            (
+                either::Right(self.sync_service.subscribe_all(32, false).await),
+                None,
+            )
         };
 
         let (subscription_id, initial_notifications, abort_registration) = {
@@ -2683,6 +2696,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 FollowSubscription {
                     non_finalized_blocks,
                     pinned_blocks_headers,
+                    runtime_subscribe_all,
                     abort_handle: abort_handle,
                 },
             );
