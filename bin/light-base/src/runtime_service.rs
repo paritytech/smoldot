@@ -741,7 +741,10 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 guarded_lock.runtimes[*tree.finalized_async_user_data()].num_references += 1;
                 guarded_lock.pinned_blocks.insert(
                     (subscription_id, finalized_block.hash),
-                    *tree.finalized_async_user_data(),
+                    (
+                        *tree.finalized_async_user_data(),
+                        finalized_block.scale_encoded_header.clone(),
+                    ),
                 );
 
                 tree.input_iter_ancestry_order()
@@ -766,9 +769,10 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                         );
 
                         guarded_lock.runtimes[runtime_index].num_references += 1;
-                        guarded_lock
-                            .pinned_blocks
-                            .insert((subscription_id, block_hash), runtime_index);
+                        guarded_lock.pinned_blocks.insert(
+                            (subscription_id, block_hash),
+                            (runtime_index, block.user_data.scale_encoded_header.clone()),
+                        );
 
                         Some(BlockNotification {
                             is_new_best: block.is_output_best,
@@ -851,7 +855,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ) {
         let mut guarded_lock = guarded.lock().await;
 
-        let runtime_index = guarded_lock
+        let (runtime_index, _scale_encoded_header) = guarded_lock
             .pinned_blocks
             .remove(&(subscription_id.0, *block_hash))
             .unwrap();
@@ -860,6 +864,11 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         } else {
             guarded_lock.runtimes[runtime_index].num_references -= 1;
         }
+
+        debug_assert_eq!(
+            header::hash_from_scale_encoded_header(&_scale_encoded_header),
+            *block_hash
+        );
 
         let (sender, num_pinned) = guarded_lock
             .all_blocks_subscriptions
@@ -891,50 +900,47 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
         RuntimeLock {
             service: self,
+            guarded,
             inner: if let Some(block_index) = block_index {
-                RuntimeLockInner::InTree {
-                    guarded,
-                    block_index,
-                }
+                RuntimeLockInner::InTree { block_index }
             } else {
-                RuntimeLockInner::Finalized(guarded)
+                RuntimeLockInner::Finalized
             },
         }
     }
 
-    // TODO: should have a LRU cache of slightly older finalized blocks
-    // TODO: doc, especially about which blocks are available
-    // TODO: return error instead
-    pub async fn runtime_lock<'a>(
+    /// Lock the runtime service and prepare a call to a runtime entry point.
+    ///
+    /// The hash of the block passed as parameter corresponds to the block whose runtime to use
+    /// to make the call. The block must be currently pinned in the context of the provided
+    /// [`SubscriptionId`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the given block isn't currently pinned by the given subscription.
+    ///
+    pub async fn pinned_block_runtime_call_lock<'a>(
         &'a self,
+        subscription_id: SubscriptionId,
         block_hash: &[u8; 32],
-    ) -> Option<RuntimeLock<'a, TPlat>> {
-        // TODO: restore
-        //let guarded = self.guarded.lock().await;
-        /*if guarded
-            .tree
-            .as_ref()
-            .unwrap()
-            .block_runtime(block_hash)
-            .is_some()
-        {
-            return Some(RuntimeLock {
-                service: self,
-                inner: RuntimeLockInner::InTree(guarded),
-                block_hash: *block_hash,
-            });
-        }*/
+    ) -> RuntimeLock<'a, TPlat> {
+        let guarded = self.guarded.lock().await;
 
-        let (scale_encoded_header, virtual_machine) =
-            self.network_block_info(block_hash).await.ok()?;
-        Some(RuntimeLock {
+        let (runtime_index, scale_encoded_header) = (*guarded
+            .pinned_blocks
+            .get(&(subscription_id.0, *block_hash))
+            .unwrap())
+        .clone();
+
+        RuntimeLock {
             service: self,
+            guarded,
             inner: RuntimeLockInner::OutOfTree {
                 hash: *block_hash,
                 scale_encoded_header,
-                virtual_machine,
+                runtime_index,
             },
-        })
+        }
     }
 
     /// Obtain the metadata of the runtime of the current best block.
@@ -942,8 +948,8 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// > **Note**: Keep in mind that this function is subject to race conditions. The runtime
     /// >           of the best block can change at any time. This method should ideally be called
     /// >           again after every runtime change.
-    pub async fn metadata(&self, block_hash: &[u8; 32]) -> Result<Vec<u8>, MetadataError> {
-        self.metadata_inner(Some(block_hash)).await
+    pub async fn metadata(&self, _block_hash: &[u8; 32]) -> Result<Vec<u8>, MetadataError> {
+        todo!() // TODO: restore, somehow
     }
 
     /// Obtain the metadata of the runtime of the current best block.
@@ -975,23 +981,16 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             }
         }*/
 
-        self.metadata_inner(None).await
+        self.metadata_inner().await
     }
 
-    async fn metadata_inner(
-        &self,
-        block_hash: Option<&[u8; 32]>,
-    ) -> Result<Vec<u8>, MetadataError> {
-        let (runtime_call_lock, virtual_machine) = if let Some(block_hash) = block_hash {
-            self.runtime_lock(block_hash)
-                .await
-                .ok_or(MetadataError::RuntimeFetch)?
-        } else {
-            self.recent_best_block_runtime_lock().await
-        }
-        .start("Metadata_metadata", iter::empty::<Vec<u8>>())
-        .await
-        .map_err(MetadataError::CallError)?;
+    async fn metadata_inner(&self) -> Result<Vec<u8>, MetadataError> {
+        let (runtime_call_lock, virtual_machine) = self
+            .recent_best_block_runtime_lock()
+            .await
+            .start("Metadata_metadata", iter::empty::<Vec<u8>>())
+            .await
+            .map_err(MetadataError::CallError)?;
 
         let mut query = metadata::query_metadata(virtual_machine);
         let (metadata_result, virtual_machine) = loop {
@@ -1207,15 +1206,15 @@ async fn is_near_head_of_chain_heuristic<TPlat: Platform>(
 #[must_use]
 pub struct RuntimeLock<'a, TPlat: Platform> {
     service: &'a RuntimeService<TPlat>,
-    inner: RuntimeLockInner<'a, TPlat>,
+    guarded: MutexGuard<'a, Guarded<TPlat>>, // TODO: is the lock actually necessary? maybe we can just increase the reference count of the runtime instead, and clone the header+hash
+    inner: RuntimeLockInner,
 }
 
-enum RuntimeLockInner<'a, TPlat: Platform> {
+enum RuntimeLockInner {
     /// Call made against [`GuardedInner::FinalizedBlockRuntimeKnown::finalized_block`].
-    Finalized(MutexGuard<'a, Guarded<TPlat>>),
+    Finalized,
     /// Block is found in the tree at the given index.
     InTree {
-        guarded: MutexGuard<'a, Guarded<TPlat>>,
         /// Index of the block to make the call against.
         block_index: async_tree::NodeIndex,
     },
@@ -1223,7 +1222,7 @@ enum RuntimeLockInner<'a, TPlat: Platform> {
     OutOfTree {
         scale_encoded_header: Vec<u8>,
         hash: [u8; 32],
-        virtual_machine: executor::host::HostVmPrototype,
+        runtime_index: usize,
     },
 }
 
@@ -1233,16 +1232,13 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
     /// Guaranteed to always be valid.
     pub fn block_scale_encoded_header(&self) -> &[u8] {
         match &self.inner {
-            RuntimeLockInner::Finalized(guarded) => match &guarded.tree {
+            RuntimeLockInner::Finalized => match &self.guarded.tree {
                 GuardedInner::FinalizedBlockRuntimeKnown {
                     finalized_block, ..
                 } => &finalized_block.scale_encoded_header[..],
                 _ => unreachable!(),
             },
-            RuntimeLockInner::InTree {
-                guarded,
-                block_index,
-            } => match &guarded.tree {
+            RuntimeLockInner::InTree { block_index } => match &self.guarded.tree {
                 GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
                     &tree.block_user_data(*block_index).scale_encoded_header[..]
                 }
@@ -1261,16 +1257,13 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
         match &self.inner {
-            RuntimeLockInner::Finalized(guarded) => match &guarded.tree {
+            RuntimeLockInner::Finalized => match &self.guarded.tree {
                 GuardedInner::FinalizedBlockRuntimeKnown {
                     finalized_block, ..
                 } => &finalized_block.hash,
                 _ => unreachable!(),
             },
-            RuntimeLockInner::InTree {
-                guarded,
-                block_index,
-            } => match &guarded.tree {
+            RuntimeLockInner::InTree { block_index } => match &self.guarded.tree {
                 GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
                     &tree.block_user_data(*block_index).hash
                 }
@@ -1296,17 +1289,10 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
             .number;
         let block_hash = *self.block_hash();
         let runtime_block_header = self.block_scale_encoded_header().to_owned(); // TODO: cloning :-/
-        let virtual_machine = match self.inner {
-            RuntimeLockInner::Finalized(guarded) | RuntimeLockInner::InTree { guarded, .. } => {
-                // Unlock `guarded` before doing anything that takes a long time, such as the
-                // network request below.
-                drop(guarded);
-                None
-            }
-            RuntimeLockInner::OutOfTree {
-                virtual_machine, ..
-            } => Some(virtual_machine),
-        };
+
+        // Unlock `guarded` before doing anything that takes a long time, such as the
+        // network request below.
+        drop(self.guarded);
 
         // Perform the call proof request.
         // Note that `guarded` is not locked.
@@ -1327,34 +1313,38 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
             .await
             .map_err(RuntimeCallError::CallProof);
 
-        let (guarded, virtual_machine) = if let Some(virtual_machine) = virtual_machine {
-            (None, virtual_machine)
-        } else {
+        let (guarded, virtual_machine) = {
             // Lock `guarded` again now that the call is finished.
             let mut guarded = self.service.guarded.lock().await;
 
-            // It is not guaranteed that the block is still in the tree after the storage proof
-            // has ended.
-            let runtime_index = match &guarded.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown {
-                    tree,
-                    finalized_block,
-                    ..
-                } => {
-                    if finalized_block.hash == block_hash {
-                        Some(*tree.finalized_async_user_data())
-                    } else {
-                        tree.input_iter_unordered()
+            let runtime_index =
+                if let RuntimeLockInner::OutOfTree { runtime_index, .. } = self.inner {
+                    Some(runtime_index)
+                } else {
+                    // It is not guaranteed that the block is still in the tree after the storage
+                    // proof has ended.
+                    // TODO: solve this better than downloading the runtime below
+                    match &guarded.tree {
+                        GuardedInner::FinalizedBlockRuntimeKnown {
+                            tree,
+                            finalized_block,
+                            ..
+                        } => {
+                            if finalized_block.hash == block_hash {
+                                Some(*tree.finalized_async_user_data())
+                            } else {
+                                tree.input_iter_unordered()
+                                    .find(|block| block.user_data.hash == block_hash)
+                                    .map(|block| *block.async_op_user_data.unwrap())
+                            }
+                        }
+                        GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => tree
+                            .input_iter_unordered()
                             .find(|block| block.user_data.hash == block_hash)
-                            .map(|block| *block.async_op_user_data.unwrap())
+                            .map(|block| block.async_op_user_data.unwrap().unwrap()),
+                        _ => unreachable!(),
                     }
-                }
-                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => tree
-                    .input_iter_unordered()
-                    .find(|block| block.user_data.hash == block_hash)
-                    .map(|block| block.async_op_user_data.unwrap().unwrap()),
-                _ => unreachable!(),
-            };
+                };
 
             match runtime_index {
                 Some(runtime_index) => {
@@ -1579,8 +1569,9 @@ pub enum MetadataError {
     /// Error in the metadata-specific runtime API.
     #[display(fmt = "Error in the metadata-specific runtime API: {}", _0)]
     MetadataQuery(metadata::Error),
-    /// Error while fetching the runtime of the desired block.
-    RuntimeFetch,
+    // TODO: restore or remove
+    /*/// Error while fetching the runtime of the desired block.
+    RuntimeFetch,*/
 }
 
 struct Guarded<TPlat: Platform> {
@@ -1613,8 +1604,10 @@ struct Guarded<TPlat: Platform> {
     /// the channel is closed it is the background that needs to purge all blocks from this
     /// container that are no longer relevant.
     ///
-    /// Keys are `(subscription_id, block_hash)`. Values are indices within [`Guarded::runtimes`].
-    pinned_blocks: BTreeMap<(u64, [u8; 32]), usize>,
+    /// Keys are `(subscription_id, block_hash)`. Values are indices within [`Guarded::runtimes`]
+    /// and block SCALE-encoded headers.
+    // TODO: it seems quite expensive to clone this block header all the time
+    pinned_blocks: BTreeMap<(u64, [u8; 32]), (usize, Vec<u8>)>,
 }
 
 enum GuardedInner<TPlat: Platform> {
@@ -2175,7 +2168,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 .parent(block_index)
                                 .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash),
                             is_new_best,
-                            scale_encoded_header,
+                            scale_encoded_header: scale_encoded_header.clone(),
                             new_runtime: if parent_runtime_index != block_runtime_index {
                                 Some(
                                     guarded.runtimes[block_runtime_index]
@@ -2202,9 +2195,10 @@ impl<TPlat: Platform> Background<TPlat> {
                             if sender.try_send(notif.clone()).is_ok() {
                                 *num_pinned += 1;
                                 guarded.runtimes[block_runtime_index].num_references += 1;
-                                guarded
-                                    .pinned_blocks
-                                    .insert((*subscription_id, block_hash), block_runtime_index);
+                                guarded.pinned_blocks.insert(
+                                    (*subscription_id, block_hash),
+                                    (block_runtime_index, scale_encoded_header.clone()),
+                                );
                             } else {
                                 to_remove.push(*subscription_id);
                             }

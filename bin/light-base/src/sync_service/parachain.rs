@@ -121,6 +121,11 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         let mut all_subscriptions = Vec::<mpsc::Sender<_>>::new();
 
         // List of in-progress parahead fetching operations.
+        //
+        // The operations require some blocks to be pinned within the relay chain runtime service,
+        // which is guaranteed by the fact that `relay_chain_subscribe_all.new_blocks` stays
+        // alive for longer than this container, and by the fact that we unpin block after a
+        // fetching operation has finished and that we never fetch twice for the same block.
         let mut in_progress_paraheads = stream::FuturesUnordered::new();
 
         // Future that is ready when we need to wake up the `select!` below.
@@ -148,12 +153,19 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
                         in_progress_paraheads.push({
                             let relay_chain_sync = relay_chain_sync.clone();
+                            let subscription_id = relay_chain_subscribe_all.new_blocks.id();
                             let block_hash = *op.block_user_data;
                             let async_op_id = op.id;
                             async move {
                                 (
                                     async_op_id,
-                                    parahead(&relay_chain_sync, parachain_id, &block_hash).await,
+                                    parahead(
+                                        &relay_chain_sync,
+                                        subscription_id,
+                                        parachain_id,
+                                        &block_hash,
+                                    )
+                                    .await,
                                 )
                             }
                             .boxed()
@@ -470,15 +482,15 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
 async fn parahead<TPlat: Platform>(
     relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
+    subscription_id: runtime_service::SubscriptionId,
     parachain_id: u32,
     block_hash: &[u8; 32],
 ) -> Result<Vec<u8>, ParaheadError> {
     // For each relay chain block, call `ParachainHost_persisted_validation_data` in
     // order to know where the parachains are.
     let (runtime_call_lock, virtual_machine) = relay_chain_sync
-        .runtime_lock(block_hash)
+        .pinned_block_runtime_call_lock(subscription_id, block_hash)
         .await
-        .ok_or(ParaheadError::BlockPruned)?
         .start(
             para::PERSISTED_VALIDATION_FUNCTION_NAME,
             para::persisted_validation_data_parameters(
@@ -555,7 +567,6 @@ enum ParaheadError {
     ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
     NoCore,
     InvalidRuntimeOutput(para::Error),
-    BlockPruned,
 }
 
 impl ParaheadError {
@@ -568,7 +579,6 @@ impl ParaheadError {
             ParaheadError::ReadOnlyRuntime(_) => false,
             ParaheadError::NoCore => false,
             ParaheadError::InvalidRuntimeOutput(_) => false,
-            ParaheadError::BlockPruned => false,
         }
     }
 }
