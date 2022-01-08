@@ -722,7 +722,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                     guarded_lock.next_subscription_id += 1;
                     guarded_lock
                         .all_blocks_subscriptions
-                        .insert(subscription_id, tx);
+                        .insert(subscription_id, (tx, 0));
                     drop(guarded_lock);
                     let _ = rx.next().await;
                 }
@@ -733,9 +733,6 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         let (tx, new_blocks_channel) = mpsc::channel(buffer_size);
         let subscription_id = guarded_lock.next_subscription_id;
         guarded_lock.next_subscription_id += 1;
-        guarded_lock
-            .all_blocks_subscriptions
-            .insert(subscription_id, tx);
 
         let non_finalized_blocks_ancestry_order: Vec<_> = match &guarded_lock.tree {
             GuardedInner::FinalizedBlockRuntimeKnown {
@@ -803,6 +800,11 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 .count(),
             0 | 1
         ));
+
+        guarded_lock.all_blocks_subscriptions.insert(
+            subscription_id,
+            (tx, 1 + non_finalized_blocks_ancestry_order.len()),
+        );
 
         SubscribeAll {
             finalized_block_scale_encoded_header: match &guarded_lock.tree {
@@ -1060,6 +1062,12 @@ impl<TPlat: Platform> Subscription<TPlat> {
         } else {
             guarded_lock.runtimes[runtime_index].num_references -= 1;
         }
+
+        guarded_lock
+            .all_blocks_subscriptions
+            .get_mut(&self.subscription_id)
+            .unwrap()
+            .1 -= 1;
     }
 }
 
@@ -1545,11 +1553,12 @@ pub enum MetadataError {
 
 struct Guarded<TPlat: Platform> {
     /// List of senders that get notified when new blocks arrive.
-    /// See [`RuntimeService::subscribe_all`].
+    /// See [`RuntimeService::subscribe_all`]. Alongside with each sender, the number of pinned
+    /// blocks for this subscription.
     ///
     /// Keys are assigned from [`Guarded::next_subscription_id`].
     all_blocks_subscriptions:
-        hashbrown::HashMap<u64, mpsc::Sender<Notification>, fnv::FnvBuildHasher>,
+        hashbrown::HashMap<u64, (mpsc::Sender<Notification>, usize), fnv::FnvBuildHasher>,
 
     /// Identifier of the next subscription for [`Guarded::all_blocks_subscriptions`].
     next_subscription_id: u64,
@@ -1649,6 +1658,7 @@ async fn run_background<TPlat: Platform>(
             let lock = &mut *lock; // Solves borrow checking issues.
 
             lock.all_blocks_subscriptions.clear();
+            lock.pinned_blocks.clear();
             // TODO: restore
             /*lock.best_near_head_of_chain =
             is_near_head_of_chain_heuristic(&sync_service, &guarded).await;*/
@@ -2146,9 +2156,17 @@ impl<TPlat: Platform> Background<TPlat> {
                         });
 
                         let mut to_remove = Vec::new();
-                        for (subscription_id, sender) in guarded.all_blocks_subscriptions.iter_mut()
+                        for (subscription_id, (sender, num_pinned)) in
+                            guarded.all_blocks_subscriptions.iter_mut()
                         {
+                            if *num_pinned >= 32 {
+                                // TODO: constant
+                                to_remove.push(*subscription_id);
+                                continue;
+                            }
+
                             if sender.try_send(notif.clone()).is_ok() {
+                                *num_pinned += 1;
                                 guarded.runtimes[block_runtime_index].num_references += 1;
                                 guarded
                                     .pinned_blocks
@@ -2179,8 +2197,9 @@ impl<TPlat: Platform> Background<TPlat> {
                     }) => {
                         debug_assert!(former_finalized_async_op_user_data.is_none());
 
-                        // TODO: this is a hack to make the implementation of `subscribe_all` work and because the rest of this block doesn't properly report blocks
+                        // TODO: the two lines below are a hack to make the implementation of `subscribe_all` work and because the rest of this block doesn't properly report blocks
                         guarded.all_blocks_subscriptions.clear();
+                        guarded.pinned_blocks.clear();
 
                         let best_block_hash = best_block_index.map_or(new_finalized.hash, |idx| {
                             tree.as_ref().unwrap().block_user_data(idx).hash
@@ -2223,13 +2242,14 @@ impl<TPlat: Platform> Background<TPlat> {
             };
 
             let mut to_remove = Vec::new();
-            for (subscription_id, sender) in guarded.all_blocks_subscriptions.iter_mut() {
+            for (subscription_id, (sender, _)) in guarded.all_blocks_subscriptions.iter_mut() {
                 if sender.try_send(all_blocks_notif.clone()).is_err() {
                     to_remove.push(*subscription_id);
                 }
             }
             for to_remove in to_remove {
                 guarded.all_blocks_subscriptions.remove(&to_remove);
+                // TODO: unpin blocks
             }
         }
     }
