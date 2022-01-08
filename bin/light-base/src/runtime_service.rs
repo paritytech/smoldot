@@ -833,6 +833,42 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         }
     }
 
+    /// Unpins a block after it has been reported by a subscription.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SubscriptionId`] is not or no longer valid.
+    /// Panics if the block hash has not been reported or has already been unpinned.
+    ///
+    pub async fn unpin_block(&self, subscription_id: SubscriptionId, block_hash: &[u8; 32]) {
+        Self::unpin_block_inner(&self.guarded, subscription_id, block_hash).await
+    }
+
+    async fn unpin_block_inner(
+        guarded: &Arc<Mutex<Guarded<TPlat>>>,
+        subscription_id: SubscriptionId,
+        block_hash: &[u8; 32],
+    ) {
+        let mut guarded_lock = guarded.lock().await;
+
+        let runtime_index = guarded_lock
+            .pinned_blocks
+            .remove(&(subscription_id.0, *block_hash))
+            .unwrap();
+        if guarded_lock.runtimes[runtime_index].num_references == 1 {
+            guarded_lock.runtimes.remove(runtime_index);
+        } else {
+            guarded_lock.runtimes[runtime_index].num_references -= 1;
+        }
+
+        let (sender, num_pinned) = guarded_lock
+            .all_blocks_subscriptions
+            .get_mut(&subscription_id.0)
+            .unwrap();
+        assert!(!sender.is_closed()); // Strong assertion in order to conform to API constraints
+        *num_pinned -= 1;
+    }
+
     // TODO: doc
     pub async fn recent_best_block_runtime_lock<'a>(&'a self) -> RuntimeLock<'a, TPlat> {
         // TODO: clean up implementation
@@ -1032,6 +1068,9 @@ pub struct SubscribeAll<TPlat: Platform> {
     pub new_blocks: Subscription<TPlat>,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SubscriptionId(u64);
+
 pub struct Subscription<TPlat: Platform> {
     subscription_id: u64,
     channel: mpsc::Receiver<Notification>,
@@ -1043,6 +1082,11 @@ impl<TPlat: Platform> Subscription<TPlat> {
         self.channel.next().await
     }
 
+    /// Returns an opaque identifier that can be used to call [`RuntimeService::unpin_block`].
+    pub fn id(&self) -> SubscriptionId {
+        SubscriptionId(self.subscription_id)
+    }
+
     /// Unpins a block after it has been reported.
     ///
     /// # Panic
@@ -1050,23 +1094,11 @@ impl<TPlat: Platform> Subscription<TPlat> {
     /// Panics if the block hash has not been reported or has already been unpinned.
     ///
     pub async fn unpin_block(&self, block_hash: &[u8; 32]) {
-        let mut guarded_lock = self.guarded.lock().await;
-
-        let runtime_index = guarded_lock
-            .pinned_blocks
-            .remove(&(self.subscription_id, *block_hash))
-            .unwrap();
-        if guarded_lock.runtimes[runtime_index].num_references == 1 {
-            guarded_lock.runtimes.remove(runtime_index);
-        } else {
-            guarded_lock.runtimes[runtime_index].num_references -= 1;
-        }
-
-        guarded_lock
-            .all_blocks_subscriptions
-            .get_mut(&self.subscription_id)
-            .unwrap()
-            .1 -= 1;
+        RuntimeService::unpin_block_inner(
+            &self.guarded,
+            SubscriptionId(self.subscription_id),
+            block_hash,
+        ).await
     }
 }
 
