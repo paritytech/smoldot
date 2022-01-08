@@ -740,7 +740,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             } => {
                 guarded_lock.runtimes[*tree.finalized_async_user_data()].num_references += 1;
                 guarded_lock.pinned_blocks.insert(
-                    (finalized_block.hash, subscription_id),
+                    (subscription_id, finalized_block.hash),
                     *tree.finalized_async_user_data(),
                 );
 
@@ -768,7 +768,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                         guarded_lock.runtimes[runtime_index].num_references += 1;
                         guarded_lock
                             .pinned_blocks
-                            .insert((block_hash, subscription_id), runtime_index);
+                            .insert((subscription_id, block_hash), runtime_index);
 
                         Some(BlockNotification {
                             is_new_best: block.is_output_best,
@@ -1054,7 +1054,7 @@ impl<TPlat: Platform> Subscription<TPlat> {
 
         let runtime_index = guarded_lock
             .pinned_blocks
-            .remove(&(*block_hash, self.subscription_id))
+            .remove(&(self.subscription_id, *block_hash))
             .unwrap();
         if guarded_lock.runtimes[runtime_index].num_references == 1 {
             guarded_lock.runtimes.remove(runtime_index);
@@ -1579,7 +1579,7 @@ struct Guarded<TPlat: Platform> {
     ///
     /// Values are indices within [`Guarded::runtimes`].
     // TODO: docs
-    pinned_blocks: BTreeMap<([u8; 32], u64), usize>,
+    pinned_blocks: BTreeMap<(u64, [u8; 32]), usize>,
 }
 
 enum GuardedInner<TPlat: Platform> {
@@ -2159,7 +2159,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             guarded.all_blocks_subscriptions.iter_mut()
                         {
                             if *num_pinned >= 32 {
-                                // TODO: constant
+                                // TODO: constant ^
                                 to_remove.push(*subscription_id);
                                 continue;
                             }
@@ -2169,14 +2169,21 @@ impl<TPlat: Platform> Background<TPlat> {
                                 guarded.runtimes[block_runtime_index].num_references += 1;
                                 guarded
                                     .pinned_blocks
-                                    .insert((block_hash, *subscription_id), block_runtime_index);
+                                    .insert((*subscription_id, block_hash), block_runtime_index);
                             } else {
                                 to_remove.push(*subscription_id);
                             }
                         }
                         for to_remove in to_remove {
                             guarded.all_blocks_subscriptions.remove(&to_remove);
-                            // TODO: unpin all blocks for this subscription
+                            let pinned_blocks = guarded
+                                .pinned_blocks
+                                .range((to_remove, [0; 32])..=(to_remove, [0xff; 32]))
+                                .map(|((_, h), _)| *h)
+                                .collect::<Vec<_>>();
+                            for block in pinned_blocks {
+                                guarded.pinned_blocks.remove(&(to_remove, block));
+                            }
                         }
 
                         continue;
@@ -2248,7 +2255,14 @@ impl<TPlat: Platform> Background<TPlat> {
             }
             for to_remove in to_remove {
                 guarded.all_blocks_subscriptions.remove(&to_remove);
-                // TODO: unpin blocks
+                let pinned_blocks = guarded
+                    .pinned_blocks
+                    .range((to_remove, [0; 32])..=(to_remove, [0xff; 32]))
+                    .map(|((_, h), _)| *h)
+                    .collect::<Vec<_>>();
+                for block in pinned_blocks {
+                    guarded.pinned_blocks.remove(&(to_remove, block));
+                }
             }
         }
     }
