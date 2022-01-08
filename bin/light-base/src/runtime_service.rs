@@ -1573,12 +1573,14 @@ struct Guarded<TPlat: Platform> {
     /// reported to the outer API.
     tree: GuardedInner<TPlat>,
 
-    /// Pinned blocks
+    /// List of pinned blocks.
     ///
-    /// Every time a block is reported to the API user, it is inserted in this map.
+    /// Every time a block is reported to the API user, it is inserted in this map. The block is
+    /// inserted after it has been pushed in the channel, but before it is pulled. Therefore, if
+    /// the channel is closed it is the background that needs to purge all blocks from this
+    /// container that are no longer relevant.
     ///
-    /// Values are indices within [`Guarded::runtimes`].
-    // TODO: docs
+    /// Keys are `(subscription_id, block_hash)`. Values are indices within [`Guarded::runtimes`].
     pinned_blocks: BTreeMap<(u64, [u8; 32]), usize>,
 }
 
