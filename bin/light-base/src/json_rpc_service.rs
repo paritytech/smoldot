@@ -481,6 +481,7 @@ enum SubscriptionTy {
     RuntimeSpec,
     ChainHeadBody,
     ChainHeadCall,
+    ChainHeadStorage,
 }
 
 struct Blocks {
@@ -1549,10 +1550,49 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.requests_subscriptions
                     .respond(
                         &state_machine_request_id,
-                        methods::Response::chainHead_unstable_stopBody(())
+                        methods::Response::chainHead_unstable_stopCall(())
                             .to_json_response(request_id),
                     )
                     .await;
+            }
+            methods::MethodCall::chainHead_unstable_stopStorage { subscription_id } => {
+                let state_machine_subscription =
+                    if let Some((abort_handle, state_machine_subscription)) = self
+                        .subscriptions
+                        .lock()
+                        .await
+                        .misc
+                        .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadStorage))
+                    {
+                        abort_handle.abort();
+                        Some(state_machine_subscription)
+                    } else {
+                        None
+                    };
+
+                if let Some(state_machine_subscription) = &state_machine_subscription {
+                    self.requests_subscriptions
+                        .stop_subscription(state_machine_subscription)
+                        .await;
+                }
+
+                self.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        methods::Response::chainHead_unstable_stopStorage(())
+                            .to_json_response(request_id),
+                    )
+                    .await;
+            }
+            methods::MethodCall::chainHead_unstable_storage {
+                follow_subscription_id,
+                hash,
+                key,
+                child_key,
+                r#type: ty,
+                .. // TODO: network_config
+            } => {
+                self.chain_head_storage(request_id, &state_machine_request_id, follow_subscription_id, hash, key, child_key, ty).await;
             }
             methods::MethodCall::chainHead_unstable_follow { runtime_updates } => {
                 self.chain_head_follow(request_id, &state_machine_request_id, runtime_updates)
@@ -3286,6 +3326,193 @@ impl<TPlat: Platform> Background<TPlat> {
             .lock()
             .await
             .unbounded_send(task.boxed())
+            .unwrap();
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_storage`].
+    async fn chain_head_storage(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        follow_subscription_id: &str,
+        hash: methods::HashHexString,
+        key: methods::HexString,
+        child_key: Option<methods::HexString>,
+        ty: methods::StorageQueryType,
+    ) {
+        if child_key.is_some() {
+            self.requests_subscriptions
+                .respond(
+                    &state_machine_request_id,
+                    json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(
+                            -32000,
+                            "Child key storage queries not supported yet",
+                        ),
+                        None,
+                    ),
+                )
+                .await;
+            log::warn!(
+                target: &self.log_target,
+                "chainHead_unstable_storage with a non-null childKey has been called. \
+                This isn't supported by smoldot yet."
+            );
+            return;
+        }
+
+        // Determine whether the requested block hash is valid, and if so its state trie root.
+        let block_storage_root = {
+            let lock = self.subscriptions.lock().await;
+            if let Some(subscription) = lock.chain_head_follow.get(follow_subscription_id) {
+                if let Some(header) = subscription.pinned_blocks_headers.get(&hash.0) {
+                    if let Ok(decoded) = header::decode(&header) {
+                        Some(*decoded.state_root)
+                    } else {
+                        None // TODO: what to return?!
+                    }
+                } else {
+                    self.requests_subscriptions
+                        .respond(
+                            &state_machine_request_id,
+                            json_rpc::parse::build_error_response(
+                                request_id,
+                                json_rpc::parse::ErrorResponse::InvalidParams,
+                                None,
+                            ),
+                        )
+                        .await;
+                    return;
+                }
+            } else {
+                None
+            }
+        };
+
+        let state_machine_subscription = match self
+            .requests_subscriptions
+            .start_subscription(&state_machine_request_id, 1)
+            .await
+        {
+            Ok(v) => v,
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                self.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Too many active subscriptions",
+                            ),
+                            None,
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let subscription_id = self
+            .next_subscription_id
+            .fetch_add(1, atomic::Ordering::Relaxed)
+            .to_string();
+
+        let abort_registration = {
+            let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
+            let mut subscriptions_list = self.subscriptions.lock().await;
+            subscriptions_list.misc.insert(
+                (subscription_id.clone(), SubscriptionTy::ChainHeadStorage),
+                (abort_handle, state_machine_subscription.clone()),
+            );
+            abort_registration
+        };
+
+        self.requests_subscriptions
+            .respond(
+                &state_machine_request_id,
+                methods::Response::chainHead_unstable_storage(&subscription_id)
+                    .to_json_response(request_id),
+            )
+            .await;
+
+        let task = {
+            let me = self.clone();
+            async move {
+                let response = if let Some(block_storage_root) = block_storage_root {
+                    let response = me
+                        .sync_service
+                        .clone()
+                        .storage_query(&hash.0, &block_storage_root, iter::once(&key.0))
+                        .await;
+                    match response {
+                        Ok(values) => {
+                            // `storage_query` returns a list of values because it can perform
+                            // multiple queries at once. In our situation, we only start one query
+                            // and as such the outcome only ever contains one element.
+                            debug_assert_eq!(values.len(), 1);
+                            let value = values.into_iter().next().unwrap();
+
+                            let output = match ty {
+                                methods::StorageQueryType::Value => {
+                                    value.map(|v| methods::HexString(v).to_string())
+                                }
+                                methods::StorageQueryType::Size => {
+                                    value.map(|v| v.len().to_string())
+                                }
+                                methods::StorageQueryType::Hash => value.map(|v| {
+                                    methods::HexString(
+                                        blake2_rfc::blake2b::blake2b(32, &[], &v)
+                                            .as_bytes()
+                                            .to_vec(),
+                                    )
+                                    .to_string()
+                                }),
+                            };
+
+                            methods::ServerToClient::chainHead_unstable_storageEvent {
+                                subscription: &subscription_id,
+                                result: methods::ChainHeadStorageEvent::Done { value: output },
+                            }
+                            .to_json_call_object_parameters(None)
+                        }
+                        Err(_) => methods::ServerToClient::chainHead_unstable_storageEvent {
+                            subscription: &subscription_id,
+                            result: methods::ChainHeadStorageEvent::Inaccessible {},
+                        }
+                        .to_json_call_object_parameters(None),
+                    }
+                } else {
+                    methods::ServerToClient::chainHead_unstable_storageEvent {
+                        subscription: &subscription_id,
+                        result: methods::ChainHeadStorageEvent::Disjoint {},
+                    }
+                    .to_json_call_object_parameters(None)
+                };
+
+                me.requests_subscriptions
+                    .set_queued_notification(&state_machine_subscription, 0, response)
+                    .await;
+
+                me.requests_subscriptions
+                    .stop_subscription(&state_machine_subscription)
+                    .await;
+                let _ = me
+                    .subscriptions
+                    .lock()
+                    .await
+                    .misc
+                    .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadStorage));
+            }
+        };
+
+        self.new_child_tasks_tx
+            .lock()
+            .await
+            .unbounded_send(Box::pin(
+                future::Abortable::new(task, abort_registration).map(|_| ()),
+            ))
             .unwrap();
     }
 }

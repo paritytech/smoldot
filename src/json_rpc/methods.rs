@@ -26,6 +26,7 @@ use alloc::{
     string::{String, ToString as _},
     vec::Vec,
 };
+use core::fmt;
 use hashbrown::HashMap;
 
 /// Parses a JSON call (usually received from a JSON-RPC server).
@@ -467,6 +468,7 @@ define_methods! {
     chainHead_unstable_bodyEvent(#[rename = "subscriptionId"] subscription: &'a str, result: ChainHeadBodyEvent) -> (),
     chainHead_unstable_callEvent(#[rename = "subscriptionId"] subscription: &'a str, result: ChainHeadCallEvent<'a>) -> (),
     chainHead_unstable_followEvent(#[rename = "subscriptionId"] subscription: &'a str, result: FollowEvent<'a>) -> (),
+    chainHead_unstable_storageEvent(#[rename = "subscriptionId"] subscription: &'a str, result: ChainHeadStorageEvent) -> (),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -627,6 +629,17 @@ pub enum ChainHeadCallEvent<'a> {
     Inaccessible { error: &'a str },
     #[serde(rename = "error")]
     Error { error: &'a str },
+    #[serde(rename = "disjoint")]
+    Disjoint {},
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event")]
+pub enum ChainHeadStorageEvent {
+    #[serde(rename = "done")]
+    Done { value: Option<String> },
+    #[serde(rename = "inaccessible")]
+    Inaccessible {},
     #[serde(rename = "disjoint")]
     Disjoint {},
 }
@@ -820,12 +833,18 @@ impl serde::Serialize for HashHexString {
     }
 }
 
+impl fmt::Display for HexString {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "0x{}", hex::encode(&self.0[..]))
+    }
+}
+
 impl serde::Serialize for HexString {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        format!("0x{}", hex::encode(&self.0[..])).serialize(serializer)
+        self.to_string().serialize(serializer)
     }
 }
 
