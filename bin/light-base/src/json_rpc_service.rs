@@ -3090,7 +3090,8 @@ impl<TPlat: Platform> Background<TPlat> {
                     .fetch_add(1, atomic::Ordering::Relaxed)
                     .to_string();
 
-                let abort_registration = {
+                // TODO: make use of this
+                let _abort_registration = {
                     let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
                     let mut subscriptions_list = me.subscriptions.lock().await;
                     subscriptions_list.misc.insert(
@@ -3120,69 +3121,86 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 let final_notif = match pre_runtime_call {
                     Some(Ok((runtime_call_lock, virtual_machine))) => {
-                        let mut runtime_call =
-                            match read_only_runtime_host::run(read_only_runtime_host::Config {
-                                virtual_machine,
-                                function_to_call: &function_to_call,
-                                parameter: call_parameters.iter().map(|c| &c.0),
-                            }) {
-                                Ok(vm) => vm,
-                                Err((err, prototype)) => {
-                                    runtime_call_lock.unlock(prototype);
-                                    todo!()
+                        match read_only_runtime_host::run(read_only_runtime_host::Config {
+                            virtual_machine,
+                            function_to_call: &function_to_call,
+                            parameter: call_parameters.iter().map(|c| &c.0),
+                        }) {
+                            Err((error, prototype)) => {
+                                runtime_call_lock.unlock(prototype);
+                                methods::ServerToClient::chainHead_unstable_callEvent {
+                                    subscription: &subscription_id,
+                                    result: methods::ChainHeadCallEvent::Error {
+                                        error: &error.to_string(),
+                                    },
                                 }
-                            };
-
-                        loop {
-                            match runtime_call {
-                                read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                                    let output =
-                                        success.virtual_machine.value().as_ref().to_owned();
-                                    runtime_call_lock
-                                        .unlock(success.virtual_machine.into_prototype());
-                                    break methods::ServerToClient::chainHead_unstable_callEvent {
-                                        subscription: &subscription_id,
-                                        result: methods::ChainHeadCallEvent::Done {
-                                            output: methods::HexString(output),
-                                        },
+                                .to_json_call_object_parameters(None)
+                            }
+                            Ok(mut runtime_call) => {
+                                loop {
+                                    match runtime_call {
+                                        read_only_runtime_host::RuntimeHostVm::Finished(Ok(
+                                            success,
+                                        )) => {
+                                            let output =
+                                                success.virtual_machine.value().as_ref().to_owned();
+                                            runtime_call_lock
+                                                .unlock(success.virtual_machine.into_prototype());
+                                            break methods::ServerToClient::chainHead_unstable_callEvent {
+                                                    subscription: &subscription_id,
+                                                    result: methods::ChainHeadCallEvent::Done {
+                                                        output: methods::HexString(output),
+                                                    },
+                                                }
+                                                .to_json_call_object_parameters(None);
+                                        }
+                                        read_only_runtime_host::RuntimeHostVm::Finished(Err(
+                                            error,
+                                        )) => {
+                                            runtime_call_lock.unlock(error.prototype);
+                                            break methods::ServerToClient::chainHead_unstable_callEvent {
+                                                    subscription: &subscription_id,
+                                                    result: methods::ChainHeadCallEvent::Error {
+                                                        error: &error.detail.to_string(),
+                                                    },
+                                                }
+                                                .to_json_call_object_parameters(None);
+                                        }
+                                        read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
+                                            // TODO: what if the remote lied to us?
+                                            let storage_value = match runtime_call_lock
+                                                .storage_entry(&get.key_as_vec())
+                                            {
+                                                Ok(v) => v,
+                                                Err(error) => {
+                                                    runtime_call_lock.unlock(
+                                                            read_only_runtime_host::RuntimeHostVm::StorageGet(
+                                                                get,
+                                                            )
+                                                            .into_prototype(),
+                                                        );
+                                                    break methods::ServerToClient::chainHead_unstable_callEvent {
+                                                            subscription: &subscription_id,
+                                                            result: methods::ChainHeadCallEvent::Inaccessible {
+                                                                error: &error.to_string(),
+                                                            },
+                                                        }
+                                                        .to_json_call_object_parameters(None);
+                                                }
+                                            };
+                                            runtime_call =
+                                                get.inject_value(storage_value.map(iter::once));
+                                        }
+                                        read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
+                                            todo!() // TODO:
+                                        }
+                                        read_only_runtime_host::RuntimeHostVm::StorageRoot(
+                                            storage_root,
+                                        ) => {
+                                            runtime_call = storage_root
+                                                .resume(runtime_call_lock.block_storage_root());
+                                        }
                                     }
-                                    .to_json_call_object_parameters(None);
-                                }
-                                read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
-                                    runtime_call_lock.unlock(error.prototype);
-                                    break methods::ServerToClient::chainHead_unstable_callEvent {
-                                        subscription: &subscription_id,
-                                        result: methods::ChainHeadCallEvent::Error {
-                                            error: &error.detail.to_string(),
-                                        },
-                                    }
-                                    .to_json_call_object_parameters(None);
-                                }
-                                read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
-                                    // TODO: what if the remote lied to us?
-                                    let storage_value =
-                                        match runtime_call_lock.storage_entry(&get.key_as_vec()) {
-                                            Ok(v) => v,
-                                            Err(err) => {
-                                                runtime_call_lock.unlock(
-                                                read_only_runtime_host::RuntimeHostVm::StorageGet(
-                                                    get,
-                                                )
-                                                .into_prototype(),
-                                            );
-                                                todo!()
-                                            }
-                                        };
-                                    runtime_call = get.inject_value(storage_value.map(iter::once));
-                                }
-                                read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
-                                    todo!() // TODO:
-                                }
-                                read_only_runtime_host::RuntimeHostVm::StorageRoot(
-                                    storage_root,
-                                ) => {
-                                    runtime_call =
-                                        storage_root.resume(runtime_call_lock.block_storage_root());
                                 }
                             }
                         }
