@@ -465,6 +465,7 @@ define_methods! {
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_unstable_bodyEvent(#[rename = "subscriptionId"] subscription: &'a str, result: ChainHeadBodyEvent) -> (),
+    chainHead_unstable_callEvent(#[rename = "subscriptionId"] subscription: &'a str, result: ChainHeadCallEvent<'a>) -> (),
     chainHead_unstable_followEvent(#[rename = "subscriptionId"] subscription: &'a str, result: FollowEvent<'a>) -> (),
 }
 
@@ -613,6 +614,19 @@ pub enum ChainHeadBodyEvent {
     Done { value: Vec<HexString> },
     #[serde(rename = "inaccessible")]
     Inaccessible {},
+    #[serde(rename = "disjoint")]
+    Disjoint {},
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event")]
+pub enum ChainHeadCallEvent<'a> {
+    #[serde(rename = "done")]
+    Done { output: HexString },
+    #[serde(rename = "inaccessible")]
+    Inaccessible { error: &'a str },
+    #[serde(rename = "error")]
+    Error { error: &'a str },
     #[serde(rename = "disjoint")]
     Disjoint {},
 }

@@ -480,6 +480,7 @@ enum SubscriptionTy {
     Transaction,
     RuntimeSpec,
     ChainHeadBody,
+    ChainHeadCall,
 }
 
 struct Blocks {
@@ -1514,6 +1515,44 @@ impl<TPlat: Platform> Background<TPlat> {
                         future::Abortable::new(task, abort_registration).map(|_| ()),
                     ))
                     .unwrap();
+            }
+            methods::MethodCall::chainHead_unstable_call {
+                follow_subscription_id,
+                hash,
+                function,
+                call_parameters,
+                .. // TODO: network_config
+            } => {
+                self.chain_head_call(request_id, &state_machine_request_id, follow_subscription_id, hash, function, call_parameters).await;
+            }
+            methods::MethodCall::chainHead_unstable_stopCall { subscription_id } => {
+                let state_machine_subscription =
+                    if let Some((abort_handle, state_machine_subscription)) = self
+                        .subscriptions
+                        .lock()
+                        .await
+                        .misc
+                        .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadCall))
+                    {
+                        abort_handle.abort();
+                        Some(state_machine_subscription)
+                    } else {
+                        None
+                    };
+
+                if let Some(state_machine_subscription) = &state_machine_subscription {
+                    self.requests_subscriptions
+                        .stop_subscription(state_machine_subscription)
+                        .await;
+                }
+
+                self.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        methods::Response::chainHead_unstable_stopBody(())
+                            .to_json_response(request_id),
+                    )
+                    .await;
             }
             methods::MethodCall::chainHead_unstable_follow { runtime_updates } => {
                 self.chain_head_follow(request_id, &state_machine_request_id, runtime_updates)
@@ -2952,6 +2991,301 @@ impl<TPlat: Platform> Background<TPlat> {
             .unbounded_send(Box::pin(
                 future::Abortable::new(task, abort_registration).map(|_| ()),
             ))
+            .unwrap();
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_call`].
+    async fn chain_head_call(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        follow_subscription_id: &str,
+        hash: methods::HashHexString,
+        function_to_call: &str,
+        call_parameters: Vec<methods::HexString>,
+    ) {
+        let task = {
+            let me = self.clone();
+            let request_id = request_id.to_owned();
+            let function_to_call = function_to_call.to_owned();
+            let state_machine_request_id = state_machine_request_id.clone();
+            let follow_subscription_id = follow_subscription_id.to_owned();
+            async move {
+                // Determine whether the requested block hash is valid and start the call.
+                let pre_runtime_call = {
+                    let lock = me.subscriptions.lock().await;
+                    if let Some(subscription) = lock.chain_head_follow.get(&follow_subscription_id)
+                    {
+                        let runtime_service_subscribe_all = match subscription.runtime_subscribe_all
+                        {
+                            Some(sa) => sa,
+                            None => {
+                                me.requests_subscriptions
+                                    .respond(
+                                        &state_machine_request_id,
+                                        json_rpc::parse::build_error_response(
+                                            &request_id,
+                                            json_rpc::parse::ErrorResponse::InvalidParams,
+                                            None,
+                                        ),
+                                    )
+                                    .await;
+                                return;
+                            }
+                        };
+
+                        if !subscription.pinned_blocks_headers.contains_key(&hash.0) {
+                            me.requests_subscriptions
+                                .respond(
+                                    &state_machine_request_id,
+                                    json_rpc::parse::build_error_response(
+                                        &request_id,
+                                        json_rpc::parse::ErrorResponse::InvalidParams,
+                                        None,
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+
+                        Some(
+                            me.runtime_service
+                                .pinned_block_runtime_call_lock(
+                                    runtime_service_subscribe_all,
+                                    &hash.0,
+                                )
+                                .await,
+                        )
+                    } else {
+                        None
+                    }
+                };
+
+                let state_machine_subscription = match me
+                    .requests_subscriptions
+                    .start_subscription(&state_machine_request_id, 1)
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                        me.requests_subscriptions
+                            .respond(
+                                &state_machine_request_id,
+                                json_rpc::parse::build_error_response(
+                                    &request_id,
+                                    json_rpc::parse::ErrorResponse::ServerError(
+                                        -32000,
+                                        "Too many active subscriptions",
+                                    ),
+                                    None,
+                                ),
+                            )
+                            .await;
+                        return;
+                    }
+                };
+
+                let subscription_id = me
+                    .next_subscription_id
+                    .fetch_add(1, atomic::Ordering::Relaxed)
+                    .to_string();
+
+                // TODO: make use of this
+                let _abort_registration = {
+                    let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
+                    let mut subscriptions_list = me.subscriptions.lock().await;
+                    subscriptions_list.misc.insert(
+                        (subscription_id.clone(), SubscriptionTy::ChainHeadCall),
+                        (abort_handle, state_machine_subscription.clone()),
+                    );
+                    abort_registration
+                };
+
+                me.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        methods::Response::chainHead_unstable_call(&subscription_id)
+                            .to_json_response(&request_id),
+                    )
+                    .await;
+
+                let pre_runtime_call = if let Some(pre_runtime_call) = pre_runtime_call {
+                    Some(
+                        pre_runtime_call
+                            .start(&function_to_call, call_parameters.iter().map(|c| &c.0))
+                            .await,
+                    )
+                } else {
+                    None
+                };
+
+                let final_notif = match pre_runtime_call {
+                    Some(Ok((runtime_call_lock, virtual_machine))) => {
+                        match read_only_runtime_host::run(read_only_runtime_host::Config {
+                            virtual_machine,
+                            function_to_call: &function_to_call,
+                            parameter: call_parameters.iter().map(|c| &c.0),
+                        }) {
+                            Err((error, prototype)) => {
+                                runtime_call_lock.unlock(prototype);
+                                methods::ServerToClient::chainHead_unstable_callEvent {
+                                    subscription: &subscription_id,
+                                    result: methods::ChainHeadCallEvent::Error {
+                                        error: &error.to_string(),
+                                    },
+                                }
+                                .to_json_call_object_parameters(None)
+                            }
+                            Ok(mut runtime_call) => {
+                                loop {
+                                    match runtime_call {
+                                        read_only_runtime_host::RuntimeHostVm::Finished(Ok(
+                                            success,
+                                        )) => {
+                                            let output =
+                                                success.virtual_machine.value().as_ref().to_owned();
+                                            runtime_call_lock
+                                                .unlock(success.virtual_machine.into_prototype());
+                                            break methods::ServerToClient::chainHead_unstable_callEvent {
+                                                    subscription: &subscription_id,
+                                                    result: methods::ChainHeadCallEvent::Done {
+                                                        output: methods::HexString(output),
+                                                    },
+                                                }
+                                                .to_json_call_object_parameters(None);
+                                        }
+                                        read_only_runtime_host::RuntimeHostVm::Finished(Err(
+                                            error,
+                                        )) => {
+                                            runtime_call_lock.unlock(error.prototype);
+                                            break methods::ServerToClient::chainHead_unstable_callEvent {
+                                                    subscription: &subscription_id,
+                                                    result: methods::ChainHeadCallEvent::Error {
+                                                        error: &error.detail.to_string(),
+                                                    },
+                                                }
+                                                .to_json_call_object_parameters(None);
+                                        }
+                                        read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
+                                            // TODO: what if the remote lied to us?
+                                            let storage_value = match runtime_call_lock
+                                                .storage_entry(&get.key_as_vec())
+                                            {
+                                                Ok(v) => v,
+                                                Err(error) => {
+                                                    runtime_call_lock.unlock(
+                                                            read_only_runtime_host::RuntimeHostVm::StorageGet(
+                                                                get,
+                                                            )
+                                                            .into_prototype(),
+                                                        );
+                                                    break methods::ServerToClient::chainHead_unstable_callEvent {
+                                                            subscription: &subscription_id,
+                                                            result: methods::ChainHeadCallEvent::Inaccessible {
+                                                                error: &error.to_string(),
+                                                            },
+                                                        }
+                                                        .to_json_call_object_parameters(None);
+                                                }
+                                            };
+                                            runtime_call =
+                                                get.inject_value(storage_value.map(iter::once));
+                                        }
+                                        read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
+                                            todo!() // TODO:
+                                        }
+                                        read_only_runtime_host::RuntimeHostVm::StorageRoot(
+                                            storage_root,
+                                        ) => {
+                                            runtime_call = storage_root
+                                                .resume(runtime_call_lock.block_storage_root());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(runtime_service::RuntimeCallError::InvalidRuntime(error))) => {
+                        methods::ServerToClient::chainHead_unstable_callEvent {
+                            subscription: &subscription_id,
+                            result: methods::ChainHeadCallEvent::Error {
+                                error: &error.to_string(),
+                            },
+                        }
+                        .to_json_call_object_parameters(None)
+                    }
+                    Some(Err(runtime_service::RuntimeCallError::StorageRetrieval(error))) => {
+                        methods::ServerToClient::chainHead_unstable_callEvent {
+                            subscription: &subscription_id,
+                            result: methods::ChainHeadCallEvent::Error {
+                                error: &error.to_string(),
+                            },
+                        }
+                        .to_json_call_object_parameters(None)
+                    }
+                    Some(Err(runtime_service::RuntimeCallError::CallProof(error))) => {
+                        methods::ServerToClient::chainHead_unstable_callEvent {
+                            subscription: &subscription_id,
+                            result: methods::ChainHeadCallEvent::Error {
+                                error: &error.to_string(),
+                            },
+                        }
+                        .to_json_call_object_parameters(None)
+                    }
+                    Some(Err(runtime_service::RuntimeCallError::NetworkBlockRequest)) => {
+                        methods::ServerToClient::chainHead_unstable_callEvent {
+                            subscription: &subscription_id,
+                            result: methods::ChainHeadCallEvent::Inaccessible {
+                                error: "couldn't retrieve proof from network",
+                            },
+                        }
+                        .to_json_call_object_parameters(None)
+                    }
+                    Some(Err(runtime_service::RuntimeCallError::InvalidBlockHeader(error))) => {
+                        methods::ServerToClient::chainHead_unstable_callEvent {
+                            subscription: &subscription_id,
+                            result: methods::ChainHeadCallEvent::Error {
+                                error: &format!("invalid block header format: {}", error),
+                            },
+                        }
+                        .to_json_call_object_parameters(None)
+                    }
+                    Some(Err(runtime_service::RuntimeCallError::StorageQuery(error))) => {
+                        methods::ServerToClient::chainHead_unstable_callEvent {
+                            subscription: &subscription_id,
+                            result: methods::ChainHeadCallEvent::Error {
+                                error: &format!("failed to fetch call proof: {}", error),
+                            },
+                        }
+                        .to_json_call_object_parameters(None)
+                    }
+                    None => methods::ServerToClient::chainHead_unstable_callEvent {
+                        subscription: &subscription_id,
+                        result: methods::ChainHeadCallEvent::Disjoint {},
+                    }
+                    .to_json_call_object_parameters(None),
+                };
+
+                me.requests_subscriptions
+                    .push_notification(&state_machine_subscription, final_notif)
+                    .await;
+
+                me.requests_subscriptions
+                    .stop_subscription(&state_machine_subscription)
+                    .await;
+                let _ = me
+                    .subscriptions
+                    .lock()
+                    .await
+                    .misc
+                    .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadCall));
+            }
+        };
+
+        self.new_child_tasks_tx
+            .lock()
+            .await
+            .unbounded_send(task.boxed())
             .unwrap();
     }
 }
