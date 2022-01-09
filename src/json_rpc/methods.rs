@@ -624,9 +624,9 @@ pub enum ChainHeadCallEvent<'a> {
     #[serde(rename = "done")]
     Done { output: HexString },
     #[serde(rename = "inaccessible")]
-    Inaccessible { error: &'a str, },
+    Inaccessible { error: &'a str },
     #[serde(rename = "error")]
-    Error { error: &'a str, },
+    Error { error: &'a str },
     #[serde(rename = "disjoint")]
     Disjoint {},
 }
