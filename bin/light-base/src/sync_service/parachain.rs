@@ -73,7 +73,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         let mut relay_chain_subscribe_all = relay_chain_sync.subscribe_all(32).await;
         log::debug!(
             target: &log_target,
-            "Resetting parachain syncing to relay chain block 0x{}",
+            "RelayChain => NewSubscription(finalized_hash={})",
             HashDisplay(&header::hash_from_scale_encoded_header(
                 &relay_chain_subscribe_all.finalized_block_scale_encoded_header
             ))
@@ -119,6 +119,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         // Note that this list is created in the inner loop, as to be cleared if the relay chain
         // blocks stream has a gap.
         let mut all_subscriptions = Vec::<mpsc::Sender<_>>::new();
+        log::debug!(target: &log_target, "Subscriptions <= Reset");
 
         // List of in-progress parahead fetching operations.
         //
@@ -127,6 +128,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         // alive for longer than this container, and by the fact that we unpin block after a
         // fetching operation has finished and that we never fetch twice for the same block.
         let mut in_progress_paraheads = stream::FuturesUnordered::new();
+        log::debug!(target: &log_target, "ParaheadFetchOperations <= Clear");
 
         // Future that is ready when we need to wake up the `select!` below.
         let mut wakeup_deadline = future::Either::Right(future::pending());
@@ -146,9 +148,8 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     async_tree::NextNecessaryAsyncOp::Ready(op) => {
                         log::debug!(
                             target: &log_target,
-                            "Fetching parahead for relay chain block 0x{} (operation id: {:?})",
+                            "ParaheadFetchOperations <= StartFetch(relay_block_hash={})",
                             HashDisplay(op.block_user_data),
-                            op.id
                         );
 
                         in_progress_paraheads.push({
@@ -206,7 +207,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
                         log::debug!(
                             target: &log_target,
-                            "Reporting finalized parablock 0x{}",
+                            "Subscriptions <= ParablockFinalized(hash={})",
                             HashDisplay(&hash)
                         );
 
@@ -263,7 +264,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
                         log::debug!(
                             target: &log_target,
-                            "Reporting new parablock 0x{}",
+                            "Subscriptions <= NewParablock(hash={})",
                             HashDisplay(&header::hash_from_scale_encoded_header(
                                 &scale_encoded_header
                             ))
@@ -306,7 +307,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         runtime_service::Notification::Finalized { hash, best_block_hash, .. } => {
                             log::debug!(
                                 target: &log_target,
-                                "Relay chain has finalized block 0x{}",
+                                "RelayChain => Finalized(hash={})",
                                 HashDisplay(&hash)
                             );
 
@@ -319,8 +320,9 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
                             log::debug!(
                                 target: &log_target,
-                                "New relay chain block 0x{}",
-                                HashDisplay(&hash)
+                                "RelayChain => Block(hash={}, parent_hash={})",
+                                HashDisplay(&hash),
+                                HashDisplay(&block.parent_hash)
                             );
 
                             let parent = async_tree.input_iter_unordered().find(|b| *b.user_data == block.parent_hash).map(|b| b.id); // TODO: check if finalized
@@ -337,9 +339,9 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         Ok(parahead) => {
                             log::debug!(
                                 target: &log_target,
-                                "Successfully fetched parahead of blake2 hash {} for relay chain block(s) {}",
+                                "ParaheadFetchOperations => Parahead(hash={}, relay_blocks={})",
                                 HashDisplay(blake2_rfc::blake2b::blake2b(32, b"", &parahead).as_bytes()),
-                                async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", ")
+                                async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(",")
                             );
 
                             // Unpin the relay blocks whose parahead is now known.
@@ -352,15 +354,19 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             // Only a debug line is printed if not near the head of the chain,
                             // to handle chains that have been upgraded later on to support
                             // parachains later.
-                            log::log!(
+                            if is_near_head_of_chain && !error.is_network_problem() { // TODO: is is_near_head_of_chain the correct flag?
+                                log::error!(
+                                    target: &log_target,
+                                    "Failed to fetch the parachain head from relay chain blocks {}: {}",
+                                    async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", "),
+                                    error
+                                );
+                            }
+
+                            log::debug!(
                                 target: &log_target,
-                                if is_near_head_of_chain && !error.is_network_problem() { // TODO: is is_near_head_of_chain the correct flag?
-                                    log::Level::Error
-                                } else {
-                                    log::Level::Debug
-                                },
-                                "Failed to fetch the parachain head from relay chain blocks {}: {}",
-                                async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", "),
+                                "ParaheadFetchOperations => Error(relay_blocks={}, error={})",
+                                async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(","),
                                 error
                             );
 
