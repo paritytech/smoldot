@@ -550,7 +550,7 @@ impl<TPlat: Platform> Task<TPlat> {
 
                             log::debug!(
                                 target: &self.log_target,
-                                "Successfully verified header {} (new best: {})",
+                                "Sync => HeaderVerified(hash={}, new_best={})",
                                 HashDisplay(&verified_hash),
                                 if is_new_best { "yes" } else { "no" }
                             );
@@ -578,6 +578,14 @@ impl<TPlat: Platform> Task<TPlat> {
                         all::HeaderVerifyOutcome::Error { sync, error, .. } => {
                             self.sync = sync;
 
+                            // TODO: print which peer sent the header
+                            log::debug!(
+                                target: &self.log_target,
+                                "Sync => HeaderVerifyError(hash={}, error={})",
+                                HashDisplay(&verified_hash),
+                                error
+                            );
+
                             log::warn!(
                                 target: &self.log_target,
                                 "Error while verifying header {}: {}",
@@ -597,6 +605,7 @@ impl<TPlat: Platform> Task<TPlat> {
                             sync,
                             all::JustificationVerifyOutcome::NewFinalized {
                                 updates_best_block,
+                                finalized_blocks,
                                 ..
                             },
                         ) => {
@@ -604,7 +613,8 @@ impl<TPlat: Platform> Task<TPlat> {
 
                             log::debug!(
                                 target: &self.log_target,
-                                "Successfully verified justification"
+                                "Sync => JustificationVerified(finalized_blocks={})",
+                                finalized_blocks.len(),
                             );
 
                             self.best_block_updated |= updates_best_block;
@@ -615,6 +625,13 @@ impl<TPlat: Platform> Task<TPlat> {
 
                         (sync, all::JustificationVerifyOutcome::Error(error)) => {
                             self.sync = sync;
+
+                            // TODO: print which peer sent the justification
+                            log::debug!(
+                                target: &self.log_target,
+                                "Sync => JustificationVerificationError(error={})",
+                                error,
+                            );
 
                             log::warn!(
                                 target: &self.log_target,
@@ -766,6 +783,15 @@ impl<TPlat: Platform> Task<TPlat> {
             } if chain_index == self.network_chain_index => {
                 let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
                 let decoded = announce.decode();
+
+                log::debug!(
+                    target: &self.log_target,
+                    "Sync <= BlockAnnounce(sender={}, hash={}, is_best={})",
+                    peer_id,
+                    HashDisplay(&header::hash_from_scale_encoded_header(&decoded.scale_encoded_header)),
+                    decoded.is_best
+                );
+
                 match self.sync.block_announce(
                     sync_source_id,
                     decoded.scale_encoded_header.to_owned(),
@@ -775,28 +801,30 @@ impl<TPlat: Platform> Task<TPlat> {
                     | all::BlockAnnounceOutcome::AlreadyInChain => {
                         log::debug!(
                             target: &self.log_target,
-                            "Processed block announce from {}",
-                            peer_id
+                            "Sync => Ok"
                         );
                     }
                     all::BlockAnnounceOutcome::Discarded => {
                         log::debug!(
                             target: &self.log_target,
-                            "Processed block announce from {} (discarded)",
-                            peer_id
+                            "Sync => Discarded"
                         );
                     }
                     all::BlockAnnounceOutcome::Disjoint {} => {
                         log::debug!(
                             target: &self.log_target,
-                            "Processed block announce from {} (disjoint)",
-                            peer_id
+                            "Sync => Disjoint"
                         );
                     }
                     all::BlockAnnounceOutcome::TooOld {
                         announce_block_height,
                         ..
                     } => {
+                        log::debug!(
+                            target: &self.log_target,
+                            "Sync => TooOld"
+                        );
+
                         log::warn!(
                             target: &self.log_target,
                             "Block announce header height (#{}) from {} is below finalized block",
@@ -805,6 +833,11 @@ impl<TPlat: Platform> Task<TPlat> {
                         );
                     }
                     all::BlockAnnounceOutcome::NotFinalizedChain => {
+                        log::debug!(
+                            target: &self.log_target,
+                            "Sync => NotFinalized"
+                        );
+
                         log::warn!(
                             target: &self.log_target,
                             "Block announce from {} isn't part of finalized chain",
@@ -824,6 +857,12 @@ impl<TPlat: Platform> Task<TPlat> {
             } if chain_index == self.network_chain_index => {
                 match self.sync.grandpa_commit_message(&message.as_encoded()) {
                     Ok(()) => {
+                        // TODO: print more details
+                        log::debug!(
+                            target: &self.log_target,
+                            "Sync => GrandpaCommitVerified"
+                        );
+
                         self.finalized_block_updated = true; // TODO: only do if commit message has been processed
                         self.known_finalized_runtime = None; // TODO: only do if commit message has been processed and if there was no RuntimeUpdated log item in the finalized blocks
                         self.best_block_updated = true; // TODO: done in case finality changes the best block; make this clearer in the sync layer
