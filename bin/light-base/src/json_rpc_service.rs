@@ -639,10 +639,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             .collect(),
                         header: methods::Header::from_scale_encoded_header(&block.header.unwrap())
                             .unwrap(),
-                        // TODO: do properly, with https://github.com/paritytech/smoldot/issues/778
-                        justification: block.justifications.as_ref()
-                            .and_then(|l| l.first())
-                            .map(|(_, j)| methods::HexString(j.clone())),
+                        justifications: block.justifications,
                     })
                     .to_json_response(request_id)
                 } else {

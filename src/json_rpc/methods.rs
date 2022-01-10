@@ -24,6 +24,7 @@ use alloc::{
     boxed::Box,
     format,
     string::{String, ToString as _},
+    vec,
     vec::Vec,
 };
 use core::fmt;
@@ -571,7 +572,9 @@ impl<'a> serde::Deserialize<'a> for AccountId {
 pub struct Block {
     pub extrinsics: Vec<HexString>,
     pub header: Header,
-    pub justification: Option<HexString>,
+    /// List of justifications. Each justification is made of a consensus engine id and of the
+    /// actual SCALE-encoded justification.
+    pub justifications: Option<Vec<([u8; 4], Vec<u8>)>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -947,14 +950,18 @@ impl serde::Serialize for Block {
         struct SerdeBlockInner<'a> {
             extrinsics: &'a [HexString],
             header: &'a Header,
-            justification: Option<&'a HexString>, // TODO: unsure of the type
+            justifications: Option<Vec<Vec<Vec<u8>>>>,
         }
 
         SerdeBlock {
             block: SerdeBlockInner {
                 extrinsics: &self.extrinsics,
                 header: &self.header,
-                justification: self.justification.as_ref(),
+                justifications: self.justifications.as_ref().map(|list| {
+                    list.iter()
+                        .map(|(e, j)| vec![e.to_vec(), j.clone()])
+                        .collect()
+                }),
             },
         }
         .serialize(serializer)
