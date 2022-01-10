@@ -206,7 +206,7 @@ pub enum Error {
 pub struct DecodeError();
 
 /// Errors that can occur while checking the validity of a transaction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
 pub enum TransactionValidityError {
     /// The transaction is invalid.
     Invalid(InvalidTransaction),
