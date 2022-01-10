@@ -453,6 +453,9 @@ define_methods! {
 
     sudo_unstable_p2pDiscover(multiaddr: &'a str) -> (),
     sudo_unstable_version() -> &'a str,
+
+    transaction_unstable_submitAndWatch(transaction: HexString) -> &'a str,
+    transaction_unstable_unwatch(subscription: &'a str) -> (),
 }
 
 define_methods! {
@@ -469,6 +472,7 @@ define_methods! {
     chainHead_unstable_callEvent(#[rename = "subscriptionId"] subscription: &'a str, result: ChainHeadCallEvent<'a>) -> (),
     chainHead_unstable_followEvent(#[rename = "subscriptionId"] subscription: &'a str, result: FollowEvent<'a>) -> (),
     chainHead_unstable_storageEvent(#[rename = "subscriptionId"] subscription: &'a str, result: ChainHeadStorageEvent) -> (),
+    transaction_unstable_watchEvent(#[rename = "subscriptionId"] subscription: &'a str, result: TransactionWatchEvent<'a>) -> (),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -642,6 +646,68 @@ pub enum ChainHeadStorageEvent {
     Inaccessible {},
     #[serde(rename = "disjoint")]
     Disjoint {},
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event")]
+pub enum TransactionWatchEvent<'a> {
+    #[serde(rename = "validated")]
+    Validated {},
+    #[serde(rename = "broadcasted")]
+    Broadcasted {
+        #[serde(rename = "numPeers")]
+        num_peers: u32,
+    },
+    #[serde(rename = "bestChainBlockIncluded")]
+    BestChainBlockIncluded {
+        #[serde(rename = "block")]
+        block: Option<TransactionWatchEventBlock>,
+    },
+    #[serde(rename = "finalized")]
+    Finalized {
+        #[serde(rename = "block")]
+        block: TransactionWatchEventBlock,
+    },
+    #[serde(rename = "error")]
+    Error { error: &'a str },
+    #[serde(rename = "invalid")]
+    Invalid { error: &'a str },
+    #[serde(rename = "dropped")]
+    Dropped { broadcasted: bool, error: &'a str },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TransactionWatchEventBlock {
+    pub hash: HashHexString,
+    pub index: NumberAsString,
+}
+
+#[derive(Debug, Clone)]
+pub struct NumberAsString(pub u32);
+
+impl serde::Serialize for NumberAsString {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.to_string().serialize(serializer)
+    }
+}
+
+impl<'a> serde::Deserialize<'a> for NumberAsString {
+    fn deserialize<D>(deserializer: D) -> Result<NumberAsString, D::Error>
+    where
+        D: serde::Deserializer<'a>,
+    {
+        let string = String::deserialize(deserializer)?;
+        match string.parse() {
+            Ok(num) => Ok(NumberAsString(num)),
+            Err(_) => Err(<D::Error as serde::de::Error>::invalid_value(
+                serde::de::Unexpected::Other("invalid number string"),
+                &"a valid number",
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

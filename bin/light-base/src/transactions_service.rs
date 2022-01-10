@@ -219,7 +219,7 @@ pub enum TransactionStatus {
         /// If `Some`, the transaction is included in the block of the best chain with the given
         /// hash and at the given index. If `None`, the transaction isn't present in the best
         /// chain.
-        block_hash: Option<([u8; 32], usize)>,
+        block_hash: Option<([u8; 32], u32)>,
     },
 
     /// Transaction has been removed from the pool.
@@ -234,7 +234,7 @@ pub enum DropReason {
     /// Transaction has been included in a finalized block.
     ///
     /// This is a success path.
-    Finalized([u8; 32]),
+    Finalized { block_hash: [u8; 32], index: u32 },
 
     /// Transaction has been dropped because there was a gap in the chain of blocks. It is
     /// impossible to know.
@@ -475,10 +475,13 @@ async fn background_task<TPlat: Platform>(
             // Remove finalized blocks from the pool when possible.
             for block in worker.pending_transactions.prune_finalized_with_body() {
                 debug_assert!(!block.user_data.downloading);
-                for (_, mut tx) in block.included_transactions {
-                    tx.update_status(TransactionStatus::Dropped(DropReason::Finalized(
-                        block.block_hash,
-                    )));
+                for (_, body_index, mut tx) in block.included_transactions {
+                    // We assume that there's no more than 2<<32 transactions per block.
+                    let body_index = u32::try_from(body_index).unwrap();
+                    tx.update_status(TransactionStatus::Dropped(DropReason::Finalized {
+                        block_hash: block.block_hash,
+                        index: body_index,
+                    }));
                     // `tx` is no longer in the pool.
                 }
             }
@@ -551,6 +554,8 @@ async fn background_task<TPlat: Platform>(
                         for (tx_id, body_index) in included_transactions {
                             debug_assert!(body_index < block_body_size);
                             let tx = worker.pending_transactions.transaction_user_data_mut(tx_id).unwrap();
+                            // We assume that there's no more than 2<<32 transactions per block.
+                            let body_index = u32::try_from(body_index).unwrap();
                             tx.update_status(TransactionStatus::IncludedBlockUpdate { block_hash: Some((block_hash, body_index)) });
                         }
                     }
@@ -831,6 +836,8 @@ impl<TPlat: Platform> Worker<TPlat> {
                 .pending_transactions
                 .transaction_user_data_mut(tx_id)
                 .unwrap();
+            // We assume that there's no more than 2<<32 transactions per block.
+            let block_body_index = u32::try_from(block_body_index).unwrap();
             tx.update_status(TransactionStatus::IncludedBlockUpdate {
                 block_hash: Some((block_hash, block_body_index)),
             });
