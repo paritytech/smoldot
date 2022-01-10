@@ -1130,7 +1130,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         .map(|iter| {
                             iter.map(|block| optimistic::RequestSuccessBlock {
                                 scale_encoded_header: block.scale_encoded_header,
-                                scale_encoded_justification: block.scale_encoded_justifications,
+                                scale_encoded_justifications: block.scale_encoded_justifications,
                                 scale_encoded_extrinsics: block.scale_encoded_extrinsics,
                                 user_data: block.user_data,
                             })
