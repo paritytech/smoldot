@@ -401,7 +401,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                     protocol::BlocksRequestFields {
                         header: true,
                         body: false,
-                        justification: false,
+                        justifications: false,
                     },
                 )
                 .await;

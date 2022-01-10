@@ -451,7 +451,7 @@ async fn background_task<TPlat: Platform>(
                         protocol::BlocksRequestFields {
                             body: true,
                             header: true, // TODO: must be true in order for the body to be verified; fix the sync_service to not require that
-                            justification: false,
+                            justifications: false,
                         },
                     );
 

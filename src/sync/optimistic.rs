@@ -52,7 +52,12 @@ use crate::{
     trie::calculate_root,
 };
 
-use alloc::{borrow::ToOwned as _, boxed::Box, collections::BTreeMap, vec::Vec};
+use alloc::{
+    borrow::ToOwned as _,
+    boxed::Box,
+    collections::BTreeMap,
+    vec::{self, Vec},
+};
 use core::{
     cmp, fmt, iter, mem,
     num::{NonZeroU32, NonZeroU64},
@@ -161,8 +166,8 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     verification_queue:
         verification_queue::VerificationQueue<(RequestId, TRq), RequestSuccessBlock<TBl>>,
 
-    /// Justification, if any, of the block that has just been verified.
-    pending_encoded_justification: Option<(Vec<u8>, SourceId)>,
+    /// Justifications, if any, of the block that has just been verified.
+    pending_encoded_justifications: vec::IntoIter<([u8; 4], Vec<u8>, SourceId)>,
 
     /// Identifier to assign to the next request.
     next_request_id: RequestId,
@@ -217,7 +222,7 @@ pub struct Block<TBl> {
     pub header: header::Header,
 
     /// SCALE-encoded justification of this block, if any.
-    pub justification: Option<Vec<u8>>,
+    pub justifications: Vec<([u8; 4], Vec<u8>)>,
 
     /// User data associated to the block.
     pub user_data: TBl,
@@ -265,7 +270,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                 verification_queue: verification_queue::VerificationQueue::new(
                     best_block_header_num + 1,
                 ),
-                pending_encoded_justification: None,
+                pending_encoded_justifications: Vec::new().into_iter(),
                 download_ahead_blocks: config.download_ahead_blocks,
                 next_request_id: RequestId(0),
                 obsolete_requests: HashMap::with_capacity_and_hasher(0, Default::default()),
@@ -604,7 +609,12 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     /// This method takes ownership of the [`OptimisticSync`]. The [`OptimisticSync`] is yielded
     /// back in the returned value.
     pub fn process_one(self) -> ProcessOne<TRq, TSrc, TBl> {
-        if self.inner.pending_encoded_justification.is_some() {
+        if !self
+            .inner
+            .pending_encoded_justifications
+            .as_slice()
+            .is_empty()
+        {
             return ProcessOne::VerifyJustification(JustificationVerify {
                 chain: self.chain,
                 inner: self.inner,
@@ -643,7 +653,7 @@ impl<TRq, TSrc, TBl> ops::IndexMut<SourceId> for OptimisticSync<TRq, TSrc, TBl> 
 
 pub struct RequestSuccessBlock<TBl> {
     pub scale_encoded_header: Vec<u8>,
-    pub scale_encoded_justification: Option<Vec<u8>>,
+    pub scale_encoded_justifications: Vec<([u8; 4], Vec<u8>)>,
     pub scale_encoded_extrinsics: Vec<Vec<u8>>,
     pub user_data: TBl,
 }
@@ -777,11 +787,18 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
         // Be aware that `source_id` might refer to an obsolete source.
         let (block, source_id) = self.inner.verification_queue.pop_first_block().unwrap();
 
-        debug_assert!(self.inner.pending_encoded_justification.is_none());
-        self.inner.pending_encoded_justification = block
-            .scale_encoded_justification
+        debug_assert!(self
+            .inner
+            .pending_encoded_justifications
+            .as_slice()
+            .is_empty());
+        self.inner.pending_encoded_justifications = block
+            .scale_encoded_justifications
             .clone()
-            .map(|j| (j, source_id));
+            .into_iter()
+            .map(|(e, j)| (e, j, source_id))
+            .collect::<Vec<_>>()
+            .into_iter();
 
         if self.inner.finalized_runtime.is_some() {
             BlockVerification::from(
@@ -809,7 +826,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                     let header = insert.header().into();
                     insert.insert(Block {
                         header,
-                        justification: block.scale_encoded_justification.clone(),
+                        justifications: block.scale_encoded_justifications.clone(),
                         user_data: block.user_data,
                         full: None,
                     });
@@ -999,7 +1016,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         let header = insert.header().into();
                         insert.insert(Block {
                             header,
-                            justification: None, // TODO: /!\
+                            justifications: Vec::new(), // TODO: /!\
                             user_data: shared.block_user_data.take().unwrap(),
                             full: Some(BlockFull {
                                 body: mem::take(&mut shared.block_body),
@@ -1193,9 +1210,13 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
         OptimisticSync<TRq, TSrc, TBl>,
         JustificationVerification<TBl>,
     ) {
-        let (justification, source_id) = self.inner.pending_encoded_justification.take().unwrap();
+        let (consensus_engine_id, justification, source_id) =
+            self.inner.pending_encoded_justifications.next().unwrap();
 
-        let mut apply = match self.chain.verify_justification(&justification) {
+        let mut apply = match self
+            .chain
+            .verify_justification(consensus_engine_id, &justification)
+        {
             Ok(a) => a,
             Err(error) => {
                 if let Some(source) = self.inner.sources.get_mut(&source_id) {
@@ -1233,7 +1254,10 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
 
         // As part of the finalization, put the justification in the chain that's
         // going to be reported to the user.
-        apply.block_user_data().justification = Some(justification);
+        apply
+            .block_user_data()
+            .justifications
+            .push((consensus_engine_id, justification));
 
         // Applying the finalization and iterating over the now-finalized block.
         // Since `apply()` returns the blocks in decreasing block number, we have

@@ -510,7 +510,7 @@ impl SyncBackground {
                         let (_, response_outcome) = self.sync.blocks_request_response(request_id, result.map(|v| v.into_iter().map(|block| all::BlockRequestSuccessBlock {
                             scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
                             scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
-                            scale_encoded_justification: block.justification,
+                            scale_encoded_justifications: block.justifications.unwrap_or(Vec::new()),
                             user_data: (),
                         })));
 
@@ -839,7 +839,7 @@ impl SyncBackground {
                         Ok(iter::once(all::BlockRequestSuccessBlock {
                             scale_encoded_header,
                             scale_encoded_extrinsics,
-                            scale_encoded_justification: None,
+                            scale_encoded_justifications: Vec::new(),
                             user_data: (),
                         })),
                     );
@@ -881,7 +881,7 @@ impl SyncBackground {
                             fields: network::protocol::BlocksRequestFields {
                                 header: request_headers,
                                 body: request_bodies,
-                                justification: request_justification,
+                                justifications: request_justification,
                             },
                         },
                     );
