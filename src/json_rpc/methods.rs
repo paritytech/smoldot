@@ -24,7 +24,8 @@ use alloc::{
     boxed::Box,
     format,
     string::{String, ToString as _},
-    vec, vec::Vec,
+    vec,
+    vec::Vec,
 };
 use core::fmt;
 use hashbrown::HashMap;
