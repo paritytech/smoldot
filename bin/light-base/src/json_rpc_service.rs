@@ -477,6 +477,7 @@ enum SubscriptionTy {
     NewHeads,
     FinalizedHeads,
     Storage,
+    TransactionLegacy,
     Transaction,
     RuntimeSpec,
     ChainHeadBody,
@@ -569,6 +570,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     request_id,
                     &state_machine_request_id,
                     transaction,
+                    true,
                 )
                 .await
             }
@@ -579,7 +581,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         .lock()
                         .await
                         .misc
-                        .remove(&(subscription.to_owned(), SubscriptionTy::Transaction))
+                        .remove(&(subscription.to_owned(), SubscriptionTy::TransactionLegacy))
                     {
                         abort_handle.abort();
                         Some(state_machine_subscription)
@@ -1783,6 +1785,44 @@ impl<TPlat: Platform> Background<TPlat> {
                     )
                     .await;
             }
+            methods::MethodCall::transaction_unstable_submitAndWatch { transaction } => {
+                self.submit_and_watch_transaction(
+                    request_id,
+                    &state_machine_request_id,
+                    transaction,
+                    false,
+                )
+                .await
+            }
+            methods::MethodCall::transaction_unstable_unwatch { subscription } => {
+                let state_machine_subscription =
+                    if let Some((abort_handle, state_machine_subscription)) = self
+                        .subscriptions
+                        .lock()
+                        .await
+                        .misc
+                        .remove(&(subscription.to_owned(), SubscriptionTy::Transaction))
+                    {
+                        abort_handle.abort();
+                        Some(state_machine_subscription)
+                    } else {
+                        None
+                    };
+
+                if let Some(state_machine_subscription) = &state_machine_subscription {
+                    self.requests_subscriptions
+                        .stop_subscription(state_machine_subscription)
+                        .await;
+                }
+
+                self.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        methods::Response::transaction_unstable_unwatch(())
+                            .to_json_response(request_id),
+                    )
+                    .await;
+            }
 
             _method => {
                 log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
@@ -1803,12 +1843,15 @@ impl<TPlat: Platform> Background<TPlat> {
         }
     }
 
-    /// Handles a call to [`methods::MethodCall::author_submitAndWatchExtrinsic`].
+    /// Handles a call to [`methods::MethodCall::author_submitAndWatchExtrinsic`] (if `is_legacy`
+    /// is `true`) or to [`methods::MethodCall::transaction_unstable_submitAndWatch`] (if
+    /// `is_legacy` is `false`).
     async fn submit_and_watch_transaction(
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
         transaction: methods::HexString,
+        is_legacy: bool,
     ) {
         let state_machine_subscription = match self
             .requests_subscriptions
@@ -1842,8 +1885,13 @@ impl<TPlat: Platform> Background<TPlat> {
         let abort_registration = {
             let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
             let mut subscriptions_list = self.subscriptions.lock().await;
+            let ty = if is_legacy {
+                SubscriptionTy::TransactionLegacy
+            } else {
+                SubscriptionTy::Transaction
+            };
             subscriptions_list.misc.insert(
-                (subscription_id.clone(), SubscriptionTy::Transaction),
+                (subscription_id.clone(), ty),
                 (abort_handle, state_machine_subscription.clone()),
             );
             abort_registration
@@ -1852,8 +1900,13 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 &state_machine_request_id,
-                methods::Response::author_submitAndWatchExtrinsic(&subscription_id)
-                    .to_json_response(request_id),
+                if is_legacy {
+                    methods::Response::author_submitAndWatchExtrinsic(&subscription_id)
+                        .to_json_response(request_id)
+                } else {
+                    methods::Response::transaction_unstable_submitAndWatch(&subscription_id)
+                        .to_json_response(request_id)
+                },
             )
             .await;
 
@@ -1866,65 +1919,185 @@ impl<TPlat: Platform> Background<TPlat> {
             let me = self.clone();
             async move {
                 let mut included_block = None;
+                let mut num_broadcasted_peers = 0;
+
+                // TODO: doesn't reported `validated` events
 
                 loop {
                     match transaction_updates.next().await {
                         Some(update) => {
-                            let update = match update {
-                                transactions_service::TransactionStatus::Broadcast(peers) => {
-                                    methods::TransactionStatus::Broadcast(
-                                        peers.into_iter().map(|peer| peer.to_base58()).collect(),
-                                    )
-                                }
-                                transactions_service::TransactionStatus::IncludedBlockUpdate {
-                                    block_hash: Some((block_hash, _)),
-                                } => {
-                                    included_block = Some(block_hash);
-                                    methods::TransactionStatus::InBlock(methods::HashHexString(
-                                        block_hash,
-                                    ))
-                                }
-                                transactions_service::TransactionStatus::IncludedBlockUpdate {
-                                    block_hash: None,
-                                } => {
-                                    if let Some(block_hash) = included_block.take() {
-                                        methods::TransactionStatus::Retracted(
-                                            methods::HashHexString(block_hash),
+                            let update = match (update, is_legacy) {
+                                (transactions_service::TransactionStatus::Broadcast(peers), false) => {
+                                    methods::ServerToClient::author_extrinsicUpdate {
+                                        subscription: &subscription_id,
+                                        result: methods::TransactionStatus::Broadcast(
+                                            peers.into_iter().map(|peer| peer.to_base58()).collect(),
                                         )
+                                    }
+                                    .to_json_call_object_parameters(None)
+                                }
+                                (transactions_service::TransactionStatus::Broadcast(peers), true) => {
+                                    num_broadcasted_peers += peers.len();
+                                    methods::ServerToClient::transaction_unstable_watchEvent {
+                                        subscription: &subscription_id,
+                                        result: methods::TransactionWatchEvent::Broadcasted {
+                                            num_peers: u32::try_from(num_broadcasted_peers).unwrap_or(u32::max_value()),
+                                        }
+                                    }
+                                    .to_json_call_object_parameters(None)
+                                }
+
+                                (transactions_service::TransactionStatus::IncludedBlockUpdate {
+                                    block_hash: Some((block_hash, _)),
+                                }, true) => {
+                                    included_block = Some(block_hash);
+                                    methods::ServerToClient::author_extrinsicUpdate {
+                                        subscription: &subscription_id,
+                                        result: methods::TransactionStatus::InBlock(methods::HashHexString(
+                                            block_hash,
+                                        ))
+                                    }
+                                    .to_json_call_object_parameters(None)
+                                }
+                                (transactions_service::TransactionStatus::IncludedBlockUpdate {
+                                    block_hash: None,
+                                }, true) => {
+                                    if let Some(block_hash) = included_block.take() {
+                                        methods::ServerToClient::author_extrinsicUpdate {
+                                            subscription: &subscription_id,
+                                            result: methods::TransactionStatus::Retracted(
+                                                methods::HashHexString(block_hash),
+                                            )
+                                        }
+                                        .to_json_call_object_parameters(None)
+
                                     } else {
                                         continue;
                                     }
                                 }
-                                transactions_service::TransactionStatus::Dropped(
+                                (transactions_service::TransactionStatus::IncludedBlockUpdate {
+                                    block_hash: Some((block_hash, index)),
+                                }, false) => {
+                                    included_block = Some(block_hash);
+                                    methods::ServerToClient::transaction_unstable_watchEvent {
+                                        subscription: &subscription_id,
+                                        result: methods::TransactionWatchEvent::BestChainBlockIncluded {
+                                            block: Some(methods::TransactionWatchEventBlock {
+                                                hash: methods::HashHexString(block_hash),
+                                                index: methods::NumberAsString(index),
+                                            })
+                                        }
+                                    }
+                                    .to_json_call_object_parameters(None)
+                                }
+                                (transactions_service::TransactionStatus::IncludedBlockUpdate {
+                                    block_hash: None,
+                                }, false) => {
+                                    methods::ServerToClient::transaction_unstable_watchEvent {
+                                        subscription: &subscription_id,
+                                        result: methods::TransactionWatchEvent::BestChainBlockIncluded {
+                                            block: None,
+                                        }
+                                    }
+                                    .to_json_call_object_parameters(None)
+                                }
+
+                                (transactions_service::TransactionStatus::Dropped(
                                     transactions_service::DropReason::GapInChain,
-                                )
-                                | transactions_service::TransactionStatus::Dropped(
+                                ), true)
+                                | (transactions_service::TransactionStatus::Dropped(
                                     transactions_service::DropReason::MaxPendingTransactionsReached,
-                                )
-                                | transactions_service::TransactionStatus::Dropped(
+                                ), true)
+                                | (transactions_service::TransactionStatus::Dropped(
                                     transactions_service::DropReason::Invalid(_),
-                                )
-                                | transactions_service::TransactionStatus::Dropped(
+                                ), true)
+                                | (transactions_service::TransactionStatus::Dropped(
                                     transactions_service::DropReason::ValidateError(_),
-                                ) => methods::TransactionStatus::Dropped,
-                                transactions_service::TransactionStatus::Dropped(
-                                    transactions_service::DropReason::Finalized(block),
-                                ) => methods::TransactionStatus::Finalized(methods::HashHexString(
-                                    block,
-                                )),
+                                ), true) => {
+                                    methods::ServerToClient::author_extrinsicUpdate {
+                                        subscription: &subscription_id,
+                                        result: methods::TransactionStatus::Dropped,
+                                    }
+                                    .to_json_call_object_parameters(None)
+                                },
+                                (transactions_service::TransactionStatus::Dropped(
+                                    transactions_service::DropReason::GapInChain,
+                                ), false) => {
+                                    methods::ServerToClient::transaction_unstable_watchEvent {
+                                        subscription: &subscription_id,
+                                        result: methods::TransactionWatchEvent::Dropped {
+                                            error: "gap in chain of blocks",
+                                            broadcasted: num_broadcasted_peers != 0,
+                                        }
+                                    }
+                                    .to_json_call_object_parameters(None)
+                                },
+                                (transactions_service::TransactionStatus::Dropped(
+                                    transactions_service::DropReason::MaxPendingTransactionsReached,
+                                ), false) => {
+                                    methods::ServerToClient::transaction_unstable_watchEvent {
+                                        subscription: &subscription_id,
+                                        result: methods::TransactionWatchEvent::Dropped {
+                                            error: "transactions pool full",
+                                            broadcasted: num_broadcasted_peers != 0,
+                                        }
+                                    }
+                                    .to_json_call_object_parameters(None)
+                                },
+                                (transactions_service::TransactionStatus::Dropped(
+                                    transactions_service::DropReason::Invalid(error),
+                                ), false) => {
+                                    methods::ServerToClient::transaction_unstable_watchEvent {
+                                        subscription: &subscription_id,
+                                        result: methods::TransactionWatchEvent::Invalid {
+                                            error: &error.to_string(),
+                                        }
+                                    }
+                                    .to_json_call_object_parameters(None)
+                                },
+                                (transactions_service::TransactionStatus::Dropped(
+                                    transactions_service::DropReason::ValidateError(error),
+                                ), false) => {
+                                    methods::ServerToClient::transaction_unstable_watchEvent {
+                                        subscription: &subscription_id,
+                                        result: methods::TransactionWatchEvent::Error {
+                                            error: &error.to_string(),
+                                        }
+                                    }
+                                    .to_json_call_object_parameters(None)
+                                },
+
+                                (transactions_service::TransactionStatus::Dropped(
+                                    transactions_service::DropReason::Finalized { block_hash, .. },
+                                ), true) => {
+                                    methods::ServerToClient::author_extrinsicUpdate {
+                                        subscription: &subscription_id,
+                                        result: methods::TransactionStatus::Finalized(methods::HashHexString(
+                                            block_hash,
+                                        ))
+                                    }
+                                    .to_json_call_object_parameters(None)
+                                }
+                                (transactions_service::TransactionStatus::Dropped(
+                                    transactions_service::DropReason::Finalized { block_hash, index },
+                                ), false) => {
+                                    methods::ServerToClient::transaction_unstable_watchEvent {
+                                        subscription: &subscription_id,
+                                        result: methods::TransactionWatchEvent::Finalized {
+                                            block: methods::TransactionWatchEventBlock {
+                                                hash: methods::HashHexString(block_hash),
+                                                index: methods::NumberAsString(index),
+                                            },
+                                        }
+                                    }
+                                    .to_json_call_object_parameters(None)
+                                }
                             };
 
                             // TODO: handle situation where buffer is full
                             let _ = me
                                 .requests_subscriptions
-                                .try_push_notification(
-                                    &state_machine_subscription,
-                                    methods::ServerToClient::author_extrinsicUpdate {
-                                        subscription: &subscription_id,
-                                        result: update,
-                                    }
-                                    .to_json_call_object_parameters(None),
-                                )
+                                .try_push_notification(&state_machine_subscription, update)
                                 .await;
                         }
                         None => {
