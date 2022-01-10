@@ -1976,7 +1976,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     }
                                 }
                                 (transactions_service::TransactionStatus::IncludedBlockUpdate {
-                                    block_hash: Some((block_hash, _)),
+                                    block_hash: Some((block_hash, index)),
                                 }, false) => {
                                     included_block = Some(block_hash);
                                     methods::ServerToClient::transaction_unstable_watchEvent {
@@ -1984,7 +1984,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                         result: methods::TransactionWatchEvent::BestChainBlockIncluded {
                                             block: Some(methods::TransactionWatchEventBlock {
                                                 hash: methods::HashHexString(block_hash),
-                                                index: methods::NumberAsString(0), // TODO: /!\
+                                                index: methods::NumberAsString(index),
                                             })
                                         }
                                     }
@@ -2068,25 +2068,25 @@ impl<TPlat: Platform> Background<TPlat> {
                                 },
 
                                 (transactions_service::TransactionStatus::Dropped(
-                                    transactions_service::DropReason::Finalized(block),
+                                    transactions_service::DropReason::Finalized { block_hash, .. },
                                 ), true) => {
                                     methods::ServerToClient::author_extrinsicUpdate {
                                         subscription: &subscription_id,
                                         result: methods::TransactionStatus::Finalized(methods::HashHexString(
-                                            block,
+                                            block_hash,
                                         ))
                                     }
                                     .to_json_call_object_parameters(None)
                                 }
                                 (transactions_service::TransactionStatus::Dropped(
-                                    transactions_service::DropReason::Finalized(block),
+                                    transactions_service::DropReason::Finalized { block_hash, index },
                                 ), false) => {
                                     methods::ServerToClient::transaction_unstable_watchEvent {
                                         subscription: &subscription_id,
                                         result: methods::TransactionWatchEvent::Finalized {
                                             block: methods::TransactionWatchEventBlock {
-                                                hash: methods::HashHexString(block),
-                                                index: methods::NumberAsString(0), // TODO: /!\
+                                                hash: methods::HashHexString(block_hash),
+                                                index: methods::NumberAsString(index),
                                             },
                                         }
                                     }
