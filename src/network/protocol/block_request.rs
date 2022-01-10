@@ -17,7 +17,7 @@
 
 use super::{schema, ProtobufDecodeError};
 
-use alloc::vec::Vec;
+use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{iter, num::NonZeroU32};
 use prost::Message as _;
 
@@ -50,7 +50,7 @@ pub enum BlocksRequestDirection {
 pub struct BlocksRequestFields {
     pub header: bool,
     pub body: bool,
-    pub justification: bool,
+    pub justifications: bool,
 }
 
 /// Which block the remote must return first.
@@ -75,7 +75,7 @@ pub fn build_block_request(config: BlocksRequestConfig) -> impl Iterator<Item = 
         if config.fields.body {
             fields |= 1 << 25;
         }
-        if config.fields.justification {
+        if config.fields.justifications {
             fields |= 1 << 28;
         }
 
@@ -179,7 +179,7 @@ pub fn decode_block_request(
         fields: BlocksRequestFields {
             header: (request.fields & (1 << 24)) != 0,
             body: (request.fields & (1 << 25)) != 0,
-            justification: (request.fields & (1 << 28)) != 0,
+            justifications: (request.fields & (1 << 28)) != 0,
         },
     })
 }

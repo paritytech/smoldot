@@ -629,7 +629,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     "Connection({}) <= BlocksRequest(start: {}, num: {}, descending: {:?}, header: {:?}, body: {:?}, justifications: {:?})",
                     target, HashDisplay(hash), config.desired_count.get(),
                     matches!(config.direction, protocol::BlocksRequestDirection::Descending),
-                    config.fields.header, config.fields.body, config.fields.justification
+                    config.fields.header, config.fields.body, config.fields.justifications
                 );
             }
             protocol::BlocksRequestConfigStart::Number(number) => {
@@ -638,7 +638,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     "Connection({}) <= BlocksRequest(start: #{}, num: {}, descending: {:?}, header: {:?}, body: {:?}, justifications: {:?})",
                     target, number, config.desired_count.get(),
                     matches!(config.direction, protocol::BlocksRequestDirection::Descending),
-                    config.fields.header, config.fields.body, config.fields.justification
+                    config.fields.header, config.fields.body, config.fields.justifications
                 );
             }
         }

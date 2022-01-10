@@ -621,7 +621,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         protocol::BlocksRequestFields {
                             header: true,
                             body: true,
-                            justification: true,
+                            justifications: true,
                         },
                     )
                     .await;
@@ -639,7 +639,10 @@ impl<TPlat: Platform> Background<TPlat> {
                             .collect(),
                         header: methods::Header::from_scale_encoded_header(&block.header.unwrap())
                             .unwrap(),
-                        justification: block.justification.map(methods::HexString),
+                        // TODO: do properly, with https://github.com/paritytech/smoldot/issues/778
+                        justification: block.justifications.as_ref()
+                            .and_then(|l| l.first())
+                            .map(|(_, j)| methods::HexString(j.clone())),
                     })
                     .to_json_response(request_id)
                 } else {
@@ -1473,7 +1476,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         let response = if block_is_valid {
                             // TODO: right now we query the header because the underlying function returns an error if we don't
                             let response = me.sync_service.clone()
-                                .block_query(hash.0, protocol::BlocksRequestFields { header: true, body: true, justification: false  }).await;
+                                .block_query(hash.0, protocol::BlocksRequestFields { header: true, body: true, justifications: false  }).await;
                             match response {
                                 Ok(block_data) => {
                                     methods::ServerToClient::chainHead_unstable_bodyEvent {
@@ -2703,7 +2706,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 protocol::BlocksRequestFields {
                     header: true,
                     body: false,
-                    justification: false,
+                    justifications: false,
                 },
             );
             let result = fut.await;
