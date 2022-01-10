@@ -1099,7 +1099,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     blocks.map(|iter| {
                         iter.map(|block| all_forks::RequestSuccessBlock {
                             scale_encoded_header: block.scale_encoded_header,
-                            scale_encoded_justification: block.scale_encoded_justification,
+                            scale_encoded_justification: block.scale_encoded_justifications,
                         })
                     }),
                 );
@@ -1130,7 +1130,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         .map(|iter| {
                             iter.map(|block| optimistic::RequestSuccessBlock {
                                 scale_encoded_header: block.scale_encoded_header,
-                                scale_encoded_justification: block.scale_encoded_justification,
+                                scale_encoded_justification: block.scale_encoded_justifications,
                                 scale_encoded_extrinsics: block.scale_encoded_extrinsics,
                                 user_data: block.user_data,
                             })
@@ -1449,7 +1449,7 @@ impl RequestDetail {
 
 pub struct BlockRequestSuccessBlock<TBl> {
     pub scale_encoded_header: Vec<u8>,
-    pub scale_encoded_justification: Option<Vec<u8>>,
+    pub scale_encoded_justifications: Vec<([u8; 4], Vec<u8>)>,
     pub scale_encoded_extrinsics: Vec<Vec<u8>>,
     pub user_data: TBl,
 }

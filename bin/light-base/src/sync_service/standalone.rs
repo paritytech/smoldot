@@ -194,7 +194,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                             v.into_iter().filter_map(|block| {
                                 Some(all::BlockRequestSuccessBlock {
                                     scale_encoded_header: block.header?,
-                                    scale_encoded_justification: block.justification,
+                                    scale_encoded_justifications: block.justification,
                                     scale_encoded_extrinsics: Vec::new(),
                                     user_data: (),
                                 })

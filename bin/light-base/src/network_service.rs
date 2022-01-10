@@ -659,7 +659,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     BytesDisplay(blocks.iter().fold(0, |sum, block| {
                         let block_size = block.header.as_ref().map_or(0, |h| h.len()) +
                             block.body.as_ref().map_or(0, |b| b.iter().fold(0, |s, e| s + e.len())) +
-                            block.justification.as_ref().map_or(0, |j| j.len());
+                            block.justifications.as_ref().into_iter().flat_map(|l| l.iter()).fold(0, |s, j| s + j.1.len());
                         sum + u64::try_from(block_size).unwrap()
                     }))
                 );
