@@ -15,8 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { CompatWorker, workerOnError, workerOnMessage, workerTerminate } from './compat/index.js';
+import { workerTerminate } from './compat/index.js';
 import * as messages from './worker/messages.js';
+import { default as spawnWorker } from './spawnWorker.js'
 
 /**
  * Thrown in case of a problem when initializing the chain.
@@ -336,7 +337,7 @@ export function start(options?: ClientOptions): Client {
   // The line of code below (`new Worker(...)`) is designed to hopefully work across all
   // platforms and bundlers.
   // See also the README.md for more context.
-  const worker = new Worker(new URL('./worker/worker.js', import.meta.url));
+  const worker = spawnWorker();
   let workerError: null | Error = null;
 
   // Whenever an `addChain` or `removeChain` message is sent to the worker, a corresponding entry
@@ -367,11 +368,11 @@ export function start(options?: ClientOptions): Client {
   // If this liveness ping isn't received for a long time, an error is reported in the logs.
   // The first check is delayed in order to account for the fact that the worker has to perform
   // an expensive initialization step when initializing the Wasm VM.
-  let livenessTimeout: null | ReturnType<setTimeout> = null;
+  let livenessTimeout: null | ReturnType<typeof globalThis.setTimeout> = null;
   const resetLivenessTimeout = () => {
     if (livenessTimeout !== null)
-      clearTimeout(livenessTimeout);
-    livenessTimeout = setTimeout(() => {
+      globalThis.clearTimeout(livenessTimeout);
+    livenessTimeout = globalThis.setTimeout(() => {
       livenessTimeout = null;
       console.warn(
         "Smoldot appears unresponsive. Please open an issue at " +
@@ -382,10 +383,10 @@ export function start(options?: ClientOptions): Client {
       );
     }, 10000);
   };
-  setTimeout(() => resetLivenessTimeout(), 15000);
+  globalThis.setTimeout(() => resetLivenessTimeout(), 15000);
 
   // The worker can send us messages whose type is identified through a `kind` field.
-  workerOnMessage(worker, (message: messages.FromWorker) => {
+  worker.addListener('message', (message: messages.FromWorker) => {
     if (message.kind == 'jsonrpc') {
       const cb = chainsJsonRpcCallbacks.get(message.chainId);
       if (cb) cb(message.data);
@@ -485,7 +486,7 @@ export function start(options?: ClientOptions): Client {
     }
   });
 
-  workerOnError(worker, (error) => {
+  worker.addListener('error', (error) => {
     // A worker error should only happen in case of a critical error as the result of a bug
     // somewhere. Consequently, nothing is really in place to cleanly report the error.
     console.error(
@@ -574,7 +575,7 @@ export function start(options?: ClientOptions): Client {
       workerError = new AlreadyDestroyedError();
 
       if (livenessTimeout !== null)
-        clearTimeout(livenessTimeout)
+        globalThis.clearTimeout(livenessTimeout)
 
       return workerTerminate(worker)
     }

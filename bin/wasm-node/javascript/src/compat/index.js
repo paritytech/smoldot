@@ -21,13 +21,12 @@
 
 import { parentPort } from 'worker_threads';
 import { hrtime } from 'process';
+import { createConnection } from 'net';
+import { randomFillSync } from 'crypto';
 
-export { default as net } from 'net';
-export { Worker } from 'worker_threads';
-
-export const workerOnMessage = (worker, callback) => worker.on('message', callback);
-export const workerOnError = (worker, callback) => worker.on('error', callback);
-export const workerTerminate = (worker) => worker.terminate().then(() => { });
+export function workerTerminate(worker) {
+    return worker.terminate().then(() => { });
+}
 
 export function postMessage(msg) {
     parentPort.postMessage(msg);
@@ -44,4 +43,15 @@ export function performanceNow() {
 
 export function isTcpAvailable() {
     return true;
+}
+
+export function createTcpConnection(opts) {
+    return createConnection(opts)
+}
+
+export function getRandomValues(buffer) {
+    if (buffer.length >= 65536)
+        throw new Error('getRandomValues buffer too large')
+
+    randomFillSync(buffer)
 }

@@ -24,9 +24,8 @@
 //! of that object with the Wasm instance.
 
 import { Buffer } from 'buffer';
-import randombytes from 'randombytes';
 import * as compat from '../compat/index.js';
-import { SmoldotWasmInstance } from './bindings.js';
+import type { SmoldotWasmInstance } from './bindings.js';
 
 export interface Config {
     instance?: SmoldotWasmInstance,
@@ -51,8 +50,13 @@ export default (config: Config): compat.WasmModuleImports => {
             ptr >>>= 0;
             len >>>= 0;
 
-            const bytes = randombytes(len);
-            bytes.copy(Buffer.from(instance.exports.memory.buffer), ptr);
+            const baseBuffer = Buffer.from(instance.exports.memory.buffer)
+                .slice(ptr, ptr + len);
+            for (let iter = 0; iter < len; iter += 65536) {
+                // `baseBuffer.slice` automatically saturates at the end of the buffer
+                crypto.getRandomValues(baseBuffer.slice(iter, iter + 65536))
+            }
+
             return 0;
         },
 

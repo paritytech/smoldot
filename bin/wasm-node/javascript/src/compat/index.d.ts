@@ -19,18 +19,29 @@
 
 export type WasmModuleImports = WebAssembly.ModuleImports;
 
-declare class CompatWorker {
-
+export interface CompatWorker {
+    postMessage(value: any, transferList?: ReadonlyArray<ArrayBuffer | MessagePort | Blob>): void;
+    addListener(event: 'error', listener: (err: Error) => void): this;
+    addListener(event: 'message', listener: (value: any) => void): this;
+    removeListener(event: 'error', listener: (err: Error) => void): this;
+    removeListener(event: 'message', listener: (value: any) => void): this;
 }
 
-// TODO: worker shouldn't be any
-export function workerOnMessage(worker: any, callback: (message: any) => void): void;
-export function workerOnError(worker: any, callback: (error: Error) => void): void;
-export function workerTerminate(worker: any): Promise<void>;
+export function workerTerminate(worker: CompatWorker): Promise<void>;
 
 export function postMessage(message: any): void;
+
 export function setOnMessage(callback: (message: any) => void): void;
 
 export function performanceNow(): number;
 
 export function isTcpAvailable(): boolean;
+
+export function createTcpConnection(opts: CreateTcpConnectionOpts): any;
+
+export function getRandomValues<T extends ArrayBufferView>(buffer: T): void;
+
+interface CreateTcpConnectionOpts {
+    port: number;
+    host: string;
+}

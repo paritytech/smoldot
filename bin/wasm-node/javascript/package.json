@@ -27,13 +27,11 @@
   "dependencies": {
     "buffer": "^6.0.1",
     "pako": "^2.0.4",
-    "performance-now": "^2.1.0",
-    "randombytes": "^2.1.0",
     "websocket": "^1.0.32"
   },
   "devDependencies": {
+    "@types/node": "^17.0.8",
     "@types/pako": "^1.0.3",
-    "@types/randombytes": "^2.0.0",
     "@types/websocket": "^1.0.4",
     "ava": "^4.0.0",
     "dtslint": "^4.0.6",

@@ -23,7 +23,9 @@
 import { Buffer } from 'buffer';
 import { w3cwebsocket } from 'websocket';
 import * as compat from '../compat/index.js';
-import { SmoldotWasmInstance } from './bindings.js';
+import type { SmoldotWasmInstance } from './bindings.js';
+
+import type { Socket as TcpSocket } from 'net';
 
 export interface Config {
     instance?: SmoldotWasmInstance,
@@ -36,23 +38,7 @@ export interface Config {
     forbidWss: boolean,
 }
 
-class ConnectionError extends Error {
-    constructor(message: string) {
-        super(message);
-    }
-}
-
-interface TcpWrapped {
-    ty: 'tcp',
-    socket: compat.NodeJsSocket,
-}
-
-interface WebSocketWrapped {
-    ty: 'websocket',
-    socket: w3cwebsocket,
-}
-
-export default (config: Config): compat.WasmModuleImports => {
+export default function (config: Config): compat.WasmModuleImports {
     // Used below to store the list of all connections.
     // The indices within this array are chosen by the Rust code.
     let connections: Record<number, TcpWrapped | WebSocketWrapped> = {};
@@ -305,4 +291,20 @@ export default (config: Config): compat.WasmModuleImports => {
             }
         }
     };
+}
+
+class ConnectionError extends Error {
+    constructor(message: string) {
+        super(message);
+    }
+}
+
+interface TcpWrapped {
+    ty: 'tcp',
+    socket: TcpSocket,
+}
+
+interface WebSocketWrapped {
+    ty: 'websocket',
+    socket: w3cwebsocket,
 }
