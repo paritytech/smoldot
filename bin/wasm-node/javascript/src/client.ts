@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { workerTerminate } from './compat/index.js';
+import { workerOnMessage, workerOnError, workerTerminate } from './compat/index.js';
 import * as messages from './worker/messages.js';
 import spawnWorker from './worker/spawn.js';
 
@@ -386,7 +386,7 @@ export function start(options?: ClientOptions): Client {
   globalThis.setTimeout(() => resetLivenessTimeout(), 15000);
 
   // The worker can send us messages whose type is identified through a `kind` field.
-  worker.addListener('message', (message: messages.FromWorker) => {
+  workerOnMessage(worker, (message: messages.FromWorker) => {
     if (message.kind == 'jsonrpc') {
       const cb = chainsJsonRpcCallbacks.get(message.chainId);
       if (cb) cb(message.data);
@@ -486,7 +486,7 @@ export function start(options?: ClientOptions): Client {
     }
   });
 
-  worker.addListener('error', (error) => {
+  workerOnError(worker, (error) => {
     // A worker error should only happen in case of a critical error as the result of a bug
     // somewhere. Consequently, nothing is really in place to cleanly report the error.
     console.error(

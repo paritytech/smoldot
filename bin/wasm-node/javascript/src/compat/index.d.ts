@@ -19,17 +19,16 @@
 /// <reference lib="dom" />
 
 import type { Socket as TcpSocket, NetConnectOpts } from 'net';
-import type { Worker } from 'worker_threads';
 
 export type WasmModuleImports = WebAssembly.ModuleImports;
 
-export interface CompatWorker {
+export class CompatWorker {
     postMessage(value: any, transferList?: ReadonlyArray<ArrayBuffer | Blob>): void;
-    addListener(event: 'error', listener: (err: Error) => void): this;
-    addListener(event: 'message', listener: (value: any) => void): this;
-    removeListener(event: 'error', listener: (err: Error) => void): this;
-    removeListener(event: 'message', listener: (value: any) => void): this;
 }
+
+export function workerOnMessage(worker: CompatWorker, callback: (value: any) => void): void;
+
+export function workerOnError(worker: CompatWorker, callback: (err: Error) => void): void;
 
 export function workerTerminate(worker: CompatWorker): Promise<void>;
 

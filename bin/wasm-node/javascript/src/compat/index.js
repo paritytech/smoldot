@@ -24,6 +24,14 @@ import { hrtime } from 'process';
 import { createConnection as nodeCreateConnection } from 'net';
 import { randomFillSync } from 'crypto';
 
+export function workerOnMessage(worker, callback) {
+    worker.on('message', callback);
+}
+
+export function workerOnError(worker, callback) {
+    worker.on('error', callback);
+}
+
 export function workerTerminate(worker) {
     return worker.terminate().then(() => { });
 }

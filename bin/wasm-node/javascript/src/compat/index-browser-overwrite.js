@@ -17,6 +17,15 @@
 
 // Overrides `index.js` when in a browser.
 
+export function workerOnMessage(worker, callback) {
+    worker.onmessage = (event) => callback(event.data) 
+}
+
+export function workerOnError(worker, callback) {
+    // TODO: unclear if the parameter of the callback is same as with NodeJS
+    worker.onerror = callback;
+}
+
 export function workerTerminate(worker) {
     worker.terminate();
     return Promise.resolve();
