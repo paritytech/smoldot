@@ -39,7 +39,6 @@ use std::{
 };
 
 mod json_rpc_service;
-mod lossy_channel;
 mod network_service;
 mod runtime_service;
 mod sync_service;
@@ -1036,16 +1035,18 @@ async fn start_services<TPlat: Platform>(
 
         // The runtime service follows the runtime of the best block of the chain,
         // and allows performing runtime calls.
-        let runtime_service = runtime_service::RuntimeService::new(runtime_service::Config {
-            log_name: log_name.clone(),
-            tasks_executor: Box::new({
-                let new_task_tx = new_task_tx.clone();
-                move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
-            }),
-            sync_service: sync_service.clone(),
-            genesis_block_scale_encoded_header,
-        })
-        .await;
+        let runtime_service = Arc::new(
+            runtime_service::RuntimeService::new(runtime_service::Config {
+                log_name: log_name.clone(),
+                tasks_executor: Box::new({
+                    let new_task_tx = new_task_tx.clone();
+                    move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
+                }),
+                sync_service: sync_service.clone(),
+                genesis_block_scale_encoded_header,
+            })
+            .await,
+        );
 
         (sync_service, runtime_service)
     } else {
@@ -1071,16 +1072,18 @@ async fn start_services<TPlat: Platform>(
 
         // The runtime service follows the runtime of the best block of the chain,
         // and allows performing runtime calls.
-        let runtime_service = runtime_service::RuntimeService::new(runtime_service::Config {
-            log_name: log_name.clone(),
-            tasks_executor: Box::new({
-                let new_task_tx = new_task_tx.clone();
-                move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
-            }),
-            sync_service: sync_service.clone(),
-            genesis_block_scale_encoded_header,
-        })
-        .await;
+        let runtime_service = Arc::new(
+            runtime_service::RuntimeService::new(runtime_service::Config {
+                log_name: log_name.clone(),
+                tasks_executor: Box::new({
+                    let new_task_tx = new_task_tx.clone();
+                    move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
+                }),
+                sync_service: sync_service.clone(),
+                genesis_block_scale_encoded_header,
+            })
+            .await,
+        );
 
         (sync_service, runtime_service)
     };
