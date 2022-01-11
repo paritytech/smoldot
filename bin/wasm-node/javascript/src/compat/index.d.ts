@@ -19,11 +19,12 @@
 /// <reference lib="dom" />
 
 import type { Socket as TcpSocket, NetConnectOpts } from 'net';
+import type { Worker } from 'worker_threads';
 
 export type WasmModuleImports = WebAssembly.ModuleImports;
 
 export interface CompatWorker {
-    postMessage(value: any, transferList?: ReadonlyArray<ArrayBuffer | MessagePort | Blob>): void;
+    postMessage(value: any, transferList?: ReadonlyArray<ArrayBuffer | Blob>): void;
     addListener(event: 'error', listener: (err: Error) => void): this;
     addListener(event: 'message', listener: (value: any) => void): this;
     removeListener(event: 'error', listener: (err: Error) => void): this;
