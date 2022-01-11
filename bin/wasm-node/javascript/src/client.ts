@@ -17,7 +17,7 @@
 
 import { workerTerminate } from './compat/index.js';
 import * as messages from './worker/messages.js';
-import { default as spawnWorker } from './spawnWorker.js'
+import spawnWorker from './worker/spawn.js';
 
 /**
  * Thrown in case of a problem when initializing the chain.

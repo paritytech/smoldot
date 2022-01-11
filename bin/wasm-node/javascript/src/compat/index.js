@@ -15,9 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// This small dummy module re-exports some types from NodeJS.
+// This small dummy module re-exports types and functions from NodeJS.
 //
-// A rule in the `package.json` overrides it with `compat-browser.js` when in a browser.
+// A rule in the `package.json` overrides it with `index-browser-override.js` when in a browser.
 
 import { parentPort } from 'worker_threads';
 import { hrtime } from 'process';

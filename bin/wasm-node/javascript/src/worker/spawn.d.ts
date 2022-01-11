@@ -15,36 +15,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// Overrides `compat-nodejs.js` when in a browser.
+import type { CompatWorker } from '../compat/index.js';
 
-export function workerTerminate(worker) {
-    worker.terminate();
-    return Promise.resolve();
-}
-
-export function postMessage(msg) {
-    self.postMessage(msg);
-}
-
-export function setOnMessage(callback) {
-    self.onmessage = (event) => callback(event.data);
-}
-
-export function performanceNow() {
-    return performance.now()
-}
-
-export function isTcpAvailable() {
-    return false;
-}
-
-export function createConnection(_opts, _connectionListener) {
-    throw new Error('TCP connections not available')
-}
-
-export function getRandomValues(buffer) {
-    const crypto = globalThis.crypto;
-    if (!crypto)
-        throw new Error('randomness not available');
-    crypto.getRandomValues(buffer);
-}
+export default function (): CompatWorker;

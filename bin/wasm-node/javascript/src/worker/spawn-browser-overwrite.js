@@ -15,6 +15,15 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import type { CompatWorker } from './compat/index.js';
+export default function () {
+    if (!window.Worker)
+        throw new Error("Workers not available");
 
-export default function (): CompatWorker;
+    // The line of code below (`new Worker(...)`) is designed to hopefully work across all
+    // platforms and bundlers.
+    // Because this line is precisely recognized by bundlers, we extract it to a separate
+    // JavaScript file.
+    // See also the README.md for more context.
+    const worker = new Worker(new URL('./worker.js', import.meta.url));
+    return worker;
+}

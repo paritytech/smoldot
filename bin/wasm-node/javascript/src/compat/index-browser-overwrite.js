@@ -15,15 +15,36 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-export default function () {
-    if (!window.Worker)
-        throw new Error("Workers not available");
+// Overrides `index.js` when in a browser.
 
-    // The line of code below (`new Worker(...)`) is designed to hopefully work across all
-    // platforms and bundlers.
-    // Because this line is precisely recognized by bundlers, we extract it to a separate
-    // JavaScript file.
-    // See also the README.md for more context.
-    const worker = new Worker(new URL('./worker/worker.js', import.meta.url));
-    return worker;
+export function workerTerminate(worker) {
+    worker.terminate();
+    return Promise.resolve();
+}
+
+export function postMessage(msg) {
+    self.postMessage(msg);
+}
+
+export function setOnMessage(callback) {
+    self.onmessage = (event) => callback(event.data);
+}
+
+export function performanceNow() {
+    return performance.now()
+}
+
+export function isTcpAvailable() {
+    return false;
+}
+
+export function createConnection(_opts, _connectionListener) {
+    throw new Error('TCP connections not available')
+}
+
+export function getRandomValues(buffer) {
+    const crypto = globalThis.crypto;
+    if (!crypto)
+        throw new Error('randomness not available');
+    crypto.getRandomValues(buffer);
 }

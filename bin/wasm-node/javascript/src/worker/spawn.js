@@ -23,6 +23,6 @@ export default function () {
     // Because this line is precisely recognized by bundlers, we extract it to a separate
     // JavaScript file.
     // See also the README.md for more context.
-    const worker = new Worker(new URL('./worker/worker.js', import.meta.url));
+    const worker = new Worker(new URL('./worker.js', import.meta.url));
     return worker;
 }
