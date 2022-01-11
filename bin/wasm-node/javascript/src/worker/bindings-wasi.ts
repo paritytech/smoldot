@@ -54,7 +54,7 @@ export default (config: Config): compat.WasmModuleImports => {
                 .slice(ptr, ptr + len);
             for (let iter = 0; iter < len; iter += 65536) {
                 // `baseBuffer.slice` automatically saturates at the end of the buffer
-                crypto.getRandomValues(baseBuffer.slice(iter, iter + 65536))
+                compat.getRandomValues(baseBuffer.slice(iter, iter + 65536))
             }
 
             return 0;

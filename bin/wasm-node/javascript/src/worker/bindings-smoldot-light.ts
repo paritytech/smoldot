@@ -199,7 +199,7 @@ export default function (config: Config): compat.WasmModuleImports {
                         throw new ConnectionError('TCP connections not available');
                     }
 
-                    const socket = compat.createTcpConnection({
+                    const socket = compat.createConnection({
                         host: tcpParsed[2],
                         port: parseInt(tcpParsed[3], 10),
                     });

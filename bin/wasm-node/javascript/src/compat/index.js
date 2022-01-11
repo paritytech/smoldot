@@ -21,7 +21,7 @@
 
 import { parentPort } from 'worker_threads';
 import { hrtime } from 'process';
-import { createConnection } from 'net';
+import { createConnection as nodeCreateConnection } from 'net';
 import { randomFillSync } from 'crypto';
 
 export function workerTerminate(worker) {
@@ -45,8 +45,8 @@ export function isTcpAvailable() {
     return true;
 }
 
-export function createTcpConnection(opts) {
-    return createConnection(opts)
+export function createConnection(opts, connectionListener) {
+    return nodeCreateConnection(opts, connectionListener)
 }
 
 export function getRandomValues(buffer) {

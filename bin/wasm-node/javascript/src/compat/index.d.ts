@@ -15,7 +15,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+// TODO: remove this reference thing /!\ it's completely wrong
 /// <reference lib="dom" />
+
+import type { Socket as TcpSocket, NetConnectOpts } from 'net';
 
 export type WasmModuleImports = WebAssembly.ModuleImports;
 
@@ -37,11 +40,6 @@ export function performanceNow(): number;
 
 export function isTcpAvailable(): boolean;
 
-export function createTcpConnection(opts: CreateTcpConnectionOpts): any;
+export function createConnection(options: NetConnectOpts, connectionListener?: () => void): TcpSocket;
 
 export function getRandomValues<T extends ArrayBufferView>(buffer: T): void;
-
-interface CreateTcpConnectionOpts {
-    port: number;
-    host: string;
-}

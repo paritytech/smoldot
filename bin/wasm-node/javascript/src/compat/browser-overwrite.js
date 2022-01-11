@@ -38,7 +38,7 @@ export function isTcpAvailable() {
     return false;
 }
 
-export function createTcpConnection(_opts) {
+export function createConnection(_opts, _connectionListener) {
     throw new Error("TCP connections not available")
 }
 
