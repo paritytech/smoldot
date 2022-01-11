@@ -39,7 +39,7 @@ export function isTcpAvailable() {
 }
 
 export function createConnection(_opts, _connectionListener) {
-    throw new Error("TCP connections not available")
+    throw new Error('TCP connections not available')
 }
 
 export function getRandomValues(buffer) {
