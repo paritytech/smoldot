@@ -15,7 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import * as pako from 'pako';
+import pako from 'pako';
+
+import { Buffer } from 'buffer';
 
 import { Config as SmoldotBindingsConfig, default as smoldot_light_builder } from './bindings-smoldot-light.js';
 import { Config as WasiConfig, default as wasi_builder } from './bindings-wasi.js';
