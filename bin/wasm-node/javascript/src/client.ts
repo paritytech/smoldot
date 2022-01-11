@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { compatSetTimeout, compatClearTimeout, Timeout, CompatWorker, workerOnError, workerOnMessage, workerTerminate } from './compat/index.js';
+import { CompatWorker, workerOnError, workerOnMessage, workerTerminate } from './compat/index.js';
 import * as messages from './worker/messages.js';
 
 /**
@@ -367,11 +367,11 @@ export function start(options?: ClientOptions): Client {
   // If this liveness ping isn't received for a long time, an error is reported in the logs.
   // The first check is delayed in order to account for the fact that the worker has to perform
   // an expensive initialization step when initializing the Wasm VM.
-  let livenessTimeout: null | Timeout = null;
+  let livenessTimeout: null | ReturnType<setTimeout> = null;
   const resetLivenessTimeout = () => {
     if (livenessTimeout !== null)
-      compatClearTimeout(livenessTimeout);
-    livenessTimeout = compatSetTimeout(() => {
+      clearTimeout(livenessTimeout);
+    livenessTimeout = setTimeout(() => {
       livenessTimeout = null;
       console.warn(
         "Smoldot appears unresponsive. Please open an issue at " +
@@ -382,7 +382,7 @@ export function start(options?: ClientOptions): Client {
       );
     }, 10000);
   };
-  compatSetTimeout(() => resetLivenessTimeout(), 15000);
+  setTimeout(() => resetLivenessTimeout(), 15000);
 
   // The worker can send us messages whose type is identified through a `kind` field.
   workerOnMessage(worker, (message: messages.FromWorker) => {
@@ -574,7 +574,7 @@ export function start(options?: ClientOptions): Client {
       workerError = new AlreadyDestroyedError();
 
       if (livenessTimeout !== null)
-        compatClearTimeout(livenessTimeout)
+        clearTimeout(livenessTimeout)
 
       return workerTerminate(worker)
     }

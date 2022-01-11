@@ -25,13 +25,14 @@
 
 import { Buffer } from 'buffer';
 import randombytes from 'randombytes';
+import * as compat from '../compat/index.js';
 import { SmoldotWasmInstance } from './bindings.js';
 
 export interface Config {
     instance?: SmoldotWasmInstance,
 }
 
-export default (config: Config): WebAssembly.ModuleImports => {
+export default (config: Config): compat.WasmModuleImports => {
     // List of environment variables to feed to the Rust program. An array of strings.
     // Example usage: `let env_vars = ["RUST_BACKTRACE=1", "RUST_LOG=foo"];`
     const envVars: string[] = [];

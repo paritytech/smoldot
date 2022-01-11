@@ -52,7 +52,7 @@ interface WebSocketWrapped {
     socket: w3cwebsocket,
 }
 
-export default (config: Config): WebAssembly.ModuleImports => {
+export default (config: Config): compat.WasmModuleImports => {
     // Used below to store the list of all connections.
     // The indices within this array are chosen by the Rust code.
     let connections: Record<number, TcpWrapped | WebSocketWrapped> = {};

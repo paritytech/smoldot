@@ -16,7 +16,7 @@
   "types": "dist/src/index.d.ts",
   "main": "dist/src/index.js",
   "scripts": {
-    "prepublishOnly": "node prepare.js --release",
+    "prepublishOnly": "node prepare.js --release && rimraf ./dist && tsc",
     "build": "node prepare.js --release && rimraf ./dist && tsc",
     "start": "node prepare.js --debug && rimraf ./dist && tsc && node demo/demo.js",
     "test": "node prepare.js --debug && rimraf ./dist && tsc && ava --timeout=2m --concurrency 2 --no-worker-threads"

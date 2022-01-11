@@ -28,8 +28,14 @@ export { Worker } from 'worker_threads';
 export const workerOnMessage = (worker, callback) => worker.on('message', callback);
 export const workerOnError = (worker, callback) => worker.on('error', callback);
 export const workerTerminate = (worker) => worker.terminate().then(() => { });
-export const postMessage = (msg) => parentPort.postMessage(msg);
-export const setOnMessage = (callback) => parentPort.on('message', callback);
+
+export function postMessage(msg) {
+    parentPort.postMessage(msg);
+}
+
+export function setOnMessage(callback) {
+    parentPort.on('message', callback);
+}
 
 export function performanceNow() {
     const time = hrtime();

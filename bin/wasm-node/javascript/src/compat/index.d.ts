@@ -15,6 +15,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+/// <reference lib="dom" />
+
+export type WasmModuleImports = WebAssembly.ModuleImports;
+
+declare class CompatWorker {
+
+}
+
 // TODO: worker shouldn't be any
 export function workerOnMessage(worker: any, callback: (message: any) => void): void;
 export function workerOnError(worker: any, callback: (error: Error) => void): void;
