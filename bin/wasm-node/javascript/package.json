@@ -12,6 +12,7 @@
   "bugs": {
     "url": "https://github.com/paritytech/smoldot/issues"
   },
+  "files": ["dist"],
   "type": "module",
   "types": "dist/index.d.ts",
   "main": "dist/index.js",
