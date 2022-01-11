@@ -201,7 +201,7 @@ export default function (config: Config): compat.WasmModuleImports {
 
                     const socket = compat.createConnection({
                         host: tcpParsed[2],
-                        port: parseInt(tcpParsed[3], 10),
+                        port: parseInt(tcpParsed[3] as string, 10),
                     });
 
                     connection = { ty: 'tcp', socket };
@@ -255,7 +255,7 @@ export default function (config: Config): compat.WasmModuleImports {
 
         // Must close and destroy the connection object.
         connection_close: (id: number) => {
-            let connection = connections[id];
+            let connection = connections[id] as TcpWrapped | WebSocketWrapped;
             if (connection.ty == 'websocket') {
                 // WebSocket
                 // We can't set these fields to null because the TypeScript definitions don't
@@ -281,7 +281,7 @@ export default function (config: Config): compat.WasmModuleImports {
             len >>>= 0;
 
             let data = Buffer.from(instance.exports.memory.buffer).slice(ptr, ptr + len);
-            let connection = connections[id];
+            let connection = connections[id] as TcpWrapped | WebSocketWrapped;
             if (connection.ty == 'websocket') {
                 // WebSocket
                 connection.socket.send(data);

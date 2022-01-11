@@ -57,7 +57,7 @@ const injectMessage = (instance: SmoldotWasmInstance, message: messages.ToWorker
     const potentialRelayChainsPtr = instance.exports.alloc(potentialRelayChainsLen * 4) >>> 0;
     for (let idx = 0; idx < message.potentialRelayChains.length; ++idx) {
       Buffer.from(instance.exports.memory.buffer)
-        .writeUInt32LE(message.potentialRelayChains[idx], potentialRelayChainsPtr + idx * 4);
+        .writeUInt32LE(message.potentialRelayChains[idx] as number, potentialRelayChainsPtr + idx * 4);
     }
 
     // `add_chain` unconditionally allocates a chain id. If an error occurs, however, this chain
