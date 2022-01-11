@@ -21,7 +21,7 @@
 //! of that object with the Wasm instance.
 
 import { Buffer } from 'buffer';
-import { w3cwebsocket } from 'websocket';
+import Websocket from 'websocket';
 import * as compat from '../compat/index.js';
 import type { SmoldotWasmInstance } from './bindings.js';
 
@@ -172,7 +172,7 @@ export default function (config: Config): compat.WasmModuleImports {
 
                     connection = {
                         ty: 'websocket',
-                        socket: new w3cwebsocket(url)
+                        socket: new Websocket.w3cwebsocket(url)
                     };
                     connection.socket.binaryType = 'arraybuffer';
 
@@ -306,5 +306,5 @@ interface TcpWrapped {
 
 interface WebSocketWrapped {
     ty: 'websocket',
-    socket: w3cwebsocket,
+    socket: Websocket.w3cwebsocket,
 }
