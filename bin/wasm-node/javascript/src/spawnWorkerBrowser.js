@@ -15,9 +15,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { Worker } from 'worker_threads';
-
 export default function () {
+    if (!window.Worker)
+        throw new Error("Workers not available");
+
     // The line of code below (`new Worker(...)`) is designed to hopefully work across all
     // platforms and bundlers.
     // Because this line is precisely recognized by bundlers, we extract it to a separate
