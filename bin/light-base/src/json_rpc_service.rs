@@ -190,6 +190,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             transactions_service: config.transactions_service,
             cache: Mutex::new(Cache {
                 recent_pinned_blocks: lru::LruCache::with_hasher(32, Default::default()),
+                subscription_id: None,
                 block_state_root_hashes: lru::LruCache::with_hasher(32, Default::default()),
             }),
             genesis_block: config.genesis_block_hash,
@@ -263,20 +264,17 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                     if new_blocks.is_none() {
                         let mut cache = background.cache.try_lock().unwrap();
 
-                        // Subscribe to new sync service blocks in order to push them in the
+                        // Subscribe to new runtime service blocks in order to push them in the
                         // cache as soon as they are available.
-                        // Note that `subscribe_all` on the sync service always returns very
-                        // quickly, as opposed to the runtime service where it waits for the
-                        // runtime to be known.
                         let subscribe_all = background.runtime_service.subscribe_all(8, cache.recent_pinned_blocks.cap()).await;
+
+                        cache.subscription_id = Some(subscribe_all.new_blocks.id());
+                        cache.recent_pinned_blocks.clear();
+                        debug_assert!(cache.recent_pinned_blocks.cap() >= 1);
 
                         let finalized_block_hash = header::hash_from_scale_encoded_header(
                             &subscribe_all.finalized_block_scale_encoded_header,
                         );
-
-                        cache.recent_pinned_blocks.clear();
-
-                        debug_assert!(cache.recent_pinned_blocks.cap() >= 1);
                         cache.recent_pinned_blocks.put(
                             finalized_block_hash,
                             subscribe_all.finalized_block_scale_encoded_header,
@@ -510,14 +508,31 @@ struct Cache {
     /// calls on them, hence a cache of recent blocks.
     recent_pinned_blocks: lru::LruCache<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
 
-    /// State root hashes of blocks that were not in [`Cache::recent_pinned_blocks`].
+    /// Subscription on the runtime service under which the blocks of
+    /// [`Cache::recent_pinned_blocks`] are pinned.
+    ///
+    /// Contains `None` only at initialization, in which case [`Cache::recent_pinned_blocks`]
+    /// is guaranteed to be empty. In other words, if a block is found in
+    /// [`Cache::recent_pinned_blocks`] then this field is guaranteed to be `Some`.
+    subscription_id: Option<runtime_service::SubscriptionId>,
+
+    /// State trie root hashes of blocks that were not in [`Cache::recent_pinned_blocks`].
+    ///
+    /// The state trie root hash is wrapped in a `Shared` future. When multiple requests need the
+    /// state trie root hash of the same block, it is only queried once and the query is
+    /// inserted in the cache while in progress. This way, the multiple requests can all wait on
+    /// that single future.
     ///
     /// Most of the time, the JSON-RPC client will query blocks that are found in
     /// [`Cache::recent_pinned_blocks`], but occasionally it will query older blocks. When the
     /// storage of an older block is queried, it is common for the JSON-RPC client to make several
     /// storage requests to that same old block. In order to avoid having to retrieve the state
     /// trie root hash multiple, we store these hashes in this LRU cache.
-    block_state_root_hashes: lru::LruCache<[u8; 32], [u8; 32], fnv::FnvBuildHasher>,
+    block_state_root_hashes: lru::LruCache<
+        [u8; 32],
+        future::MaybeDone<future::Shared<future::BoxFuture<'static, [u8; 32]>>>,
+        fnv::FnvBuildHasher,
+    >,
 }
 
 impl<TPlat: Platform> Background<TPlat> {
@@ -2158,7 +2173,7 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         height: Option<u64>,
     ) {
-        // TODO: maybe store values in known_blocks?
+        // TODO: maybe store values in cache?
         let response = {
             match height {
                 Some(0) => methods::Response::chain_getBlockHash(methods::HashHexString(
