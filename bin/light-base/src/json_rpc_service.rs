@@ -188,7 +188,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             sync_service: config.sync_service,
             runtime_service: config.runtime_service,
             transactions_service: config.transactions_service,
-            blocks: Mutex::new(Blocks {
+            cache: Mutex::new(Cache {
                 known_blocks: lru::LruCache::new(256),
             }),
             genesis_block: config.genesis_block_hash,
@@ -272,7 +272,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                             &subscribe_all.finalized_block_scale_encoded_header,
                         );
 
-                        let mut blocks = background.blocks.try_lock().unwrap();
+                        let mut blocks = background.cache.try_lock().unwrap();
                         blocks.known_blocks.put(
                             finalized_block_hash,
                             subscribe_all.finalized_block_scale_encoded_header,
@@ -296,7 +296,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                             match notification {
                                 Some(sync_service::Notification::Block(block)) => {
                                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                                    let mut blocks = background.blocks.try_lock().unwrap();
+                                    let mut blocks = background.cache.try_lock().unwrap();
                                     blocks.known_blocks.put(hash, block.scale_encoded_header);
                                 }
                                 Some(sync_service::Notification::Finalized { .. }) => {}
@@ -426,9 +426,9 @@ struct Background<TPlat: Platform> {
     /// See [`Config::transactions_service`].
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
-    /// Blocks that are temporarily saved in order to serve JSON-RPC requests.
-    // TODO: move somewhere else?
-    blocks: Mutex<Blocks>,
+    /// Various information caches about blocks, to potentially reduce the number of network
+    /// requests to perform.
+    cache: Mutex<Cache>,
 
     /// Hash of the genesis block.
     /// Keeping the genesis block is important, as the genesis block hash is included in
@@ -485,7 +485,7 @@ enum SubscriptionTy {
     ChainHeadStorage,
 }
 
-struct Blocks {
+struct Cache {
     /// Blocks that are temporarily saved in order to serve JSON-RPC requests.
     ///
     /// Always contains `best_block` and `finalized_block`.
@@ -849,7 +849,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 let block_hash = header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
 
-                let mut blocks = self.blocks.lock().await;
+                let mut blocks = self.cache.lock().await;
                 let (state_root, block_number) = {
                     let block = blocks.known_blocks.get(&block_hash).unwrap();
                     match header::decode(block) {
@@ -912,7 +912,7 @@ impl<TPlat: Platform> Background<TPlat> {
             methods::MethodCall::state_queryStorageAt { keys, at } => {
                 let best_block= header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
 
-                let blocks = self.blocks.lock().await;
+                let blocks = self.cache.lock().await;
 
                 let at = at.as_ref().map(|h| h.0).unwrap_or(best_block);
 
@@ -2689,7 +2689,7 @@ impl<TPlat: Platform> Background<TPlat> {
         async move {
             // TODO: risk of deadlock here?
             {
-                let mut blocks = self.blocks.lock().await;
+                let mut blocks = self.cache.lock().await;
                 let blocks = &mut *blocks;
 
                 if let Some(header) = blocks.known_blocks.get(&hash) {
@@ -2714,7 +2714,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 let header = block.header.unwrap();
                 debug_assert_eq!(header::hash_from_scale_encoded_header(&header), hash);
 
-                let mut blocks = self.blocks.lock().await;
+                let mut blocks = self.cache.lock().await;
                 blocks.known_blocks.put(hash, header.clone());
                 Ok(header)
             } else {
