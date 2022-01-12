@@ -114,7 +114,7 @@ compat.setOnMessage((message: messages.ToWorker) => {
   // What to do depends on the type of `state`.
   // See the documentation of the `state` variable for information.
   if (state == null) {
-    const messageCasted = message as messages.ToWorkerConfig;
+    const configMessage = message as messages.ToWorkerConfig;
 
     // First ever message received by the worker. Always contains the initial configuration.
     state = [];
@@ -129,15 +129,15 @@ compat.setOnMessage((message: messages.ToWorker) => {
       databaseContentCallback: (data, chainId) => {
         postMessage({ kind: 'databaseContent', data, chainId });
       },
-      forbidTcp: messageCasted.forbidTcp,
-      forbidWs: messageCasted.forbidWs,
-      forbidNonLocalWs: messageCasted.forbidNonLocalWs,
-      forbidWss: messageCasted.forbidWss,
+      forbidTcp: configMessage.forbidTcp,
+      forbidWs: configMessage.forbidWs,
+      forbidNonLocalWs: configMessage.forbidNonLocalWs,
+      forbidWss: configMessage.forbidWss,
     };
 
     instance.startInstance(config).then((instance) => {
       // Start initialization of smoldot.
-      instance.exports.init(messageCasted.maxLogLevel);
+      instance.exports.init(configMessage.maxLogLevel);
 
       // Smoldot has finished initializing.
       // Since this function is an asynchronous function, it is possible that messages have been

@@ -24,8 +24,17 @@
 export type ToWorker = ToWorkerConfig | ToWorkerNonConfig;
 export type ToWorkerNonConfig = ToWorkerRpcRequest | ToWorkerAddChain | ToWorkerRemoveChain | ToWorkerDatabaseContent;
 
+/**
+ * Message that the worker can send to the outside.
+ */
 export type FromWorker = FromWorkerChainAddedOk | FromWorkerChainAddedError | FromWorkerChainRemoved | FromWorkerLog | FromWorkerJsonRpc | FromWorkerDatabaseContent | FromWorkerLivenessPing;
 
+/**
+ * Contains the initial configuration of the worker.
+ *
+ * This message is only ever sent once, and it is always the first ever message sent to the
+ * worker.
+ */
 export interface ToWorkerConfig {
   maxLogLevel: number;
   forbidTcp: boolean;
@@ -34,12 +43,20 @@ export interface ToWorkerConfig {
   forbidWss: boolean;
 }
 
+/**
+ * Start a JSON-RPC request.
+ */
 export interface ToWorkerRpcRequest {
   ty: 'request',
   request: string,
   chainId: number,
 }
 
+/**
+ * Add a new chain.
+ *
+ * The worker must reply with either a `FromWorkerChainAddedOk` or a `FromWorkerChainAddedError`.
+ */
 export interface ToWorkerAddChain {
   ty: 'addChain',
   chainSpec: string,
@@ -48,11 +65,21 @@ export interface ToWorkerAddChain {
   jsonRpcRunning: boolean,
 }
 
+/**
+ * Remove a chain.
+ *
+ * The worker must reply with a `FromWorkerChainRemoved`.
+ */
 export interface ToWorkerRemoveChain {
   ty: 'removeChain',
   chainId: number,
 }
 
+/**
+ * Get the database content of a chain.
+ *
+ * The worker must reply with a `FromWorkerDatabaseContent`.
+ */
 export interface ToWorkerDatabaseContent {
   ty: 'databaseContent',
   chainId: number,

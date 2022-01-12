@@ -15,11 +15,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-export interface SmoldotWasmInstance extends WebAssembly.Instance {
-    readonly exports: SmoldotWasmExports;
-}
-
 /**
+ * Interface that the Wasm module exports. Contains the functions that are exported by the Rust
+ * code.
+ *
  * Must match the bindings found in the Rust code.
  */
 export interface SmoldotWasmExports extends WebAssembly.Exports {
@@ -37,4 +36,8 @@ export interface SmoldotWasmExports extends WebAssembly.Exports {
     connection_open: (id: number) => void,
     connection_message: (id: number, ptr: number, len: number) => void,
     connection_closed: (id: number, ptr: number, len: number) => void,
+}
+
+export interface SmoldotWasmInstance extends WebAssembly.Instance {
+    readonly exports: SmoldotWasmExports;
 }
