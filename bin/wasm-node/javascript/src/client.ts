@@ -384,103 +384,121 @@ export function start(options?: ClientOptions): Client {
   globalThis.setTimeout(() => resetLivenessTimeout(), 15000);
 
   // The worker can send us messages whose type is identified through a `kind` field.
-  workerOnMessage(worker, (message: messages.FromWorker) => {
-    if (message.kind == 'jsonrpc') {
-      const cb = chainsJsonRpcCallbacks.get(message.chainId);
-      if (cb) cb(message.data);
+  workerOnMessage(worker, (message: messages.FromWorker): void => {
+    switch (message.kind) {
+      case 'jsonrpc': {
+        const cb = chainsJsonRpcCallbacks.get(message.chainId);
+        if (cb) cb(message.data);
+        break;
+      }
 
-    } else if (message.kind == 'chainAddedOk') {
-      const expected = pendingConfirmations.shift() as PendingConfirmationChainAdded;
-      let chainId = message.chainId; // Later set to null when the chain is removed.
+      case 'chainAddedOk': {
+        const expected = pendingConfirmations.shift() as PendingConfirmationChainAdded;
+        let chainId = message.chainId; // Later set to null when the chain is removed.
 
-      if (chainsJsonRpcCallbacks.has(chainId) || chainsDatabaseContentPromises.has(chainId)) // Sanity check.
-        throw 'Unexpected reuse of a chain ID';
-      if (expected.jsonRpcCallback)
-        chainsJsonRpcCallbacks.set(chainId, expected.jsonRpcCallback);
-      chainsDatabaseContentPromises.set(chainId, new Array());
+        if (chainsJsonRpcCallbacks.has(chainId) || chainsDatabaseContentPromises.has(chainId)) // Sanity check.
+          throw 'Unexpected reuse of a chain ID';
+        if (expected.jsonRpcCallback)
+          chainsJsonRpcCallbacks.set(chainId, expected.jsonRpcCallback);
+        chainsDatabaseContentPromises.set(chainId, new Array());
 
-      // `expected` was pushed by the `addChain` method.
-      // Resolve the promise that `addChain` returned to the user.
-      const newChain: Chain = {
-        sendJsonRpc: (request) => {
-          if (workerError)
-            throw workerError;
-          if (!chainsDatabaseContentPromises.has(chainId))
-            throw new AlreadyDestroyedError();
-          if (!chainsJsonRpcCallbacks.has(chainId))
-            throw new JsonRpcDisabledError();
-          if (request.length >= 8 * 1024 * 1024)
-            return;
-          worker.postMessage({ ty: 'request', request, chainId });
-        },
-        databaseContent: (maxUtf8BytesSize) => {
-          if (workerError)
-            return Promise.reject(workerError);
+        // `expected` was pushed by the `addChain` method.
+        // Resolve the promise that `addChain` returned to the user.
+        const newChain: Chain = {
+          sendJsonRpc: (request) => {
+            if (workerError)
+              throw workerError;
+            if (!chainsDatabaseContentPromises.has(chainId))
+              throw new AlreadyDestroyedError();
+            if (!chainsJsonRpcCallbacks.has(chainId))
+              throw new JsonRpcDisabledError();
+            if (request.length >= 8 * 1024 * 1024)
+              return;
+            worker.postMessage({ ty: 'request', request, chainId });
+          },
+          databaseContent: (maxUtf8BytesSize) => {
+            if (workerError)
+              return Promise.reject(workerError);
 
-          const databaseContentPromises = chainsDatabaseContentPromises.get(chainId);
-          if (!databaseContentPromises)
-            return Promise.reject(new AlreadyDestroyedError());
+            const databaseContentPromises = chainsDatabaseContentPromises.get(chainId);
+            if (!databaseContentPromises)
+              return Promise.reject(new AlreadyDestroyedError());
 
-          // TODO: because of https://github.com/microsoft/TypeScript/issues/11498 we need to define the callbacks as possibly null, and go through `unknown`
-          let resolve;
-          let reject;
-          const promise: Promise<string> = new Promise((res, rej) => {
-            resolve = res;
-            reject = rej;
-          });
-          databaseContentPromises.push({
-            resolve: resolve as unknown as (data: string) => void,
-            reject: reject as unknown as (error: Error) => void,
-          });
+            // TODO: because of https://github.com/microsoft/TypeScript/issues/11498 we need to define the callbacks as possibly null, and go through `unknown`
+            let resolve;
+            let reject;
+            const promise: Promise<string> = new Promise((res, rej) => {
+              resolve = res;
+              reject = rej;
+            });
+            databaseContentPromises.push({
+              resolve: resolve as unknown as (data: string) => void,
+              reject: reject as unknown as (error: Error) => void,
+            });
 
-          const twoPower32 = (1 << 30) * 4;  // `1 << 31` and `1 << 32` in JavaScript don't give the value that you expect.
-          const maxSize = maxUtf8BytesSize || (twoPower32 - 1);
-          const cappedMaxSize = (maxSize >= twoPower32) ? (twoPower32 - 1) : maxSize;
+            const twoPower32 = (1 << 30) * 4;  // `1 << 31` and `1 << 32` in JavaScript don't give the value that you expect.
+            const maxSize = maxUtf8BytesSize || (twoPower32 - 1);
+            const cappedMaxSize = (maxSize >= twoPower32) ? (twoPower32 - 1) : maxSize;
 
-          worker.postMessage({ ty: 'databaseContent', chainId, maxUtf8BytesSize: cappedMaxSize });
+            worker.postMessage({ ty: 'databaseContent', chainId, maxUtf8BytesSize: cappedMaxSize });
 
-          return promise;
-        },
-        remove: () => {
-          if (workerError)
-            throw workerError;
-          if (!chainsDatabaseContentPromises.has(chainId))
-            throw new AlreadyDestroyedError();
-          pendingConfirmations.push({ ty: 'chainRemoved', chainId });
-          worker.postMessage({ ty: 'removeChain', chainId });
-          // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
-          // response or database content concerning that `chainId` to arrive after the `remove`
-          // function has returned. We solve that by removing the callback immediately.
-          chainsJsonRpcCallbacks.delete(chainId);
-          chainsDatabaseContentPromises.delete(chainId);
-        },
-        // Hacky internal method that later lets us access the `chainId` of this chain for
-        // implementation reasons.
-        __internal_smoldot_id: () => chainId,
-      };
-      expected.resolve(newChain);
+            return promise;
+          },
+          remove: () => {
+            if (workerError)
+              throw workerError;
+            if (!chainsDatabaseContentPromises.has(chainId))
+              throw new AlreadyDestroyedError();
+            pendingConfirmations.push({ ty: 'chainRemoved', chainId });
+            worker.postMessage({ ty: 'removeChain', chainId });
+            // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
+            // response or database content concerning that `chainId` to arrive after the `remove`
+            // function has returned. We solve that by removing the callback immediately.
+            chainsJsonRpcCallbacks.delete(chainId);
+            chainsDatabaseContentPromises.delete(chainId);
+          },
+          // Hacky internal method that later lets us access the `chainId` of this chain for
+          // implementation reasons.
+          __internal_smoldot_id: () => chainId,
+        };
+        expected.resolve(newChain);
+        break;
+      }
 
-    } else if (message.kind == 'chainAddedErr') {
-      const expected = pendingConfirmations.shift() as PendingConfirmationChainAdded;
-      // `expected` was pushed by the `addChain` method.
-      // Reject the promise that `addChain` returned to the user.
-      expected.reject(message.error as AddChainError);
+      case 'chainAddedErr': {
+        const expected = pendingConfirmations.shift() as PendingConfirmationChainAdded;
+        // `expected` was pushed by the `addChain` method.
+        // Reject the promise that `addChain` returned to the user.
+        expected.reject(message.error as AddChainError);
+        break;
+      }
 
-    } else if (message.kind == 'chainRemoved') {
-      pendingConfirmations.shift();
+      case 'chainRemoved': {
+        pendingConfirmations.shift();
+        break;
+      }
 
-    } else if (message.kind == 'databaseContent') {
-      const promises = chainsDatabaseContentPromises.get(message.chainId);
-      if (promises) (promises.shift() as DatabasePromise).resolve(message.data);
+      case 'databaseContent': {
+        const promises = chainsDatabaseContentPromises.get(message.chainId);
+        if (promises) (promises.shift() as DatabasePromise).resolve(message.data);
+        break;
+      }
 
-    } else if (message.kind == 'log') {
-      logCallback(message.level, message.target, message.message);
+      case 'log': {
+        logCallback(message.level, message.target, message.message);
+        break;
+      }
 
-    } else if (message.kind == 'livenessPing') {
-      resetLivenessTimeout();
+      case 'livenessPing': {
+        resetLivenessTimeout();
+        break;
+      }
 
-    } else {
-      console.error('Unknown message type', message);
+      default: {
+        // Exhaustive check.
+        const _exhaustiveCheck: never = message;
+        return _exhaustiveCheck;
+      }
     }
   });
 
