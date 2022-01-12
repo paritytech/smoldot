@@ -70,7 +70,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
     // we break out of the inner loop in order to reset everything.
     loop {
         // Stream of blocks of the relay chain this parachain is registered on.
-        let mut relay_chain_subscribe_all = relay_chain_sync.subscribe_all(32).await;
+        let mut relay_chain_subscribe_all = relay_chain_sync.subscribe_all(32, 64).await;
         log::debug!(
             target: &log_target,
             "RelayChain => NewSubscription(finalized_hash={})",
