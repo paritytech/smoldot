@@ -865,9 +865,11 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
     /// Unpins a block after it has been reported by a subscription.
     ///
+    /// Has no effect if the [`SubscriptionId`] is not or no longer valid (as the runtime service
+    /// can kill any subscription at any moment).
+    ///
     /// # Panic
     ///
-    /// Panics if the [`SubscriptionId`] is not or no longer valid.
     /// Panics if the block hash has not been reported or has already been unpinned.
     ///
     #[track_caller]
@@ -883,10 +885,23 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ) {
         let mut guarded_lock = guarded.lock().await;
 
-        let (runtime_index, _scale_encoded_header) = guarded_lock
+        let (runtime_index, _scale_encoded_header) = match guarded_lock
             .pinned_blocks
             .remove(&(subscription_id.0, *block_hash))
-            .expect("block already unpinned");
+        {
+            Some(b) => b,
+            None => {
+                if guarded_lock
+                    .all_blocks_subscriptions
+                    .contains_key(&subscription_id.0)
+                {
+                    panic!("block already unpinned");
+                } else {
+                    return;
+                }
+            }
+        };
+
         if guarded_lock.runtimes[runtime_index].num_references == 1 {
             guarded_lock.runtimes.remove(runtime_index);
         } else {
