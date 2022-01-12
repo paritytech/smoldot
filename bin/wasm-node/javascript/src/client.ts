@@ -334,9 +334,7 @@ export function start(options?: ClientOptions): Client {
   });
 
   // The actual execution of Smoldot is performed in a worker thread.
-  // The line of code below (`new Worker(...)`) is designed to hopefully work across all
-  // platforms and bundlers.
-  // See also the README.md for more context.
+  // Because this specific line of code is a bit sensitive, it is done in a separate file.
   const worker = spawnWorker();
   let workerError: null | Error = null;
 
