@@ -32,7 +32,7 @@ import { SmoldotWasmInstance } from './bindings.js';
 let state: null | messages.ToWorkerNonConfig[] | SmoldotWasmInstance = null;
 
 // Inject a message coming from `index.js` to a running Wasm VM.
-const injectMessage = (instance: SmoldotWasmInstance, message: messages.ToWorkerNonConfig) => {
+function injectMessage(instance: SmoldotWasmInstance, message: messages.ToWorkerNonConfig) {
   if (message.ty == 'request') {
     const len = Buffer.byteLength(message.request, 'utf8');
     const ptr = instance.exports.alloc(len) >>> 0;
