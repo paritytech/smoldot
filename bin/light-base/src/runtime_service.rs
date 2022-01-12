@@ -819,7 +819,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         // remaining.
         //
         // It could also in principle be possible to not insert in `all_blocks_subscriptions` at,
-        // all but this would require cleaning up all the other modifications we've done to 
+        // all but this would require cleaning up all the other modifications we've done to
         // guarded`. By inserting a closed channel, we reuse the same code as the one that purges
         // closed channels.
         guarded_lock
