@@ -189,7 +189,8 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             runtime_service: config.runtime_service,
             transactions_service: config.transactions_service,
             cache: Mutex::new(Cache {
-                known_blocks: lru::LruCache::new(256),
+                recent_pinned_blocks: lru::LruCache::with_hasher(32, Default::default()),
+                block_state_root_hashes: lru::LruCache::with_hasher(32, Default::default()),
             }),
             genesis_block: config.genesis_block_hash,
             next_subscription_id: atomic::AtomicU64::new(0),
@@ -260,29 +261,39 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                     }
 
                     if new_blocks.is_none() {
+                        let mut cache = background.cache.try_lock().unwrap();
+
                         // Subscribe to new sync service blocks in order to push them in the
                         // cache as soon as they are available.
                         // Note that `subscribe_all` on the sync service always returns very
                         // quickly, as opposed to the runtime service where it waits for the
                         // runtime to be known.
-                        let subscribe_all = background.sync_service.subscribe_all(8, false).await;
-                        new_blocks = Some(subscribe_all.new_blocks);
+                        let subscribe_all = background.runtime_service.subscribe_all(8, cache.recent_pinned_blocks.cap()).await;
 
                         let finalized_block_hash = header::hash_from_scale_encoded_header(
                             &subscribe_all.finalized_block_scale_encoded_header,
                         );
 
-                        let mut blocks = background.cache.try_lock().unwrap();
-                        blocks.known_blocks.put(
+                        cache.recent_pinned_blocks.clear();
+
+                        debug_assert!(cache.recent_pinned_blocks.cap() >= 1);
+                        cache.recent_pinned_blocks.put(
                             finalized_block_hash,
                             subscribe_all.finalized_block_scale_encoded_header,
                         );
 
                         for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                            if cache.recent_pinned_blocks.len() == cache.recent_pinned_blocks.cap() {
+                                let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
+                                subscribe_all.new_blocks.unpin_block(&hash).await;
+                            }
+
                             let hash =
                                 header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                            blocks.known_blocks.put(hash, block.scale_encoded_header);
+                            cache.recent_pinned_blocks.put(hash, block.scale_encoded_header);
                         }
+
+                        new_blocks = Some(subscribe_all.new_blocks);
                     }
 
                     futures::select! {
@@ -292,14 +303,20 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                             let task = task.unwrap();
                             secondary_tasks.push(task);
                         }
-                        notification = new_blocks.as_mut().unwrap().next() => {
+                        notification = new_blocks.as_mut().unwrap().next().fuse() => {
                             match notification {
-                                Some(sync_service::Notification::Block(block)) => {
+                                Some(runtime_service::Notification::Block(block)) => {
+                                    let mut cache = background.cache.try_lock().unwrap();
+
+                                    if cache.recent_pinned_blocks.len() == cache.recent_pinned_blocks.cap() {
+                                        let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
+                                        new_blocks.as_mut().unwrap().unpin_block(&hash).await;
+                                    }
+
                                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                                    let mut blocks = background.cache.try_lock().unwrap();
-                                    blocks.known_blocks.put(hash, block.scale_encoded_header);
+                                    cache.recent_pinned_blocks.put(hash, block.scale_encoded_header);
                                 }
-                                Some(sync_service::Notification::Finalized { .. }) => {}
+                                Some(runtime_service::Notification::Finalized { .. }) => {}
                                 None => new_blocks = None,
                             }
                         }
@@ -486,10 +503,21 @@ enum SubscriptionTy {
 }
 
 struct Cache {
-    /// Blocks that are temporarily saved in order to serve JSON-RPC requests.
+    /// When the runtime service reports a new block, it is kept pinned and inserted in this LRU
+    /// cache. When an entry in removed from the cache, it is unpinned.
     ///
-    /// Always contains `best_block` and `finalized_block`.
-    known_blocks: lru::LruCache<[u8; 32], Vec<u8>>,
+    /// JSON-RPC clients are more likely to ask for information about recent blocks and perform
+    /// calls on them, hence a cache of recent blocks.
+    recent_pinned_blocks: lru::LruCache<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
+
+    /// State root hashes of blocks that were not in [`Cache::recent_pinned_blocks`].
+    ///
+    /// Most of the time, the JSON-RPC client will query blocks that are found in
+    /// [`Cache::recent_pinned_blocks`], but occasionally it will query older blocks. When the
+    /// storage of an older block is queried, it is common for the JSON-RPC client to make several
+    /// storage requests to that same old block. In order to avoid having to retrieve the state
+    /// trie root hash multiple, we store these hashes in this LRU cache.
+    block_state_root_hashes: lru::LruCache<[u8; 32], [u8; 32], fnv::FnvBuildHasher>,
 }
 
 impl<TPlat: Platform> Background<TPlat> {
@@ -851,7 +879,8 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 let mut blocks = self.cache.lock().await;
                 let (state_root, block_number) = {
-                    let block = blocks.known_blocks.get(&block_hash).unwrap();
+                    // TODO: no /!\
+                    let block = blocks.recent_pinned_blocks.get(&block_hash).unwrap();
                     match header::decode(block) {
                         Ok(d) => (*d.state_root, d.number),
                         Err(_) => {
@@ -2692,7 +2721,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 let mut blocks = self.cache.lock().await;
                 let blocks = &mut *blocks;
 
-                if let Some(header) = blocks.known_blocks.get(&hash) {
+                if let Some(header) = blocks.recent_pinned_blocks.get(&hash) {
                     return Ok(header.clone());
                 }
             }
@@ -2713,9 +2742,6 @@ impl<TPlat: Platform> Background<TPlat> {
             if let Ok(block) = result {
                 let header = block.header.unwrap();
                 debug_assert_eq!(header::hash_from_scale_encoded_header(&header), hash);
-
-                let mut blocks = self.cache.lock().await;
-                blocks.known_blocks.put(hash, header.clone());
                 Ok(header)
             } else {
                 Err(())
