@@ -188,9 +188,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             sync_service: config.sync_service,
             runtime_service: config.runtime_service,
             transactions_service: config.transactions_service,
-            blocks: Mutex::new(Blocks {
-                known_blocks: lru::LruCache::new(256),
-            }),
+            known_blocks: Mutex::new(lru::LruCache::new(256)),
             genesis_block: config.genesis_block_hash,
             next_subscription_id: atomic::AtomicU64::new(0),
             subscriptions: Mutex::new(Subscriptions {
@@ -272,8 +270,8 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                             &subscribe_all.finalized_block_scale_encoded_header,
                         );
 
-                        let mut blocks = background.blocks.try_lock().unwrap();
-                        blocks.known_blocks.put(
+                        let mut known_blocks = background.known_blocks.try_lock().unwrap();
+                        known_blocks.put(
                             finalized_block_hash,
                             subscribe_all.finalized_block_scale_encoded_header,
                         );
@@ -281,7 +279,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                         for block in subscribe_all.non_finalized_blocks_ancestry_order {
                             let hash =
                                 header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                            blocks.known_blocks.put(hash, block.scale_encoded_header);
+                            known_blocks.put(hash, block.scale_encoded_header);
                         }
                     }
 
@@ -296,8 +294,8 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                             match notification {
                                 Some(sync_service::Notification::Block(block)) => {
                                     let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                                    let mut blocks = background.blocks.try_lock().unwrap();
-                                    blocks.known_blocks.put(hash, block.scale_encoded_header);
+                                    let mut blocks = background.known_blocks.try_lock().unwrap();
+                                    blocks.put(hash, block.scale_encoded_header);
                                 }
                                 Some(sync_service::Notification::Finalized { .. }) => {}
                                 None => new_blocks = None,
@@ -427,8 +425,7 @@ struct Background<TPlat: Platform> {
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
     /// Blocks that are temporarily saved in order to serve JSON-RPC requests.
-    // TODO: move somewhere else?
-    blocks: Mutex<Blocks>,
+    known_blocks: Mutex<lru::LruCache<[u8; 32], Vec<u8>>>,
 
     /// Hash of the genesis block.
     /// Keeping the genesis block is important, as the genesis block hash is included in
@@ -483,13 +480,6 @@ enum SubscriptionTy {
     ChainHeadBody,
     ChainHeadCall,
     ChainHeadStorage,
-}
-
-struct Blocks {
-    /// Blocks that are temporarily saved in order to serve JSON-RPC requests.
-    ///
-    /// Always contains `best_block` and `finalized_block`.
-    known_blocks: lru::LruCache<[u8; 32], Vec<u8>>,
 }
 
 impl<TPlat: Platform> Background<TPlat> {
@@ -849,9 +839,9 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 let block_hash = header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
 
-                let mut blocks = self.blocks.lock().await;
+                let mut known_blocks = self.known_blocks.lock().await;
                 let (state_root, block_number) = {
-                    let block = blocks.known_blocks.get(&block_hash).unwrap();
+                    let block = known_blocks.get(&block_hash).unwrap();
                     match header::decode(block) {
                         Ok(d) => (*d.state_root, d.number),
                         Err(_) => {
@@ -867,7 +857,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         }
                     }
                 };
-                drop(blocks);
+                drop(known_blocks);
 
                 let outcome = self
                     .sync_service
@@ -912,7 +902,7 @@ impl<TPlat: Platform> Background<TPlat> {
             methods::MethodCall::state_queryStorageAt { keys, at } => {
                 let best_block= header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
 
-                let blocks = self.blocks.lock().await;
+                let blocks = self.known_blocks.lock().await;
 
                 let at = at.as_ref().map(|h| h.0).unwrap_or(best_block);
 
@@ -2689,10 +2679,10 @@ impl<TPlat: Platform> Background<TPlat> {
         async move {
             // TODO: risk of deadlock here?
             {
-                let mut blocks = self.blocks.lock().await;
-                let blocks = &mut *blocks;
+                let mut blocks = self.known_blocks.lock().await;
+                let known_blocks = &mut *blocks;
 
-                if let Some(header) = blocks.known_blocks.get(&hash) {
+                if let Some(header) = known_blocks.get(&hash) {
                     return Ok(header.clone());
                 }
             }
@@ -2714,8 +2704,8 @@ impl<TPlat: Platform> Background<TPlat> {
                 let header = block.header.unwrap();
                 debug_assert_eq!(header::hash_from_scale_encoded_header(&header), hash);
 
-                let mut blocks = self.blocks.lock().await;
-                blocks.known_blocks.put(hash, header.clone());
+                let mut known_blocks = self.known_blocks.lock().await;
+                known_blocks.put(hash, header.clone());
                 Ok(header)
             } else {
                 Err(())
