@@ -388,7 +388,7 @@ export function start(options?: ClientOptions): Client {
       }
 
       case 'chainAddedOk': {
-        const expected = pendingConfirmations.shift() as PendingConfirmationChainAdded;
+        const expected = pendingConfirmations.shift()!;
         let chainId = message.chainId;
 
         if (chains.has(chainId)) // Sanity check.
@@ -445,7 +445,6 @@ export function start(options?: ClientOptions): Client {
               throw workerError;
             if (!chains.has(chainId))
               throw new AlreadyDestroyedError();
-            pendingConfirmations.push({ ty: 'chainRemoved', chainId });
             worker.postMessage({ ty: 'removeChain', chainId });
             // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
             // response or database content concerning that `chainId` to arrive after the `remove`
@@ -461,15 +460,10 @@ export function start(options?: ClientOptions): Client {
       }
 
       case 'chainAddedErr': {
-        const expected = pendingConfirmations.shift() as PendingConfirmationChainAdded;
+        const expected = pendingConfirmations.shift()!;
         // `expected` was pushed by the `addChain` method.
         // Reject the promise that `addChain` returned to the user.
         expected.reject(message.error as AddChainError);
-        break;
-      }
-
-      case 'chainRemoved': {
-        pendingConfirmations.shift();
         break;
       }
 
@@ -593,18 +587,11 @@ export function start(options?: ClientOptions): Client {
   }
 }
 
-type PendingConfirmation = PendingConfirmationChainAdded | PendingConfirmationChainRemoved;
-
-interface PendingConfirmationChainAdded {
+interface PendingConfirmation {
   ty: 'chainAdded',
   resolve: (c: Chain) => void,
   reject: (error: AddChainError) => void,
   jsonRpcCallback?: JsonRpcCallback,
-}
-
-interface PendingConfirmationChainRemoved {
-  ty: 'chainRemoved',
-  chainId: number,
 }
 
 interface DatabasePromise {
