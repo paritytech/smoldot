@@ -45,7 +45,7 @@ export default (config: Config): compat.WasmModuleImports => {
         // Need to fill the buffer described by `ptr` and `len` with random data.
         // This data will be used in order to generate secrets. Do not use a dummy implementation!
         random_get: (ptr: number, len: number) => {
-            const instance = config.instance as SmoldotWasmInstance;
+            const instance = config.instance!;
 
             ptr >>>= 0;
             len >>>= 0;
@@ -62,7 +62,7 @@ export default (config: Config): compat.WasmModuleImports => {
 
         // Writing to a file descriptor is used in order to write to stdout/stderr.
         fd_write: (fd: number, addr: number, num: number, outPtr: number) => {
-            const instance = config.instance as SmoldotWasmInstance;
+            const instance = config.instance!;
 
             outPtr >>>= 0;
 
@@ -132,7 +132,7 @@ export default (config: Config): compat.WasmModuleImports => {
         // Return the number of environment variables and the total size of all environment
         // variables. This is called in order to initialize buffers before `environ_get`.
         environ_sizes_get: (argcOut: number, argvBufSizeOut: number) => {
-            const instance = config.instance as SmoldotWasmInstance;
+            const instance = config.instance!;
 
             argcOut >>>= 0;
             argvBufSizeOut >>>= 0;
@@ -152,7 +152,7 @@ export default (config: Config): compat.WasmModuleImports => {
         // the environment variables.
         // The sizes of the buffers were determined by calling `environ_sizes_get`.
         environ_get: (argv: number, argvBuf: number) => {
-            const instance = config.instance as SmoldotWasmInstance;
+            const instance = config.instance!;
 
             argv >>>= 0;
             argvBuf >>>= 0;

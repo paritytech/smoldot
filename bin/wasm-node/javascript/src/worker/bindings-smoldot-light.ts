@@ -47,7 +47,7 @@ export default function (config: Config): compat.WasmModuleImports {
         // Must exit with an error. A human-readable message can be found in the WebAssembly
         // memory in the given buffer.
         panic: (ptr: number, len: number) => {
-            const instance = config.instance as SmoldotWasmInstance;
+            const instance = config.instance!;
 
             ptr >>>= 0;
             len >>>= 0;
@@ -58,7 +58,7 @@ export default function (config: Config): compat.WasmModuleImports {
 
         // Used by the Rust side to emit a JSON-RPC response or subscription notification.
         json_rpc_respond: (ptr: number, len: number, chainId: number) => {
-            const instance = config.instance as SmoldotWasmInstance;
+            const instance = config.instance!;
 
             ptr >>>= 0;
             len >>>= 0;
@@ -71,7 +71,7 @@ export default function (config: Config): compat.WasmModuleImports {
 
         // Used by the Rust side in response to asking for the database content of a chain.
         database_content_ready: (ptr: number, len: number, chainId: number) => {
-            const instance = config.instance as SmoldotWasmInstance;
+            const instance = config.instance!;
 
             ptr >>>= 0;
             len >>>= 0;
@@ -85,7 +85,7 @@ export default function (config: Config): compat.WasmModuleImports {
         // Used by the Rust side to emit a log entry.
         // See also the `max_log_level` parameter in the configuration.
         log: (level: number, targetPtr: number, targetLen: number, messagePtr: number, messageLen: number) => {
-            const instance = config.instance as SmoldotWasmInstance;
+            const instance = config.instance!;
 
             targetPtr >>>= 0;
             targetLen >>>= 0;
@@ -109,7 +109,7 @@ export default function (config: Config): compat.WasmModuleImports {
 
         // Must call `timer_finished` after the given number of milliseconds has elapsed.
         start_timer: (id: number, ms: number) => {
-            const instance = config.instance as SmoldotWasmInstance;
+            const instance = config.instance!;
 
             // In browsers, `setTimeout` works as expected when `ms` equals 0. However, NodeJS
             // requires a minimum of 1 millisecond (if `0` is passed, it is automatically replaced
@@ -128,7 +128,7 @@ export default function (config: Config): compat.WasmModuleImports {
         // Must create a new connection object. This implementation stores the created object in
         // `connections`.
         connection_new: (id: number, addr_ptr: number, addr_len: number, error_ptr_ptr: number) => {
-            const instance = config.instance as SmoldotWasmInstance;
+            const instance = config.instance!;
 
             addr_ptr >>>= 0;
             addr_len >>>= 0;
@@ -151,10 +151,7 @@ export default function (config: Config): compat.WasmModuleImports {
                 const tcpParsed = addr.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)$/);
 
                 if (wsParsed != null) {
-                    let proto = 'wss';
-                    if (wsParsed[4] == 'ws') {
-                        proto = 'ws';
-                    }
+                    const proto = (wsParsed[4] == 'ws') ? 'ws' : 'wss';
                     if (
                         (proto == 'ws' && config.forbidWs) ||
                         (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && config.forbidNonLocalWs) ||
@@ -163,12 +160,9 @@ export default function (config: Config): compat.WasmModuleImports {
                         throw new ConnectionError('Connection type not allowed');
                     }
 
-                    let url: string;
-                    if (wsParsed[1] == 'ip6') {
-                        url = proto + "://[" + wsParsed[2] + "]:" + wsParsed[3];
-                    } else {
-                        url = proto + "://" + wsParsed[2] + ":" + wsParsed[3];
-                    }
+                    const url = (wsParsed[1] == 'ip6') ?
+                        (proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]) :
+                        (proto + "://" + wsParsed[2] + ":" + wsParsed[3]);
 
                     connection = {
                         ty: 'websocket',
@@ -201,7 +195,7 @@ export default function (config: Config): compat.WasmModuleImports {
 
                     const socket = compat.createConnection({
                         host: tcpParsed[2],
-                        port: parseInt(tcpParsed[3] as string, 10),
+                        port: parseInt(tcpParsed[3]!, 10),
                     });
 
                     connection = { ty: 'tcp', socket };
@@ -255,7 +249,7 @@ export default function (config: Config): compat.WasmModuleImports {
 
         // Must close and destroy the connection object.
         connection_close: (id: number) => {
-            let connection = connections[id] as TcpWrapped | WebSocketWrapped;
+            let connection = connections[id]!;
             if (connection.ty == 'websocket') {
                 // WebSocket
                 // We can't set these fields to null because the TypeScript definitions don't
@@ -275,13 +269,13 @@ export default function (config: Config): compat.WasmModuleImports {
         // Must queue the data found in the WebAssembly memory at the given pointer. It is assumed
         // that this function is called only when the connection is in an open state.
         connection_send: (id: number, ptr: number, len: number) => {
-            const instance = config.instance as SmoldotWasmInstance;
+            const instance = config.instance!;
 
             ptr >>>= 0;
             len >>>= 0;
 
             let data = Buffer.from(instance.exports.memory.buffer).slice(ptr, ptr + len);
-            let connection = connections[id] as TcpWrapped | WebSocketWrapped;
+            let connection = connections[id]!;
             if (connection.ty == 'websocket') {
                 // WebSocket
                 connection.socket.send(data);
