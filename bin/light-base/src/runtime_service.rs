@@ -870,10 +870,12 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// Panics if the [`SubscriptionId`] is not or no longer valid.
     /// Panics if the block hash has not been reported or has already been unpinned.
     ///
+    #[track_caller]
     pub async fn unpin_block(&self, subscription_id: SubscriptionId, block_hash: &[u8; 32]) {
         Self::unpin_block_inner(&self.guarded, subscription_id, block_hash).await
     }
 
+    #[track_caller]
     async fn unpin_block_inner(
         guarded: &Arc<Mutex<Guarded<TPlat>>>,
         subscription_id: SubscriptionId,
@@ -884,7 +886,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         let (runtime_index, _scale_encoded_header) = guarded_lock
             .pinned_blocks
             .remove(&(subscription_id.0, *block_hash))
-            .unwrap();
+            .expect("block already unpinned");
         if guarded_lock.runtimes[runtime_index].num_references == 1 {
             guarded_lock.runtimes.remove(runtime_index);
         } else {
