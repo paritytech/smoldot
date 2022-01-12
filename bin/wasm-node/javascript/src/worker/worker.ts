@@ -114,11 +114,14 @@ compat.setOnMessage((message: messages.ToWorker) => {
   // What to do depends on the type of `state`.
   // See the documentation of the `state` variable for information.
   if (state == null) {
+    // First ever message received by the worker. Always contains the initial configuration.
     const configMessage = message as messages.ToWorkerConfig;
 
-    // First ever message received by the worker. Always contains the initial configuration.
+    // Transition to the next phase: an array during which messages are stored while the
+    // initialization is in progress.
     state = [];
 
+    // Start initialization of the Wasm VM.
     const config: instance.Config = {
       logCallback: (level, target, message) => {
         postMessage({ kind: 'log', level, target, message });
@@ -136,7 +139,8 @@ compat.setOnMessage((message: messages.ToWorker) => {
     };
 
     instance.startInstance(config).then((instance) => {
-      // Start initialization of smoldot.
+      // Smoldot requires an initial call to the `init` function in order to do its internal
+      // configuration.
       instance.exports.init(configMessage.maxLogLevel);
 
       // Smoldot has finished initializing.
@@ -150,8 +154,8 @@ compat.setOnMessage((message: messages.ToWorker) => {
     });
 
   } else if (Array.isArray(state)) {
-    // A JSON-RPC request has been received while the Wasm VM is still initializing. Queue it
-    // for when initialization is over.
+    // A message has been received while the Wasm VM is still initializing. Queue it for when
+    // initialization is over.
     state.push(message as messages.ToWorkerNonConfig);
 
   } else {
