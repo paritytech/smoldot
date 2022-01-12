@@ -891,6 +891,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         {
             Some(b) => b,
             None => {
+                // Cold path.
                 if guarded_lock
                     .all_blocks_subscriptions
                     .contains_key(&subscription_id.0)
@@ -913,11 +914,10 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             *block_hash
         );
 
-        let (sender, pinned_remaining) = guarded_lock
+        let (_, pinned_remaining) = guarded_lock
             .all_blocks_subscriptions
             .get_mut(&subscription_id.0)
             .unwrap();
-        assert!(!sender.is_closed()); // Strong assertion in order to conform to API constraints
         *pinned_remaining += 1;
     }
 
