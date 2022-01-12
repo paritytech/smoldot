@@ -344,22 +344,17 @@ export function start(options?: ClientOptions): Client {
   // to finish the initialization of the chain.
   let pendingConfirmations: PendingConfirmation[] = [];
 
-  // For each chain that is currently running, contains the callback to use to send back JSON-RPC
-  // responses corresponding to this chain.
+  // Contains the information of each chain that is currently.
   // Entries are instantly removed when the user desires to remove a chain even before the worker
   // has confirmed the removal. Doing so avoids a race condition where the worker sends back a
-  // JSON-RPC response even though we've already sent a `removeChain` message to it.
-  let chainsJsonRpcCallbacks: Map<number, JsonRpcCallback> = new Map();
-
-  // For each chain that is currently running, contains the promises corresponding to the database
-  // retrieval requests.
-  // Entries are instantly removed when the user desires to remove a chain even before the worker
-  // has confirmed the removal. Doing so avoids a race condition where the worker sends back a
-  // database content even though we've already sent a `removeChain` message to it.
+  // database content or a JSON-RPC response/notification even though we've already sent a
+  // `removeChain` message to it.
   //
-  // This map is also used as a way to check whether a chain still exists.
-  // TODO: should be merged with `chainsJsonRpcCallbacks` variable above
-  let chainsDatabaseContentPromises: Map<number, DatabasePromise[]> = new Map();
+  // This map is also used in general as a way to check whether a chain still exists.
+  let chains: Map<number, {
+    jsonRpcCallback?: JsonRpcCallback,
+    databasePromises: DatabasePromise[],
+  }> = new Map();
 
   // The worker periodically sends a message of kind 'livenessPing' in order to notify that it is
   // still alive.
@@ -387,20 +382,21 @@ export function start(options?: ClientOptions): Client {
   workerOnMessage(worker, (message: messages.FromWorker): void => {
     switch (message.kind) {
       case 'jsonrpc': {
-        const cb = chainsJsonRpcCallbacks.get(message.chainId);
+        const cb = chains.get(message.chainId)?.jsonRpcCallback;
         if (cb) cb(message.data);
         break;
       }
 
       case 'chainAddedOk': {
         const expected = pendingConfirmations.shift() as PendingConfirmationChainAdded;
-        let chainId = message.chainId; // Later set to null when the chain is removed.
+        let chainId = message.chainId;
 
-        if (chainsJsonRpcCallbacks.has(chainId) || chainsDatabaseContentPromises.has(chainId)) // Sanity check.
+        if (chains.has(chainId)) // Sanity check.
           throw 'Unexpected reuse of a chain ID';
-        if (expected.jsonRpcCallback)
-          chainsJsonRpcCallbacks.set(chainId, expected.jsonRpcCallback);
-        chainsDatabaseContentPromises.set(chainId, new Array());
+        chains.set(chainId, {
+          jsonRpcCallback: expected.jsonRpcCallback,
+          databasePromises: new Array()
+        });
 
         // `expected` was pushed by the `addChain` method.
         // Resolve the promise that `addChain` returned to the user.
@@ -408,9 +404,9 @@ export function start(options?: ClientOptions): Client {
           sendJsonRpc: (request) => {
             if (workerError)
               throw workerError;
-            if (!chainsDatabaseContentPromises.has(chainId))
+            if (!chains.has(chainId))
               throw new AlreadyDestroyedError();
-            if (!chainsJsonRpcCallbacks.has(chainId))
+            if (!(chains.get(chainId)?.jsonRpcCallback))
               throw new JsonRpcDisabledError();
             if (request.length >= 8 * 1024 * 1024)
               return;
@@ -420,7 +416,7 @@ export function start(options?: ClientOptions): Client {
             if (workerError)
               return Promise.reject(workerError);
 
-            const databaseContentPromises = chainsDatabaseContentPromises.get(chainId);
+            const databaseContentPromises = chains.get(chainId)?.databasePromises;
             if (!databaseContentPromises)
               return Promise.reject(new AlreadyDestroyedError());
 
@@ -447,15 +443,14 @@ export function start(options?: ClientOptions): Client {
           remove: () => {
             if (workerError)
               throw workerError;
-            if (!chainsDatabaseContentPromises.has(chainId))
+            if (!chains.has(chainId))
               throw new AlreadyDestroyedError();
             pendingConfirmations.push({ ty: 'chainRemoved', chainId });
             worker.postMessage({ ty: 'removeChain', chainId });
             // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
             // response or database content concerning that `chainId` to arrive after the `remove`
-            // function has returned. We solve that by removing the callback immediately.
-            chainsJsonRpcCallbacks.delete(chainId);
-            chainsDatabaseContentPromises.delete(chainId);
+            // function has returned. We solve that by removing the information immediately.
+            chains.delete(chainId);
           },
           // Hacky internal method that later lets us access the `chainId` of this chain for
           // implementation reasons.
@@ -479,7 +474,7 @@ export function start(options?: ClientOptions): Client {
       }
 
       case 'databaseContent': {
-        const promises = chainsDatabaseContentPromises.get(message.chainId);
+        const promises = chains.get(message.chainId)?.databasePromises;
         if (promises) (promises.shift() as DatabasePromise).resolve(message.data);
         break;
       }
@@ -520,14 +515,14 @@ export function start(options?: ClientOptions): Client {
     pendingConfirmations = [];
 
     // Reject all promises for database contents.
-    chainsDatabaseContentPromises.forEach((chain) => {
-      chain.forEach((promise) => {
+    chains.forEach((chain) => {
+      chain.databasePromises.forEach((promise) => {
         // TODO: Because of https://github.com/microsoft/TypeScript/issues/11498, TypeScript is unable to know that `workerError` has been set above.
         const err = workerError as CrashError;
         promise.reject(err)
       });
     });
-    chainsDatabaseContentPromises.clear();
+    chains.clear();
   });
 
   // The first message expected by the worker contains the configuration.
