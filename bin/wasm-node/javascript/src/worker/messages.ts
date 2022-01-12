@@ -27,7 +27,7 @@ export type ToWorkerNonConfig = ToWorkerRpcRequest | ToWorkerAddChain | ToWorker
 /**
  * Message that the worker can send to the outside.
  */
-export type FromWorker = FromWorkerChainAddedOk | FromWorkerChainAddedError | FromWorkerChainRemoved | FromWorkerLog | FromWorkerJsonRpc | FromWorkerDatabaseContent | FromWorkerLivenessPing;
+export type FromWorker = FromWorkerChainAddedOk | FromWorkerChainAddedError | FromWorkerLog | FromWorkerJsonRpc | FromWorkerDatabaseContent | FromWorkerLivenessPing;
 
 /**
  * Contains the initial configuration of the worker.
@@ -94,10 +94,6 @@ export interface FromWorkerChainAddedOk {
 export interface FromWorkerChainAddedError {
   kind: 'chainAddedErr',
   error: Error,
-}
-
-export interface FromWorkerChainRemoved {
-  kind: 'chainRemoved',
 }
 
 export interface FromWorkerLog {

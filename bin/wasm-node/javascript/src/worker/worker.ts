@@ -90,7 +90,6 @@ function injectMessage(instance: SmoldotWasmInstance, message: messages.ToWorker
 
     case 'removeChain': {
       instance.exports.remove_chain(message.chainId);
-      postMessage({ kind: 'chainRemoved' });
       break;
     }
 
