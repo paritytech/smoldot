@@ -15,12 +15,15 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// Overrides `compat-nodejs.js` when in a browser.
+export default function () {
+    if (!window.Worker)
+        throw new Error("Workers not available");
 
-export const net = null;
-export const Worker = typeof window != 'undefined' ? window.Worker : null;
-export const workerOnMessage = (worker, callback) => { worker.onmessage = (event) => callback(event.data) };
-export const workerOnError = (worker, callback) => { worker.onerror = callback; };  // TODO: unclear if the parameter of the callback is same as with NodeJS
-export const workerTerminate = (worker) => { worker.terminate(); return Promise.resolve(); };
-export const postMessage = (msg) => self.postMessage(msg);
-export const setOnMessage = (callback) => { self.onmessage = (event) => callback(event.data) };
+    // The line of code below (`new Worker(...)`) is designed to hopefully work across all
+    // platforms and bundlers.
+    // Because this line is precisely recognized by bundlers, we extract it to a separate
+    // JavaScript file.
+    // See also the README.md for more context.
+    const worker = new Worker(new URL('./worker.js', import.meta.url));
+    return worker;
+}

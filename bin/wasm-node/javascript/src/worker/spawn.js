@@ -15,17 +15,14 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// This small dummy module re-exports some types from NodeJS.
-//
-// A rule in the `package.json` overrides it with `compat-browser.js` when in a browser.
+import { Worker } from 'worker_threads';
 
-import { parentPort } from 'worker_threads';
-
-export { default as net } from 'net';
-export { Worker } from 'worker_threads';
-
-export const workerOnMessage = (worker, callback) => worker.on('message', callback);
-export const workerOnError = (worker, callback) => worker.on('error', callback);
-export const workerTerminate = (worker) => worker.terminate().then(() => {});
-export const postMessage = (msg) => parentPort.postMessage(msg);
-export const setOnMessage = (callback) => parentPort.on('message', callback);
+export default function () {
+    // The line of code below (`new Worker(...)`) is designed to hopefully work across all
+    // platforms and bundlers.
+    // Because this line is precisely recognized by bundlers, we extract it to a separate
+    // JavaScript file.
+    // See also the README.md for more context.
+    const worker = new Worker(new URL('./worker.js', import.meta.url));
+    return worker;
+}

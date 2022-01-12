@@ -17,7 +17,7 @@
 
 // This file launches a WebSocket server that exposes JSON-RPC functions.
 
-import * as smoldot from '../src/index.js';
+import * as smoldot from '../dist/index.js';
 import { default as websocket } from 'websocket';
 import * as http from 'http';
 import * as process from 'process';

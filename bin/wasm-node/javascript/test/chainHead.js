@@ -17,7 +17,7 @@
 
 import test from 'ava';
 import * as fs from 'fs';
-import { start } from "../src/index.js";
+import { start } from "../dist/index.js";
 
 const westendSpec = fs.readFileSync('./test/westend.json', 'utf8');
 

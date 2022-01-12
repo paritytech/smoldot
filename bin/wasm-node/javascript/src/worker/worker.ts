@@ -16,25 +16,23 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { Buffer } from 'buffer';
-import { default as pako } from 'pako';
-import * as compat from './compat-nodejs.js';
-import { default as smoldot_light_builder } from './bindings-smoldot-light.js';
-import { default as wasi_builder } from './bindings-wasi.js';
-
-import { default as wasm_base64 } from './autogen/wasm.js';
+import * as compat from './../compat/index.js';
+import * as instance from './instance.js';
+import * as messages from './messages.js';
+import { SmoldotWasmInstance } from './bindings.js';
 
 // This variable represents the state of the worker, and serves three different purposes:
 //
 // - At initialization, it is set to `null`.
 // - Once the first message, containing the configuration, has been received from the parent, it
-//   becomes an array filled with JSON-RPC requests that are received while the Wasm VM is still
+//   becomes an array filled with the messages that are received while the Wasm VM is still
 //   initializing.
 // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
 //
-let state = null;
+let state: null | messages.ToWorkerNonConfig[] | SmoldotWasmInstance = null;
 
 // Inject a message coming from `index.js` to a running Wasm VM.
-const injectMessage = (instance, message) => {
+function injectMessage(instance: SmoldotWasmInstance, message: messages.ToWorkerNonConfig) {
   if (message.ty == 'request') {
     const len = Buffer.byteLength(message.request, 'utf8');
     const ptr = instance.exports.alloc(len) >>> 0;
@@ -57,9 +55,9 @@ const injectMessage = (instance, message) => {
     // Write the potential relay chains into memory.
     const potentialRelayChainsLen = message.potentialRelayChains.length;
     const potentialRelayChainsPtr = instance.exports.alloc(potentialRelayChainsLen * 4) >>> 0;
-    for (let idx in message.potentialRelayChains) {
+    for (let idx = 0; idx < message.potentialRelayChains.length; ++idx) {
       Buffer.from(instance.exports.memory.buffer)
-        .writeUInt32LE(message.potentialRelayChains[idx], potentialRelayChainsPtr + idx * 4);
+        .writeUInt32LE(message.potentialRelayChains[idx]!, potentialRelayChainsPtr + idx * 4);
     }
 
     // `add_chain` unconditionally allocates a chain id. If an error occurs, however, this chain
@@ -69,25 +67,24 @@ const injectMessage = (instance, message) => {
     const chainId = instance.exports.add_chain(
       chainSpecPtr, chainSpecLen,
       databaseContentPtr, databaseContentLen,
-      message.jsonRpcRunning,
+      message.jsonRpcRunning ? 1 : 0,
       potentialRelayChainsPtr, potentialRelayChainsLen
     );
 
     if (instance.exports.chain_is_ok(chainId) != 0) {
-      compat.postMessage({ kind: 'chainAddedOk', chainId });
+      postMessage({ kind: 'chainAddedOk', chainId });
     } else {
       const errorMsgLen = instance.exports.chain_error_len(chainId) >>> 0;
       const errorMsgPtr = instance.exports.chain_error_ptr(chainId) >>> 0;
-      const errorMsg = Buffer.from(instance.exports.memory.buffer)
+      const errorMsg = Buffer.from((instance.exports.memory as WebAssembly.Memory).buffer)
         .toString('utf8', errorMsgPtr, errorMsgPtr + errorMsgLen);
       instance.exports.remove_chain(chainId);
-      compat.postMessage({ kind: 'chainAddedErr', error: new Error(errorMsg) });
+      postMessage({ kind: 'chainAddedErr', error: new Error(errorMsg) });
     }
 
   } else if (message.ty == 'removeChain') {
     instance.exports.remove_chain(message.chainId);
-    // `compat.postMessage` is the same as `postMessage`, but works across environments.
-    compat.postMessage({ kind: 'chainRemoved' });
+    postMessage({ kind: 'chainRemoved' });
 
   } else if (message.ty == 'databaseContent') {
     // The value of `maxUtf8BytesSize` is guaranteed (by `index.js`) to always fit in 32 bits, in
@@ -107,86 +104,67 @@ const injectMessage = (instance, message) => {
     throw new Error('unrecognized message type');
 };
 
-const startInstance = async (config) => {
-  // The actual Wasm bytecode is base64-decoded then gzip-decoded from a constant found in a
-  // different file.
-  // This is suboptimal compared to using `instantiateStreaming`, but it is the most
-  // cross-platform cross-bundler approach.
-  const wasmBytecode = pako.inflate(new Uint8Array(Buffer.from(wasm_base64, 'base64')));
-
-  // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
-  const smoldotJsConfig = {
-    logCallback: (level, target, message) => {
-      // `compat.postMessage` is the same as `postMessage`, but works across environments.
-      compat.postMessage({ kind: 'log', level, target, message });
-    },
-    jsonRpcCallback: (data, chainId) => {
-      // `compat.postMessage` is the same as `postMessage`, but works across environments.
-      compat.postMessage({ kind: 'jsonrpc', data, chainId });
-    },
-    databaseContentCallback: (data, chainId) => {
-      // `compat.postMessage` is the same as `postMessage`, but works across environments.
-      compat.postMessage({ kind: 'databaseContent', data, chainId });
-    },
-    forbidTcp: config.forbidTcp,
-    forbidWs: config.forbidWs,
-    forbidNonLocalWs: config.forbidNonLocalWs,
-    forbidWss: config.forbidWss,
-  };
-
-  const { bindings: smoldotJsBindings } = smoldot_light_builder(smoldotJsConfig);
-
-  // Used to bind with the Wasi bindings. See the `bindings-wasi.js` file.
-  const wasiConfig = {};
-
-  // Start the Wasm virtual machine.
-  // The Rust code defines a list of imports that must be fulfilled by the environment. The second
-  // parameter provides their implementations.
-  const result = await WebAssembly.instantiate(wasmBytecode, {
-    // The functions with the "smoldot" prefix are specific to smoldot.
-    "smoldot": smoldotJsBindings,
-    // As the Rust code is compiled for wasi, some more wasi-specific imports exist.
-    "wasi_snapshot_preview1": wasi_builder(wasiConfig),
-  });
-
-  smoldotJsConfig.instance = result.instance;
-  wasiConfig.instance = result.instance;
-
-  // Start initialization of smoldot.
-  result.instance.exports.init(config.maxLogLevel);
-
-  // Smoldot has finished initializing.
-  // Since this function is an asynchronous function, it is possible that messages have been
-  // received from the parent while it was executing. These messages are now handled.
-  state.forEach((message) => {
-    injectMessage(result.instance, message);
-  });
-
-  state = result.instance;
-};
+function postMessage(message: messages.FromWorker) {
+  // `compat.postMessage` is the same as `postMessage`, but works across environments.
+  compat.postMessage(message)
+}
 
 // `compat.setOnMessage` is the same as `onmessage = ...`, but works across environments.
-compat.setOnMessage((message) => {
+compat.setOnMessage((message: messages.ToWorker) => {
   // What to do depends on the type of `state`.
   // See the documentation of the `state` variable for information.
   if (state == null) {
     // First ever message received by the worker. Always contains the initial configuration.
+    const configMessage = message as messages.ToWorkerConfig;
+
+    // Transition to the next phase: an array during which messages are stored while the
+    // initialization is in progress.
     state = [];
-    startInstance(message) // Note that `startInstance` is `async`.
+
+    // Start initialization of the Wasm VM.
+    const config: instance.Config = {
+      logCallback: (level, target, message) => {
+        postMessage({ kind: 'log', level, target, message });
+      },
+      jsonRpcCallback: (data, chainId) => {
+        postMessage({ kind: 'jsonrpc', data, chainId });
+      },
+      databaseContentCallback: (data, chainId) => {
+        postMessage({ kind: 'databaseContent', data, chainId });
+      },
+      forbidTcp: configMessage.forbidTcp,
+      forbidWs: configMessage.forbidWs,
+      forbidNonLocalWs: configMessage.forbidNonLocalWs,
+      forbidWss: configMessage.forbidWss,
+    };
+
+    instance.startInstance(config).then((instance) => {
+      // Smoldot requires an initial call to the `init` function in order to do its internal
+      // configuration.
+      instance.exports.init(configMessage.maxLogLevel);
+
+      // Smoldot has finished initializing.
+      // Since this function is an asynchronous function, it is possible that messages have been
+      // received from the parent while it was executing. These messages are now handled.
+      (state as messages.ToWorkerNonConfig[]).forEach((message) => {
+        injectMessage(instance, message);
+      });
+
+      state = instance;
+    });
 
   } else if (Array.isArray(state)) {
-    // A JSON-RPC request has been received while the Wasm VM is still initializing. Queue it
-    // for when initialization is over.
-    state.push(message);
+    // A message has been received while the Wasm VM is still initializing. Queue it for when
+    // initialization is over.
+    state.push(message as messages.ToWorkerNonConfig);
 
   } else {
     // Everything is already initialized. Process the message synchronously.
-    injectMessage(state, message);
+    injectMessage(state, message as messages.ToWorkerNonConfig);
   }
 });
 
 // Periodically send a ping message to the outside, as a way to report liveness.
 setInterval(() => {
-  // `compat.postMessage` is the same as `postMessage`, but works across environments.
-  compat.postMessage({ kind: 'livenessPing' });
+  postMessage({ kind: 'livenessPing' });
 }, 2500);
