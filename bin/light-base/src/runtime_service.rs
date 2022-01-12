@@ -187,7 +187,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         stream::BoxStream<'static, Result<executor::CoreVersion, RuntimeError>>,
     ) {
         let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
-            let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await;
+            let subscribe_all = Self::subscribe_all_inner(&guarded, 16, 32).await;
 
             // Map of runtimes by hash. Contains all non-finalized blocks runtimes.
             let mut non_finalized_headers =
@@ -463,7 +463,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ///
     /// The future returned by this function might take a long time.
     pub async fn best_block_runtime(&self) -> Result<executor::CoreVersion, RuntimeError> {
-        self.subscribe_all(0).await.finalized_block_runtime
+        self.subscribe_all(0, 0).await.finalized_block_runtime
     }
 
     /// Returns the SCALE-encoded header of the current finalized block, plus an unlimited stream
@@ -473,7 +473,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// might take a long time.
     pub async fn subscribe_finalized(&self) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
         let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
-            let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await;
+            let subscribe_all = Self::subscribe_all_inner(&guarded, 16, 48).await;
 
             // Map of block headers by hash. Contains all non-finalized blocks headers.
             let mut non_finalized_headers = hashbrown::HashMap::<
@@ -560,7 +560,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// on the best block.
     pub async fn subscribe_best(&self) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
         let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
-            let subscribe_all = Self::subscribe_all_inner(&guarded, 16).await;
+            let subscribe_all = Self::subscribe_all_inner(&guarded, 16, 48).await;
 
             // Map of block headers by hash. Contains all non-finalized blocks headers.
             let mut non_finalized_headers = hashbrown::HashMap::<
@@ -696,17 +696,26 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// `buffer_size` block notifications are buffered in the channel. If the channel is full
     /// when a new notification is attempted to be pushed, the channel gets closed.
     ///
+    /// A maximum number of pinned blocks must be passed, indicating the maximum number of blocks
+    /// that the runtime service will pin at the same time for this subscription. If this maximum
+    /// is reached, the channel will get closed.
+    ///
     /// The channel also gets closed if a gap in the finality happens, such as after a Grandpa
     /// warp syncing.
     ///
     /// See [`SubscribeAll`] for information about the return value.
-    pub async fn subscribe_all(&self, buffer_size: usize) -> SubscribeAll<TPlat> {
-        Self::subscribe_all_inner(&self.guarded, buffer_size).await
+    pub async fn subscribe_all(
+        &self,
+        buffer_size: usize,
+        max_pinned_blocks: usize,
+    ) -> SubscribeAll<TPlat> {
+        Self::subscribe_all_inner(&self.guarded, buffer_size, max_pinned_blocks).await
     }
 
     async fn subscribe_all_inner(
         guarded: &Arc<Mutex<Guarded<TPlat>>>,
         buffer_size: usize,
+        max_pinned_blocks: usize,
     ) -> SubscribeAll<TPlat> {
         // First, lock `guarded` and wait for the tree to be in `FinalizedBlockRuntimeKnown` mode.
         // This can take a long time.
@@ -721,7 +730,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                     guarded_lock.next_subscription_id += 1;
                     guarded_lock
                         .all_blocks_subscriptions
-                        .insert(subscription_id, (tx, 0));
+                        .insert(subscription_id, (tx, 8));
                     drop(guarded_lock);
                     let _ = rx.next().await;
                 }
@@ -729,7 +738,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         };
         let mut guarded_lock = &mut *guarded_lock;
 
-        let (tx, new_blocks_channel) = mpsc::channel(buffer_size);
+        let (mut tx, new_blocks_channel) = mpsc::channel(buffer_size);
         let subscription_id = guarded_lock.next_subscription_id;
         guarded_lock.next_subscription_id += 1;
 
@@ -804,10 +813,27 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             0 | 1
         ));
 
-        guarded_lock.all_blocks_subscriptions.insert(
-            subscription_id,
-            (tx, 1 + non_finalized_blocks_ancestry_order.len()),
-        );
+        // If the requested maximum number of pinned blocks is too low, we pretend that this
+        // maximum number was just enough by insert `0` remaining pinned blocks, but we also close
+        // the subscription immediately to mimic the effects of not having enough pinned blocks
+        // remaining.
+        //
+        // It could also in principle be possible to not insert in `all_blocks_subscriptions` at,
+        // all but this would require cleaning up all the other modifications we've done to 
+        // guarded`. By inserting a closed channel, we reuse the same code as the one that purges
+        // closed channels.
+        guarded_lock
+            .all_blocks_subscriptions
+            .insert(subscription_id, {
+                if let Some(pinned_remaining) =
+                    max_pinned_blocks.checked_sub(1 + non_finalized_blocks_ancestry_order.len())
+                {
+                    (tx, pinned_remaining)
+                } else {
+                    tx.close_channel();
+                    (tx, 0)
+                }
+            });
 
         SubscribeAll {
             finalized_block_scale_encoded_header: match &guarded_lock.tree {
@@ -870,12 +896,12 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             *block_hash
         );
 
-        let (sender, num_pinned) = guarded_lock
+        let (sender, pinned_remaining) = guarded_lock
             .all_blocks_subscriptions
             .get_mut(&subscription_id.0)
             .unwrap();
         assert!(!sender.is_closed()); // Strong assertion in order to conform to API constraints
-        *num_pinned -= 1;
+        *pinned_remaining += 1;
     }
 
     // TODO: doc
@@ -1578,7 +1604,7 @@ pub enum MetadataError {
 struct Guarded<TPlat: Platform> {
     /// List of senders that get notified when new blocks arrive.
     /// See [`RuntimeService::subscribe_all`]. Alongside with each sender, the number of pinned
-    /// blocks for this subscription.
+    /// blocks remaining for this subscription.
     ///
     /// Keys are assigned from [`Guarded::next_subscription_id`].
     all_blocks_subscriptions:
@@ -2184,17 +2210,16 @@ impl<TPlat: Platform> Background<TPlat> {
                         });
 
                         let mut to_remove = Vec::new();
-                        for (subscription_id, (sender, num_pinned)) in
+                        for (subscription_id, (sender, pinned_remaining)) in
                             guarded.all_blocks_subscriptions.iter_mut()
                         {
-                            if *num_pinned >= 32 {
-                                // TODO: constant ^
+                            if *pinned_remaining == 0 {
                                 to_remove.push(*subscription_id);
                                 continue;
                             }
 
                             if sender.try_send(notif.clone()).is_ok() {
-                                *num_pinned += 1;
+                                *pinned_remaining -= 1;
                                 guarded.runtimes[block_runtime_index].num_references += 1;
                                 guarded.pinned_blocks.insert(
                                     (*subscription_id, block_hash),

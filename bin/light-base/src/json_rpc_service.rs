@@ -2212,7 +2212,7 @@ impl<TPlat: Platform> Background<TPlat> {
             .await;
 
         let mut new_blocks = {
-            let subscribe_all = self.runtime_service.subscribe_all(16).await;
+            let subscribe_all = self.runtime_service.subscribe_all(16, 32).await;
 
             // The finalized and already-known blocks aren't reported to the user, but we need
             // unpin them on to the runtime service.
@@ -2755,7 +2755,7 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         let (mut subscribe_all, runtime_subscribe_all) = if runtime_updates {
-            let subscribe_all = self.runtime_service.subscribe_all(32).await;
+            let subscribe_all = self.runtime_service.subscribe_all(32, 48).await;
             let id = subscribe_all.new_blocks.id();
             (either::Left(subscribe_all), Some(id))
         } else {
