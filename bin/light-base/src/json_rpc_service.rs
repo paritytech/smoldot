@@ -895,10 +895,10 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 let block_hash = header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
 
-                let mut blocks = self.cache.lock().await;
+                let mut cache = self.cache.lock().await;
                 let (state_root, block_number) = {
                     // TODO: no /!\
-                    let block = blocks.recent_pinned_blocks.get(&block_hash).unwrap();
+                    let block = cache.recent_pinned_blocks.get(&block_hash).unwrap();
                     match header::decode(block) {
                         Ok(d) => (*d.state_root, d.number),
                         Err(_) => {
@@ -914,7 +914,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         }
                     }
                 };
-                drop(blocks);
+                drop(cache);
 
                 let outcome = self
                     .sync_service
@@ -959,7 +959,7 @@ impl<TPlat: Platform> Background<TPlat> {
             methods::MethodCall::state_queryStorageAt { keys, at } => {
                 let best_block= header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
 
-                let blocks = self.cache.lock().await;
+                let cache = self.cache.lock().await;
 
                 let at = at.as_ref().map(|h| h.0).unwrap_or(best_block);
 
@@ -969,7 +969,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     changes: Vec::new(),
                 };
 
-                drop(blocks);
+                drop(cache);
 
                 let fut = self.storage_query(keys.iter(), &at);
                 if let Ok(values) = fut.await {
@@ -2804,10 +2804,10 @@ impl<TPlat: Platform> Background<TPlat> {
         async move {
             // TODO: risk of deadlock here?
             {
-                let mut blocks = self.cache.lock().await;
-                let blocks = &mut *blocks;
+                let mut cache = self.cache.lock().await;
+                let cache = &mut *cache;
 
-                if let Some(header) = blocks.recent_pinned_blocks.get(&hash) {
+                if let Some(header) = cache.recent_pinned_blocks.get(&hash) {
                     return Ok(header.clone());
                 }
             }
