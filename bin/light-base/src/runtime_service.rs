@@ -1634,7 +1634,8 @@ struct Guarded<TPlat: Platform> {
     /// after the latest best block update.
     best_near_head_of_chain: bool,
 
-    /// List of runtimes referenced by the tree in [`GuardedInner`].
+    /// List of runtimes referenced by the tree in [`GuardedInner`] and by
+    /// [`Guarded::pinned_blocks`].
     runtimes: slab::Slab<Runtime>,
 
     /// Tree of blocks received from the sync service. Keeps track of which block has been
