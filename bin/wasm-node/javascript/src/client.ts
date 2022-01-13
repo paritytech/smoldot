@@ -525,13 +525,11 @@ export function start(options?: ClientOptions): Client {
     pendingConfirmations = [];
 
     // Reject all promises for database contents.
-    chains.forEach((chain) => {
-      chain.databasePromises.forEach((promise) => {
-        // TODO: Because of https://github.com/microsoft/TypeScript/issues/11498, TypeScript is unable to know that `workerError` has been set above.
-        const err = workerError as CrashError;
-        promise.reject(err)
-      });
-    });
+    for (const chain of chains) {
+      for (const promise of chain[1].databasePromises) {
+        promise.reject(workerError)
+      }
+    }
     chains.clear();
   });
 
