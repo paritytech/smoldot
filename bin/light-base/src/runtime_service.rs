@@ -90,6 +90,10 @@ pub struct Config<TPlat: Platform> {
     pub genesis_block_scale_encoded_header: Vec<u8>,
 }
 
+/// Identifies a runtime currently pinned within a [`RuntimeService`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PinnedRuntimeId(u64);
+
 /// See [the module-level documentation](..).
 pub struct RuntimeService<TPlat: Platform> {
     /// Target to use for the logs. See [`Config::log_name`].
@@ -147,6 +151,8 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             tree,
             runtimes: slab::Slab::with_capacity(2),
             pinned_blocks: BTreeMap::new(),
+            pinned_runtimes: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()), // TODO: capacity?
+            next_pinned_runtime_id: 0,
         }));
 
         // Spawns a task that runs in the background and updates the content of the mutex.
@@ -985,6 +991,67 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         }
     }
 
+    /// Tries to find a runtime within the [`RuntimeService`] that has the given storage code and
+    /// heap pages. If none is found, compiles the runtime and stores it within the
+    /// [`RuntimeService`]. In both cases, it is kept pinned until it is unpinned with
+    /// [`RuntimeService::unpin_runtime`].
+    pub async fn compile_and_pin_runtime(
+        &self,
+        storage_code: Option<Vec<u8>>,
+        storage_heap_pages: Option<Vec<u8>>,
+    ) -> PinnedRuntimeId {
+        let mut guarded = self.guarded.lock().await;
+
+        // Try to find an existing identical runtime.
+        let existing_runtime = guarded
+            .runtimes
+            .iter()
+            .find(|(_, rt)| rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages)
+            .map(|(id, _)| id);
+
+        let runtime_index = if let Some(existing_runtime) = existing_runtime {
+            existing_runtime
+        } else {
+            // No identical runtime was found. Try compiling the new runtime.
+            let runtime = SuccessfulRuntime::from_storage(&storage_code, &storage_heap_pages).await;
+            guarded.runtimes.insert(Runtime {
+                num_references: 0, // Incremented below.
+                heap_pages: storage_heap_pages,
+                runtime_code: storage_code,
+                runtime,
+            })
+        };
+
+        guarded.runtimes[runtime_index].num_references += 1;
+
+        let pinned_runtime_id = guarded.next_pinned_runtime_id;
+        guarded.next_pinned_runtime_id += 1;
+
+        let _previous_value = guarded
+            .pinned_runtimes
+            .insert(pinned_runtime_id, runtime_index);
+        debug_assert!(_previous_value.is_none());
+
+        PinnedRuntimeId(pinned_runtime_id)
+    }
+
+    /// Un-pins a previously-pinned runtime.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the provided [`PinnedRuntimeId`] is stale or invalid.
+    ///
+    pub async fn unpin_runtime(&self, id: PinnedRuntimeId) {
+        let mut guarded = self.guarded.lock().await;
+
+        let runtime_index = guarded.pinned_runtimes.remove(&id.0).unwrap();
+        if guarded.runtimes[runtime_index].num_references == 1 {
+            guarded.runtimes.remove(runtime_index);
+        } else {
+            guarded.runtimes[runtime_index].num_references -= 1;
+        }
+    }
+
     /// Returns true if it is believed that we are near the head of the chain.
     ///
     /// The way this method is implemented is opaque and cannot be relied on. The return value
@@ -1531,8 +1598,15 @@ struct Guarded<TPlat: Platform> {
     /// after the latest best block update.
     best_near_head_of_chain: bool,
 
-    /// List of runtimes referenced by the tree in [`GuardedInner`].
+    /// List of runtimes referenced by the tree in [`GuardedInner`], by [`Guarded::pinned_blocks`],
+    /// and by [`Guarded::pinned_runtimes`].
     runtimes: slab::Slab<Runtime>,
+
+    /// Runtimes pinned by the API user.
+    pinned_runtimes: hashbrown::HashMap<u64, usize, fnv::FnvBuildHasher>,
+
+    /// Identifier of the next pinned runtime for [`Guarded::pinned_runtimes`].
+    next_pinned_runtime_id: u64,
 
     /// Tree of blocks received from the sync service. Keeps track of which block has been
     /// reported to the outer API.
@@ -2381,8 +2455,8 @@ impl<TPlat: Platform> Background<TPlat> {
 }
 
 struct Runtime {
-    /// Number of items in [`Guarded::tree`] and [`Guarded::pinned_blocks`] that reference this
-    /// runtime.
+    /// Number of items in [`Guarded::tree`], [`Guarded::pinned_blocks`], and
+    /// [`Guarded::pinned_runtimes`] that reference this runtime.
     num_references: usize,
 
     /// Successfully-compiled runtime and all its information. Can contain an error if an error
