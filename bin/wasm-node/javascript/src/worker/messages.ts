@@ -27,7 +27,7 @@ export type ToWorkerNonConfig = ToWorkerRpcRequest | ToWorkerAddChain | ToWorker
 /**
  * Message that the worker can send to the outside.
  */
-export type FromWorker = FromWorkerChainAddedOk | FromWorkerChainAddedError | FromWorkerLog | FromWorkerJsonRpc | FromWorkerDatabaseContent | FromWorkerLivenessPing;
+export type FromWorker = FromWorkerChainAddedOk | FromWorkerChainAddedError | FromWorkerLog | FromWorkerJsonRpc | FromWorkerDatabaseContent | FromWorkerLivenessPing | FromWorkerCurrentTask;
 
 /**
  * Contains the initial configuration of the worker.
@@ -37,6 +37,7 @@ export type FromWorker = FromWorkerChainAddedOk | FromWorkerChainAddedError | Fr
  */
 export interface ToWorkerConfig {
   maxLogLevel: number;
+  enableCurrentTask: boolean;
   forbidTcp: boolean;
   forbidWs: boolean;
   forbidNonLocalWs: boolean;
@@ -117,4 +118,9 @@ export interface FromWorkerDatabaseContent {
 
 export interface FromWorkerLivenessPing {
   kind: 'livenessPing',
+}
+
+export interface FromWorkerCurrentTask {
+  kind: 'currentTask',
+  taskName: string | null,
 }

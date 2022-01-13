@@ -151,7 +151,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
         // Spawns a task that runs in the background and updates the content of the mutex.
         let background_task_abort;
-        (config.tasks_executor)("runtime-service".into(), {
+        (config.tasks_executor)(log_target.clone(), {
             let log_target = log_target.clone();
             let sync_service = config.sync_service.clone();
             let guarded = guarded.clone();

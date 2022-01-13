@@ -183,7 +183,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
         let (new_child_tasks_tx, mut new_child_tasks_rx) = mpsc::unbounded();
 
         let background = Arc::new(Background {
-            log_target,
+            log_target: log_target.clone(),
             requests_subscriptions,
             client_id,
             new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
@@ -219,7 +219,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
         // Spawns the background task that actually runs the logic of that JSON-RPC service.
         let max_parallel_requests = config.max_parallel_requests;
         (config.tasks_executor)(
-            "json-rpc-service".into(),
+            log_target,
             future::Abortable::new(
                 async move {
                     let mut tasks = stream::FuturesUnordered::new();
