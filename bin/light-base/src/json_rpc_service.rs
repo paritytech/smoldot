@@ -2865,11 +2865,10 @@ impl<TPlat: Platform> Background<TPlat> {
                 // Make sure to unlock the cache, in order to not block the other requests.
                 drop::<futures::lock::MutexGuard<_>>(cache_lock);
 
-                let (runtime_call_lock, virtual_machine) = runtime_call_lock
+                runtime_call_lock
                     .start(function_to_call, iter::once(call_parameters))
                     .await
-                    .unwrap(); // TODO: don't unwrap
-                (runtime_call_lock, virtual_machine)
+                    .unwrap() // TODO: don't unwrap
             } else {
                 // Second situation: the block is not in the cache of recent blocks. This isn't great.
                 drop::<futures::lock::MutexGuard<_>>(cache_lock);
@@ -2883,7 +2882,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 // Download the runtime of this block. This takes a long time as the runtime is rather
                 // big (around 1MiB in general).
-                let (code, heap_pages) = {
+                let (storage_code, storage_heap_pages) = {
                     let mut code_query_result = self
                         .sync_service
                         .clone()
@@ -2900,33 +2899,25 @@ impl<TPlat: Platform> Background<TPlat> {
                     (code, heap_pages)
                 };
 
-                let virtual_machine = match executor::host::HostVmPrototype::new(
-                    code.as_ref()
-                        .ok_or(runtime_service::RuntimeError::CodeNotFound)
-                        .map_err(runtime_service::RuntimeCallError::InvalidRuntime)
-                        .map_err(RuntimeCallError::Call)?,
-                    executor::storage_heap_pages_to_value(heap_pages.as_deref())
-                        .map_err(runtime_service::RuntimeError::InvalidHeapPages)
-                        .map_err(runtime_service::RuntimeCallError::InvalidRuntime)
-                        .map_err(RuntimeCallError::Call)?,
-                    executor::vm::ExecHint::CompileAheadOfTime,
-                ) {
-                    Ok(vm) => vm,
-                    Err(error) => {
-                        log::warn!(
-                            target: &self.log_target,
-                            "Failed to compile best block runtime: {}",
-                            error
-                        );
-                        return Err(RuntimeCallError::Call(
-                            runtime_service::RuntimeCallError::InvalidRuntime(
-                                runtime_service::RuntimeError::Build(error),
-                            ),
-                        ));
-                    }
-                };
+                // Give the code and heap pages to the runtime service. The runtime service will
+                // try to find any similar runtime it might have, and if not will compile it.
+                let pinned_runtime_id = self
+                    .runtime_service
+                    .compile_and_pin_runtime(storage_code, storage_heap_pages)
+                    .await;
 
-                todo!()
+                let precall = self
+                    .runtime_service
+                    .pinned_runtime_call_lock(pinned_runtime_id)
+                    .await;
+
+                // TODO: consider keeping pinned runtimes in a cache instead
+                self.runtime_service.unpin_runtime(pinned_runtime_id).await;
+
+                precall
+                    .start(function_to_call, iter::once(call_parameters))
+                    .await
+                    .unwrap() // TODO: don't unwrap
             }
         };
 

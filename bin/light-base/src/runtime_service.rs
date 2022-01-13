@@ -991,6 +991,23 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         }
     }
 
+    /// Lock the runtime service and prepare a call to a runtime entry point.
+    ///
+    /// The hash of the block passed as parameter corresponds to the block whose runtime to use
+    /// to make the call. The block must be currently pinned in the context of the provided
+    /// [`SubscriptionId`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the given block isn't currently pinned by the given subscription.
+    ///
+    pub async fn pinned_runtime_call_lock<'a>(
+        &'a self,
+        _pinned_runtime_id: PinnedRuntimeId,
+    ) -> RuntimeLock<'a, TPlat> {
+        todo!()
+    }
+
     /// Tries to find a runtime within the [`RuntimeService`] that has the given storage code and
     /// heap pages. If none is found, compiles the runtime and stores it within the
     /// [`RuntimeService`]. In both cases, it is kept pinned until it is unpinned with
