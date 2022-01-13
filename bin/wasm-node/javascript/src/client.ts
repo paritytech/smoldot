@@ -111,7 +111,10 @@ export interface Chain {
    * If, however, the request is a valid JSON-RPC request but that concerns an unknown method, a
    * error response is properly generated.
    *
-   * The available methods are documented here: <https://polkadot.js.org/docs/substrate/rpc>
+   * Two JSON-RPC APIs are supported by smoldot:
+   *
+   * - The "legacy" one, documented here: <https://polkadot.js.org/docs/substrate/rpc>
+   * - The more recent one: <https://github.com/paritytech/json-rpc-interface-spec>
    *
    * @param rpc JSON-encoded RPC request.
    *
