@@ -479,6 +479,12 @@ define_methods! {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HexString(pub Vec<u8>);
 
+impl AsRef<[u8]> for HexString {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 // TODO: not great for type in public API
 impl<'a> serde::Deserialize<'a> for HexString {
     fn deserialize<D>(deserializer: D) -> Result<HexString, D::Error>

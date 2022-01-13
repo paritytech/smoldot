@@ -971,10 +971,9 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 drop(blocks);
 
-                for key in keys {
-                    // TODO: parallelism?
-                    let fut = self.storage_query(&key.0, &at);
-                    if let Ok(value) = fut.await {
+                let fut = self.storage_query(keys.iter(), &at);
+                if let Ok(values) = fut.await {
+                    for (value, key) in values.into_iter().zip(keys) {
                         out.changes.push((key, value.map(methods::HexString)));
                     }
                 }
@@ -1024,9 +1023,9 @@ impl<TPlat: Platform> Background<TPlat> {
                     .map(|h| h.0)
                     .unwrap_or(header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0));
 
-                let fut = self.storage_query(&key.0, &hash);
+                let fut = self.storage_query(iter::once(&key.0), &hash);
                 let response = fut.await;
-                let response = match response {
+                let response = match response.map(|mut r| r.pop().unwrap()) {
                     Ok(Some(value)) => {
                         methods::Response::state_getStorage(methods::HexString(value.to_owned())) // TODO: overhead
                             .to_json_response(request_id)
@@ -2775,30 +2774,24 @@ impl<TPlat: Platform> Background<TPlat> {
         fetch.await
     }
 
-    fn storage_query(
-        &'_ self,
-        key: &[u8],
+    async fn storage_query(
+        &self,
+        keys: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
         hash: &[u8; 32],
-    ) -> impl Future<Output = Result<Option<Vec<u8>>, StorageQueryError>> + '_ {
-        // TODO: had to go through hoops to make it compile; clean up
-        let key = key.to_owned();
-        let hash = *hash;
-        let sync_service = self.sync_service.clone();
-        let fut = self.header_query(&hash);
+    ) -> Result<Vec<Option<Vec<u8>>>, StorageQueryError> {
+        let state_trie_root_hash = self
+            .state_trie_root_hash(&hash)
+            .await
+            .map_err(|()| StorageQueryError::FindStorageRootHashError)?;
 
-        async move {
-            // TODO: risk of deadlock here?
-            let header = fut
-                .await
-                .map_err(|_| StorageQueryError::FindStorageRootHashError)?;
-            let trie_root_hash = header::decode(&header).unwrap().state_root;
+        let result = self
+            .sync_service
+            .clone()
+            .storage_query(hash, &state_trie_root_hash, keys)
+            .await
+            .map_err(StorageQueryError::StorageRetrieval)?;
 
-            let mut result = sync_service
-                .storage_query(&hash, &trie_root_hash, iter::once(key))
-                .await
-                .map_err(StorageQueryError::StorageRetrieval)?;
-            Ok(result.pop().unwrap())
-        }
+        Ok(result)
     }
 
     fn header_query(&'_ self, hash: &[u8; 32]) -> impl Future<Output = Result<Vec<u8>, ()>> + '_ {
