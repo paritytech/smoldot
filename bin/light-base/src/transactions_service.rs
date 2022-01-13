@@ -126,12 +126,13 @@ pub struct TransactionsService<TPlat> {
 impl<TPlat: Platform> TransactionsService<TPlat> {
     /// Builds a new service.
     pub async fn new(mut config: Config<TPlat>) -> Self {
+        let log_target = format!("tx-service-{}", config.log_name);
         let (to_background, from_foreground) = mpsc::channel(8);
 
         (config.tasks_executor)(
-            "transactions-service".into(),
+            log_target.clone(),
             Box::pin(background_task::<TPlat>(
-                config.log_name,
+                log_target,
                 config.sync_service,
                 config.runtime_service,
                 config.network_service.0,
@@ -270,7 +271,7 @@ enum ToBackground {
 
 /// Background task running in parallel of the front service.
 async fn background_task<TPlat: Platform>(
-    log_name: String,
+    log_target: String,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
@@ -299,8 +300,6 @@ async fn background_task<TPlat: Platform>(
         max_concurrent_downloads,
         max_pending_transactions,
     };
-
-    let log_target = format!("tx-service-{}", log_name);
 
     // TODO: must periodically re-send transactions that aren't included in block yet
 
