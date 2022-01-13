@@ -262,7 +262,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                     }
 
                     if new_blocks.is_none() {
-                        let mut cache = background.cache.try_lock().unwrap();
+                        let mut cache = background.cache.lock().await;
 
                         // Subscribe to new runtime service blocks in order to push them in the
                         // cache as soon as they are available.
