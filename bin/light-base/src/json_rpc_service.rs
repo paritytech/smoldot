@@ -188,7 +188,11 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             sync_service: config.sync_service,
             runtime_service: config.runtime_service,
             transactions_service: config.transactions_service,
-            known_blocks: Mutex::new(lru::LruCache::new(256)),
+            cache: Mutex::new(Cache {
+                recent_pinned_blocks: lru::LruCache::with_hasher(32, Default::default()),
+                subscription_id: None,
+                block_state_root_hashes: lru::LruCache::with_hasher(32, Default::default()),
+            }),
             genesis_block: config.genesis_block_hash,
             next_subscription_id: atomic::AtomicU64::new(0),
             subscriptions: Mutex::new(Subscriptions {
@@ -210,7 +214,6 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             async move {
                 let mut main_tasks = stream::FuturesUnordered::new();
                 let mut secondary_tasks = stream::FuturesUnordered::new();
-                let mut new_blocks = None;
 
                 main_tasks.push({
                     let background = background.clone();
@@ -252,35 +255,81 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                     );
                 }
 
+                main_tasks.push(
+                    async move {
+                        loop {
+                            let mut cache = background.cache.lock().await;
+
+                            // Subscribe to new runtime service blocks in order to push them in the
+                            // cache as soon as they are available.
+                            let mut subscribe_all = background
+                                .runtime_service
+                                .subscribe_all(8, cache.recent_pinned_blocks.cap())
+                                .await;
+
+                            cache.subscription_id = Some(subscribe_all.new_blocks.id());
+                            cache.recent_pinned_blocks.clear();
+                            debug_assert!(cache.recent_pinned_blocks.cap() >= 1);
+
+                            let finalized_block_hash = header::hash_from_scale_encoded_header(
+                                &subscribe_all.finalized_block_scale_encoded_header,
+                            );
+                            cache.recent_pinned_blocks.put(
+                                finalized_block_hash,
+                                subscribe_all.finalized_block_scale_encoded_header,
+                            );
+
+                            for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                                if cache.recent_pinned_blocks.len()
+                                    == cache.recent_pinned_blocks.cap()
+                                {
+                                    let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
+                                    subscribe_all.new_blocks.unpin_block(&hash).await;
+                                }
+
+                                let hash = header::hash_from_scale_encoded_header(
+                                    &block.scale_encoded_header,
+                                );
+                                cache
+                                    .recent_pinned_blocks
+                                    .put(hash, block.scale_encoded_header);
+                            }
+
+                            drop(cache);
+
+                            loop {
+                                let notification = subscribe_all.new_blocks.next().await;
+                                match notification {
+                                    Some(runtime_service::Notification::Block(block)) => {
+                                        let mut cache = background.cache.try_lock().unwrap();
+
+                                        if cache.recent_pinned_blocks.len()
+                                            == cache.recent_pinned_blocks.cap()
+                                        {
+                                            let (hash, _) =
+                                                cache.recent_pinned_blocks.pop_lru().unwrap();
+                                            subscribe_all.new_blocks.unpin_block(&hash).await;
+                                        }
+
+                                        let hash = header::hash_from_scale_encoded_header(
+                                            &block.scale_encoded_header,
+                                        );
+                                        cache
+                                            .recent_pinned_blocks
+                                            .put(hash, block.scale_encoded_header);
+                                    }
+                                    Some(runtime_service::Notification::Finalized { .. }) => {}
+                                    None => break,
+                                }
+                            }
+                        }
+                    }
+                    .boxed(),
+                );
+
                 loop {
                     if main_tasks.is_empty() {
                         break;
-                    }
-
-                    if new_blocks.is_none() {
-                        // Subscribe to new sync service blocks in order to push them in the
-                        // cache as soon as they are available.
-                        // Note that `subscribe_all` on the sync service always returns very
-                        // quickly, as opposed to the runtime service where it waits for the
-                        // runtime to be known.
-                        let subscribe_all = background.sync_service.subscribe_all(8, false).await;
-                        new_blocks = Some(subscribe_all.new_blocks);
-
-                        let finalized_block_hash = header::hash_from_scale_encoded_header(
-                            &subscribe_all.finalized_block_scale_encoded_header,
-                        );
-
-                        let mut known_blocks = background.known_blocks.try_lock().unwrap();
-                        known_blocks.put(
-                            finalized_block_hash,
-                            subscribe_all.finalized_block_scale_encoded_header,
-                        );
-
-                        for block in subscribe_all.non_finalized_blocks_ancestry_order {
-                            let hash =
-                                header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                            known_blocks.put(hash, block.scale_encoded_header);
-                        }
                     }
 
                     futures::select! {
@@ -289,17 +338,6 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                         task = new_child_tasks_rx.next() => {
                             let task = task.unwrap();
                             secondary_tasks.push(task);
-                        }
-                        notification = new_blocks.as_mut().unwrap().next() => {
-                            match notification {
-                                Some(sync_service::Notification::Block(block)) => {
-                                    let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                                    let mut blocks = background.known_blocks.try_lock().unwrap();
-                                    blocks.put(hash, block.scale_encoded_header);
-                                }
-                                Some(sync_service::Notification::Finalized { .. }) => {}
-                                None => new_blocks = None,
-                            }
                         }
                     }
                 }
@@ -424,8 +462,9 @@ struct Background<TPlat: Platform> {
     /// See [`Config::transactions_service`].
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
-    /// Blocks that are temporarily saved in order to serve JSON-RPC requests.
-    known_blocks: Mutex<lru::LruCache<[u8; 32], Vec<u8>>>,
+    /// Various information caches about blocks, to potentially reduce the number of network
+    /// requests to perform.
+    cache: Mutex<Cache>,
 
     /// Hash of the genesis block.
     /// Keeping the genesis block is important, as the genesis block hash is included in
@@ -480,6 +519,44 @@ enum SubscriptionTy {
     ChainHeadBody,
     ChainHeadCall,
     ChainHeadStorage,
+}
+
+struct Cache {
+    /// When the runtime service reports a new block, it is kept pinned and inserted in this LRU
+    /// cache. When an entry in removed from the cache, it is unpinned.
+    ///
+    /// JSON-RPC clients are more likely to ask for information about recent blocks and perform
+    /// calls on them, hence a cache of recent blocks.
+    recent_pinned_blocks: lru::LruCache<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>,
+
+    /// Subscription on the runtime service under which the blocks of
+    /// [`Cache::recent_pinned_blocks`] are pinned.
+    ///
+    /// Contains `None` only at initialization, in which case [`Cache::recent_pinned_blocks`]
+    /// is guaranteed to be empty. In other words, if a block is found in
+    /// [`Cache::recent_pinned_blocks`] then this field is guaranteed to be `Some`.
+    subscription_id: Option<runtime_service::SubscriptionId>,
+
+    /// State trie root hashes of blocks that were not in [`Cache::recent_pinned_blocks`].
+    ///
+    /// The state trie root hash can also be an `Err` if the network request failed or if the
+    /// header is of an invalid format.
+    ///
+    /// The state trie root hash is wrapped in a `Shared` future. When multiple requests need the
+    /// state trie root hash of the same block, it is only queried once and the query is
+    /// inserted in the cache while in progress. This way, the multiple requests can all wait on
+    /// that single future.
+    ///
+    /// Most of the time, the JSON-RPC client will query blocks that are found in
+    /// [`Cache::recent_pinned_blocks`], but occasionally it will query older blocks. When the
+    /// storage of an older block is queried, it is common for the JSON-RPC client to make several
+    /// storage requests to that same old block. In order to avoid having to retrieve the state
+    /// trie root hash multiple, we store these hashes in this LRU cache.
+    block_state_root_hashes: lru::LruCache<
+        [u8; 32],
+        future::MaybeDone<future::Shared<future::BoxFuture<'static, Result<[u8; 32], ()>>>>,
+        fnv::FnvBuildHasher,
+    >,
 }
 
 impl<TPlat: Platform> Background<TPlat> {
@@ -839,9 +916,10 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 let block_hash = header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
 
-                let mut known_blocks = self.known_blocks.lock().await;
+                let mut cache = self.cache.lock().await;
                 let (state_root, block_number) = {
-                    let block = known_blocks.get(&block_hash).unwrap();
+                    // TODO: no /!\
+                    let block = cache.recent_pinned_blocks.get(&block_hash).unwrap();
                     match header::decode(block) {
                         Ok(d) => (*d.state_root, d.number),
                         Err(_) => {
@@ -857,7 +935,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         }
                     }
                 };
-                drop(known_blocks);
+                drop(cache);
 
                 let outcome = self
                     .sync_service
@@ -902,7 +980,7 @@ impl<TPlat: Platform> Background<TPlat> {
             methods::MethodCall::state_queryStorageAt { keys, at } => {
                 let best_block= header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
 
-                let blocks = self.known_blocks.lock().await;
+                let cache = self.cache.lock().await;
 
                 let at = at.as_ref().map(|h| h.0).unwrap_or(best_block);
 
@@ -912,12 +990,11 @@ impl<TPlat: Platform> Background<TPlat> {
                     changes: Vec::new(),
                 };
 
-                drop(blocks);
+                drop(cache);
 
-                for key in keys {
-                    // TODO: parallelism?
-                    let fut = self.storage_query(&key.0, &at);
-                    if let Ok(value) = fut.await {
+                let fut = self.storage_query(keys.iter(), &at);
+                if let Ok(values) = fut.await {
+                    for (value, key) in values.into_iter().zip(keys) {
                         out.changes.push((key, value.map(methods::HexString)));
                     }
                 }
@@ -967,9 +1044,9 @@ impl<TPlat: Platform> Background<TPlat> {
                     .map(|h| h.0)
                     .unwrap_or(header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0));
 
-                let fut = self.storage_query(&key.0, &hash);
+                let fut = self.storage_query(iter::once(&key.0), &hash);
                 let response = fut.await;
-                let response = match response {
+                let response = match response.map(|mut r| r.pop().unwrap()) {
                     Ok(Some(value)) => {
                         methods::Response::state_getStorage(methods::HexString(value.to_owned())) // TODO: overhead
                             .to_json_response(request_id)
@@ -2119,7 +2196,7 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         height: Option<u64>,
     ) {
-        // TODO: maybe store values in known_blocks?
+        // TODO: maybe store values in cache?
         let response = {
             match height {
                 Some(0) => methods::Response::chain_getBlockHash(methods::HashHexString(
@@ -2645,30 +2722,99 @@ impl<TPlat: Platform> Background<TPlat> {
             .unwrap();
     }
 
-    fn storage_query(
-        &'_ self,
-        key: &[u8],
+    /// Obtain the state trie root hash of the given block, and make sure to put it in cache.
+    // TODO: better error return type
+    async fn state_trie_root_hash(&self, hash: &[u8; 32]) -> Result<[u8; 32], ()> {
+        let fetch = {
+            // Try to find an existing entry in cache, and if not create one.
+            let mut cache_lock = self.cache.lock().await;
+
+            // Look in `recent_pinned_blocks`.
+            match cache_lock
+                .recent_pinned_blocks
+                .get(hash)
+                .map(|h| header::decode(h))
+            {
+                Some(Ok(header)) => return Ok(*header.state_root),
+                Some(Err(_)) => return Err(()),
+                None => {}
+            }
+
+            // Look in `block_state_root_hashes`.
+            match cache_lock.block_state_root_hashes.get(hash) {
+                Some(future::MaybeDone::Done(Ok(val))) => return Ok(*val),
+                Some(future::MaybeDone::Future(f)) => f.clone(),
+                Some(future::MaybeDone::Gone) => unreachable!(), // We never use `Gone`.
+                Some(future::MaybeDone::Done(Err(()))) | None => {
+                    // TODO: filter by error      ^ ; invalid header for example should be returned immediately
+                    // No existing cache entry. Create the future that will perform the fetch
+                    // but do not actually start doing anything now.
+                    let fetch = {
+                        let sync_service = self.sync_service.clone();
+                        let hash = *hash;
+                        async move {
+                            // The sync service knows which peers are potentially aware of
+                            // this block.
+                            let result = sync_service
+                                .block_query(
+                                    hash,
+                                    protocol::BlocksRequestFields {
+                                        header: true,
+                                        body: false,
+                                        justifications: false,
+                                    },
+                                )
+                                .await;
+
+                            if let Ok(block) = result {
+                                // If successful, the `block_query` function guarantees that the
+                                // header is present and valid.
+                                let header = block.header.unwrap();
+                                debug_assert_eq!(
+                                    header::hash_from_scale_encoded_header(&header),
+                                    hash
+                                );
+                                let decoded = header::decode(&header).unwrap();
+                                Ok(*decoded.state_root)
+                            } else {
+                                Err(())
+                            }
+                        }
+                    };
+
+                    // Insert the future in the cache, so that any other call will use the same
+                    // future.
+                    let wrapped = fetch.boxed().shared();
+                    cache_lock
+                        .block_state_root_hashes
+                        .put(*hash, future::maybe_done(wrapped.clone()));
+                    wrapped
+                }
+            }
+        };
+
+        // We await separately to be certain that the lock isn't held anymore.
+        fetch.await
+    }
+
+    async fn storage_query(
+        &self,
+        keys: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
         hash: &[u8; 32],
-    ) -> impl Future<Output = Result<Option<Vec<u8>>, StorageQueryError>> + '_ {
-        // TODO: had to go through hoops to make it compile; clean up
-        let key = key.to_owned();
-        let hash = *hash;
-        let sync_service = self.sync_service.clone();
-        let fut = self.header_query(&hash);
+    ) -> Result<Vec<Option<Vec<u8>>>, StorageQueryError> {
+        let state_trie_root_hash = self
+            .state_trie_root_hash(&hash)
+            .await
+            .map_err(|()| StorageQueryError::FindStorageRootHashError)?;
 
-        async move {
-            // TODO: risk of deadlock here?
-            let header = fut
-                .await
-                .map_err(|_| StorageQueryError::FindStorageRootHashError)?;
-            let trie_root_hash = header::decode(&header).unwrap().state_root;
+        let result = self
+            .sync_service
+            .clone()
+            .storage_query(hash, &state_trie_root_hash, keys)
+            .await
+            .map_err(StorageQueryError::StorageRetrieval)?;
 
-            let mut result = sync_service
-                .storage_query(&hash, &trie_root_hash, iter::once(key))
-                .await
-                .map_err(StorageQueryError::StorageRetrieval)?;
-            Ok(result.pop().unwrap())
-        }
+        Ok(result)
     }
 
     fn header_query(&'_ self, hash: &[u8; 32]) -> impl Future<Output = Result<Vec<u8>, ()>> + '_ {
@@ -2679,10 +2825,10 @@ impl<TPlat: Platform> Background<TPlat> {
         async move {
             // TODO: risk of deadlock here?
             {
-                let mut blocks = self.known_blocks.lock().await;
-                let known_blocks = &mut *blocks;
+                let mut cache = self.cache.lock().await;
+                let cache = &mut *cache;
 
-                if let Some(header) = known_blocks.get(&hash) {
+                if let Some(header) = cache.recent_pinned_blocks.get(&hash) {
                     return Ok(header.clone());
                 }
             }
@@ -2703,9 +2849,6 @@ impl<TPlat: Platform> Background<TPlat> {
             if let Ok(block) = result {
                 let header = block.header.unwrap();
                 debug_assert_eq!(header::hash_from_scale_encoded_header(&header), hash);
-
-                let mut known_blocks = self.known_blocks.lock().await;
-                known_blocks.put(hash, header.clone());
                 Ok(header)
             } else {
                 Err(())
