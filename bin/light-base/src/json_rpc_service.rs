@@ -47,6 +47,7 @@ use smoldot::{
     header,
     json_rpc::{self, methods, requests_subscriptions},
     libp2p::{multiaddr, PeerId},
+    metadata::remove_metadata_length_prefix,
     network::protocol,
 };
 use std::{
@@ -1022,17 +1023,21 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::state_getMetadata { hash } => {
-                let result = if let Some(hash) = hash {
-                    self.runtime_service.clone().metadata(&hash.0).await
+                let block_hash = if let Some(hash) = hash {
+                    hash.0
                 } else {
-                    self.runtime_service.clone().best_block_metadata().await
+                    header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0)
                 };
 
+                let result = self.runtime_call(&block_hash, "Metadata_metadata", &[]).await;
+                let result = result.as_ref().map(|output| remove_metadata_length_prefix(&output));
+
                 let response = match result {
-                    Ok(metadata) => {
-                        methods::Response::state_getMetadata(methods::HexString(metadata))
+                    Ok(Ok(metadata)) => {
+                        methods::Response::state_getMetadata(methods::HexString(metadata.to_vec()))
                             .to_json_response(request_id)
                     }
+                    Ok(Err(_)) => todo!(),
                     Err(error) => {
                         log::warn!(
                             target: &self.log_target,
@@ -2831,6 +2836,151 @@ impl<TPlat: Platform> Background<TPlat> {
         Ok(result)
     }
 
+    /// Performs a runtime call to a random block.
+    // TODO: maybe add a parameter to check for a runtime API?
+    async fn runtime_call(
+        self: &Arc<Self>,
+        block_hash: &[u8; 32],
+        function_to_call: &str,
+        call_parameters: &[u8],
+    ) -> Result<Vec<u8>, RuntimeCallError> {
+        // This function contains two steps: obtaining the runtime of the block in question,
+        // then performing the actual call. The first step is the longest and most difficult.
+        let (runtime_call_lock, virtual_machine) = {
+            let cache_lock = self.cache.lock().await;
+
+            // Try to find the block in the cache of recent blocks. Most of the time, the call target
+            // should be in there.
+            if cache_lock.recent_pinned_blocks.contains(block_hash) {
+                // The runtime service has the block pinned, meaning that we can ask the runtime
+                // service to perform the call.
+                let runtime_call_lock = self
+                    .runtime_service
+                    .pinned_block_runtime_call_lock(
+                        cache_lock.subscription_id.clone().unwrap(),
+                        block_hash,
+                    )
+                    .await;
+
+                // Make sure to unlock the cache, in order to not block the other requests.
+                drop::<futures::lock::MutexGuard<_>>(cache_lock);
+
+                let (runtime_call_lock, virtual_machine) = runtime_call_lock
+                    .start(function_to_call, iter::once(call_parameters))
+                    .await
+                    .unwrap(); // TODO: don't unwrap
+                (runtime_call_lock, virtual_machine)
+            } else {
+                // Second situation: the block is not in the cache of recent blocks. This isn't great.
+                drop::<futures::lock::MutexGuard<_>>(cache_lock);
+
+                // The only solution is to download the runtime of the block in question from the network.
+
+                // TODO: considering caching the runtime code the same way as the state trie root hash
+
+                // In order to grab the runtime code
+                let state_trie_root_hash = self.state_trie_root_hash(block_hash).await.unwrap(); // TODO: don't unwrap
+
+                // Download the runtime of this block. This takes a long time as the runtime is rather
+                // big (around 1MiB in general).
+                let (code, heap_pages) = {
+                    let mut code_query_result = self
+                        .sync_service
+                        .clone()
+                        .storage_query(
+                            block_hash,
+                            &state_trie_root_hash,
+                            iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+                        )
+                        .await
+                        .map_err(runtime_service::RuntimeCallError::StorageQuery)
+                        .map_err(RuntimeCallError::Call)?;
+                    let heap_pages = code_query_result.pop().unwrap();
+                    let code = code_query_result.pop().unwrap();
+                    (code, heap_pages)
+                };
+
+                let virtual_machine = match executor::host::HostVmPrototype::new(
+                    code.as_ref()
+                        .ok_or(runtime_service::RuntimeError::CodeNotFound)
+                        .map_err(runtime_service::RuntimeCallError::InvalidRuntime)
+                        .map_err(RuntimeCallError::Call)?,
+                    executor::storage_heap_pages_to_value(heap_pages.as_deref())
+                        .map_err(runtime_service::RuntimeError::InvalidHeapPages)
+                        .map_err(runtime_service::RuntimeCallError::InvalidRuntime)
+                        .map_err(RuntimeCallError::Call)?,
+                    executor::vm::ExecHint::CompileAheadOfTime,
+                ) {
+                    Ok(vm) => vm,
+                    Err(error) => {
+                        log::warn!(
+                            target: &self.log_target,
+                            "Failed to compile best block runtime: {}",
+                            error
+                        );
+                        return Err(RuntimeCallError::Call(
+                            runtime_service::RuntimeCallError::InvalidRuntime(
+                                runtime_service::RuntimeError::Build(error),
+                            ),
+                        ));
+                    }
+                };
+
+                todo!()
+            }
+        };
+
+        // Now that we have obtained the virtual machine, we can perform the call.
+        // This is a CPU-only operation that executes the virtual machine.
+        // The virtual machine might access the storage.
+        // TODO: finish doc
+
+        let mut runtime_call = match read_only_runtime_host::run(read_only_runtime_host::Config {
+            virtual_machine,
+            function_to_call,
+            parameter: iter::once(call_parameters),
+        }) {
+            Ok(vm) => vm,
+            Err((err, prototype)) => {
+                runtime_call_lock.unlock(prototype);
+                return Err(RuntimeCallError::StartError(err));
+            }
+        };
+
+        loop {
+            match runtime_call {
+                read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                    let output = success.virtual_machine.value().as_ref().to_vec();
+                    runtime_call_lock.unlock(success.virtual_machine.into_prototype());
+                    break Ok(output);
+                }
+                read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+                    runtime_call_lock.unlock(error.prototype);
+                    break Err(RuntimeCallError::ReadOnlyRuntime(error.detail));
+                }
+                read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
+                    let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            runtime_call_lock.unlock(
+                                read_only_runtime_host::RuntimeHostVm::StorageGet(get)
+                                    .into_prototype(),
+                            );
+                            break Err(RuntimeCallError::Call(err));
+                        }
+                    };
+                    runtime_call = get.inject_value(storage_value.map(iter::once));
+                }
+                read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
+                    todo!() // TODO:
+                }
+                read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
+                    runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
+                }
+            }
+        }
+    }
+
     fn header_query(&'_ self, hash: &[u8; 32]) -> impl Future<Output = Result<Vec<u8>, ()>> + '_ {
         // TODO: had to go through hoops to make it compile; clean up
         let hash = *hash;
@@ -3872,6 +4022,13 @@ enum StorageQueryError {
     /// Error while retrieving the storage item from other nodes.
     #[display(fmt = "{}", _0)]
     StorageRetrieval(sync_service::StorageQueryError),
+}
+
+#[derive(derive_more::Display)]
+enum RuntimeCallError {
+    Call(runtime_service::RuntimeCallError),
+    StartError(host::StartErr),
+    ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
 }
 
 async fn account_nonce<TPlat: Platform>(

@@ -67,7 +67,6 @@ use smoldot::{
     chain::async_tree,
     executor, header,
     informant::{BytesDisplay, HashDisplay},
-    metadata,
     network::protocol,
     trie::{self, proof_verify},
 };
@@ -986,94 +985,6 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         }
     }
 
-    /// Obtain the metadata of the runtime of the current best block.
-    ///
-    /// > **Note**: Keep in mind that this function is subject to race conditions. The runtime
-    /// >           of the best block can change at any time. This method should ideally be called
-    /// >           again after every runtime change.
-    pub async fn metadata(&self, _block_hash: &[u8; 32]) -> Result<Vec<u8>, MetadataError> {
-        todo!() // TODO: restore, somehow
-    }
-
-    /// Obtain the metadata of the runtime of the current best block.
-    ///
-    /// > **Note**: Keep in mind that this function is subject to race conditions. The runtime
-    /// >           of the best block can change at any time. This method should ideally be called
-    /// >           again after every runtime change.
-    pub async fn best_block_metadata(&self) -> Result<Vec<u8>, MetadataError> {
-        // First, try the cache.
-        // TODO: restore
-        /*{
-            let guarded = self.guarded.lock().await;
-            match guarded
-                .tree
-                .as_ref()
-                .unwrap()
-                .best_block_runtime()
-                .runtime
-                .as_ref()
-            {
-                Ok(runtime) => {
-                    if let Some(metadata) = runtime.metadata.as_ref() {
-                        return Ok(metadata.clone());
-                    }
-                }
-                Err(err) => {
-                    return Err(MetadataError::InvalidRuntime(err.clone()));
-                }
-            }
-        }*/
-
-        self.metadata_inner().await
-    }
-
-    async fn metadata_inner(&self) -> Result<Vec<u8>, MetadataError> {
-        let (runtime_call_lock, virtual_machine) = self
-            .recent_best_block_runtime_lock()
-            .await
-            .start("Metadata_metadata", iter::empty::<Vec<u8>>())
-            .await
-            .map_err(MetadataError::CallError)?;
-
-        let mut query = metadata::query_metadata(virtual_machine);
-        let (metadata_result, virtual_machine) = loop {
-            match query {
-                metadata::Query::Finished(Ok(metadata), virtual_machine) => {
-                    // TODO: restore
-                    /*if let Some(guarded) = &mut runtime_call_lock.guarded {
-                        guarded
-                            .tree
-                            .as_mut()
-                            .unwrap()
-                            .best_block_runtime_mut()
-                            .runtime
-                            .as_mut()
-                            .unwrap()
-                            .metadata = Some(metadata.clone());
-                    }*/
-                    break (Ok(metadata), virtual_machine);
-                }
-                metadata::Query::StorageGet(storage_get) => {
-                    match runtime_call_lock.storage_entry(&storage_get.key_as_vec()) {
-                        Ok(v) => query = storage_get.inject_value(v.map(iter::once)),
-                        Err(err) => {
-                            break (
-                                Err(MetadataError::CallError(err)),
-                                metadata::Query::StorageGet(storage_get).into_prototype(),
-                            );
-                        }
-                    }
-                }
-                metadata::Query::Finished(Err(err), virtual_machine) => {
-                    break (Err(MetadataError::MetadataQuery(err)), virtual_machine);
-                }
-            }
-        };
-
-        runtime_call_lock.unlock(virtual_machine);
-        metadata_result
-    }
-
     /// Returns true if it is believed that we are near the head of the chain.
     ///
     /// The way this method is implemented is opaque and cannot be relied on. The return value
@@ -1602,20 +1513,6 @@ pub enum RuntimeError {
     Build(executor::host::NewErr),
     /// Error when determining the runtime specification.
     CoreVersion(executor::CoreVersionError),
-}
-
-/// Error that can happen when calling [`RuntimeService::metadata`].
-#[derive(Debug, derive_more::Display)]
-pub enum MetadataError {
-    /// Error during the runtime call.
-    #[display(fmt = "{}", _0)]
-    CallError(RuntimeCallError),
-    /// Error in the metadata-specific runtime API.
-    #[display(fmt = "Error in the metadata-specific runtime API: {}", _0)]
-    MetadataQuery(metadata::Error),
-    // TODO: restore or remove
-    /*/// Error while fetching the runtime of the desired block.
-    RuntimeFetch,*/
 }
 
 struct Guarded<TPlat: Platform> {
@@ -2510,24 +2407,6 @@ struct Runtime {
 }
 
 struct SuccessfulRuntime {
-    // TODO: restore this metadata cache
-    /*/// Cache of the metadata extracted from the runtime. `None` if unknown.
-    ///
-    /// This cache is filled lazily whenever it is requested through the public API.
-    ///
-    /// Note that building the metadata might require access to the storage, just like obtaining
-    /// the runtime code. if the runtime code gets an update, we can reasonably assume that the
-    /// network is able to serve us the storage of recent blocks, and thus the changes of being
-    /// able to build the metadata are very high.
-    ///
-    /// If the runtime is the one found in the genesis storage, the metadata must have been been
-    /// filled using the genesis storage as well. If we build the metadata of the genesis runtime
-    /// lazily, chances are that the network wouldn't be able to serve the storage of blocks near
-    /// the genesis.
-    ///
-    /// As documented in the smoldot metadata module, the metadata might access the storage, but
-    /// we intentionally don't watch for changes in these storage keys to refresh the metadata.
-    metadata: Option<Vec<u8>>,*/
     /// Runtime specs extracted from the runtime.
     runtime_spec: executor::CoreVersion,
 
