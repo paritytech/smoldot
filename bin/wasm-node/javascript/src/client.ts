@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { workerOnMessage, workerOnError, workerTerminate } from './compat/index.js';
+import { CompatWorker, workerOnMessage, workerOnError, workerTerminate } from './compat/index.js';
 import * as messages from './worker/messages.js';
 import spawnWorker from './worker/spawn.js';
 
@@ -421,7 +421,7 @@ export function start(options?: ClientOptions): Client {
               throw new JsonRpcDisabledError();
             if (request.length >= 8 * 1024 * 1024)
               return;
-            worker.postMessage({ ty: 'request', request, chainId });
+            postMessage(worker, { ty: 'request', request, chainId });
           },
           databaseContent: (maxUtf8BytesSize) => {
             if (workerError)
@@ -447,7 +447,7 @@ export function start(options?: ClientOptions): Client {
             const maxSize = maxUtf8BytesSize || (twoPower32 - 1);
             const cappedMaxSize = (maxSize >= twoPower32) ? (twoPower32 - 1) : maxSize;
 
-            worker.postMessage({ ty: 'databaseContent', chainId, maxUtf8BytesSize: cappedMaxSize });
+            postMessage(worker, { ty: 'databaseContent', chainId, maxUtf8BytesSize: cappedMaxSize });
 
             return promise;
           },
@@ -456,7 +456,7 @@ export function start(options?: ClientOptions): Client {
               throw workerError;
             if (!chains.has(chainId))
               throw new AlreadyDestroyedError();
-            worker.postMessage({ ty: 'removeChain', chainId });
+            postMessage(worker, { ty: 'removeChain', chainId });
             // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
             // response or database content concerning that `chainId` to arrive after the `remove`
             // function has returned. We solve that by removing the information immediately.
@@ -534,15 +534,15 @@ export function start(options?: ClientOptions): Client {
   });
 
   // The first message expected by the worker contains the configuration.
-  worker.postMessage({
+  postMessage(worker, {
     // Maximum level of log entries sent by the client.
     // 0 = Logging disabled, 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
     maxLogLevel: options.maxLogLevel || 3,
     enableCurrentTask: true, // TODO: make this configurable? `true` slows things down but makes it easily debuggable
-    forbidTcp: options.forbidTcp,
-    forbidWs: options.forbidWs,
-    forbidNonLocalWs: options.forbidNonLocalWs,
-    forbidWss: options.forbidWss,
+    forbidTcp: options.forbidTcp || false,
+    forbidWs: options.forbidWs || false,
+    forbidNonLocalWs: options.forbidNonLocalWs || false,
+    forbidWss: options.forbidWss || false,
   });
 
   return {
@@ -556,7 +556,7 @@ export function start(options?: ClientOptions): Client {
           // The content of `options.potentialRelayChains` are supposed to be chains earlier
           // returned by `addChain`.
           const id = chainIds.get(chain);
-          if (id === null) // It is possible for `id` to be null if it has earlier been removed.
+          if (id === undefined) // It is possible for `id` to be missing if it has earlier been removed.
             continue;
           potentialRelayChainsIds.push(id);
         }
@@ -578,7 +578,7 @@ export function start(options?: ClientOptions): Client {
         jsonRpcCallback: options.jsonRpcCallback,
       });
 
-      worker.postMessage({
+      postMessage(worker, {
         ty: 'addChain',
         chainSpec: options.chainSpec,
         databaseContent: typeof options.databaseContent === 'string' ? options.databaseContent : "",
@@ -599,6 +599,11 @@ export function start(options?: ClientOptions): Client {
       return workerTerminate(worker)
     }
   }
+}
+
+// Separate function in order to enforce types.
+function postMessage(worker: CompatWorker, message: messages.ToWorker) {
+  worker.postMessage(message)
 }
 
 interface PendingConfirmation {
