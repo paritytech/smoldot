@@ -362,6 +362,10 @@ export function start(options?: ClientOptions): Client {
   // Immediately cleared when `remove()` is called on a chain.
   let chainIds: WeakMap<Chain, number> = new WeakMap();
 
+  // The worker periodically reports the name of the task it is currently in. This makes it
+  // possible, when the worker is frozen, to know which task it was in when frozen.
+  const workerCurrentTask: { name: string | null } = { name: null };
+
   // The worker periodically sends a message of kind 'livenessPing' in order to notify that it is
   // still alive.
   // If this liveness ping isn't received for a long time, an error is reported in the logs.
@@ -374,11 +378,12 @@ export function start(options?: ClientOptions): Client {
     livenessTimeout = globalThis.setTimeout(() => {
       livenessTimeout = null;
       console.warn(
-        "Smoldot appears unresponsive. Please open an issue at " +
-        "https://github.com/paritytech/smoldot/issues. If you have a debugger available, " +
-        "please pause execution, generate a stack trace of the thread that isn't the main " +
-        "execution thread, and paste it in the issue. Please also include any other log found " +
-        "in the console or elsewhere."
+        "Smoldot appears unresponsive" +
+        (workerCurrentTask.name ? (" while executing task `" + workerCurrentTask.name + "`") : "") +
+        ". Please open an issue at https://github.com/paritytech/smoldot/issues. If you have a " +
+        "debugger available, please pause execution, generate a stack trace of the thread " +
+        "that isn't the main execution thread, and paste it in the issue. Please also include " +
+        "any other log found in the console or elsewhere."
       );
     }, 10000);
   };
@@ -489,6 +494,11 @@ export function start(options?: ClientOptions): Client {
         break;
       }
 
+      case 'currentTask': {
+        workerCurrentTask.name = message.taskName;
+        break;
+      }
+
       default: {
         // Exhaustive check.
         const _exhaustiveCheck: never = message;
@@ -515,13 +525,11 @@ export function start(options?: ClientOptions): Client {
     pendingConfirmations = [];
 
     // Reject all promises for database contents.
-    chains.forEach((chain) => {
-      chain.databasePromises.forEach((promise) => {
-        // TODO: Because of https://github.com/microsoft/TypeScript/issues/11498, TypeScript is unable to know that `workerError` has been set above.
-        const err = workerError as CrashError;
-        promise.reject(err)
-      });
-    });
+    for (const chain of chains) {
+      for (const promise of chain[1].databasePromises) {
+        promise.reject(workerError)
+      }
+    }
     chains.clear();
   });
 
@@ -530,6 +538,7 @@ export function start(options?: ClientOptions): Client {
     // Maximum level of log entries sent by the client.
     // 0 = Logging disabled, 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
     maxLogLevel: options.maxLogLevel || 3,
+    enableCurrentTask: true, // TODO: make this configurable? `true` slows things down but makes it easily debuggable
     forbidTcp: options.forbidTcp,
     forbidWs: options.forbidWs,
     forbidNonLocalWs: options.forbidNonLocalWs,

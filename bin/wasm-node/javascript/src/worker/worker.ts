@@ -145,6 +145,9 @@ compat.setOnMessage((message: messages.ToWorker) => {
       databaseContentCallback: (data, chainId) => {
         postMessage({ kind: 'databaseContent', data, chainId });
       },
+      currentTaskCallback: (taskName) => {
+        postMessage({ kind: 'currentTask', taskName });
+      },
       forbidTcp: configMessage.forbidTcp,
       forbidWs: configMessage.forbidWs,
       forbidNonLocalWs: configMessage.forbidNonLocalWs,
@@ -154,7 +157,7 @@ compat.setOnMessage((message: messages.ToWorker) => {
     instance.startInstance(config).then((instance) => {
       // Smoldot requires an initial call to the `init` function in order to do its internal
       // configuration.
-      instance.exports.init(configMessage.maxLogLevel);
+      instance.exports.init(configMessage.maxLogLevel, configMessage.enableCurrentTask ? 1 : 0);
 
       // Smoldot has finished initializing.
       // Since this function is an asynchronous function, it is possible that messages have been
