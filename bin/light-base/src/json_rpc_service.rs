@@ -518,6 +518,9 @@ struct Cache {
 
     /// State trie root hashes of blocks that were not in [`Cache::recent_pinned_blocks`].
     ///
+    /// The state trie root hash can also be an `Err` if the network request failed or if the
+    /// header is of an invalid format.
+    ///
     /// The state trie root hash is wrapped in a `Shared` future. When multiple requests need the
     /// state trie root hash of the same block, it is only queried once and the query is
     /// inserted in the cache while in progress. This way, the multiple requests can all wait on
@@ -530,7 +533,7 @@ struct Cache {
     /// trie root hash multiple, we store these hashes in this LRU cache.
     block_state_root_hashes: lru::LruCache<
         [u8; 32],
-        future::MaybeDone<future::Shared<future::BoxFuture<'static, [u8; 32]>>>,
+        future::MaybeDone<future::Shared<future::BoxFuture<'static, Result<[u8; 32], ()>>>>,
         fnv::FnvBuildHasher,
     >,
 }
@@ -2697,6 +2700,79 @@ impl<TPlat: Platform> Background<TPlat> {
                 future::Abortable::new(task, abort_registration).map(|_| ()),
             ))
             .unwrap();
+    }
+
+    /// Obtain the state trie root hash of the given block, and make sure to put it in cache.
+    // TODO: better error return type
+    async fn state_trie_root_hash(&self, hash: &[u8; 32]) -> Result<[u8; 32], ()> {
+        let fetch = {
+            // Try to find an existing entry in cache, and if not create one.
+            let mut cache_lock = self.cache.lock().await;
+
+            // Look in `recent_pinned_blocks`.
+            match cache_lock
+                .recent_pinned_blocks
+                .get(hash)
+                .map(|h| header::decode(h))
+            {
+                Some(Ok(header)) => return Ok(*header.state_root),
+                Some(Err(_)) => return Err(()),
+                None => {}
+            }
+
+            // Look in `block_state_root_hashes`.
+            match cache_lock.block_state_root_hashes.get(hash) {
+                Some(future::MaybeDone::Done(Ok(val))) => return Ok(*val),
+                Some(future::MaybeDone::Future(f)) => f.clone(),
+                Some(future::MaybeDone::Gone) => unreachable!(), // We never use `Gone`.
+                Some(future::MaybeDone::Done(Err(()))) | None => {
+                    // TODO: filter by error      ^ ; invalid header for example should be returned immediately
+                    // No existing cache entry. Starting the fetch.
+                    let fetch = {
+                        let sync_service = self.sync_service.clone();
+                        let hash = *hash;
+                        async move {
+                            // The sync service knows which peers are potentially aware of
+                            // this block.
+                            let result = sync_service
+                                .block_query(
+                                    hash,
+                                    protocol::BlocksRequestFields {
+                                        header: true,
+                                        body: false,
+                                        justifications: false,
+                                    },
+                                )
+                                .await;
+
+                            if let Ok(block) = result {
+                                // If successful, the `block_query` function guarantees that the
+                                // header is present and valid.
+                                let header = block.header.unwrap();
+                                debug_assert_eq!(
+                                    header::hash_from_scale_encoded_header(&header),
+                                    hash
+                                );
+                                let decoded = header::decode(&header).unwrap();
+                                Ok(*decoded.state_root)
+                            } else {
+                                Err(())
+                            }
+                        }
+                    };
+
+                    // Adding it to the cache.
+                    let wrapped = fetch.boxed().shared();
+                    cache_lock
+                        .block_state_root_hashes
+                        .put(*hash, future::maybe_done(wrapped.clone()));
+                    wrapped
+                }
+            }
+        };
+
+        // We await separately to be certain that the lock isn't held anymore.
+        fetch.await
     }
 
     fn storage_query(
