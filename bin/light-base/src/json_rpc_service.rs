@@ -214,7 +214,6 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             async move {
                 let mut main_tasks = stream::FuturesUnordered::new();
                 let mut secondary_tasks = stream::FuturesUnordered::new();
-                let mut new_blocks = None;
 
                 main_tasks.push({
                     let background = background.clone();
@@ -256,42 +255,81 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                     );
                 }
 
+                main_tasks.push(
+                    async move {
+                        loop {
+                            let mut cache = background.cache.lock().await;
+
+                            // Subscribe to new runtime service blocks in order to push them in the
+                            // cache as soon as they are available.
+                            let mut subscribe_all = background
+                                .runtime_service
+                                .subscribe_all(8, cache.recent_pinned_blocks.cap())
+                                .await;
+
+                            cache.subscription_id = Some(subscribe_all.new_blocks.id());
+                            cache.recent_pinned_blocks.clear();
+                            debug_assert!(cache.recent_pinned_blocks.cap() >= 1);
+
+                            let finalized_block_hash = header::hash_from_scale_encoded_header(
+                                &subscribe_all.finalized_block_scale_encoded_header,
+                            );
+                            cache.recent_pinned_blocks.put(
+                                finalized_block_hash,
+                                subscribe_all.finalized_block_scale_encoded_header,
+                            );
+
+                            for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                                if cache.recent_pinned_blocks.len()
+                                    == cache.recent_pinned_blocks.cap()
+                                {
+                                    let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
+                                    subscribe_all.new_blocks.unpin_block(&hash).await;
+                                }
+
+                                let hash = header::hash_from_scale_encoded_header(
+                                    &block.scale_encoded_header,
+                                );
+                                cache
+                                    .recent_pinned_blocks
+                                    .put(hash, block.scale_encoded_header);
+                            }
+
+                            drop(cache);
+
+                            loop {
+                                let notification = subscribe_all.new_blocks.next().await;
+                                match notification {
+                                    Some(runtime_service::Notification::Block(block)) => {
+                                        let mut cache = background.cache.try_lock().unwrap();
+
+                                        if cache.recent_pinned_blocks.len()
+                                            == cache.recent_pinned_blocks.cap()
+                                        {
+                                            let (hash, _) =
+                                                cache.recent_pinned_blocks.pop_lru().unwrap();
+                                            subscribe_all.new_blocks.unpin_block(&hash).await;
+                                        }
+
+                                        let hash = header::hash_from_scale_encoded_header(
+                                            &block.scale_encoded_header,
+                                        );
+                                        cache
+                                            .recent_pinned_blocks
+                                            .put(hash, block.scale_encoded_header);
+                                    }
+                                    Some(runtime_service::Notification::Finalized { .. }) => {}
+                                    None => break,
+                                }
+                            }
+                        }
+                    }
+                    .boxed(),
+                );
+
                 loop {
                     if main_tasks.is_empty() {
                         break;
-                    }
-
-                    if new_blocks.is_none() {
-                        let mut cache = background.cache.lock().await;
-
-                        // Subscribe to new runtime service blocks in order to push them in the
-                        // cache as soon as they are available.
-                        let subscribe_all = background.runtime_service.subscribe_all(8, cache.recent_pinned_blocks.cap()).await;
-
-                        cache.subscription_id = Some(subscribe_all.new_blocks.id());
-                        cache.recent_pinned_blocks.clear();
-                        debug_assert!(cache.recent_pinned_blocks.cap() >= 1);
-
-                        let finalized_block_hash = header::hash_from_scale_encoded_header(
-                            &subscribe_all.finalized_block_scale_encoded_header,
-                        );
-                        cache.recent_pinned_blocks.put(
-                            finalized_block_hash,
-                            subscribe_all.finalized_block_scale_encoded_header,
-                        );
-
-                        for block in subscribe_all.non_finalized_blocks_ancestry_order {
-                            if cache.recent_pinned_blocks.len() == cache.recent_pinned_blocks.cap() {
-                                let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
-                                subscribe_all.new_blocks.unpin_block(&hash).await;
-                            }
-
-                            let hash =
-                                header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                            cache.recent_pinned_blocks.put(hash, block.scale_encoded_header);
-                        }
-
-                        new_blocks = Some(subscribe_all.new_blocks);
                     }
 
                     futures::select! {
@@ -300,23 +338,6 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                         task = new_child_tasks_rx.next() => {
                             let task = task.unwrap();
                             secondary_tasks.push(task);
-                        }
-                        notification = new_blocks.as_mut().unwrap().next().fuse() => {
-                            match notification {
-                                Some(runtime_service::Notification::Block(block)) => {
-                                    let mut cache = background.cache.try_lock().unwrap();
-
-                                    if cache.recent_pinned_blocks.len() == cache.recent_pinned_blocks.cap() {
-                                        let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
-                                        new_blocks.as_mut().unwrap().unpin_block(&hash).await;
-                                    }
-
-                                    let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                                    cache.recent_pinned_blocks.put(hash, block.scale_encoded_header);
-                                }
-                                Some(runtime_service::Notification::Finalized { .. }) => {}
-                                None => new_blocks = None,
-                            }
                         }
                     }
                 }
