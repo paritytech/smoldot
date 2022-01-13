@@ -109,7 +109,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
 
         if let Some(config_parachain) = config.parachain {
             (config.tasks_executor)(
-                "sync-para".into(),
+                log_target.clone(),
                 Box::pin(parachain::start_parachain(
                     log_target,
                     config.chain_information,
@@ -122,7 +122,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
             );
         } else {
             (config.tasks_executor)(
-                "sync-relay".into(),
+                log_target.clone(),
                 Box::pin(standalone::start_standalone_chain(
                     log_target,
                     config.chain_information,
