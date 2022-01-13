@@ -153,11 +153,6 @@ export interface Chain {
    * @throws {CrashError} If the background client has crashed.
    */
   remove(): void;
-
-  /**
-   * Returns the identifier of this chain within the smoldot client.
-   */
-  __internal_smoldot_id(): number;
 }
 
 /**
@@ -278,6 +273,9 @@ export interface AddChainOptions {
    * to match with the parachain's `relay_chain`.
    * Defaults to `[]`.
    *
+   * Must contain exactly the objects that were returned by previous calls to `addChain`. The
+   * library uses a `WeakMap` in its implementation in order to identify chains.
+   *
    * The primary way smoldot determines which relay chain is associated to a parachain is by
    * inspecting the chain specification of that parachain (i.e. the `chainSpec` field).
    *
@@ -356,6 +354,11 @@ export function start(options?: ClientOptions): Client {
     databasePromises: DatabasePromise[],
   }> = new Map();
 
+  // For each chain object returned by `addChain`, the associated internal chain id.
+  //
+  // Immediately cleared when `remove()` is called on a chain.
+  let chainIds: WeakMap<Chain, number> = new WeakMap();
+
   // The worker periodically sends a message of kind 'livenessPing' in order to notify that it is
   // still alive.
   // If this liveness ping isn't received for a long time, an error is reported in the logs.
@@ -389,7 +392,7 @@ export function start(options?: ClientOptions): Client {
 
       case 'chainAddedOk': {
         const expected = pendingConfirmations.shift()!;
-        let chainId = message.chainId;
+        const chainId = message.chainId;
 
         if (chains.has(chainId)) // Sanity check.
           throw 'Unexpected reuse of a chain ID';
@@ -450,11 +453,11 @@ export function start(options?: ClientOptions): Client {
             // response or database content concerning that `chainId` to arrive after the `remove`
             // function has returned. We solve that by removing the information immediately.
             chains.delete(chainId);
+            chainIds.delete(newChain);
           },
-          // Hacky internal method that later lets us access the `chainId` of this chain for
-          // implementation reasons.
-          __internal_smoldot_id: () => chainId,
         };
+
+        chainIds.set(newChain, chainId);
         expected.resolve(newChain);
         break;
       }
@@ -539,9 +542,8 @@ export function start(options?: ClientOptions): Client {
       if (!!options.potentialRelayChains) {
         for (const chain of options.potentialRelayChains) {
           // The content of `options.potentialRelayChains` are supposed to be chains earlier
-          // returned by `addChain`. The hacky `__internal_smoldot_id` method lets us obtain the
-          // internal ID of these chains.
-          const id = chain.__internal_smoldot_id();
+          // returned by `addChain`.
+          const id = chainIds.get(chain);
           if (id === null) // It is possible for `id` to be null if it has earlier been removed.
             continue;
           potentialRelayChainsIds.push(id);
