@@ -2726,7 +2726,8 @@ impl<TPlat: Platform> Background<TPlat> {
                 Some(future::MaybeDone::Gone) => unreachable!(), // We never use `Gone`.
                 Some(future::MaybeDone::Done(Err(()))) | None => {
                     // TODO: filter by error      ^ ; invalid header for example should be returned immediately
-                    // No existing cache entry. Starting the fetch.
+                    // No existing cache entry. Create the future that will perform the fetch
+                    // but do not actually start doing anything now.
                     let fetch = {
                         let sync_service = self.sync_service.clone();
                         let hash = *hash;
@@ -2760,7 +2761,8 @@ impl<TPlat: Platform> Background<TPlat> {
                         }
                     };
 
-                    // Adding it to the cache.
+                    // Insert the future in the cache, so that any other call will use the same
+                    // future.
                     let wrapped = fetch.boxed().shared();
                     cache_lock
                         .block_state_root_hashes
