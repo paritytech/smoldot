@@ -29,13 +29,17 @@ import type { SmoldotWasmInstance } from './bindings.js';
 
 export interface Config {
     instance?: SmoldotWasmInstance,
+
+    /**
+     * List of environment variables to feed to the Rust program. An array of strings.
+     * Example: `["RUST_BACKTRACE=1", "RUST_LOG=foo"];`
+     *
+     * Must never be modified after the bindings have been initialized.
+     */
+    envVars: string[],
 }
 
 export default (config: Config): compat.WasmModuleImports => {
-    // List of environment variables to feed to the Rust program. An array of strings.
-    // Example usage: `let env_vars = ["RUST_BACKTRACE=1", "RUST_LOG=foo"];`
-    const envVars: string[] = [];
-
     // Buffers holding temporary data being written by the Rust code to respectively stdout and
     // stderr.
     let stdoutBuffer = "";
@@ -138,10 +142,10 @@ export default (config: Config): compat.WasmModuleImports => {
             argvBufSizeOut >>>= 0;
 
             let totalLen = 0;
-            envVars.forEach(e => totalLen += Buffer.byteLength(e, 'utf8') + 1); // +1 for trailing \0
+            config.envVars.forEach(e => totalLen += Buffer.byteLength(e, 'utf8') + 1); // +1 for trailing \0
 
             const mem = Buffer.from(instance.exports.memory.buffer);
-            mem.writeUInt32LE(envVars.length, argcOut);
+            mem.writeUInt32LE(config.envVars.length, argcOut);
             mem.writeUInt32LE(totalLen, argvBufSizeOut);
             return 0;
         },
@@ -162,7 +166,7 @@ export default (config: Config): compat.WasmModuleImports => {
             let argvPos = 0;
             let argvBufPos = 0;
 
-            envVars.forEach(envVar => {
+            config.envVars.forEach(envVar => {
                 let envVarLen = Buffer.byteLength(envVar, 'utf8');
 
                 mem.writeUInt32LE(argvBuf + argvBufPos, argv + argvPos);
