@@ -1260,7 +1260,7 @@ enum RuntimeLockInner {
     OutOfTree {
         scale_encoded_header: Vec<u8>,
         hash: [u8; 32],
-        runtime_index: usize,
+        runtime_index: usize, // TODO: increase the num_references of this runtime beforehand?
     },
 }
 
@@ -1396,6 +1396,7 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
                     (Some((guarded, runtime_index)), virtual_machine)
                 }
                 None => {
+                    // TODO: remove by increasing the num_references of the runtime before unlocking guarded
                     let (_, virtual_machine) = self.service.network_block_info(&block_hash).await?;
                     (None, virtual_machine)
                 }
