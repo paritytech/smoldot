@@ -31,9 +31,9 @@
 //! status updates about this transaction.
 //!
 //! In order to implement this, the [`TransactionsService`] will follow all the blocks that are
-//! verified locally by the [`sync_service::SyncService`] (see
-//! [`sync_service::SyncService::subscribe_all`]) and download from the network the body of all
-//! the blocks in the best chain.
+//! verified locally by the [`runtime_service::RuntimeService`] (see
+//! [`runtime_service::RuntimeService::subscribe_all`]) and download from the network the body of
+//! all the blocks in the best chain.
 //!
 //! When a block body download fails, it is ignored, in the hopes that the block will not be part
 //! of the finalized chain. If the block body download of a finalized block fails, we enter "panic
@@ -41,7 +41,7 @@
 //! transactions are dropped.
 //!
 //! The same "panic mode" happens if there's an accidental gap in the chain, which will typically
-//! happen if the [`sync_service::SyncService`] is overwhelmed.
+//! happen if the [`runtime_service::RuntimeService`] is overwhelmed.
 //!
 //! If the channel returned by [`TransactionsService::submit_transaction`] is full, it will
 //! automatically be closed so as to not block the transactions service if the receive is too slow
@@ -304,12 +304,12 @@ async fn background_task<TPlat: Platform>(
     // TODO: must periodically re-send transactions that aren't included in block yet
 
     'channels_rebuild: loop {
-        // This loop is entered when it is necessary to rebuild the subscriptions with the syncing
+        // This loop is entered when it is necessary to rebuild the subscriptions with the runtime
         // service. This happens when there is a gap in the blocks, either intentionally (e.g.
         // after a Grandpa warp sync) or because the transactions service was too busy to process
         // the new blocks.
 
-        let mut subscribe_all = worker.sync_service.subscribe_all(32, false).await;
+        let mut subscribe_all = worker.runtime_service.subscribe_all(32, 32).await;
         let initial_finalized_block_hash = header::hash_from_scale_encoded_header(
             &subscribe_all.finalized_block_scale_encoded_header,
         );
@@ -333,6 +333,7 @@ async fn background_task<TPlat: Platform>(
                 hash,
                 &block.parent_hash,
                 Block {
+                    scale_encoded_header: block.scale_encoded_header,
                     failed_downloads: 0,
                     downloading: false,
                 },
@@ -366,11 +367,10 @@ async fn background_task<TPlat: Platform>(
             while worker.validations_in_progress.len() < max_concurrent_validations {
                 // Find a transaction that needs to be validated.
                 //
-                // While this looks like an `O(n)` process, in practice we pick the first
-                // transaction not currently being validated, and only `max_concurrent_validations`
-                // transactions in the list don't match that criteria. Since
-                // `max_concurrent_validations` should be pretty low, this search should complete
-                // very quickly.
+                // While this is an `O(n)` process, in practice we pick the first transaction not
+                // currently being validated, and only `max_concurrent_validations` transactions
+                // in the list don't match that criteria. Since `max_concurrent_validations`
+                // should be pretty low, this search should complete very quickly.
                 let to_start_validate = worker
                     .pending_transactions
                     .unvalidated_transactions()
@@ -384,26 +384,48 @@ async fn background_task<TPlat: Platform>(
 
                 // Create the `Future` of the validation process.
                 let validation_future = {
+                    // Find which block to validate the transaction against.
+                    let block_hash = *worker.pending_transactions.best_block_hash();
+
+                    // It is possible for the current best block to be equal to the finalized
+                    // block, in which case it will not be in the data structure and will already
+                    // be unpinned in the runtime service.
+                    // In that situation, we simply don't start any validation.
+                    // TODO: is this problem worth solving? ^
+                    let scale_encoded_header =
+                        match worker.pending_transactions.block_user_data(&block_hash) {
+                            Some(b) => b.scale_encoded_header.clone(),
+                            None => continue,
+                        };
+
+                    // Make copies of everything in order to move the values into the future.
                     let runtime_service = worker.runtime_service.clone();
                     let log_target = log_target.clone();
+                    let relay_chain_sync_subscription_id = subscribe_all.new_blocks.id();
                     let scale_encoded_transaction = worker
                         .pending_transactions
                         .scale_encoding(to_start_validate)
                         .unwrap()
                         .to_owned();
+                    // TODO: race condition /!\ the block could be pruned and unpinned before this future starts executing
                     async move {
-                        validate_transaction(
+                        let result = validate_transaction(
                             &log_target,
                             &runtime_service,
+                            relay_chain_sync_subscription_id,
+                            block_hash,
+                            &scale_encoded_header,
                             scale_encoded_transaction,
                             validate::TransactionSource::External,
                         )
-                        .await
+                        .await?;
+                        Ok((block_hash, result))
                     }
                 };
 
-                // The future with the actual result is stored in the `PendingTransaction`, while
-                // the future that executes the validation is stored in `validations_in_progress`.
+                // The future that will yield the validation result is stored in the
+                // `PendingTransaction`, while the future that executes the validation (and
+                // yields `()`) is stored in `validations_in_progress`.
                 let (to_execute, result_rx) = validation_future.remote_handle();
                 worker
                     .validations_in_progress
@@ -423,8 +445,8 @@ async fn background_task<TPlat: Platform>(
                     .pending_transactions
                     .missing_block_bodies()
                     .find(|(_, block)| {
-                        // The transaction pool isn't aware of the fact that we're currently downloading
-                        // a block's body. Skip when that is the case.
+                        // The transaction pool isn't aware of the fact that we're currently
+                        // downloading a block's body. Skip when that is the case.
                         if block.downloading {
                             return false;
                         }
@@ -473,6 +495,13 @@ async fn background_task<TPlat: Platform>(
 
             // Remove finalized blocks from the pool when possible.
             for block in worker.pending_transactions.prune_finalized_with_body() {
+                // All blocks in `pending_transactions` are pinned within the runtime service.
+                // Unpin them when they're removed.
+                subscribe_all
+                    .new_blocks
+                    .unpin_block(&block.block_hash)
+                    .await;
+
                 debug_assert!(!block.user_data.downloading);
                 for (_, body_index, mut tx) in block.included_transactions {
                     // We assume that there's no more than 2<<32 transactions per block.
@@ -486,14 +515,15 @@ async fn background_task<TPlat: Platform>(
             }
 
             futures::select! {
-                notification = subscribe_all.new_blocks.next() => {
+                notification = subscribe_all.new_blocks.next().fuse() => {
                     match notification {
-                        Some(sync_service::Notification::Block(new_block)) => {
+                        Some(runtime_service::Notification::Block(new_block)) => {
                             let hash = header::hash_from_scale_encoded_header(&new_block.scale_encoded_header);
                             worker.pending_transactions.add_block(
                                 header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
                                 &new_block.parent_hash,
                                 Block {
+                                    scale_encoded_header: new_block.scale_encoded_header,
                                     failed_downloads: 0,
                                     downloading: false,
                                 },
@@ -502,15 +532,18 @@ async fn background_task<TPlat: Platform>(
                                 worker.set_best_block(&hash);
                             }
                         },
-                        Some(sync_service::Notification::Finalized { hash, best_block_hash }) => {
+                        Some(runtime_service::Notification::Finalized { hash, best_block_hash, .. }) => {
                             worker.set_best_block(&best_block_hash);
-                            for _ in worker
+                            for pruned in worker
                                 .pending_transactions
                                 .set_finalized_block(&hash)
                             {
-                                // Nothing to do here.
-                                // We could in principle interrupt any on-going download of that block,
-                                // but it is not worth the effort.
+                                // All blocks in `pending_transactions` are pinned within the
+                                // runtime service. Unpin them when they're removed.
+                                subscribe_all.new_blocks.unpin_block(&pruned.0).await;
+
+                                // Note that we could in principle interrupt any on-going
+                                // download of that block, but it is not worth the effort.
                             }
                         },
                         None => continue 'channels_rebuild
@@ -776,6 +809,9 @@ struct Worker<TPlat: Platform> {
     /// network. It is normal to find entries where the status report channel is close, as they
     /// still represent transactions that we're trying to include but whose status isn't
     /// interesting us.
+    ///
+    /// All the blocks within this data structure are also pinned within the runtime service. They
+    /// must be unpinned when they leave the data structure.
     pending_transactions: light_pool::LightPool<PendingTransaction<TPlat>, Block>,
 
     /// See [`Config::max_pending_transactions`].
@@ -845,6 +881,9 @@ impl<TPlat: Platform> Worker<TPlat> {
 }
 
 struct Block {
+    /// Header of the block, in SCALE encoding. Necessary in order to be able to validate blocks.
+    scale_encoded_header: Vec<u8>,
+
     /// Number of previous downloads that have failed.
     failed_downloads: u8,
 
@@ -906,32 +945,34 @@ impl<TPlat: Platform> PendingTransaction<TPlat> {
     }
 }
 
-/// Actual transaction validation logic. Validates the transaction against a recent best block
-/// of the [`runtime_service::RuntimeService`].
+/// Actual transaction validation logic. Validates the transaction against the given block of the
+/// [`runtime_service::RuntimeService`].
 ///
 /// Returns the result of the validation, and the hash of the block it was validated against.
 async fn validate_transaction<TPlat: Platform>(
     log_target: &str,
     relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
+    relay_chain_sync_subscription_id: runtime_service::SubscriptionId,
+    block_hash: [u8; 32],
+    block_scale_encoded_header: &[u8],
     scale_encoded_transaction: impl AsRef<[u8]> + Clone,
     source: validate::TransactionSource,
 ) -> Result<
-    (
-        [u8; 32],
-        Result<validate::ValidTransaction, validate::TransactionValidityError>,
-    ),
+    Result<validate::ValidTransaction, validate::TransactionValidityError>,
     ValidateTransactionError,
 > {
-    let runtime_lock = relay_chain_sync.recent_best_block_runtime_lock().await;
+    let runtime_lock = relay_chain_sync
+        .pinned_block_runtime_call_lock(relay_chain_sync_subscription_id, &block_hash)
+        .await;
 
     log::debug!(
         target: log_target,
         "Starting validation of {} against block {} (height: {:?})",
         HashDisplay(&blake2_hash(scale_encoded_transaction.as_ref())),
         HashDisplay(runtime_lock.block_hash()),
-        header::decode(runtime_lock.block_scale_encoded_header())
+        header::decode(block_scale_encoded_header)
             .ok()
-            .map(|h| h.number)
+            .map(|h| h.number) // TODO: show this better than with the `Debug` trait
     );
 
     let block_hash = *runtime_lock.block_hash();
@@ -950,7 +991,7 @@ async fn validate_transaction<TPlat: Platform>(
 
     let mut validation_in_progress = validate::validate_transaction(validate::Config {
         runtime,
-        scale_encoded_header: runtime_call_lock.block_scale_encoded_header(),
+        scale_encoded_header: block_scale_encoded_header,
         scale_encoded_transaction: iter::once(scale_encoded_transaction),
         source,
     });
@@ -961,12 +1002,8 @@ async fn validate_transaction<TPlat: Platform>(
                 result: Ok(success),
                 virtual_machine,
             } => {
-                // TODO: provide hash as method of runtime_call_lock?
-                let block_hash = header::hash_from_scale_encoded_header(
-                    runtime_call_lock.block_scale_encoded_header(),
-                );
                 runtime_call_lock.unlock(virtual_machine);
-                break Ok((block_hash, success));
+                break Ok(success);
             }
             validate::Query::Finished {
                 result: Err(error),

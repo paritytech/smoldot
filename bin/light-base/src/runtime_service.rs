@@ -1427,11 +1427,6 @@ pub struct RuntimeCallLock<'a, TPlat: Platform> {
 }
 
 impl<'a, TPlat: Platform> RuntimeCallLock<'a, TPlat> {
-    /// Returns the SCALE-encoded header of the block the call is being made against.
-    pub fn block_scale_encoded_header(&self) -> &[u8] {
-        &self.runtime_block_header
-    }
-
     /// Returns the storage root of the block the call is being made against.
     pub fn block_storage_root(&self) -> &[u8; 32] {
         header::decode(&self.runtime_block_header)
