@@ -216,10 +216,13 @@ pub struct HostVmPrototype {
     /// The keys of this `Vec` (i.e. the `usize` indices) have been passed to the virtual machine
     /// executor. Whenever the Wasm code invokes a host function, we obtain its index, and look
     /// within this `Vec` to know what to do.
-    registered_functions: Vec<HostFunction>,
+    registered_functions: Vec<FunctionImport>,
 
     /// Value of `heap_pages` passed to [`HostVmPrototype::new`].
     heap_pages: HeapPages,
+
+    /// Values passed to [`HostVmPrototype::new`].
+    allow_unresolved_imports: bool,
 
     /// Total number of pages of Wasm memory. This is equal to `heap_base / 64k` (rounded up) plus
     /// `heap_pages`.
@@ -231,19 +234,25 @@ impl HostVmPrototype {
     ///
     /// The module can be either directly Wasm bytecode, or zstandard-compressed.
     // TODO: document `heap_pages`; I know it comes from storage, but it's unclear what it means exactly
+    // TODO: have a proper Config struct
     pub fn new(
         module: impl AsRef<[u8]>,
         heap_pages: HeapPages,
         exec_hint: vm::ExecHint,
+        allow_unresolved_imports: bool,
     ) -> Result<Self, NewErr> {
         // TODO: configurable maximum allowed size? a uniform value is important for consensus
         let module = zstd::zstd_decode_if_necessary(module.as_ref(), 50 * 1024 * 1024)
             .map_err(NewErr::BadFormat)?;
         let module = vm::Module::new(module, exec_hint)?;
-        Self::from_module(module, heap_pages)
+        Self::from_module(module, heap_pages, allow_unresolved_imports)
     }
 
-    fn from_module(module: vm::Module, heap_pages: HeapPages) -> Result<Self, NewErr> {
+    fn from_module(
+        module: vm::Module,
+        heap_pages: HeapPages,
+        allow_unresolved_imports: bool,
+    ) -> Result<Self, NewErr> {
         // Initialize the virtual machine.
         // Each symbol requested by the Wasm runtime will be put in `registered_functions`. Later,
         // when a function is invoked, the Wasm virtual machine will pass indices within that
@@ -260,8 +269,12 @@ impl HostVmPrototype {
 
                     let id = registered_functions.len();
                     registered_functions.push(match HostFunction::by_name(f_name) {
-                        Some(f) => f,
-                        None => return Err(()),
+                        Some(f) => FunctionImport::Resolved(f),
+                        None if !allow_unresolved_imports => return Err(()),
+                        None => FunctionImport::Unresolved {
+                            name: f_name.to_owned(),
+                            module: mod_name.to_owned(),
+                        },
                     });
                     Ok(id)
                 },
@@ -295,6 +308,7 @@ impl HostVmPrototype {
             heap_base,
             registered_functions,
             heap_pages,
+            allow_unresolved_imports,
             memory_total_pages,
         })
     }
@@ -371,6 +385,7 @@ impl HostVmPrototype {
                 vm,
                 heap_base: self.heap_base,
                 heap_pages: self.heap_pages,
+                allow_unresolved_imports: self.allow_unresolved_imports,
                 memory_total_pages: self.memory_total_pages,
                 registered_functions: self.registered_functions,
                 within_storage_transaction: false,
@@ -385,7 +400,12 @@ impl Clone for HostVmPrototype {
         // The `from_module` function returns an error if the format of the module is invalid.
         // Since we have successfully called `from_module` with that same `module` earlier, it
         // is assumed that errors cannot happen.
-        Self::from_module(self.module.clone(), self.heap_pages).unwrap()
+        Self::from_module(
+            self.module.clone(),
+            self.heap_pages,
+            self.allow_unresolved_imports,
+        )
+        .unwrap()
     }
 }
 
@@ -601,7 +621,20 @@ impl ReadyToRun {
 
         // The Wasm code has called an host_fn. The `id` is a value that we passed
         // at initialization, and corresponds to an index in `registered_functions`.
-        let host_fn = *self.inner.registered_functions.get_mut(id).unwrap();
+        let host_fn = match self.inner.registered_functions.get_mut(id) {
+            Some(FunctionImport::Resolved(f)) => *f,
+            Some(FunctionImport::Unresolved { name, module }) => {
+                debug_assert!(self.inner.allow_unresolved_imports);
+                return HostVm::Error {
+                    error: Error::UnresolvedFunctionCalled {
+                        function: name.clone(),
+                        module_name: module.clone(),
+                    },
+                    prototype: self.inner.into_prototype(),
+                };
+            }
+            None => unreachable!(),
+        };
 
         // Check that the actual number of parameters matches the expected number.
         // This is done ahead of time in order to not forget.
@@ -1541,7 +1574,7 @@ pub struct ExternalStorageGet {
     inner: Inner,
 
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`Inner::registered_functions`].
+    /// [`Inner::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
     calling: usize,
 
     /// Used only for the `ext_storage_read_version_1` function. Stores the pointer where the
@@ -1640,7 +1673,11 @@ impl ExternalStorageGet {
         mut self,
         value: Option<(impl Iterator<Item = impl AsRef<[u8]>> + Clone, usize)>,
     ) -> HostVm {
-        let host_fn = self.inner.registered_functions[self.calling];
+        let host_fn = match self.inner.registered_functions[self.calling] {
+            FunctionImport::Resolved(f) => f,
+            FunctionImport::Unresolved { .. } => unreachable!(),
+        };
+
         match host_fn {
             HostFunction::ext_storage_get_version_1 => {
                 if let Some((value, value_total_len)) = value {
@@ -2167,6 +2204,11 @@ impl EndStorageTransaction {
     }
 }
 
+enum FunctionImport {
+    Resolved(HostFunction),
+    Unresolved { module: String, name: String },
+}
+
 /// Running virtual machine. Shared between all the variants in [`HostVm`].
 struct Inner {
     /// See [`HostVmPrototype::module`].
@@ -2185,12 +2227,15 @@ struct Inner {
     /// See [`HostVmPrototype::memory_total_pages`].
     memory_total_pages: HeapPages,
 
+    /// Value passed to [`HostVmPrototype::new`].
+    allow_unresolved_imports: bool,
+
     /// If true, a transaction has been started using `ext_storage_start_transaction_version_1`.
     /// No further transaction start is allowed before the current one ends.
     within_storage_transaction: bool,
 
     /// See [`HostVmPrototype::registered_functions`].
-    registered_functions: Vec<HostFunction>,
+    registered_functions: Vec<FunctionImport>,
 
     /// Memory allocator in order to answer the calls to `malloc` and `free`.
     allocator: allocator::FreeingBumpHeapAllocator,
@@ -2356,6 +2401,7 @@ impl Inner {
             heap_base: self.heap_base,
             registered_functions: self.registered_functions,
             heap_pages: self.heap_pages,
+            allow_unresolved_imports: self.allow_unresolved_imports,
             memory_total_pages: self.memory_total_pages,
         }
     }
@@ -2412,6 +2458,16 @@ pub enum Error {
     /// An host_fn wants to returns a certain value, but the Wasm code expects a different one.
     // TODO: indicate function and actual/expected types
     ReturnValueTypeMismatch,
+    /// Called a function that is unknown to the host.
+    ///
+    /// > **Note**: Can only happen if `allow_unresolved_imports` was `true`.
+    #[display(fmt = "Called unresolved function `{}`:`{}`", module_name, function)]
+    UnresolvedFunctionCalled {
+        /// Name of the function that was unresolved.
+        function: String,
+        /// Name of module associated with the unresolved function.
+        module_name: String,
+    },
     /// Mismatch between the number of parameters expected and the actual number.
     #[display(
         fmt = "Mismatch in parameters count: {}, expected = {}, actual = {}",
