@@ -752,12 +752,16 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 tree,
                 finalized_block,
             } => {
+                let decoded_finalized_block =
+                    header::decode(&finalized_block.scale_encoded_header).unwrap();
+
                 guarded_lock.runtimes[*tree.finalized_async_user_data()].num_references += 1;
                 guarded_lock.pinned_blocks.insert(
                     (subscription_id, finalized_block.hash),
                     (
                         *tree.finalized_async_user_data(),
-                        finalized_block.scale_encoded_header.clone(),
+                        *decoded_finalized_block.state_root,
+                        decoded_finalized_block.number,
                     ),
                 );
 
@@ -782,10 +786,16 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                                         && b.async_op_user_data.is_some())
                         );
 
+                        let decoded_header =
+                            header::decode(&block.user_data.scale_encoded_header).unwrap();
                         guarded_lock.runtimes[runtime_index].num_references += 1;
                         guarded_lock.pinned_blocks.insert(
                             (subscription_id, block_hash),
-                            (runtime_index, block.user_data.scale_encoded_header.clone()),
+                            (
+                                runtime_index,
+                                *decoded_header.state_root,
+                                decoded_header.number,
+                            ),
                         );
 
                         Some(BlockNotification {
@@ -890,7 +900,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ) {
         let mut guarded_lock = guarded.lock().await;
 
-        let (runtime_index, _scale_encoded_header) = match guarded_lock
+        let (runtime_index, _, _) = match guarded_lock
             .pinned_blocks
             .remove(&(subscription_id.0, *block_hash))
         {
@@ -913,11 +923,6 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         } else {
             guarded_lock.runtimes[runtime_index].num_references -= 1;
         }
-
-        debug_assert_eq!(
-            header::hash_from_scale_encoded_header(&_scale_encoded_header),
-            *block_hash
-        );
 
         let (_, pinned_remaining) = guarded_lock
             .all_blocks_subscriptions
@@ -974,7 +979,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ) -> RuntimeLock<'a, TPlat> {
         let guarded = self.guarded.lock().await;
 
-        let (runtime_index, scale_encoded_header) = (*guarded
+        let (runtime_index, block_state_root_hash, block_number) = (*guarded
             .pinned_blocks
             .get(&(subscription_id.0, *block_hash))
             .unwrap())
@@ -985,8 +990,9 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             guarded,
             inner: RuntimeLockInner::OutOfTree {
                 hash: *block_hash,
-                scale_encoded_header,
                 runtime_index,
+                block_number,
+                block_state_root_hash,
             },
         }
     }
@@ -1274,40 +1280,14 @@ enum RuntimeLockInner {
     },
     /// Block information directly inlined in this enum.
     OutOfTree {
-        scale_encoded_header: Vec<u8>,
+        block_number: u64,
+        block_state_root_hash: [u8; 32],
         hash: [u8; 32],
         runtime_index: usize, // TODO: increase the num_references of this runtime beforehand?
     },
 }
 
 impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
-    /// Returns the SCALE-encoded header of the block the call is being made against.
-    ///
-    /// Guaranteed to always be valid.
-    pub fn block_scale_encoded_header(&self) -> &[u8] {
-        match &self.inner {
-            RuntimeLockInner::Finalized => match &self.guarded.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown {
-                    finalized_block, ..
-                } => &finalized_block.scale_encoded_header[..],
-                _ => unreachable!(),
-            },
-            RuntimeLockInner::InTree { block_index } => match &self.guarded.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
-                    &tree.block_user_data(*block_index).scale_encoded_header[..]
-                }
-                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
-                    &tree.block_user_data(*block_index).scale_encoded_header[..]
-                }
-                _ => unreachable!(),
-            },
-            RuntimeLockInner::OutOfTree {
-                scale_encoded_header,
-                ..
-            } => &scale_encoded_header[..],
-        }
-    }
-
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
         match &self.inner {
@@ -1338,11 +1318,39 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
     {
         // TODO: DRY :-/ this whole thing is messy
 
-        let block_number = header::decode(&self.block_scale_encoded_header())
-            .unwrap()
-            .number;
         let block_hash = *self.block_hash();
-        let runtime_block_header = self.block_scale_encoded_header().to_owned(); // TODO: cloning :-/
+
+        let (block_storage_root, block_number) = match &self.inner {
+            RuntimeLockInner::Finalized => match &self.guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    finalized_block, ..
+                } => {
+                    let header = header::decode(&finalized_block.scale_encoded_header).unwrap();
+                    (*header.state_root, header.number)
+                }
+                _ => unreachable!(),
+            },
+            RuntimeLockInner::InTree { block_index } => match &self.guarded.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
+                    let header =
+                        header::decode(&tree.block_user_data(*block_index).scale_encoded_header)
+                            .unwrap();
+                    (*header.state_root, header.number)
+                }
+                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
+                    let header =
+                        header::decode(&tree.block_user_data(*block_index).scale_encoded_header)
+                            .unwrap();
+                    (*header.state_root, header.number)
+                }
+                _ => unreachable!(),
+            },
+            RuntimeLockInner::OutOfTree {
+                block_state_root_hash,
+                block_number,
+                ..
+            } => (*block_state_root_hash, *block_number),
+        };
 
         // Unlock `guarded` before doing anything that takes a long time, such as the
         // network request below.
@@ -1421,7 +1429,7 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
 
         let lock = RuntimeCallLock {
             guarded,
-            runtime_block_header,
+            block_storage_root,
             call_proof,
         };
 
@@ -1434,16 +1442,14 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
 pub struct RuntimeCallLock<'a, TPlat: Platform> {
     /// If `Some`, the virtual machine must be put back in the runtimes at the given index.
     guarded: Option<(MutexGuard<'a, Guarded<TPlat>>, usize)>,
-    runtime_block_header: Vec<u8>,
+    block_storage_root: [u8; 32],
     call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
 }
 
 impl<'a, TPlat: Platform> RuntimeCallLock<'a, TPlat> {
     /// Returns the storage root of the block the call is being made against.
     pub fn block_storage_root(&self) -> &[u8; 32] {
-        header::decode(&self.runtime_block_header)
-            .unwrap()
-            .state_root
+        &self.block_storage_root
     }
 
     /// Finds the given key in the call proof and returns the associated storage value.
@@ -1648,10 +1654,10 @@ struct Guarded<TPlat: Platform> {
     /// the channel is closed it is the background that needs to purge all blocks from this
     /// container that are no longer relevant.
     ///
-    /// Keys are `(subscription_id, block_hash)`. Values are indices within [`Guarded::runtimes`]
-    /// and block SCALE-encoded headers.
-    // TODO: it seems quite expensive to clone this block header all the time
-    pinned_blocks: BTreeMap<(u64, [u8; 32]), (usize, Vec<u8>)>,
+    /// Keys are `(subscription_id, block_hash)`. Values are indices within [`Guarded::runtimes`],
+    /// state trie root hashes, and block numbers.
+    // TODO: use structs instead of tuples
+    pinned_blocks: BTreeMap<(u64, [u8; 32]), (usize, [u8; 32], u64)>,
 }
 
 enum GuardedInner<TPlat: Platform> {
@@ -2194,6 +2200,11 @@ impl<TPlat: Platform> Background<TPlat> {
                         let scale_encoded_header = block.user_data.scale_encoded_header.clone();
                         let is_new_best = block.is_new_best;
 
+                        let (block_number, block_state_root_hash) = {
+                            let decoded = header::decode(&scale_encoded_header).unwrap();
+                            (decoded.number, *decoded.state_root)
+                        };
+
                         let parent_runtime_index = tree
                             .parent(block_index)
                             .map_or(*tree.finalized_async_user_data(), |idx| {
@@ -2212,7 +2223,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 .parent(block_index)
                                 .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash),
                             is_new_best,
-                            scale_encoded_header: scale_encoded_header.clone(),
+                            scale_encoded_header,
                             new_runtime: if parent_runtime_index != block_runtime_index {
                                 Some(
                                     guarded.runtimes[block_runtime_index]
@@ -2240,7 +2251,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 guarded.runtimes[block_runtime_index].num_references += 1;
                                 guarded.pinned_blocks.insert(
                                     (*subscription_id, block_hash),
-                                    (block_runtime_index, scale_encoded_header.clone()),
+                                    (block_runtime_index, block_state_root_hash, block_number),
                                 );
                             } else {
                                 to_remove.push(*subscription_id);
