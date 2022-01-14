@@ -1004,8 +1004,24 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     pub async fn pinned_runtime_call_lock<'a>(
         &'a self,
         _pinned_runtime_id: PinnedRuntimeId,
+        _block_hash: [u8; 32],
+        _block_number: u64,
+        _block_state_trie_root_hash: [u8; 32],
     ) -> RuntimeLock<'a, TPlat> {
         todo!()
+        /*let guarded = self.guarded.lock().await;
+
+        let runtime_index = *guarded.pinned_runtimes.get(&pinned_runtime_id.0).unwrap();
+
+        RuntimeLock {
+            service: self,
+            guarded,
+            inner: RuntimeLockInner::OutOfTree {
+                hash: block_hash,
+                scale_encoded_header: todo!(),  // TODO: not implementable at the moment
+                runtime_index,
+            },
+        }*/
     }
 
     /// Tries to find a runtime within the [`RuntimeService`] that has the given storage code and

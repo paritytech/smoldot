@@ -200,7 +200,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             cache: Mutex::new(Cache {
                 recent_pinned_blocks: lru::LruCache::with_hasher(32, Default::default()),
                 subscription_id: None,
-                block_state_root_hashes: lru::LruCache::with_hasher(32, Default::default()),
+                block_state_root_hashes_numbers: lru::LruCache::with_hasher(32, Default::default()),
             }),
             genesis_block: config.genesis_block_hash,
             next_subscription_id: atomic::AtomicU64::new(0),
@@ -552,24 +552,25 @@ struct Cache {
     /// [`Cache::recent_pinned_blocks`] then this field is guaranteed to be `Some`.
     subscription_id: Option<runtime_service::SubscriptionId>,
 
-    /// State trie root hashes of blocks that were not in [`Cache::recent_pinned_blocks`].
+    /// State trie root hashes and numbers of blocks that were not in
+    /// [`Cache::recent_pinned_blocks`].
     ///
     /// The state trie root hash can also be an `Err` if the network request failed or if the
     /// header is of an invalid format.
     ///
-    /// The state trie root hash is wrapped in a `Shared` future. When multiple requests need the
-    /// state trie root hash of the same block, it is only queried once and the query is
-    /// inserted in the cache while in progress. This way, the multiple requests can all wait on
-    /// that single future.
+    /// The state trie root hash and number are wrapped in a `Shared` future. When multiple
+    /// requests need the state trie root hash and number of the same block, they are only queried
+    /// once and the query is inserted in the cache while in progress. This way, the multiple
+    /// requests can all wait on that single future.
     ///
     /// Most of the time, the JSON-RPC client will query blocks that are found in
     /// [`Cache::recent_pinned_blocks`], but occasionally it will query older blocks. When the
     /// storage of an older block is queried, it is common for the JSON-RPC client to make several
     /// storage requests to that same old block. In order to avoid having to retrieve the state
     /// trie root hash multiple, we store these hashes in this LRU cache.
-    block_state_root_hashes: lru::LruCache<
+    block_state_root_hashes_numbers: lru::LruCache<
         [u8; 32],
-        future::MaybeDone<future::Shared<future::BoxFuture<'static, Result<[u8; 32], ()>>>>,
+        future::MaybeDone<future::Shared<future::BoxFuture<'static, Result<([u8; 32], u64), ()>>>>,
         fnv::FnvBuildHasher,
     >,
 }
@@ -2741,9 +2742,10 @@ impl<TPlat: Platform> Background<TPlat> {
             .unwrap();
     }
 
-    /// Obtain the state trie root hash of the given block, and make sure to put it in cache.
+    /// Obtain the state trie root hash and number of the given block, and make sure to put it
+    /// in cache.
     // TODO: better error return type
-    async fn state_trie_root_hash(&self, hash: &[u8; 32]) -> Result<[u8; 32], ()> {
+    async fn state_trie_root_hash(&self, hash: &[u8; 32]) -> Result<([u8; 32], u64), ()> {
         let fetch = {
             // Try to find an existing entry in cache, and if not create one.
             let mut cache_lock = self.cache.lock().await;
@@ -2754,13 +2756,13 @@ impl<TPlat: Platform> Background<TPlat> {
                 .get(hash)
                 .map(|h| header::decode(h))
             {
-                Some(Ok(header)) => return Ok(*header.state_root),
+                Some(Ok(header)) => return Ok((*header.state_root, header.number)),
                 Some(Err(_)) => return Err(()),
                 None => {}
             }
 
             // Look in `block_state_root_hashes`.
-            match cache_lock.block_state_root_hashes.get(hash) {
+            match cache_lock.block_state_root_hashes_numbers.get(hash) {
                 Some(future::MaybeDone::Done(Ok(val))) => return Ok(*val),
                 Some(future::MaybeDone::Future(f)) => f.clone(),
                 Some(future::MaybeDone::Gone) => unreachable!(), // We never use `Gone`.
@@ -2794,7 +2796,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     hash
                                 );
                                 let decoded = header::decode(&header).unwrap();
-                                Ok(*decoded.state_root)
+                                Ok((*decoded.state_root, decoded.number))
                             } else {
                                 Err(())
                             }
@@ -2805,7 +2807,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     // future.
                     let wrapped = fetch.boxed().shared();
                     cache_lock
-                        .block_state_root_hashes
+                        .block_state_root_hashes_numbers
                         .put(*hash, future::maybe_done(wrapped.clone()));
                     wrapped
                 }
@@ -2821,7 +2823,7 @@ impl<TPlat: Platform> Background<TPlat> {
         keys: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
         hash: &[u8; 32],
     ) -> Result<Vec<Option<Vec<u8>>>, StorageQueryError> {
-        let state_trie_root_hash = self
+        let (state_trie_root_hash, _) = self
             .state_trie_root_hash(&hash)
             .await
             .map_err(|()| StorageQueryError::FindStorageRootHashError)?;
@@ -2877,8 +2879,10 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 // TODO: considering caching the runtime code the same way as the state trie root hash
 
-                // In order to grab the runtime code
-                let state_trie_root_hash = self.state_trie_root_hash(block_hash).await.unwrap(); // TODO: don't unwrap
+                // In order to grab the runtime code and perform the call network request, we need
+                // to know the state trie root hash and the height of the block.
+                let (state_trie_root_hash, block_number) =
+                    self.state_trie_root_hash(block_hash).await.unwrap(); // TODO: don't unwrap
 
                 // Download the runtime of this block. This takes a long time as the runtime is rather
                 // big (around 1MiB in general).
@@ -2908,7 +2912,12 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 let precall = self
                     .runtime_service
-                    .pinned_runtime_call_lock(pinned_runtime_id)
+                    .pinned_runtime_call_lock(
+                        pinned_runtime_id,
+                        *block_hash,
+                        block_number,
+                        state_trie_root_hash,
+                    )
                     .await;
 
                 // TODO: consider keeping pinned runtimes in a cache instead
