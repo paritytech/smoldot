@@ -38,9 +38,8 @@
 //! [`RuntimeService`] of the same chain. They each provide a consistent view of the chain, but
 //! this view isn't necessarily the same on both services.
 //!
-//! The main service offered by the runtime service is
-//! [`RuntimeService::recent_best_block_runtime_lock`], that performs a runtime call on the latest
-//! reported best block or more recent.
+//! The main service offered by the runtime service is [`RuntimeService::subcribe_all`], that
+//! notifies about new blocks once their runtime is known.
 //!
 //! # Blocks pinning
 //!
@@ -558,12 +557,6 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ///
     /// This function only returns once the runtime of the current best block is known. This might
     /// take a long time.
-    ///
-    /// It is guaranteed that when a notification is sent out, calling
-    /// [`RuntimeService::recent_best_block_runtime_lock`] will operate on this block or more
-    /// recent. In other words, if you call [`RuntimeService::recent_best_block_runtime_lock`] and
-    /// the stream of notifications is empty, you are guaranteed that the call has been performed
-    /// on the best block.
     pub async fn subscribe_best(&self) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
         let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
             let subscribe_all = Self::subscribe_all_inner(&guarded, 16, 48).await;
@@ -1232,7 +1225,7 @@ async fn is_near_head_of_chain_heuristic<TPlat: Platform>(
     guarded.lock().await.best_near_head_of_chain
 }
 
-/// See [`RuntimeService::recent_best_block_runtime_lock`].
+/// See [`RuntimeService::pinned_block_runtime_call_lock`].
 #[must_use]
 pub struct RuntimeLock<'a, TPlat: Platform> {
     service: &'a RuntimeService<TPlat>,
@@ -1325,7 +1318,7 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
     }
 }
 
-/// See [`RuntimeService::recent_best_block_runtime_lock`].
+/// See [`RuntimeService::pinned_block_runtime_call_lock`].
 #[must_use]
 pub struct RuntimeCallLock<'a, TPlat: Platform> {
     /// If `Some`, the virtual machine must be put back in the runtimes at the given index.
