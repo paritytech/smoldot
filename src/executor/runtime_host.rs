@@ -715,7 +715,7 @@ impl Inner {
                         req.wasm_code(),
                         executor::DEFAULT_HEAP_PAGES,
                         vm::ExecHint::Oneshot,
-                        false,
+                        false, // TODO: what is a correct value here?
                     ) {
                         Ok(w) => w,
                         Err(_) => {
