@@ -38,9 +38,8 @@
 //! [`RuntimeService`] of the same chain. They each provide a consistent view of the chain, but
 //! this view isn't necessarily the same on both services.
 //!
-//! The main service offered by the runtime service is
-//! [`RuntimeService::recent_best_block_runtime_lock`], that performs a runtime call on the latest
-//! reported best block or more recent.
+//! The main service offered by the runtime service is [`RuntimeService::subscribe_all`], that
+//! notifies about new blocks once their runtime is known.
 //!
 //! # Blocks pinning
 //!
@@ -558,12 +557,6 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ///
     /// This function only returns once the runtime of the current best block is known. This might
     /// take a long time.
-    ///
-    /// It is guaranteed that when a notification is sent out, calling
-    /// [`RuntimeService::recent_best_block_runtime_lock`] will operate on this block or more
-    /// recent. In other words, if you call [`RuntimeService::recent_best_block_runtime_lock`] and
-    /// the stream of notifications is empty, you are guaranteed that the call has been performed
-    /// on the best block.
     pub async fn subscribe_best(&self) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
         let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
             let subscribe_all = Self::subscribe_all_inner(&guarded, 16, 48).await;
@@ -932,37 +925,6 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         *pinned_remaining += 1;
     }
 
-    // TODO: doc
-    pub async fn recent_best_block_runtime_lock<'a>(&'a self) -> RuntimeLock<'a, TPlat> {
-        // TODO: clean up implementation
-        let (_, mut notifs) = self.subscribe_best().await;
-
-        let (guarded, block_index) = loop {
-            let guarded = self.guarded.lock().await;
-            match &guarded.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
-                    let index = tree.best_block_index().map(|(idx, _)| idx);
-                    break (guarded, index);
-                }
-                GuardedInner::FinalizedBlockRuntimeUnknown { .. } => {}
-            };
-
-            // Wait for the best block to change.
-            drop::<MutexGuard<_>>(guarded);
-            let _ = notifs.next().await;
-        };
-
-        RuntimeLock {
-            service: self,
-            guarded,
-            inner: if let Some(block_index) = block_index {
-                RuntimeLockInner::InTree { block_index }
-            } else {
-                RuntimeLockInner::Finalized
-            },
-        }
-    }
-
     /// Lock the runtime service and prepare a call to a runtime entry point.
     ///
     /// The hash of the block passed as parameter corresponds to the block whose runtime to use
@@ -1263,7 +1225,7 @@ async fn is_near_head_of_chain_heuristic<TPlat: Platform>(
     guarded.lock().await.best_near_head_of_chain
 }
 
-/// See [`RuntimeService::recent_best_block_runtime_lock`].
+/// See [`RuntimeService::pinned_block_runtime_call_lock`].
 #[must_use]
 pub struct RuntimeLock<'a, TPlat: Platform> {
     service: &'a RuntimeService<TPlat>,
@@ -1272,13 +1234,6 @@ pub struct RuntimeLock<'a, TPlat: Platform> {
 }
 
 enum RuntimeLockInner {
-    /// Call made against [`GuardedInner::FinalizedBlockRuntimeKnown::finalized_block`].
-    Finalized,
-    /// Block is found in the tree at the given index.
-    InTree {
-        /// Index of the block to make the call against.
-        block_index: async_tree::NodeIndex,
-    },
     /// Block information directly inlined in this enum.
     OutOfTree {
         block_number: u64,
@@ -1292,21 +1247,6 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
         match &self.inner {
-            RuntimeLockInner::Finalized => match &self.guarded.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown {
-                    finalized_block, ..
-                } => &finalized_block.hash,
-                _ => unreachable!(),
-            },
-            RuntimeLockInner::InTree { block_index } => match &self.guarded.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
-                    &tree.block_user_data(*block_index).hash
-                }
-                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
-                    &tree.block_user_data(*block_index).hash
-                }
-                _ => unreachable!(),
-            },
             RuntimeLockInner::OutOfTree { hash, .. } => hash,
         }
     }
@@ -1322,30 +1262,6 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
         let block_hash = *self.block_hash();
 
         let (block_storage_root, block_number) = match &self.inner {
-            RuntimeLockInner::Finalized => match &self.guarded.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown {
-                    finalized_block, ..
-                } => {
-                    let header = header::decode(&finalized_block.scale_encoded_header).unwrap();
-                    (*header.state_root, header.number)
-                }
-                _ => unreachable!(),
-            },
-            RuntimeLockInner::InTree { block_index } => match &self.guarded.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
-                    let header =
-                        header::decode(&tree.block_user_data(*block_index).scale_encoded_header)
-                            .unwrap();
-                    (*header.state_root, header.number)
-                }
-                GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
-                    let header =
-                        header::decode(&tree.block_user_data(*block_index).scale_encoded_header)
-                            .unwrap();
-                    (*header.state_root, header.number)
-                }
-                _ => unreachable!(),
-            },
             RuntimeLockInner::OutOfTree {
                 block_state_root_hash,
                 block_number,
@@ -1380,52 +1296,16 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
             // Lock `guarded` again now that the call is finished.
             let mut guarded = self.service.guarded.lock().await;
 
-            let runtime_index =
-                if let RuntimeLockInner::OutOfTree { runtime_index, .. } = self.inner {
-                    Some(runtime_index)
-                } else {
-                    // It is not guaranteed that the block is still in the tree after the storage
-                    // proof has ended.
-                    // TODO: solve this better than downloading the runtime below
-                    match &guarded.tree {
-                        GuardedInner::FinalizedBlockRuntimeKnown {
-                            tree,
-                            finalized_block,
-                            ..
-                        } => {
-                            if finalized_block.hash == block_hash {
-                                Some(*tree.finalized_async_user_data())
-                            } else {
-                                tree.input_iter_unordered()
-                                    .find(|block| block.user_data.hash == block_hash)
-                                    .map(|block| *block.async_op_user_data.unwrap())
-                            }
-                        }
-                        GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => tree
-                            .input_iter_unordered()
-                            .find(|block| block.user_data.hash == block_hash)
-                            .map(|block| block.async_op_user_data.unwrap().unwrap()),
-                        _ => unreachable!(),
-                    }
-                };
+            let RuntimeLockInner::OutOfTree { runtime_index, .. } = self.inner;
 
-            match runtime_index {
-                Some(runtime_index) => {
-                    let virtual_machine = match guarded.runtimes[runtime_index].runtime.as_mut() {
-                        Ok(r) => r.virtual_machine.take().unwrap(),
-                        Err(err) => {
-                            return Err(RuntimeCallError::InvalidRuntime(err.clone()));
-                        }
-                    };
+            let virtual_machine = match guarded.runtimes[runtime_index].runtime.as_mut() {
+                Ok(r) => r.virtual_machine.take().unwrap(),
+                Err(err) => {
+                    return Err(RuntimeCallError::InvalidRuntime(err.clone()));
+                }
+            };
 
-                    (Some((guarded, runtime_index)), virtual_machine)
-                }
-                None => {
-                    // TODO: remove by increasing the num_references of the runtime before unlocking guarded
-                    let (_, virtual_machine) = self.service.network_block_info(&block_hash).await?;
-                    (None, virtual_machine)
-                }
-            }
+            (Some((guarded, runtime_index)), virtual_machine)
         };
 
         let lock = RuntimeCallLock {
@@ -1438,7 +1318,7 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
     }
 }
 
-/// See [`RuntimeService::recent_best_block_runtime_lock`].
+/// See [`RuntimeService::pinned_block_runtime_call_lock`].
 #[must_use]
 pub struct RuntimeCallLock<'a, TPlat: Platform> {
     /// If `Some`, the virtual machine must be put back in the runtimes at the given index.

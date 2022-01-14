@@ -891,22 +891,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::payment_queryInfo { extrinsic, hash } => {
-                assert!(hash.is_none()); // TODO: handle when hash != None
-
-                let response = match payment_query_info(&self.runtime_service, &extrinsic.0).await {
-                    Ok(info) => {
-                        methods::Response::payment_queryInfo(info).to_json_response(request_id)
-                    }
-                    Err(error) => json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                        None,
-                    ),
-                };
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
-                    .await;
+                self.payment_query_info(request_id, &state_machine_request_id, &extrinsic.0, hash.as_ref().map(|h| &h.0)).await;
             }
             methods::MethodCall::rpc_methods {} => {
                 self.requests_subscriptions
@@ -1030,7 +1015,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0)
                 };
 
-                let result = self.runtime_call(&block_hash, "Metadata_metadata", &[]).await;
+                let result = self.runtime_call(&block_hash, "Metadata_metadata",iter::empty::<Vec<u8>>()).await;
                 let result = result.as_ref().map(|output| remove_metadata_length_prefix(&output));
 
                 let response = match result {
@@ -1931,7 +1916,11 @@ impl<TPlat: Platform> Background<TPlat> {
             header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
 
         let result = self
-            .runtime_call(&block_hash, "AccountNonceApi_account_nonce", &account.0)
+            .runtime_call(
+                &block_hash,
+                "AccountNonceApi_account_nonce",
+                iter::once(&account.0),
+            )
             .await;
 
         let response = match result {
@@ -1942,6 +1931,61 @@ impl<TPlat: Platform> Background<TPlat> {
                 methods::Response::system_accountNextIndex(u64::from(index))
                     .to_json_response(request_id)
             }
+            Err(error) => {
+                log::warn!(
+                    target: &self.log_target,
+                    "Returning error from `state_getMetadata`. \
+                    API user might not function properly. Error: {}",
+                    error
+                );
+                json_rpc::parse::build_error_response(
+                    request_id,
+                    json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                    None,
+                )
+            }
+        };
+
+        self.requests_subscriptions
+            .respond(&state_machine_request_id, response)
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::payment_queryInfo`].
+    async fn payment_query_info(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        extrinsic: &[u8],
+        block_hash: Option<&[u8; 32]>,
+    ) {
+        let block_hash = match block_hash {
+            Some(h) => *h,
+            None => header::hash_from_scale_encoded_header(
+                &self.runtime_service.subscribe_best().await.0,
+            ),
+        };
+
+        let result = self
+            .runtime_call(
+                &block_hash,
+                json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME,
+                json_rpc::payment_info::payment_info_parameters(extrinsic),
+            )
+            .await;
+
+        let response = match result {
+            Ok(encoded) => match json_rpc::payment_info::decode_payment_info(&encoded) {
+                Ok(info) => methods::Response::payment_queryInfo(info).to_json_response(request_id),
+                Err(error) => json_rpc::parse::build_error_response(
+                    request_id,
+                    json_rpc::parse::ErrorResponse::ServerError(
+                        -32000,
+                        &format!("Failed to decode runtime output: {}", error),
+                    ),
+                    None,
+                ),
+            },
             Err(error) => {
                 log::warn!(
                     target: &self.log_target,
@@ -2876,7 +2920,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self: &Arc<Self>,
         block_hash: &[u8; 32],
         function_to_call: &str,
-        call_parameters: &[u8],
+        call_parameters: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
     ) -> Result<Vec<u8>, RuntimeCallError> {
         // This function contains two steps: obtaining the runtime of the block in question,
         // then performing the actual call. The first step is the longest and most difficult.
@@ -2900,7 +2944,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 drop::<futures::lock::MutexGuard<_>>(cache_lock);
 
                 runtime_call_lock
-                    .start(function_to_call, iter::once(call_parameters))
+                    .start(function_to_call, call_parameters.clone())
                     .await
                     .unwrap() // TODO: don't unwrap
             } else {
@@ -2956,7 +3000,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.runtime_service.unpin_runtime(pinned_runtime_id).await;
 
                 precall
-                    .start(function_to_call, iter::once(call_parameters))
+                    .start(function_to_call, call_parameters.clone())
                     .await
                     .unwrap() // TODO: don't unwrap
             }
@@ -2970,7 +3014,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let mut runtime_call = match read_only_runtime_host::run(read_only_runtime_host::Config {
             virtual_machine,
             function_to_call,
-            parameter: iter::once(call_parameters),
+            parameter: call_parameters,
         }) {
             Ok(vm) => vm,
             Err((err, prototype)) => {
@@ -4061,83 +4105,4 @@ enum RuntimeCallError {
     Call(runtime_service::RuntimeCallError),
     StartError(host::StartErr),
     ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
-}
-
-async fn payment_query_info<TPlat: Platform>(
-    relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
-    extrinsic: &[u8],
-) -> Result<methods::RuntimeDispatchInfo, PaymentQueryInfoError> {
-    // For each relay chain block, call `ParachainHost_persisted_validation_data` in
-    // order to know where the parachains are.
-    let (runtime_call_lock, virtual_machine) = relay_chain_sync
-        .recent_best_block_runtime_lock()
-        .await
-        .start(
-            json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME,
-            json_rpc::payment_info::payment_info_parameters(extrinsic),
-        )
-        .await
-        .map_err(PaymentQueryInfoError::Call)?;
-
-    // TODO: move the logic below in the `src` directory
-
-    let mut runtime_call = match read_only_runtime_host::run(read_only_runtime_host::Config {
-        virtual_machine,
-        function_to_call: json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME,
-        parameter: json_rpc::payment_info::payment_info_parameters(extrinsic),
-    }) {
-        Ok(vm) => vm,
-        Err((err, prototype)) => {
-            runtime_call_lock.unlock(prototype);
-            return Err(PaymentQueryInfoError::StartError(err));
-        }
-    };
-
-    loop {
-        match runtime_call {
-            read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                let decoded = json_rpc::payment_info::decode_payment_info(
-                    success.virtual_machine.value().as_ref(),
-                );
-
-                runtime_call_lock.unlock(success.virtual_machine.into_prototype());
-                match decoded {
-                    Ok(d) => break Ok(d),
-                    Err(err) => {
-                        return Err(PaymentQueryInfoError::DecodeError(err));
-                    }
-                }
-            }
-            read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
-                runtime_call_lock.unlock(error.prototype);
-                break Err(PaymentQueryInfoError::ReadOnlyRuntime(error.detail));
-            }
-            read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
-                let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
-                    Ok(v) => v,
-                    Err(err) => {
-                        runtime_call_lock.unlock(
-                            read_only_runtime_host::RuntimeHostVm::StorageGet(get).into_prototype(),
-                        );
-                        return Err(PaymentQueryInfoError::Call(err));
-                    }
-                };
-                runtime_call = get.inject_value(storage_value.map(iter::once));
-            }
-            read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
-                todo!() // TODO:
-            }
-            read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
-                runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
-            }
-        }
-    }
-}
-
-#[derive(derive_more::Display)]
-enum PaymentQueryInfoError {
-    Call(runtime_service::RuntimeCallError),
-    StartError(host::StartErr),
-    ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
-    DecodeError(json_rpc::payment_info::DecodeError),
 }
