@@ -951,12 +951,10 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         RuntimeLock {
             service: self,
             guarded,
-            inner: RuntimeLockInner::OutOfTree {
-                hash: *block_hash,
-                runtime_index,
-                block_number,
-                block_state_root_hash,
-            },
+            hash: *block_hash,
+            runtime_index,
+            block_number,
+            block_state_root_hash,
         }
     }
 
@@ -984,12 +982,10 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         RuntimeLock {
             service: self,
             guarded,
-            inner: RuntimeLockInner::OutOfTree {
-                hash: block_hash,
-                runtime_index,
-                block_number,
-                block_state_root_hash: block_state_trie_root_hash,
-            },
+            hash: block_hash,
+            runtime_index,
+            block_number,
+            block_state_root_hash: block_state_trie_root_hash,
         }
     }
 
@@ -1230,25 +1226,17 @@ async fn is_near_head_of_chain_heuristic<TPlat: Platform>(
 pub struct RuntimeLock<'a, TPlat: Platform> {
     service: &'a RuntimeService<TPlat>,
     guarded: MutexGuard<'a, Guarded<TPlat>>, // TODO: is the lock actually necessary? maybe we can just increase the reference count of the runtime instead, and clone the header+hash
-    inner: RuntimeLockInner,
-}
 
-enum RuntimeLockInner {
-    /// Block information directly inlined in this enum.
-    OutOfTree {
-        block_number: u64,
-        block_state_root_hash: [u8; 32],
-        hash: [u8; 32],
-        runtime_index: usize, // TODO: increase the num_references of this runtime beforehand?
-    },
+    block_number: u64,
+    block_state_root_hash: [u8; 32],
+    hash: [u8; 32],
+    runtime_index: usize, // TODO: increase the num_references of this runtime beforehand?
 }
 
 impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
     /// Returns the hash of the block the call is being made against.
     pub fn block_hash(&self) -> &[u8; 32] {
-        match &self.inner {
-            RuntimeLockInner::OutOfTree { hash, .. } => hash,
-        }
+        &self.hash
     }
 
     pub async fn start<'b>(
@@ -1258,16 +1246,6 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
     ) -> Result<(RuntimeCallLock<'a, TPlat>, executor::host::HostVmPrototype), RuntimeCallError>
     {
         // TODO: DRY :-/ this whole thing is messy
-
-        let block_hash = *self.block_hash();
-
-        let (block_storage_root, block_number) = match &self.inner {
-            RuntimeLockInner::OutOfTree {
-                block_state_root_hash,
-                block_number,
-                ..
-            } => (*block_state_root_hash, *block_number),
-        };
 
         // Unlock `guarded` before doing anything that takes a long time, such as the
         // network request below.
@@ -1282,9 +1260,9 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
             .sync_service
             .clone()
             .call_proof_query(
-                block_number,
+                self.block_number,
                 protocol::CallProofRequestConfig {
-                    block_hash,
+                    block_hash: self.hash,
                     method,
                     parameter_vectored: parameter_vectored.clone(),
                 },
@@ -1292,25 +1270,20 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
             .await
             .map_err(RuntimeCallError::CallProof);
 
-        let (guarded, virtual_machine) = {
-            // Lock `guarded` again now that the call is finished.
-            let mut guarded = self.service.guarded.lock().await;
+        // Lock `guarded` again now that the call is finished.
+        let mut guarded = self.service.guarded.lock().await;
 
-            let RuntimeLockInner::OutOfTree { runtime_index, .. } = self.inner;
-
-            let virtual_machine = match guarded.runtimes[runtime_index].runtime.as_mut() {
-                Ok(r) => r.virtual_machine.take().unwrap(),
-                Err(err) => {
-                    return Err(RuntimeCallError::InvalidRuntime(err.clone()));
-                }
-            };
-
-            (Some((guarded, runtime_index)), virtual_machine)
+        let virtual_machine = match guarded.runtimes[self.runtime_index].runtime.as_mut() {
+            Ok(r) => r.virtual_machine.take().unwrap(),
+            Err(err) => {
+                return Err(RuntimeCallError::InvalidRuntime(err.clone()));
+            }
         };
 
         let lock = RuntimeCallLock {
             guarded,
-            block_storage_root,
+            runtime_index: self.runtime_index,
+            block_state_root_hash: self.block_state_root_hash,
             call_proof,
         };
 
@@ -1321,16 +1294,16 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
 /// See [`RuntimeService::pinned_block_runtime_call_lock`].
 #[must_use]
 pub struct RuntimeCallLock<'a, TPlat: Platform> {
-    /// If `Some`, the virtual machine must be put back in the runtimes at the given index.
-    guarded: Option<(MutexGuard<'a, Guarded<TPlat>>, usize)>,
-    block_storage_root: [u8; 32],
+    guarded: MutexGuard<'a, Guarded<TPlat>>,
+    runtime_index: usize,
+    block_state_root_hash: [u8; 32],
     call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
 }
 
 impl<'a, TPlat: Platform> RuntimeCallLock<'a, TPlat> {
     /// Returns the storage root of the block the call is being made against.
     pub fn block_storage_root(&self) -> &[u8; 32] {
-        &self.block_storage_root
+        &self.block_state_root_hash
     }
 
     /// Finds the given key in the call proof and returns the associated storage value.
@@ -1417,29 +1390,25 @@ impl<'a, TPlat: Platform> RuntimeCallLock<'a, TPlat> {
     ///
     /// This method **must** be called.
     pub fn unlock(mut self, vm: executor::host::HostVmPrototype) {
-        if let Some((guarded, runtime_index)) = &mut self.guarded {
-            guarded.runtimes[*runtime_index]
-                .runtime
-                .as_mut()
-                .unwrap()
-                .virtual_machine = Some(vm);
-        }
+        self.guarded.runtimes[self.runtime_index]
+            .runtime
+            .as_mut()
+            .unwrap()
+            .virtual_machine = Some(vm);
     }
 }
 
 impl<'a, TPlat: Platform> Drop for RuntimeCallLock<'a, TPlat> {
     fn drop(&mut self) {
-        if let Some((guarded, runtime_index)) = &mut self.guarded {
-            let vm = &guarded.runtimes[*runtime_index]
-                .runtime
-                .as_ref()
-                .unwrap()
-                .virtual_machine;
+        let vm = &self.guarded.runtimes[self.runtime_index]
+            .runtime
+            .as_ref()
+            .unwrap()
+            .virtual_machine;
 
-            if vm.is_none() {
-                // The [`RuntimeCallLock`] has been destroyed without being properly unlocked.
-                panic!()
-            }
+        if vm.is_none() {
+            // The [`RuntimeCallLock`] has been destroyed without being properly unlocked.
+            panic!()
         }
     }
 }
