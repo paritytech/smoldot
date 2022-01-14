@@ -47,6 +47,7 @@ use smoldot::{
     header,
     json_rpc::{self, methods, requests_subscriptions},
     libp2p::{multiaddr, PeerId},
+    metadata::remove_metadata_length_prefix,
     network::protocol,
 };
 use std::{
@@ -199,7 +200,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             cache: Mutex::new(Cache {
                 recent_pinned_blocks: lru::LruCache::with_hasher(32, Default::default()),
                 subscription_id: None,
-                block_state_root_hashes: lru::LruCache::with_hasher(32, Default::default()),
+                block_state_root_hashes_numbers: lru::LruCache::with_hasher(32, Default::default()),
             }),
             genesis_block: config.genesis_block_hash,
             next_subscription_id: atomic::AtomicU64::new(0),
@@ -551,24 +552,25 @@ struct Cache {
     /// [`Cache::recent_pinned_blocks`] then this field is guaranteed to be `Some`.
     subscription_id: Option<runtime_service::SubscriptionId>,
 
-    /// State trie root hashes of blocks that were not in [`Cache::recent_pinned_blocks`].
+    /// State trie root hashes and numbers of blocks that were not in
+    /// [`Cache::recent_pinned_blocks`].
     ///
     /// The state trie root hash can also be an `Err` if the network request failed or if the
     /// header is of an invalid format.
     ///
-    /// The state trie root hash is wrapped in a `Shared` future. When multiple requests need the
-    /// state trie root hash of the same block, it is only queried once and the query is
-    /// inserted in the cache while in progress. This way, the multiple requests can all wait on
-    /// that single future.
+    /// The state trie root hash and number are wrapped in a `Shared` future. When multiple
+    /// requests need the state trie root hash and number of the same block, they are only queried
+    /// once and the query is inserted in the cache while in progress. This way, the multiple
+    /// requests can all wait on that single future.
     ///
     /// Most of the time, the JSON-RPC client will query blocks that are found in
     /// [`Cache::recent_pinned_blocks`], but occasionally it will query older blocks. When the
     /// storage of an older block is queried, it is common for the JSON-RPC client to make several
     /// storage requests to that same old block. In order to avoid having to retrieve the state
     /// trie root hash multiple, we store these hashes in this LRU cache.
-    block_state_root_hashes: lru::LruCache<
+    block_state_root_hashes_numbers: lru::LruCache<
         [u8; 32],
-        future::MaybeDone<future::Shared<future::BoxFuture<'static, Result<[u8; 32], ()>>>>,
+        future::MaybeDone<future::Shared<future::BoxFuture<'static, Result<([u8; 32], u64), ()>>>>,
         fnv::FnvBuildHasher,
     >,
 }
@@ -1022,17 +1024,21 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::state_getMetadata { hash } => {
-                let result = if let Some(hash) = hash {
-                    self.runtime_service.clone().metadata(&hash.0).await
+                let block_hash = if let Some(hash) = hash {
+                    hash.0
                 } else {
-                    self.runtime_service.clone().best_block_metadata().await
+                    header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0)
                 };
 
+                let result = self.runtime_call(&block_hash, "Metadata_metadata", &[]).await;
+                let result = result.as_ref().map(|output| remove_metadata_length_prefix(&output));
+
                 let response = match result {
-                    Ok(metadata) => {
-                        methods::Response::state_getMetadata(methods::HexString(metadata))
+                    Ok(Ok(metadata)) => {
+                        methods::Response::state_getMetadata(methods::HexString(metadata.to_vec()))
                             .to_json_response(request_id)
                     }
+                    Ok(Err(_)) => todo!(),
                     Err(error) => {
                         log::warn!(
                             target: &self.log_target,
@@ -2736,9 +2742,10 @@ impl<TPlat: Platform> Background<TPlat> {
             .unwrap();
     }
 
-    /// Obtain the state trie root hash of the given block, and make sure to put it in cache.
+    /// Obtain the state trie root hash and number of the given block, and make sure to put it
+    /// in cache.
     // TODO: better error return type
-    async fn state_trie_root_hash(&self, hash: &[u8; 32]) -> Result<[u8; 32], ()> {
+    async fn state_trie_root_hash(&self, hash: &[u8; 32]) -> Result<([u8; 32], u64), ()> {
         let fetch = {
             // Try to find an existing entry in cache, and if not create one.
             let mut cache_lock = self.cache.lock().await;
@@ -2749,13 +2756,13 @@ impl<TPlat: Platform> Background<TPlat> {
                 .get(hash)
                 .map(|h| header::decode(h))
             {
-                Some(Ok(header)) => return Ok(*header.state_root),
+                Some(Ok(header)) => return Ok((*header.state_root, header.number)),
                 Some(Err(_)) => return Err(()),
                 None => {}
             }
 
             // Look in `block_state_root_hashes`.
-            match cache_lock.block_state_root_hashes.get(hash) {
+            match cache_lock.block_state_root_hashes_numbers.get(hash) {
                 Some(future::MaybeDone::Done(Ok(val))) => return Ok(*val),
                 Some(future::MaybeDone::Future(f)) => f.clone(),
                 Some(future::MaybeDone::Gone) => unreachable!(), // We never use `Gone`.
@@ -2789,7 +2796,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     hash
                                 );
                                 let decoded = header::decode(&header).unwrap();
-                                Ok(*decoded.state_root)
+                                Ok((*decoded.state_root, decoded.number))
                             } else {
                                 Err(())
                             }
@@ -2800,7 +2807,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     // future.
                     let wrapped = fetch.boxed().shared();
                     cache_lock
-                        .block_state_root_hashes
+                        .block_state_root_hashes_numbers
                         .put(*hash, future::maybe_done(wrapped.clone()));
                     wrapped
                 }
@@ -2816,7 +2823,7 @@ impl<TPlat: Platform> Background<TPlat> {
         keys: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
         hash: &[u8; 32],
     ) -> Result<Vec<Option<Vec<u8>>>, StorageQueryError> {
-        let state_trie_root_hash = self
+        let (state_trie_root_hash, _) = self
             .state_trie_root_hash(&hash)
             .await
             .map_err(|()| StorageQueryError::FindStorageRootHashError)?;
@@ -2829,6 +2836,149 @@ impl<TPlat: Platform> Background<TPlat> {
             .map_err(StorageQueryError::StorageRetrieval)?;
 
         Ok(result)
+    }
+
+    /// Performs a runtime call to a random block.
+    // TODO: maybe add a parameter to check for a runtime API?
+    async fn runtime_call(
+        self: &Arc<Self>,
+        block_hash: &[u8; 32],
+        function_to_call: &str,
+        call_parameters: &[u8],
+    ) -> Result<Vec<u8>, RuntimeCallError> {
+        // This function contains two steps: obtaining the runtime of the block in question,
+        // then performing the actual call. The first step is the longest and most difficult.
+        let (runtime_call_lock, virtual_machine) = {
+            let cache_lock = self.cache.lock().await;
+
+            // Try to find the block in the cache of recent blocks. Most of the time, the call target
+            // should be in there.
+            if cache_lock.recent_pinned_blocks.contains(block_hash) {
+                // The runtime service has the block pinned, meaning that we can ask the runtime
+                // service to perform the call.
+                let runtime_call_lock = self
+                    .runtime_service
+                    .pinned_block_runtime_call_lock(
+                        cache_lock.subscription_id.clone().unwrap(),
+                        block_hash,
+                    )
+                    .await;
+
+                // Make sure to unlock the cache, in order to not block the other requests.
+                drop::<futures::lock::MutexGuard<_>>(cache_lock);
+
+                runtime_call_lock
+                    .start(function_to_call, iter::once(call_parameters))
+                    .await
+                    .unwrap() // TODO: don't unwrap
+            } else {
+                // Second situation: the block is not in the cache of recent blocks. This isn't great.
+                drop::<futures::lock::MutexGuard<_>>(cache_lock);
+
+                // The only solution is to download the runtime of the block in question from the network.
+
+                // TODO: considering caching the runtime code the same way as the state trie root hash
+
+                // In order to grab the runtime code and perform the call network request, we need
+                // to know the state trie root hash and the height of the block.
+                let (state_trie_root_hash, block_number) =
+                    self.state_trie_root_hash(block_hash).await.unwrap(); // TODO: don't unwrap
+
+                // Download the runtime of this block. This takes a long time as the runtime is rather
+                // big (around 1MiB in general).
+                let (storage_code, storage_heap_pages) = {
+                    let mut code_query_result = self
+                        .sync_service
+                        .clone()
+                        .storage_query(
+                            block_hash,
+                            &state_trie_root_hash,
+                            iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+                        )
+                        .await
+                        .map_err(runtime_service::RuntimeCallError::StorageQuery)
+                        .map_err(RuntimeCallError::Call)?;
+                    let heap_pages = code_query_result.pop().unwrap();
+                    let code = code_query_result.pop().unwrap();
+                    (code, heap_pages)
+                };
+
+                // Give the code and heap pages to the runtime service. The runtime service will
+                // try to find any similar runtime it might have, and if not will compile it.
+                let pinned_runtime_id = self
+                    .runtime_service
+                    .compile_and_pin_runtime(storage_code, storage_heap_pages)
+                    .await;
+
+                let precall = self
+                    .runtime_service
+                    .pinned_runtime_call_lock(
+                        pinned_runtime_id,
+                        *block_hash,
+                        block_number,
+                        state_trie_root_hash,
+                    )
+                    .await;
+
+                // TODO: consider keeping pinned runtimes in a cache instead
+                self.runtime_service.unpin_runtime(pinned_runtime_id).await;
+
+                precall
+                    .start(function_to_call, iter::once(call_parameters))
+                    .await
+                    .unwrap() // TODO: don't unwrap
+            }
+        };
+
+        // Now that we have obtained the virtual machine, we can perform the call.
+        // This is a CPU-only operation that executes the virtual machine.
+        // The virtual machine might access the storage.
+        // TODO: finish doc
+
+        let mut runtime_call = match read_only_runtime_host::run(read_only_runtime_host::Config {
+            virtual_machine,
+            function_to_call,
+            parameter: iter::once(call_parameters),
+        }) {
+            Ok(vm) => vm,
+            Err((err, prototype)) => {
+                runtime_call_lock.unlock(prototype);
+                return Err(RuntimeCallError::StartError(err));
+            }
+        };
+
+        loop {
+            match runtime_call {
+                read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                    let output = success.virtual_machine.value().as_ref().to_vec();
+                    runtime_call_lock.unlock(success.virtual_machine.into_prototype());
+                    break Ok(output);
+                }
+                read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+                    runtime_call_lock.unlock(error.prototype);
+                    break Err(RuntimeCallError::ReadOnlyRuntime(error.detail));
+                }
+                read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
+                    let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            runtime_call_lock.unlock(
+                                read_only_runtime_host::RuntimeHostVm::StorageGet(get)
+                                    .into_prototype(),
+                            );
+                            break Err(RuntimeCallError::Call(err));
+                        }
+                    };
+                    runtime_call = get.inject_value(storage_value.map(iter::once));
+                }
+                read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
+                    todo!() // TODO:
+                }
+                read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
+                    runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
+                }
+            }
+        }
     }
 
     fn header_query(&'_ self, hash: &[u8; 32]) -> impl Future<Output = Result<Vec<u8>, ()>> + '_ {
@@ -3872,6 +4022,13 @@ enum StorageQueryError {
     /// Error while retrieving the storage item from other nodes.
     #[display(fmt = "{}", _0)]
     StorageRetrieval(sync_service::StorageQueryError),
+}
+
+#[derive(derive_more::Display)]
+enum RuntimeCallError {
+    Call(runtime_service::RuntimeCallError),
+    StartError(host::StartErr),
+    ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
 }
 
 async fn account_nonce<TPlat: Platform>(

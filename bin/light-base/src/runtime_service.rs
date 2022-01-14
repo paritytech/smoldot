@@ -67,7 +67,6 @@ use smoldot::{
     chain::async_tree,
     executor, header,
     informant::{BytesDisplay, HashDisplay},
-    metadata,
     network::protocol,
     trie::{self, proof_verify},
 };
@@ -90,6 +89,10 @@ pub struct Config<TPlat: Platform> {
     /// Header of the genesis block of the chain, in SCALE encoding.
     pub genesis_block_scale_encoded_header: Vec<u8>,
 }
+
+/// Identifies a runtime currently pinned within a [`RuntimeService`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PinnedRuntimeId(u64);
 
 /// See [the module-level documentation](..).
 pub struct RuntimeService<TPlat: Platform> {
@@ -148,6 +151,8 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             tree,
             runtimes: slab::Slab::with_capacity(2),
             pinned_blocks: BTreeMap::new(),
+            pinned_runtimes: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()), // TODO: capacity?
+            next_pinned_runtime_id: 0,
         }));
 
         // Spawns a task that runs in the background and updates the content of the mutex.
@@ -992,92 +997,98 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         }
     }
 
-    /// Obtain the metadata of the runtime of the current best block.
+    /// Lock the runtime service and prepare a call to a runtime entry point.
     ///
-    /// > **Note**: Keep in mind that this function is subject to race conditions. The runtime
-    /// >           of the best block can change at any time. This method should ideally be called
-    /// >           again after every runtime change.
-    pub async fn metadata(&self, _block_hash: &[u8; 32]) -> Result<Vec<u8>, MetadataError> {
-        todo!() // TODO: restore, somehow
+    /// The hash of the block passed as parameter corresponds to the block whose runtime to use
+    /// to make the call. The block must be currently pinned in the context of the provided
+    /// [`SubscriptionId`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the provided [`PinnedRuntimeId`] is stale or invalid.
+    ///
+    pub async fn pinned_runtime_call_lock<'a>(
+        &'a self,
+        pinned_runtime_id: PinnedRuntimeId,
+        block_hash: [u8; 32],
+        block_number: u64,
+        block_state_trie_root_hash: [u8; 32],
+    ) -> RuntimeLock<'a, TPlat> {
+        let guarded = self.guarded.lock().await;
+
+        let runtime_index = *guarded.pinned_runtimes.get(&pinned_runtime_id.0).unwrap();
+
+        RuntimeLock {
+            service: self,
+            guarded,
+            inner: RuntimeLockInner::OutOfTree {
+                hash: block_hash,
+                runtime_index,
+                block_number,
+                block_state_root_hash: block_state_trie_root_hash,
+            },
+        }
     }
 
-    /// Obtain the metadata of the runtime of the current best block.
-    ///
-    /// > **Note**: Keep in mind that this function is subject to race conditions. The runtime
-    /// >           of the best block can change at any time. This method should ideally be called
-    /// >           again after every runtime change.
-    pub async fn best_block_metadata(&self) -> Result<Vec<u8>, MetadataError> {
-        // First, try the cache.
-        // TODO: restore
-        /*{
-            let guarded = self.guarded.lock().await;
-            match guarded
-                .tree
-                .as_ref()
-                .unwrap()
-                .best_block_runtime()
-                .runtime
-                .as_ref()
-            {
-                Ok(runtime) => {
-                    if let Some(metadata) = runtime.metadata.as_ref() {
-                        return Ok(metadata.clone());
-                    }
-                }
-                Err(err) => {
-                    return Err(MetadataError::InvalidRuntime(err.clone()));
-                }
-            }
-        }*/
+    /// Tries to find a runtime within the [`RuntimeService`] that has the given storage code and
+    /// heap pages. If none is found, compiles the runtime and stores it within the
+    /// [`RuntimeService`]. In both cases, it is kept pinned until it is unpinned with
+    /// [`RuntimeService::unpin_runtime`].
+    pub async fn compile_and_pin_runtime(
+        &self,
+        storage_code: Option<Vec<u8>>,
+        storage_heap_pages: Option<Vec<u8>>,
+    ) -> PinnedRuntimeId {
+        let mut guarded = self.guarded.lock().await;
 
-        self.metadata_inner().await
-    }
+        // Try to find an existing identical runtime.
+        let existing_runtime = guarded
+            .runtimes
+            .iter()
+            .find(|(_, rt)| rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages)
+            .map(|(id, _)| id);
 
-    async fn metadata_inner(&self) -> Result<Vec<u8>, MetadataError> {
-        let (runtime_call_lock, virtual_machine) = self
-            .recent_best_block_runtime_lock()
-            .await
-            .start("Metadata_metadata", iter::empty::<Vec<u8>>())
-            .await
-            .map_err(MetadataError::CallError)?;
-
-        let mut query = metadata::query_metadata(virtual_machine);
-        let (metadata_result, virtual_machine) = loop {
-            match query {
-                metadata::Query::Finished(Ok(metadata), virtual_machine) => {
-                    // TODO: restore
-                    /*if let Some(guarded) = &mut runtime_call_lock.guarded {
-                        guarded
-                            .tree
-                            .as_mut()
-                            .unwrap()
-                            .best_block_runtime_mut()
-                            .runtime
-                            .as_mut()
-                            .unwrap()
-                            .metadata = Some(metadata.clone());
-                    }*/
-                    break (Ok(metadata), virtual_machine);
-                }
-                metadata::Query::StorageGet(storage_get) => {
-                    match runtime_call_lock.storage_entry(&storage_get.key_as_vec()) {
-                        Ok(v) => query = storage_get.inject_value(v.map(iter::once)),
-                        Err(err) => {
-                            break (
-                                Err(MetadataError::CallError(err)),
-                                metadata::Query::StorageGet(storage_get).into_prototype(),
-                            );
-                        }
-                    }
-                }
-                metadata::Query::Finished(Err(err), virtual_machine) => {
-                    break (Err(MetadataError::MetadataQuery(err)), virtual_machine);
-                }
-            }
+        let runtime_index = if let Some(existing_runtime) = existing_runtime {
+            existing_runtime
+        } else {
+            // No identical runtime was found. Try compiling the new runtime.
+            let runtime = SuccessfulRuntime::from_storage(&storage_code, &storage_heap_pages).await;
+            guarded.runtimes.insert(Runtime {
+                num_references: 0, // Incremented below.
+                heap_pages: storage_heap_pages,
+                runtime_code: storage_code,
+                runtime,
+            })
         };
 
-        runtime_call_lock.unlock(virtual_machine);
-        metadata_result
+        guarded.runtimes[runtime_index].num_references += 1;
+
+        let pinned_runtime_id = guarded.next_pinned_runtime_id;
+        guarded.next_pinned_runtime_id += 1;
+
+        let _previous_value = guarded
+            .pinned_runtimes
+            .insert(pinned_runtime_id, runtime_index);
+        debug_assert!(_previous_value.is_none());
+
+        PinnedRuntimeId(pinned_runtime_id)
+    }
+
+    /// Un-pins a previously-pinned runtime.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the provided [`PinnedRuntimeId`] is stale or invalid.
+    ///
+    pub async fn unpin_runtime(&self, id: PinnedRuntimeId) {
+        let mut guarded = self.guarded.lock().await;
+
+        let runtime_index = guarded.pinned_runtimes.remove(&id.0).unwrap();
+        if guarded.runtimes[runtime_index].num_references == 1 {
+            guarded.runtimes.remove(runtime_index);
+        } else {
+            guarded.runtimes[runtime_index].num_references -= 1;
+        }
     }
 
     /// Returns true if it is believed that we are near the head of the chain.
@@ -1272,7 +1283,7 @@ enum RuntimeLockInner {
         block_number: u64,
         block_state_root_hash: [u8; 32],
         hash: [u8; 32],
-        runtime_index: usize,
+        runtime_index: usize, // TODO: increase the num_references of this runtime beforehand?
     },
 }
 
@@ -1409,6 +1420,7 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
                     (Some((guarded, runtime_index)), virtual_machine)
                 }
                 None => {
+                    // TODO: remove by increasing the num_references of the runtime before unlocking guarded
                     let (_, virtual_machine) = self.service.network_block_info(&block_hash).await?;
                     (None, virtual_machine)
                 }
@@ -1605,20 +1617,6 @@ pub enum RuntimeError {
     CoreVersion(executor::CoreVersionError),
 }
 
-/// Error that can happen when calling [`RuntimeService::metadata`].
-#[derive(Debug, derive_more::Display)]
-pub enum MetadataError {
-    /// Error during the runtime call.
-    #[display(fmt = "{}", _0)]
-    CallError(RuntimeCallError),
-    /// Error in the metadata-specific runtime API.
-    #[display(fmt = "Error in the metadata-specific runtime API: {}", _0)]
-    MetadataQuery(metadata::Error),
-    // TODO: restore or remove
-    /*/// Error while fetching the runtime of the desired block.
-    RuntimeFetch,*/
-}
-
 struct Guarded<TPlat: Platform> {
     /// List of senders that get notified when new blocks arrive.
     /// See [`RuntimeService::subscribe_all`]. Alongside with each sender, the number of pinned
@@ -1635,9 +1633,15 @@ struct Guarded<TPlat: Platform> {
     /// after the latest best block update.
     best_near_head_of_chain: bool,
 
-    /// List of runtimes referenced by the tree in [`GuardedInner`] and by
-    /// [`Guarded::pinned_blocks`].
+    /// List of runtimes referenced by the tree in [`GuardedInner`], by [`Guarded::pinned_blocks`],
+    /// and by [`Guarded::pinned_runtimes`].
     runtimes: slab::Slab<Runtime>,
+
+    /// Runtimes pinned by the API user.
+    pinned_runtimes: hashbrown::HashMap<u64, usize, fnv::FnvBuildHasher>,
+
+    /// Identifier of the next pinned runtime for [`Guarded::pinned_runtimes`].
+    next_pinned_runtime_id: u64,
 
     /// Tree of blocks received from the sync service. Keeps track of which block has been
     /// reported to the outer API.
@@ -2491,8 +2495,8 @@ impl<TPlat: Platform> Background<TPlat> {
 }
 
 struct Runtime {
-    /// Number of items in [`Guarded::tree`] and [`Guarded::pinned_blocks`] that reference this
-    /// runtime.
+    /// Number of items in [`Guarded::tree`], [`Guarded::pinned_blocks`], and
+    /// [`Guarded::pinned_runtimes`] that reference this runtime.
     num_references: usize,
 
     /// Successfully-compiled runtime and all its information. Can contain an error if an error
@@ -2517,24 +2521,6 @@ struct Runtime {
 }
 
 struct SuccessfulRuntime {
-    // TODO: restore this metadata cache
-    /*/// Cache of the metadata extracted from the runtime. `None` if unknown.
-    ///
-    /// This cache is filled lazily whenever it is requested through the public API.
-    ///
-    /// Note that building the metadata might require access to the storage, just like obtaining
-    /// the runtime code. if the runtime code gets an update, we can reasonably assume that the
-    /// network is able to serve us the storage of recent blocks, and thus the changes of being
-    /// able to build the metadata are very high.
-    ///
-    /// If the runtime is the one found in the genesis storage, the metadata must have been been
-    /// filled using the genesis storage as well. If we build the metadata of the genesis runtime
-    /// lazily, chances are that the network wouldn't be able to serve the storage of blocks near
-    /// the genesis.
-    ///
-    /// As documented in the smoldot metadata module, the metadata might access the storage, but
-    /// we intentionally don't watch for changes in these storage keys to refresh the metadata.
-    metadata: Option<Vec<u8>>,*/
     /// Runtime specs extracted from the runtime.
     runtime_spec: executor::CoreVersion,
 
