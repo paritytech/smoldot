@@ -1005,17 +1005,16 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ///
     /// # Panic
     ///
-    /// Panics if the given block isn't currently pinned by the given subscription.
+    /// Panics if the provided [`PinnedRuntimeId`] is stale or invalid.
     ///
     pub async fn pinned_runtime_call_lock<'a>(
         &'a self,
-        _pinned_runtime_id: PinnedRuntimeId,
-        _block_hash: [u8; 32],
-        _block_number: u64,
-        _block_state_trie_root_hash: [u8; 32],
+        pinned_runtime_id: PinnedRuntimeId,
+        block_hash: [u8; 32],
+        block_number: u64,
+        block_state_trie_root_hash: [u8; 32],
     ) -> RuntimeLock<'a, TPlat> {
-        todo!()
-        /*let guarded = self.guarded.lock().await;
+        let guarded = self.guarded.lock().await;
 
         let runtime_index = *guarded.pinned_runtimes.get(&pinned_runtime_id.0).unwrap();
 
@@ -1024,10 +1023,11 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             guarded,
             inner: RuntimeLockInner::OutOfTree {
                 hash: block_hash,
-                scale_encoded_header: todo!(),  // TODO: not implementable at the moment
                 runtime_index,
+                block_number,
+                block_state_root_hash: block_state_trie_root_hash,
             },
-        }*/
+        }
     }
 
     /// Tries to find a runtime within the [`RuntimeService`] that has the given storage code and
