@@ -1038,7 +1038,14 @@ impl<TPlat: Platform> Background<TPlat> {
                         methods::Response::state_getMetadata(methods::HexString(metadata.to_vec()))
                             .to_json_response(request_id)
                     }
-                    Ok(Err(_)) => todo!(),
+                    Ok(Err(error)) => json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(
+                            -32000,
+                            &format!("Failed to decode metadata from runtime: {}", error)
+                        ),
+                        None,
+                    ),
                     Err(error) => {
                         log::warn!(
                             target: &self.log_target,
