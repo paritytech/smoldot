@@ -51,7 +51,7 @@ impl AuraConfiguration {
         let heap_pages =
             executor::storage_heap_pages_to_value(storage_access(b":heappages").as_deref())
                 .map_err(FromStorageError::HeapPagesDecode)?;
-        let vm = host::HostVmPrototype::new(&wasm_code, heap_pages, vm::ExecHint::Oneshot)
+        let vm = host::HostVmPrototype::new(&wasm_code, heap_pages, vm::ExecHint::Oneshot, false)
             .map_err(FromStorageError::VmInitialization)?;
         let (cfg, _) = Self::from_virtual_machine_prototype(vm, storage_access)
             .map_err(FromStorageError::VmError)?;

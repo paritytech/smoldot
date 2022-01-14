@@ -902,6 +902,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
         code: Option<impl AsRef<[u8]>>,
         heap_pages: Option<impl AsRef<[u8]>>,
         exec_hint: ExecHint,
+        allow_unresolved_imports: bool,
     ) -> (WarpSync<TSrc>, Option<Error>) {
         let code = match code {
             Some(code) => code.as_ref().to_vec(),
@@ -938,7 +939,12 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                 }
             };
 
-        match HostVmPrototype::new(&code, decoded_heap_pages, exec_hint) {
+        match HostVmPrototype::new(
+            &code,
+            decoded_heap_pages,
+            exec_hint,
+            allow_unresolved_imports,
+        ) {
             Ok(runtime) => {
                 let babe_current_epoch_query =
                     babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {

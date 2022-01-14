@@ -449,6 +449,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 .map_err(RuntimeError::InvalidHeapPages)
                 .map_err(RuntimeCallError::InvalidRuntime)?,
             executor::vm::ExecHint::CompileAheadOfTime,
+            true,
         ) {
             Ok(vm) => vm,
             Err(error) => {
@@ -2543,6 +2544,7 @@ impl SuccessfulRuntime {
             executor::storage_heap_pages_to_value(heap_pages.as_deref())
                 .map_err(RuntimeError::InvalidHeapPages)?,
             executor::vm::ExecHint::CompileAheadOfTime,
+            true,
         ) {
             Ok(vm) => vm,
             Err(error) => {
