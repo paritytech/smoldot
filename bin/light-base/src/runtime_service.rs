@@ -38,7 +38,7 @@
 //! [`RuntimeService`] of the same chain. They each provide a consistent view of the chain, but
 //! this view isn't necessarily the same on both services.
 //!
-//! The main service offered by the runtime service is [`RuntimeService::subcribe_all`], that
+//! The main service offered by the runtime service is [`RuntimeService::subscribe_all`], that
 //! notifies about new blocks once their runtime is known.
 //!
 //! # Blocks pinning
