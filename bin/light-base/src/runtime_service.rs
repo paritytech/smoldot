@@ -940,17 +940,19 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         subscription_id: SubscriptionId,
         block_hash: &[u8; 32],
     ) -> RuntimeLock<'a, TPlat> {
-        let guarded = self.guarded.lock().await;
+        let mut guarded = self.guarded.lock().await;
 
         let (runtime_index, block_state_root_hash, block_number) = (*guarded
             .pinned_blocks
             .get(&(subscription_id.0, *block_hash))
             .unwrap())
         .clone();
+        guarded.runtimes[runtime_index].num_references += 1;
 
         RuntimeLock {
+            dead: false,
             service: self,
-            guarded,
+            guarded: Some(guarded),
             hash: *block_hash,
             runtime_index,
             block_number,
@@ -975,13 +977,15 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         block_number: u64,
         block_state_trie_root_hash: [u8; 32],
     ) -> RuntimeLock<'a, TPlat> {
-        let guarded = self.guarded.lock().await;
+        let mut guarded = self.guarded.lock().await;
 
         let runtime_index = *guarded.pinned_runtimes.get(&pinned_runtime_id.0).unwrap();
+        guarded.runtimes[runtime_index].num_references += 1;
 
         RuntimeLock {
+            dead: false,
             service: self,
-            guarded,
+            guarded: Some(guarded),
             hash: block_hash,
             runtime_index,
             block_number,
@@ -1224,13 +1228,15 @@ async fn is_near_head_of_chain_heuristic<TPlat: Platform>(
 /// See [`RuntimeService::pinned_block_runtime_call_lock`].
 #[must_use]
 pub struct RuntimeLock<'a, TPlat: Platform> {
+    dead: bool,
+
     service: &'a RuntimeService<TPlat>,
-    guarded: MutexGuard<'a, Guarded<TPlat>>, // TODO: is the lock actually necessary? maybe we can just increase the reference count of the runtime instead, and clone the header+hash
+    guarded: Option<MutexGuard<'a, Guarded<TPlat>>>,
 
     block_number: u64,
     block_state_root_hash: [u8; 32],
     hash: [u8; 32],
-    runtime_index: usize, // TODO: increase the num_references of this runtime beforehand?
+    runtime_index: usize,
 }
 
 impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
@@ -1240,7 +1246,7 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
     }
 
     pub async fn start<'b>(
-        self,
+        mut self,
         method: &'b str,
         parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone + 'b,
     ) -> Result<(RuntimeCallLock<'a, TPlat>, executor::host::HostVmPrototype), RuntimeCallError>
@@ -1249,7 +1255,7 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
 
         // Unlock `guarded` before doing anything that takes a long time, such as the
         // network request below.
-        drop(self.guarded);
+        drop(self.guarded.take().unwrap());
 
         // Perform the call proof request.
         // Note that `guarded` is not locked.
@@ -1280,6 +1286,7 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
             }
         };
 
+        self.dead = true;
         let lock = RuntimeCallLock {
             guarded,
             runtime_index: self.runtime_index,
@@ -1288,6 +1295,20 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
         };
 
         Ok((lock, virtual_machine))
+    }
+}
+
+impl<'a, TPlat: Platform> Drop for RuntimeLock<'a, TPlat> {
+    fn drop(&mut self) {
+        if let Some(guarded) = self.guarded.as_mut() {
+            if guarded.runtimes[self.runtime_index].num_references == 1 {
+                guarded.runtimes.remove(self.runtime_index);
+            } else {
+                guarded.runtimes[self.runtime_index].num_references -= 1;
+            }
+        } else if !self.dead {
+            panic!("dropped RuntimeLock while start is being called");
+        }
     }
 }
 
@@ -1395,6 +1416,12 @@ impl<'a, TPlat: Platform> RuntimeCallLock<'a, TPlat> {
             .as_mut()
             .unwrap()
             .virtual_machine = Some(vm);
+
+        if self.guarded.runtimes[self.runtime_index].num_references == 1 {
+            self.guarded.runtimes.remove(self.runtime_index);
+        } else {
+            self.guarded.runtimes[self.runtime_index].num_references -= 1;
+        }
     }
 }
 
