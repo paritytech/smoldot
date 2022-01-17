@@ -1117,31 +1117,10 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
     /// Returns the specification of the given runtime.
     pub fn specification(&mut self) -> Result<executor::CoreVersion, RuntimeCallError> {
         let guarded = self.guarded.as_mut().unwrap();
-
-        let virtual_machine = match guarded.runtimes[self.runtime_index].runtime.as_mut() {
-            Ok(r) => r.virtual_machine.take().unwrap(),
-            Err(err) => {
-                return Err(RuntimeCallError::InvalidRuntime(err.clone()));
-            }
-        };
-
-        let (runtime_spec, virtual_machine) = match executor::core_version(virtual_machine) {
-            (Ok(spec), vm) => (Ok(spec), vm),
-            (Err(error), vm) => (
-                Err(RuntimeCallError::InvalidRuntime(RuntimeError::CoreVersion(
-                    error,
-                ))),
-                vm,
-            ),
-        };
-
-        guarded.runtimes[self.runtime_index]
-            .runtime
-            .as_mut()
-            .unwrap()
-            .virtual_machine = Some(virtual_machine);
-
-        runtime_spec
+        match guarded.runtimes[self.runtime_index].runtime.as_mut() {
+            Ok(r) => Ok(r.runtime_spec.clone()),
+            Err(err) => Err(RuntimeCallError::InvalidRuntime(err.clone())),
+        }
     }
 
     pub async fn start<'b>(
