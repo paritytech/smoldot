@@ -1237,8 +1237,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 // the runtime to the API user. The API user might then immediately throw away
                 // this runtime, but we don't care enough about this possibility to optimize
                 // this.
-                let (grandpa_warp_sync, error) =
-                    sync.set_virtual_machine_params(code, heap_pages, ExecHint::CompileAheadOfTime);
+                // TODO: make `allow_unresolved_imports` configurable
+                let (grandpa_warp_sync, error) = sync.set_virtual_machine_params(
+                    code,
+                    heap_pages,
+                    ExecHint::CompileAheadOfTime,
+                    false,
+                );
 
                 if let Some(_error) = error {
                     // TODO: error handling

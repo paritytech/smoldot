@@ -32,6 +32,7 @@ export interface Config {
     logCallback: (level: number, target: string, message: string) => void,
     jsonRpcCallback: (response: string, chainId: number) => void,
     databaseContentCallback: (data: string, chainId: number) => void,
+    currentTaskCallback?: (taskName: string | null) => void,
     forbidTcp: boolean,
     forbidWs: boolean,
     forbidNonLocalWs: boolean,
@@ -283,6 +284,22 @@ export default function (config: Config): compat.WasmModuleImports {
                 // TCP
                 connection.socket.write(data);
             }
+        },
+
+        current_task_entered: (ptr: number, len: number) => {
+            const instance = config.instance!;
+
+            ptr >>>= 0;
+            len >>>= 0;
+
+            const taskName = Buffer.from(instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
+            if (config.currentTaskCallback)
+                config.currentTaskCallback(taskName);
+        },
+
+        current_task_exit: () => {
+            if (config.currentTaskCallback)
+                config.currentTaskCallback(null);
         }
     };
 }

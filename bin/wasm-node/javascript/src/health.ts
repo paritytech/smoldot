@@ -105,7 +105,7 @@ export function healthChecker(): HealthChecker {
 class InnerChecker {
     #healthCallback: (health: SmoldotHealth) => void
     #currentHealthCheckId: string | null = null;
-    #currentHealthTimeout: NodeJS.Timeout | null = null; // TODO: NodeJS.Timeout?!?!
+    #currentHealthTimeout: ReturnType<typeof setTimeout> | null = null;
     #currentSubunsubRequestId: string | null = null;
     #currentSubscriptionId: string | null = null;
     #requestToSmoldot: (request: string) => void;

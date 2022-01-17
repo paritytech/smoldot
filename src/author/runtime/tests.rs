@@ -38,6 +38,7 @@ fn block_building_works() {
             code,
             crate::executor::DEFAULT_HEAP_PAGES,
             crate::executor::vm::ExecHint::Oneshot,
+            false,
         )
         .unwrap()
     };

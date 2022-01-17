@@ -200,6 +200,7 @@ impl ConsensusService {
                             module,
                             heap_pages,
                             executor::vm::ExecHint::CompileAheadOfTime, // TODO: probably should be decided by the optimisticsync
+                            false,
                         )
                         .unwrap()
                     },

@@ -518,6 +518,18 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         self.blocks_by_id.contains_key(hash)
     }
 
+    /// Returns the hash of the best block.
+    ///
+    /// Please note that the block with the given hash might not have an associated user data in
+    /// case the best block is equal to the finalized block and all finalized blocks have been
+    /// pruned.
+    pub fn best_block_hash(&self) -> &[u8; 32] {
+        match self.best_block_index {
+            Some(idx) => &self.blocks_tree.get(idx).unwrap().hash,
+            None => &self.blocks_tree_root_hash,
+        }
+    }
+
     /// Returns the user data associated with a given block.
     ///
     /// Returns `None` if the block hash doesn't correspond to a known block.

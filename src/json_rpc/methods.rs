@@ -493,6 +493,10 @@ impl<'a> serde::Deserialize<'a> for HexString {
     {
         let string = String::deserialize(deserializer)?;
 
+        if string.is_empty() {
+            return Ok(HexString(Vec::new()));
+        }
+
         if !string.starts_with("0x") {
             return Err(serde::de::Error::custom(
                 "hexadecimal string doesn't start with 0x",

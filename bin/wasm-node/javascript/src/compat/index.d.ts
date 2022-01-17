@@ -15,10 +15,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// TODO: remove this reference thing /!\ it's completely wrong
+// TODO: the line below is completely wrong but necessary for WebAssembly; see https://github.com/microsoft/TypeScript-DOM-lib-generator/issues/826
 /// <reference lib="dom" />
 
-import type { Socket as TcpSocket, NetConnectOpts } from 'net';
+import type { Socket as TcpSocket, NetConnectOpts } from 'node:net';
 
 export type WasmModuleImports = WebAssembly.ModuleImports;
 
