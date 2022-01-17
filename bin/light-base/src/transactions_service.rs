@@ -962,7 +962,7 @@ async fn validate_transaction<TPlat: Platform>(
     ValidateTransactionError,
 > {
     let runtime_lock = relay_chain_sync
-        .pinned_block_runtime_call_lock(relay_chain_sync_subscription_id, &block_hash)
+        .pinned_block_runtime_lock(relay_chain_sync_subscription_id, &block_hash)
         .await;
 
     log::debug!(
