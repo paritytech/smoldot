@@ -2045,7 +2045,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 let mut runtime = self
                     .runtime_service
                     .pinned_runtime_lock(
-                        pinned_runtime_id,
+                        pinned_runtime_id.clone(),
                         block_hash,
                         block_number,
                         state_trie_root_hash,
@@ -3007,7 +3007,7 @@ impl<TPlat: Platform> Background<TPlat> {
     ) -> Result<Vec<u8>, RuntimeCallError> {
         // This function contains two steps: obtaining the runtime of the block in question,
         // then performing the actual call. The first step is the longest and most difficult.
-        let (runtime_call_lock, virtual_machine) = {
+        let precall = {
             let cache_lock = self.cache.lock().await;
 
             // Try to find the block in the cache of recent blocks. Most of the time, the call target
@@ -3027,9 +3027,6 @@ impl<TPlat: Platform> Background<TPlat> {
                 drop::<futures::lock::MutexGuard<_>>(cache_lock);
 
                 runtime_call_lock
-                    .start(function_to_call, call_parameters.clone())
-                    .await
-                    .unwrap() // TODO: don't unwrap
             } else {
                 // Second situation: the block is not in the cache of recent blocks. This isn't great.
                 drop::<futures::lock::MutexGuard<_>>(cache_lock);
@@ -3072,7 +3069,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 let precall = self
                     .runtime_service
                     .pinned_runtime_lock(
-                        pinned_runtime_id,
+                        pinned_runtime_id.clone(),
                         *block_hash,
                         block_number,
                         state_trie_root_hash,
@@ -3083,11 +3080,13 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.runtime_service.unpin_runtime(pinned_runtime_id).await;
 
                 precall
-                    .start(function_to_call, call_parameters.clone())
-                    .await
-                    .unwrap() // TODO: don't unwrap
             }
         };
+
+        let (runtime_call_lock, virtual_machine) = precall
+            .start(function_to_call, call_parameters.clone())
+            .await
+            .unwrap(); // TODO: don't unwrap
 
         // Now that we have obtained the virtual machine, we can perform the call.
         // This is a CPU-only operation that executes the virtual machine.
@@ -3775,7 +3774,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     )
                     .await;
 
-                let pre_runtime_call = if let Some(pre_runtime_call) = pre_runtime_call {
+                let pre_runtime_call = if let Some(pre_runtime_call) = &pre_runtime_call {
                     Some(
                         pre_runtime_call
                             .start(&function_to_call, call_parameters.iter().map(|c| &c.0))

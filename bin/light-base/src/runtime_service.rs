@@ -69,7 +69,13 @@ use smoldot::{
     network::protocol,
     trie::{self, proof_verify},
 };
-use std::{collections::BTreeMap, iter, mem, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    iter, mem,
+    pin::Pin,
+    sync::{Arc, Weak},
+    time::Duration,
+};
 
 /// Configuration for a runtime service.
 pub struct Config<TPlat: Platform> {
@@ -90,8 +96,8 @@ pub struct Config<TPlat: Platform> {
 }
 
 /// Identifies a runtime currently pinned within a [`RuntimeService`].
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PinnedRuntimeId(u64);
+#[derive(Clone)]
+pub struct PinnedRuntimeId(Arc<Runtime>);
 
 /// See [the module-level documentation](..).
 pub struct RuntimeService<TPlat: Platform> {
@@ -147,8 +153,6 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             tree,
             runtimes: slab::Slab::with_capacity(2),
             pinned_blocks: BTreeMap::new(),
-            pinned_runtimes: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()), // TODO: capacity?
-            next_pinned_runtime_id: 0,
         }));
 
         // Spawns a task that runs in the background and updates the content of the mutex.
@@ -618,11 +622,10 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 let decoded_finalized_block =
                     header::decode(&finalized_block.scale_encoded_header).unwrap();
 
-                guarded_lock.runtimes[*tree.finalized_async_user_data()].num_references += 1;
                 guarded_lock.pinned_blocks.insert(
                     (subscription_id, finalized_block.hash),
                     (
-                        *tree.finalized_async_user_data(),
+                        tree.finalized_async_user_data().clone(),
                         *decoded_finalized_block.state_root,
                         decoded_finalized_block.number,
                     ),
@@ -630,12 +633,12 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
                 tree.input_iter_ancestry_order()
                     .filter_map(|block| {
-                        let runtime_index = *block.async_op_user_data?;
+                        let runtime = block.async_op_user_data?.clone();
                         let block_hash = block.user_data.hash;
-                        let parent_runtime_index = tree
+                        let parent_runtime = tree
                             .parent(block.id)
-                            .map_or(*tree.finalized_async_user_data(), |parent_idx| {
-                                *tree.block_async_user_data(parent_idx).unwrap()
+                            .map_or(tree.finalized_async_user_data().clone(), |parent_idx| {
+                                tree.block_async_user_data(parent_idx).unwrap().clone()
                             });
 
                         let parent_hash = *header::decode(&block.user_data.scale_encoded_header)
@@ -651,11 +654,10 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
                         let decoded_header =
                             header::decode(&block.user_data.scale_encoded_header).unwrap();
-                        guarded_lock.runtimes[runtime_index].num_references += 1;
                         guarded_lock.pinned_blocks.insert(
                             (subscription_id, block_hash),
                             (
-                                runtime_index,
+                                runtime.clone(),
                                 *decoded_header.state_root,
                                 decoded_header.number,
                             ),
@@ -665,9 +667,9 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                             is_new_best: block.is_output_best,
                             parent_hash,
                             scale_encoded_header: block.user_data.scale_encoded_header.clone(),
-                            new_runtime: if runtime_index != parent_runtime_index {
+                            new_runtime: if !Arc::ptr_eq(&runtime, &parent_runtime) {
                                 Some(
-                                    guarded_lock.runtimes[runtime_index]
+                                    runtime
                                         .runtime
                                         .as_ref()
                                         .map(|rt| rt.runtime_spec.clone())
@@ -724,7 +726,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 tree, ..
             } = &guarded_lock.tree
             {
-                guarded_lock.runtimes[*tree.finalized_async_user_data()]
+                tree.finalized_async_user_data()
                     .runtime
                     .as_ref()
                     .map(|rt| rt.runtime_spec.clone())
@@ -763,29 +765,23 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ) {
         let mut guarded_lock = guarded.lock().await;
 
-        let (runtime_index, _, _) = match guarded_lock
+        if guarded_lock
             .pinned_blocks
             .remove(&(subscription_id.0, *block_hash))
+            .is_none()
         {
-            Some(b) => b,
-            None => {
-                // Cold path.
-                if guarded_lock
-                    .all_blocks_subscriptions
-                    .contains_key(&subscription_id.0)
-                {
-                    panic!("block already unpinned");
-                } else {
-                    return;
-                }
+            // Cold path.
+            if guarded_lock
+                .all_blocks_subscriptions
+                .contains_key(&subscription_id.0)
+            {
+                panic!("block already unpinned");
+            } else {
+                return;
             }
         };
 
-        if guarded_lock.runtimes[runtime_index].num_references == 1 {
-            guarded_lock.runtimes.remove(runtime_index);
-        } else {
-            guarded_lock.runtimes[runtime_index].num_references -= 1;
-        }
+        guarded_lock.runtimes.retain(|_, rt| rt.strong_count() > 0);
 
         let (_, pinned_remaining) = guarded_lock
             .all_blocks_subscriptions
@@ -809,21 +805,18 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         subscription_id: SubscriptionId,
         block_hash: &[u8; 32],
     ) -> RuntimeLock<'a, TPlat> {
-        let mut guarded = self.guarded.lock().await;
+        let guarded = self.guarded.lock().await;
 
-        let (runtime_index, block_state_root_hash, block_number) = (*guarded
+        let (runtime, block_state_root_hash, block_number) = (*guarded
             .pinned_blocks
             .get(&(subscription_id.0, *block_hash))
             .unwrap())
         .clone();
-        guarded.runtimes[runtime_index].num_references += 1;
 
         RuntimeLock {
-            dead: false,
             service: self,
-            guarded: Some(guarded),
             hash: *block_hash,
-            runtime_index,
+            runtime,
             block_number,
             block_state_root_hash,
         }
@@ -846,17 +839,10 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         block_number: u64,
         block_state_trie_root_hash: [u8; 32],
     ) -> RuntimeLock<'a, TPlat> {
-        let mut guarded = self.guarded.lock().await;
-
-        let runtime_index = *guarded.pinned_runtimes.get(&pinned_runtime_id.0).unwrap();
-        guarded.runtimes[runtime_index].num_references += 1;
-
         RuntimeLock {
-            dead: false,
             service: self,
-            guarded: Some(guarded),
             hash: block_hash,
-            runtime_index,
+            runtime: pinned_runtime_id.0.clone(),
             block_number,
             block_state_root_hash: block_state_trie_root_hash,
         }
@@ -877,33 +863,24 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         let existing_runtime = guarded
             .runtimes
             .iter()
-            .find(|(_, rt)| rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages)
-            .map(|(id, _)| id);
+            .filter_map(|(_, rt)| rt.upgrade())
+            .find(|rt| rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages);
 
-        let runtime_index = if let Some(existing_runtime) = existing_runtime {
+        let runtime = if let Some(existing_runtime) = existing_runtime {
             existing_runtime
         } else {
             // No identical runtime was found. Try compiling the new runtime.
             let runtime = SuccessfulRuntime::from_storage(&storage_code, &storage_heap_pages).await;
-            guarded.runtimes.insert(Runtime {
-                num_references: 0, // Incremented below.
+            let runtime = Arc::new(Runtime {
                 heap_pages: storage_heap_pages,
                 runtime_code: storage_code,
                 runtime,
-            })
+            });
+            guarded.runtimes.insert(Arc::downgrade(&runtime));
+            runtime
         };
 
-        guarded.runtimes[runtime_index].num_references += 1;
-
-        let pinned_runtime_id = guarded.next_pinned_runtime_id;
-        guarded.next_pinned_runtime_id += 1;
-
-        let _previous_value = guarded
-            .pinned_runtimes
-            .insert(pinned_runtime_id, runtime_index);
-        debug_assert!(_previous_value.is_none());
-
-        PinnedRuntimeId(pinned_runtime_id)
+        PinnedRuntimeId(runtime)
     }
 
     /// Un-pins a previously-pinned runtime.
@@ -913,14 +890,9 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// Panics if the provided [`PinnedRuntimeId`] is stale or invalid.
     ///
     pub async fn unpin_runtime(&self, id: PinnedRuntimeId) {
-        let mut guarded = self.guarded.lock().await;
-
-        let runtime_index = guarded.pinned_runtimes.remove(&id.0).unwrap();
-        if guarded.runtimes[runtime_index].num_references == 1 {
-            guarded.runtimes.remove(runtime_index);
-        } else {
-            guarded.runtimes[runtime_index].num_references -= 1;
-        }
+        // Nothing to do.
+        // TODO: doesn't check whether id is stale
+        drop(id);
     }
 
     /// Returns true if it is believed that we are near the head of the chain.
@@ -1095,17 +1067,15 @@ async fn is_near_head_of_chain_heuristic<TPlat: Platform>(
 }
 
 /// See [`RuntimeService::pinned_block_runtime_lock`].
+// TODO: rename, as it doesn't lock anything anymore
 #[must_use]
 pub struct RuntimeLock<'a, TPlat: Platform> {
-    dead: bool,
-
     service: &'a RuntimeService<TPlat>,
-    guarded: Option<MutexGuard<'a, Guarded<TPlat>>>,
 
     block_number: u64,
     block_state_root_hash: [u8; 32],
     hash: [u8; 32],
-    runtime_index: usize,
+    runtime: Arc<Runtime>,
 }
 
 impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
@@ -1116,24 +1086,18 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
 
     /// Returns the specification of the given runtime.
     pub fn specification(&mut self) -> Result<executor::CoreVersion, RuntimeCallError> {
-        let guarded = self.guarded.as_mut().unwrap();
-        match guarded.runtimes[self.runtime_index].runtime.as_mut() {
+        match self.runtime.runtime.as_ref() {
             Ok(r) => Ok(r.runtime_spec.clone()),
             Err(err) => Err(RuntimeCallError::InvalidRuntime(err.clone())),
         }
     }
 
     pub async fn start<'b>(
-        mut self,
+        &'a self,
         method: &'b str,
         parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone + 'b,
-    ) -> Result<(RuntimeCallLock<'a, TPlat>, executor::host::HostVmPrototype), RuntimeCallError>
-    {
+    ) -> Result<(RuntimeCallLock<'a>, executor::host::HostVmPrototype), RuntimeCallError> {
         // TODO: DRY :-/ this whole thing is messy
-
-        // Unlock `guarded` before doing anything that takes a long time, such as the
-        // network request below.
-        drop(self.guarded.take().unwrap());
 
         // Perform the call proof request.
         // Note that `guarded` is not locked.
@@ -1154,20 +1118,19 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
             .await
             .map_err(RuntimeCallError::CallProof);
 
-        // Lock `guarded` again now that the call is finished.
-        let mut guarded = self.service.guarded.lock().await;
-
-        let virtual_machine = match guarded.runtimes[self.runtime_index].runtime.as_mut() {
-            Ok(r) => r.virtual_machine.take().unwrap(),
+        let (guarded, virtual_machine) = match self.runtime.runtime.as_ref() {
+            Ok(r) => {
+                let mut lock = r.virtual_machine.lock().await;
+                let vm = lock.take().unwrap();
+                (lock, vm)
+            }
             Err(err) => {
                 return Err(RuntimeCallError::InvalidRuntime(err.clone()));
             }
         };
 
-        self.dead = true;
         let lock = RuntimeCallLock {
             guarded,
-            runtime_index: self.runtime_index,
             block_state_root_hash: self.block_state_root_hash,
             call_proof,
         };
@@ -1176,30 +1139,15 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
     }
 }
 
-impl<'a, TPlat: Platform> Drop for RuntimeLock<'a, TPlat> {
-    fn drop(&mut self) {
-        if let Some(guarded) = self.guarded.as_mut() {
-            if guarded.runtimes[self.runtime_index].num_references == 1 {
-                guarded.runtimes.remove(self.runtime_index);
-            } else {
-                guarded.runtimes[self.runtime_index].num_references -= 1;
-            }
-        } else if !self.dead {
-            panic!("dropped RuntimeLock while start is being called");
-        }
-    }
-}
-
 /// See [`RuntimeService::pinned_block_runtime_lock`].
 #[must_use]
-pub struct RuntimeCallLock<'a, TPlat: Platform> {
-    guarded: MutexGuard<'a, Guarded<TPlat>>,
-    runtime_index: usize,
+pub struct RuntimeCallLock<'a> {
+    guarded: MutexGuard<'a, Option<executor::host::HostVmPrototype>>,
     block_state_root_hash: [u8; 32],
     call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
 }
 
-impl<'a, TPlat: Platform> RuntimeCallLock<'a, TPlat> {
+impl<'a> RuntimeCallLock<'a> {
     /// Returns the storage root of the block the call is being made against.
     pub fn block_storage_root(&self) -> &[u8; 32] {
         &self.block_state_root_hash
@@ -1289,29 +1237,14 @@ impl<'a, TPlat: Platform> RuntimeCallLock<'a, TPlat> {
     ///
     /// This method **must** be called.
     pub fn unlock(mut self, vm: executor::host::HostVmPrototype) {
-        self.guarded.runtimes[self.runtime_index]
-            .runtime
-            .as_mut()
-            .unwrap()
-            .virtual_machine = Some(vm);
-
-        if self.guarded.runtimes[self.runtime_index].num_references == 1 {
-            self.guarded.runtimes.remove(self.runtime_index);
-        } else {
-            self.guarded.runtimes[self.runtime_index].num_references -= 1;
-        }
+        debug_assert!(self.guarded.is_none());
+        *self.guarded = Some(vm);
     }
 }
 
-impl<'a, TPlat: Platform> Drop for RuntimeCallLock<'a, TPlat> {
+impl<'a> Drop for RuntimeCallLock<'a> {
     fn drop(&mut self) {
-        let vm = &self.guarded.runtimes[self.runtime_index]
-            .runtime
-            .as_ref()
-            .unwrap()
-            .virtual_machine;
-
-        if vm.is_none() {
+        if self.guarded.is_none() {
             // The [`RuntimeCallLock`] has been destroyed without being properly unlocked.
             panic!()
         }
@@ -1381,15 +1314,15 @@ struct Guarded<TPlat: Platform> {
     /// after the latest best block update.
     best_near_head_of_chain: bool,
 
-    /// List of runtimes referenced by the tree in [`GuardedInner`], by [`Guarded::pinned_blocks`],
-    /// and by [`Guarded::pinned_runtimes`].
-    runtimes: slab::Slab<Runtime>,
-
-    /// Runtimes pinned by the API user.
-    pinned_runtimes: hashbrown::HashMap<u64, usize, fnv::FnvBuildHasher>,
-
-    /// Identifier of the next pinned runtime for [`Guarded::pinned_runtimes`].
-    next_pinned_runtime_id: u64,
+    /// List of runtimes referenced by the tree in [`GuardedInner`] and by
+    /// [`Guarded::pinned_blocks`].
+    ///
+    /// Might contains obsolete values (i.e. stale `Weak`s) and thus must be cleaned from time to
+    /// time.
+    ///
+    /// Because this list shouldn't contain many entries, it is acceptable to iterator over all
+    /// the elements.
+    runtimes: slab::Slab<Weak<Runtime>>,
 
     /// Tree of blocks received from the sync service. Keeps track of which block has been
     /// reported to the outer API.
@@ -1405,7 +1338,7 @@ struct Guarded<TPlat: Platform> {
     /// Keys are `(subscription_id, block_hash)`. Values are indices within [`Guarded::runtimes`],
     /// state trie root hashes, and block numbers.
     // TODO: use structs instead of tuples
-    pinned_blocks: BTreeMap<(u64, [u8; 32]), (usize, [u8; 32], u64)>,
+    pinned_blocks: BTreeMap<(u64, [u8; 32]), (Arc<Runtime>, [u8; 32], u64)>,
 }
 
 enum GuardedInner<TPlat: Platform> {
@@ -1415,7 +1348,7 @@ enum GuardedInner<TPlat: Platform> {
         ///
         /// The asynchronous operation user data is a `usize` corresponding to the index within
         /// [`Guarded::runtimes`].
-        tree: async_tree::AsyncTree<TPlat::Instant, Block, usize>,
+        tree: async_tree::AsyncTree<TPlat::Instant, Block, Arc<Runtime>>,
 
         /// Finalized block. Outside of the tree.
         finalized_block: Block,
@@ -1432,7 +1365,7 @@ enum GuardedInner<TPlat: Platform> {
         /// finalized block.
         // TODO: needs to be Option?
         // TODO: explain better
-        tree: Option<async_tree::AsyncTree<TPlat::Instant, Block, Option<usize>>>,
+        tree: Option<async_tree::AsyncTree<TPlat::Instant, Block, Option<Arc<Runtime>>>>,
     },
 }
 
@@ -1504,15 +1437,14 @@ async fn run_background<TPlat: Platform>(
                 )
                 .unwrap();
 
-                let runtime = Runtime {
-                    num_references: 1, // Added below.
+                let runtime = Arc::new(Runtime {
                     runtime_code: finalized_block_runtime.storage_code,
                     heap_pages: finalized_block_runtime.storage_heap_pages,
                     runtime: SuccessfulRuntime::from_virtual_machine(
                         finalized_block_runtime.virtual_machine,
                     )
                     .await,
-                };
+                });
 
                 match &runtime.runtime {
                     Ok(runtime) => {
@@ -1542,7 +1474,7 @@ async fn run_background<TPlat: Platform>(
                     tree: {
                         let mut tree =
                             async_tree::AsyncTree::<_, Block, _>::new(async_tree::Config {
-                                finalized_async_user_data: lock.runtimes.insert(runtime),
+                                finalized_async_user_data: runtime,
                                 retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
                             });
 
@@ -1671,18 +1603,9 @@ async fn run_background<TPlat: Platform>(
                                     tree, finalized_block,
                                 } => {
                                     let parent_index = if new_block.parent_hash == finalized_block.hash {
-                                        if same_runtime_as_parent {
-                                            guarded.runtimes[*tree.finalized_async_user_data()].num_references += 1;
-                                        }
                                         None
                                     } else {
-                                        let index = tree.input_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id;
-                                        if same_runtime_as_parent {
-                                            if let Some(runtime_index) = tree.block_async_user_data(index) {
-                                                guarded.runtimes[*runtime_index].num_references += 1;
-                                            }
-                                        }
-                                        Some(index)
+                                        Some(tree.input_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id)
                                     };
 
                                     tree.input_insert_block(Block {
@@ -1692,11 +1615,6 @@ async fn run_background<TPlat: Platform>(
                                 }
                                 GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
                                     let parent_index = tree.input_iter_unordered().find(|block| block.user_data.hash == new_block.parent_hash).unwrap().id;
-                                    if same_runtime_as_parent {
-                                        if let Some(runtime_index) = tree.block_async_user_data(parent_index) {
-                                            guarded.runtimes[runtime_index.unwrap()].num_references += 1;
-                                        }
-                                    }
                                     tree.input_insert_block(Block {
                                         hash: header::hash_from_scale_encoded_header(&new_block.scale_encoded_header),
                                         scale_encoded_header: new_block.scale_encoded_header,
@@ -1841,14 +1759,16 @@ impl<TPlat: Platform> Background<TPlat> {
     ) {
         let mut guarded = self.guarded.lock().await;
 
+        guarded.runtimes.retain(|_, rt| rt.strong_count() > 0);
+
         // Try to find an existing identical runtime.
         let existing_runtime = guarded
             .runtimes
             .iter()
-            .find(|(_, rt)| rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages)
-            .map(|(id, _)| id);
+            .filter_map(|(_, rt)| rt.upgrade())
+            .find(|rt| rt.runtime_code == storage_code && rt.heap_pages == storage_heap_pages);
 
-        let runtime_index = if let Some(existing_runtime) = existing_runtime {
+        let runtime = if let Some(existing_runtime) = existing_runtime {
             existing_runtime
         } else {
             // No identical runtime was found. Try compiling the new runtime.
@@ -1873,28 +1793,24 @@ impl<TPlat: Platform> Background<TPlat> {
                 }
             }
 
-            guarded.runtimes.insert(Runtime {
-                num_references: 0, // Incremented below.
+            let runtime = Arc::new(Runtime {
                 heap_pages: storage_heap_pages,
                 runtime_code: storage_code,
                 runtime,
-            })
+            });
+
+            guarded.runtimes.insert(Arc::downgrade(&runtime));
+            runtime
         };
 
-        let blocks = match &mut guarded.tree {
+        match &mut guarded.tree {
             GuardedInner::FinalizedBlockRuntimeKnown { tree, .. } => {
-                tree.async_op_finished(async_op_id, runtime_index)
+                tree.async_op_finished(async_op_id, runtime);
             }
             GuardedInner::FinalizedBlockRuntimeUnknown { tree: Some(tree) } => {
-                tree.async_op_finished(async_op_id, Some(runtime_index))
+                tree.async_op_finished(async_op_id, Some(runtime));
             }
             _ => unreachable!(),
-        };
-
-        guarded.runtimes[runtime_index].num_references += blocks.len();
-
-        if blocks.is_empty() {
-            guarded.runtimes.retain(|_, rt| rt.num_references > 0);
         }
 
         self.advance_and_notify_subscribers(&mut guarded);
@@ -1912,7 +1828,6 @@ impl<TPlat: Platform> Background<TPlat> {
                         user_data: new_finalized,
                         best_block_index,
                         pruned_blocks,
-                        former_finalized_async_op_user_data: former_finalized_runtime_index,
                         ..
                     }) => {
                         *finalized_block = new_finalized;
@@ -1925,13 +1840,6 @@ impl<TPlat: Platform> Background<TPlat> {
                             HashDisplay(&finalized_block.hash), HashDisplay(&best_block_hash)
                         );
 
-                        guarded.runtimes[former_finalized_runtime_index].num_references -= 1;
-                        for (_, _, runtime_index) in &pruned_blocks {
-                            if let Some(runtime_index) = *runtime_index {
-                                guarded.runtimes[runtime_index].num_references -= 1;
-                            }
-                        }
-
                         Notification::Finalized {
                             best_block_hash,
                             hash: finalized_block.hash,
@@ -1943,7 +1851,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     }
                     Some(async_tree::OutputUpdate::Block(block)) => {
                         let block_index = block.index;
-                        let block_runtime_index = *block.async_op_user_data;
+                        let block_runtime = block.async_op_user_data.clone();
                         let block_hash = block.user_data.hash;
                         let scale_encoded_header = block.user_data.scale_encoded_header.clone();
                         let is_new_best = block.is_new_best;
@@ -1953,10 +1861,10 @@ impl<TPlat: Platform> Background<TPlat> {
                             (decoded.number, *decoded.state_root)
                         };
 
-                        let parent_runtime_index = tree
+                        let parent_runtime = tree
                             .parent(block_index)
-                            .map_or(*tree.finalized_async_user_data(), |idx| {
-                                *tree.block_async_user_data(idx).unwrap()
+                            .map_or(tree.finalized_async_user_data().clone(), |idx| {
+                                tree.block_async_user_data(idx).unwrap().clone()
                             });
 
                         log::debug!(
@@ -1972,9 +1880,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                 .map_or(finalized_block.hash, |idx| tree.block_user_data(idx).hash),
                             is_new_best,
                             scale_encoded_header,
-                            new_runtime: if parent_runtime_index != block_runtime_index {
+                            new_runtime: if !Arc::ptr_eq(&parent_runtime, &block_runtime) {
                                 Some(
-                                    guarded.runtimes[block_runtime_index]
+                                    block_runtime
                                         .runtime
                                         .as_ref()
                                         .map(|rt| rt.runtime_spec.clone())
@@ -1996,10 +1904,9 @@ impl<TPlat: Platform> Background<TPlat> {
 
                             if sender.try_send(notif.clone()).is_ok() {
                                 *pinned_remaining -= 1;
-                                guarded.runtimes[block_runtime_index].num_references += 1;
                                 guarded.pinned_blocks.insert(
                                     (*subscription_id, block_hash),
-                                    (block_runtime_index, block_state_root_hash, block_number),
+                                    (block_runtime.clone(), block_state_root_hash, block_number),
                                 );
                             } else {
                                 to_remove.push(*subscription_id);
@@ -2058,12 +1965,6 @@ impl<TPlat: Platform> Background<TPlat> {
                         };
 
                         // TODO: doesn't report existing blocks /!\
-
-                        for (_, _, runtime_index) in &pruned_blocks {
-                            if let Some(Some(runtime_index)) = *runtime_index {
-                                guarded.runtimes[runtime_index].num_references -= 1;
-                            }
-                        }
 
                         Notification::Finalized {
                             best_block_hash,
@@ -2238,15 +2139,11 @@ impl<TPlat: Platform> Background<TPlat> {
         // Clean up unused runtimes to free up resources.
         guarded
             .runtimes
-            .retain(|_, runtime| runtime.num_references > 0);
+            .retain(|_, runtime| runtime.strong_count() == 0);
     }
 }
 
 struct Runtime {
-    /// Number of items in [`Guarded::tree`], [`Guarded::pinned_blocks`], and
-    /// [`Guarded::pinned_runtimes`] that reference this runtime.
-    num_references: usize,
-
     /// Successfully-compiled runtime and all its information. Can contain an error if an error
     /// happened, including a problem when obtaining the runtime specs.
     runtime: Result<SuccessfulRuntime, RuntimeError>,
@@ -2275,7 +2172,7 @@ struct SuccessfulRuntime {
     /// Virtual machine itself, to perform additional calls.
     ///
     /// Always `Some`, except for temporary extractions necessary to execute the VM.
-    virtual_machine: Option<executor::host::HostVmPrototype>,
+    virtual_machine: Mutex<Option<executor::host::HostVmPrototype>>,
 }
 
 impl SuccessfulRuntime {
@@ -2317,7 +2214,7 @@ impl SuccessfulRuntime {
 
         Ok(SuccessfulRuntime {
             runtime_spec,
-            virtual_machine: Some(vm),
+            virtual_machine: Mutex::new(Some(vm)),
         })
     }
 }
