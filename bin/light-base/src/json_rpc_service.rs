@@ -1267,44 +1267,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::state_getRuntimeVersion { at } => {
-                let runtime_spec = if let Some(at) = at {
-                    self.runtime_service.runtime_version_of_block(&at.0).await
-                } else {
-                    self.runtime_service
-                        .best_block_runtime()
-                        .await
-                        .map_err(runtime_service::RuntimeCallError::InvalidRuntime)
-                };
-
-                let response = match runtime_spec {
-                    Ok(runtime_spec) => {
-                        let runtime_spec = runtime_spec.decode();
-                        methods::Response::state_getRuntimeVersion(methods::RuntimeVersion {
-                            spec_name: runtime_spec.spec_name.into(),
-                            impl_name: runtime_spec.impl_name.into(),
-                            authoring_version: u64::from(runtime_spec.authoring_version),
-                            spec_version: u64::from(runtime_spec.spec_version),
-                            impl_version: u64::from(runtime_spec.impl_version),
-                            transaction_version: runtime_spec.transaction_version.map(u64::from),
-                            apis: runtime_spec
-                                .apis
-                                .map(|api| {
-                                    (methods::HexString(api.name_hash.to_vec()), api.version)
-                                })
-                                .collect(),
-                        })
-                        .to_json_response(request_id)
-                    }
-                    Err(error) => json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                        None,
-                    ),
-                };
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
-                    .await;
+                self.state_get_runtime_version(request_id, &state_machine_request_id, at.as_ref().map(|h| &h.0)).await;
             }
             methods::MethodCall::system_accountNextIndex { account } => {
                 self.account_next_index(request_id, &state_machine_request_id, account).await;
@@ -1992,6 +1955,133 @@ impl<TPlat: Platform> Background<TPlat> {
                     None,
                 )
             }
+        };
+
+        self.requests_subscriptions
+            .respond(&state_machine_request_id, response)
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_getRuntimeVersion`].
+    async fn state_get_runtime_version(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        block_hash: Option<&[u8; 32]>,
+    ) {
+        let block_hash = match block_hash {
+            Some(h) => *h,
+            None => header::hash_from_scale_encoded_header(
+                &self.runtime_service.subscribe_best().await.0,
+            ),
+        };
+
+        // This function contains two steps: obtaining the runtime of the block in question,
+        // then obtaining the specification. The first step is the longest and most difficult.
+        let specification = {
+            let cache_lock = self.cache.lock().await;
+
+            // Try to find the block in the cache of recent blocks. Most of the time, the call
+            // target should be in there.
+            if cache_lock.recent_pinned_blocks.contains(&block_hash) {
+                // The runtime service has the block pinned, meaning that we can ask the runtime
+                // service for the specification.
+                let mut runtime_call_lock = self
+                    .runtime_service
+                    .pinned_block_runtime_lock(
+                        cache_lock.subscription_id.clone().unwrap(),
+                        &block_hash,
+                    )
+                    .await;
+
+                // Unlock the cache early. While the call to `specification` shouldn't be very
+                // long, it doesn't cost anything to unlock this mutex early.
+                drop::<futures::lock::MutexGuard<_>>(cache_lock);
+
+                // Obtain the specification of that runtime.
+                runtime_call_lock.specification()
+            } else {
+                // Second situation: the block is not in the cache of recent blocks. This
+                // isn't great.
+                drop::<futures::lock::MutexGuard<_>>(cache_lock);
+
+                // The only solution is to download the runtime of the block in question from the network.
+
+                // TODO: considering caching the runtime code the same way as the state trie root hash
+                // TODO: DRY with runtime_call()
+
+                // In order to grab the runtime code and perform the call network request, we need
+                // to know the state trie root hash and the height of the block.
+                let (state_trie_root_hash, block_number) =
+                    self.state_trie_root_hash(&block_hash).await.unwrap(); // TODO: don't unwrap
+
+                // Download the runtime of this block. This takes a long time as the runtime is rather
+                // big (around 1MiB in general).
+                let (storage_code, storage_heap_pages) = {
+                    let mut code_query_result = self
+                        .sync_service
+                        .clone()
+                        .storage_query(
+                            &block_hash,
+                            &state_trie_root_hash,
+                            iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+                        )
+                        .await
+                        .map_err(runtime_service::RuntimeCallError::StorageQuery)
+                        .map_err(RuntimeCallError::Call)
+                        .unwrap(); // TODO: don't unwrap /!\
+                    let heap_pages = code_query_result.pop().unwrap();
+                    let code = code_query_result.pop().unwrap();
+                    (code, heap_pages)
+                };
+
+                // Give the code and heap pages to the runtime service. The runtime service will
+                // try to find any similar runtime it might have, and if not will compile it.
+                let pinned_runtime_id = self
+                    .runtime_service
+                    .compile_and_pin_runtime(storage_code, storage_heap_pages)
+                    .await;
+
+                let mut runtime = self
+                    .runtime_service
+                    .pinned_runtime_lock(
+                        pinned_runtime_id,
+                        block_hash,
+                        block_number,
+                        state_trie_root_hash,
+                    )
+                    .await;
+
+                // TODO: consider keeping pinned runtimes in a cache instead
+                self.runtime_service.unpin_runtime(pinned_runtime_id).await;
+
+                runtime.specification()
+            }
+        };
+
+        // Now that we have the runtime specification, turn it into a JSON-RPC response.
+        let response = match specification {
+            Ok(spec) => {
+                let runtime_spec = spec.decode();
+                methods::Response::state_getRuntimeVersion(methods::RuntimeVersion {
+                    spec_name: runtime_spec.spec_name.into(),
+                    impl_name: runtime_spec.impl_name.into(),
+                    authoring_version: u64::from(runtime_spec.authoring_version),
+                    spec_version: u64::from(runtime_spec.spec_version),
+                    impl_version: u64::from(runtime_spec.impl_version),
+                    transaction_version: runtime_spec.transaction_version.map(u64::from),
+                    apis: runtime_spec
+                        .apis
+                        .map(|api| (methods::HexString(api.name_hash.to_vec()), api.version))
+                        .collect(),
+                })
+                .to_json_response(request_id)
+            }
+            Err(error) => json_rpc::parse::build_error_response(
+                request_id,
+                json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                None,
+            ),
         };
 
         self.requests_subscriptions
@@ -2927,7 +3017,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 // service to perform the call.
                 let runtime_call_lock = self
                     .runtime_service
-                    .pinned_block_runtime_call_lock(
+                    .pinned_block_runtime_lock(
                         cache_lock.subscription_id.clone().unwrap(),
                         block_hash,
                     )
@@ -2981,7 +3071,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 let precall = self
                     .runtime_service
-                    .pinned_runtime_call_lock(
+                    .pinned_runtime_lock(
                         pinned_runtime_id,
                         *block_hash,
                         block_number,
@@ -3629,10 +3719,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                         Some(
                             me.runtime_service
-                                .pinned_block_runtime_call_lock(
-                                    runtime_service_subscribe_all,
-                                    &hash.0,
-                                )
+                                .pinned_block_runtime_lock(runtime_service_subscribe_all, &hash.0)
                                 .await,
                         )
                     } else {
@@ -3807,24 +3894,6 @@ impl<TPlat: Platform> Background<TPlat> {
                             subscription: &subscription_id,
                             result: methods::ChainHeadCallEvent::Error {
                                 error: &error.to_string(),
-                            },
-                        }
-                        .to_json_call_object_parameters(None)
-                    }
-                    Some(Err(runtime_service::RuntimeCallError::NetworkBlockRequest)) => {
-                        methods::ServerToClient::chainHead_unstable_callEvent {
-                            subscription: &subscription_id,
-                            result: methods::ChainHeadCallEvent::Inaccessible {
-                                error: "couldn't retrieve proof from network",
-                            },
-                        }
-                        .to_json_call_object_parameters(None)
-                    }
-                    Some(Err(runtime_service::RuntimeCallError::InvalidBlockHeader(error))) => {
-                        methods::ServerToClient::chainHead_unstable_callEvent {
-                            subscription: &subscription_id,
-                            result: methods::ChainHeadCallEvent::Error {
-                                error: &format!("invalid block header format: {}", error),
                             },
                         }
                         .to_json_call_object_parameters(None)
@@ -4093,7 +4162,7 @@ enum StorageQueryError {
     StorageRetrieval(sync_service::StorageQueryError),
 }
 
-#[derive(derive_more::Display)]
+#[derive(Debug, derive_more::Display, Clone)]
 enum RuntimeCallError {
     Call(runtime_service::RuntimeCallError),
     StartError(host::StartErr),
