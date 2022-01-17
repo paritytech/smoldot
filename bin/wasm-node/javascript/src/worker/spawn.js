@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { Worker } from 'worker_threads';
+import { Worker } from 'node:worker_threads';
 
 export default function () {
     // The line of code below (`new Worker(...)`) is designed to hopefully work across all

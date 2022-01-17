@@ -19,10 +19,10 @@
 //
 // A rule in the `package.json` overrides it with `index-browser-override.js` when in a browser.
 
-import { parentPort } from 'worker_threads';
-import { hrtime } from 'process';
-import { createConnection as nodeCreateConnection } from 'net';
-import { randomFillSync } from 'crypto';
+import { parentPort } from 'node:worker_threads';
+import { hrtime } from 'node:process';
+import { createConnection as nodeCreateConnection } from 'node:net';
+import { randomFillSync } from 'node:crypto';
 
 export function workerOnMessage(worker, callback) {
     worker.on('message', callback);
