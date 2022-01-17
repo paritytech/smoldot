@@ -1094,7 +1094,7 @@ async fn is_near_head_of_chain_heuristic<TPlat: Platform>(
     guarded.lock().await.best_near_head_of_chain
 }
 
-/// See [`RuntimeService::pinned_block_runtime_call_lock`].
+/// See [`RuntimeService::pinned_block_runtime_lock`].
 #[must_use]
 pub struct RuntimeLock<'a, TPlat: Platform> {
     dead: bool,
@@ -1211,7 +1211,7 @@ impl<'a, TPlat: Platform> Drop for RuntimeLock<'a, TPlat> {
     }
 }
 
-/// See [`RuntimeService::pinned_block_runtime_call_lock`].
+/// See [`RuntimeService::pinned_block_runtime_lock`].
 #[must_use]
 pub struct RuntimeCallLock<'a, TPlat: Platform> {
     guarded: MutexGuard<'a, Guarded<TPlat>>,
