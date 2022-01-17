@@ -765,21 +765,19 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ) {
         let mut guarded_lock = guarded.lock().await;
 
-        let (runtime_index, _, _) = match guarded_lock
+        if guarded_lock
             .pinned_blocks
             .remove(&(subscription_id.0, *block_hash))
+            .is_none()
         {
-            Some(b) => b,
-            None => {
-                // Cold path.
-                if guarded_lock
-                    .all_blocks_subscriptions
-                    .contains_key(&subscription_id.0)
-                {
-                    panic!("block already unpinned");
-                } else {
-                    return;
-                }
+            // Cold path.
+            if guarded_lock
+                .all_blocks_subscriptions
+                .contains_key(&subscription_id.0)
+            {
+                panic!("block already unpinned");
+            } else {
+                return;
             }
         };
 
@@ -1133,7 +1131,6 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
 
         let lock = RuntimeCallLock {
             guarded,
-            runtime: self.runtime.clone(),
             block_state_root_hash: self.block_state_root_hash,
             call_proof,
         };
@@ -1146,7 +1143,6 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
 #[must_use]
 pub struct RuntimeCallLock<'a> {
     guarded: MutexGuard<'a, Option<executor::host::HostVmPrototype>>,
-    runtime: Arc<Runtime>,
     block_state_root_hash: [u8; 32],
     call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
 }
@@ -1832,7 +1828,6 @@ impl<TPlat: Platform> Background<TPlat> {
                         user_data: new_finalized,
                         best_block_index,
                         pruned_blocks,
-                        former_finalized_async_op_user_data: former_finalized_runtime_index,
                         ..
                     }) => {
                         *finalized_block = new_finalized;
@@ -1868,8 +1863,8 @@ impl<TPlat: Platform> Background<TPlat> {
 
                         let parent_runtime = tree
                             .parent(block_index)
-                            .map_or(*tree.finalized_async_user_data(), |idx| {
-                                *tree.block_async_user_data(idx).unwrap()
+                            .map_or(tree.finalized_async_user_data().clone(), |idx| {
+                                tree.block_async_user_data(idx).unwrap().clone()
                             });
 
                         log::debug!(
@@ -1911,7 +1906,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 *pinned_remaining -= 1;
                                 guarded.pinned_blocks.insert(
                                     (*subscription_id, block_hash),
-                                    (block_runtime, block_state_root_hash, block_number),
+                                    (block_runtime.clone(), block_state_root_hash, block_number),
                                 );
                             } else {
                                 to_remove.push(*subscription_id);

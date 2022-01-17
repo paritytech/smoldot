@@ -494,9 +494,10 @@ async fn parahead<TPlat: Platform>(
 ) -> Result<Vec<u8>, ParaheadError> {
     // For each relay chain block, call `ParachainHost_persisted_validation_data` in
     // order to know where the parachains are.
-    let (runtime_call_lock, virtual_machine) = relay_chain_sync
+    let precall = relay_chain_sync
         .pinned_block_runtime_lock(subscription_id, block_hash)
-        .await
+        .await;
+    let (runtime_call_lock, virtual_machine) = precall
         .start(
             para::PERSISTED_VALIDATION_FUNCTION_NAME,
             para::persisted_validation_data_parameters(
