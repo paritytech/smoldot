@@ -682,10 +682,18 @@ async fn background_task<TPlat: Platform>(
                                 continue;
                             }
 
+                            let tx_hash = blake2_hash(worker.pending_transactions.scale_encoding(maybe_validated_tx_id).unwrap());
+
+                            log::info!(
+                                target: &log_target,
+                                "Successfully validated transaction {}",
+                                HashDisplay(&tx_hash)
+                            );
+
                             log::debug!(
                                 target: &log_target,
                                 "Successfully validated transaction {} at {}: {:?}",
-                                HashDisplay(&blake2_hash(worker.pending_transactions.scale_encoding(maybe_validated_tx_id).unwrap())),
+                                HashDisplay(&tx_hash),
                                 HashDisplay(&block_hash),
                                 result
                             );
