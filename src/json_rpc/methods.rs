@@ -412,7 +412,7 @@ define_methods! {
         #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
         hash: HashHexString,
         function: &'a str,
-        #[rename = "callParameters"] call_parameters: Vec<HexString>,
+        #[rename = "callParameters"] call_parameters: HexString,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> &'a str,
     chainHead_unstable_follow(
