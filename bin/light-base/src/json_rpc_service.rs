@@ -2045,7 +2045,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 let mut runtime = self
                     .runtime_service
                     .pinned_runtime_lock(
-                        pinned_runtime_id,
+                        pinned_runtime_id.clone(),
                         block_hash,
                         block_number,
                         state_trie_root_hash,
@@ -3072,7 +3072,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 let precall = self
                     .runtime_service
                     .pinned_runtime_lock(
-                        pinned_runtime_id,
+                        pinned_runtime_id.clone(),
                         *block_hash,
                         block_number,
                         state_trie_root_hash,
@@ -3775,7 +3775,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     )
                     .await;
 
-                let pre_runtime_call = if let Some(pre_runtime_call) = pre_runtime_call {
+                let pre_runtime_call = if let Some(pre_runtime_call) = &pre_runtime_call {
                     Some(
                         pre_runtime_call
                             .start(&function_to_call, call_parameters.iter().map(|c| &c.0))
