@@ -3670,7 +3670,7 @@ impl<TPlat: Platform> Background<TPlat> {
         follow_subscription_id: &str,
         hash: methods::HashHexString,
         function_to_call: &str,
-        call_parameters: Vec<methods::HexString>,
+        call_parameters: methods::HexString,
     ) {
         let task = {
             let me = self.clone();
@@ -3777,7 +3777,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 let pre_runtime_call = if let Some(pre_runtime_call) = &pre_runtime_call {
                     Some(
                         pre_runtime_call
-                            .start(&function_to_call, call_parameters.iter().map(|c| &c.0))
+                            .start(&function_to_call, iter::once(&call_parameters.0))
                             .await,
                     )
                 } else {
@@ -3789,7 +3789,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         match read_only_runtime_host::run(read_only_runtime_host::Config {
                             virtual_machine,
                             function_to_call: &function_to_call,
-                            parameter: call_parameters.iter().map(|c| &c.0),
+                            parameter: iter::once(&call_parameters.0),
                         }) {
                             Err((error, prototype)) => {
                                 runtime_call_lock.unlock(prototype);
