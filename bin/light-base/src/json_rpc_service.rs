@@ -234,16 +234,15 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                                     .next_response(&background.client_id)
                                     .await;
 
-                                log::debug!(
-                                    target: &background.log_target,
-                                    "JSON-RPC <= {}{}",
-                                    if message.len() > 100 {
-                                        &message[..100]
-                                    } else {
-                                        &message[..]
-                                    },
-                                    if message.len() > 100 { "…" } else { "" }
-                                );
+                                if log::log_enabled!(log::Level::Debug) {
+                                    let trunc_message =
+                                        truncate(message.chars().filter(|c| !c.is_control()), 100)
+                                            .collect::<String>();
+                                    log::debug!(
+                                        target: &background.log_target,
+                                        "JSON-RPC <= {}", trunc_message
+                                    );
+                                }
 
                                 let _ = responses_sender.send(message).await;
                             }
@@ -364,20 +363,14 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
     /// isn't polled often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
     /// JSON-RPC response to immediately send back to the user.
     pub fn queue_rpc_request(&mut self, json_rpc_request: String) -> Result<(), HandleRpcError> {
-        log::debug!(
-            target: &self.log_target,
-            "JSON-RPC => {:?}{}",
-            if json_rpc_request.len() > 100 {
-                &json_rpc_request[..100]
-            } else {
-                &json_rpc_request[..]
-            },
-            if json_rpc_request.len() > 100 {
-                "…"
-            } else {
-                ""
-            }
-        );
+        if log::log_enabled!(log::Level::Debug) {
+            let trunc_request = truncate(json_rpc_request.chars().filter(|c| !c.is_control()), 100)
+                .collect::<String>();
+            log::debug!(
+                target: &self.log_target,
+                "JSON-RPC => {}", trunc_request
+            );
+        }
 
         match self
             .requests_subscriptions
@@ -4105,4 +4098,41 @@ enum RuntimeCallError {
     Call(runtime_service::RuntimeCallError),
     StartError(host::StartErr),
     ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
+}
+
+/// Utility function. Truncates the iterator to the given number of elements, and if the limit is
+/// reached adds a `…` at the end.
+// TODO: move somewhere?
+fn truncate(input: impl Iterator<Item = char>, limit: usize) -> impl Iterator<Item = char> {
+    struct Iter<I>(I, usize, bool, usize);
+
+    impl<I: Iterator<Item = char>> Iterator for Iter<I> {
+        type Item = char;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.2 {
+                return None;
+            }
+
+            if self.1 >= self.3 {
+                self.2 = true;
+                if self.0.next().is_some() {
+                    return Some('…');
+                } else {
+                    return None;
+                }
+            }
+
+            self.1 += 1;
+            self.0.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let (min, max) = self.0.size_hint();
+            let max = max.and_then(|m| m.checked_add(1));
+            (min, max)
+        }
+    }
+
+    Iter(input, 0, false, limit)
 }
