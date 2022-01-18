@@ -180,7 +180,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
         };
 
         // Channel used in the background in order to spawn new tasks scoped to the background.
-        let (new_child_tasks_tx, mut new_child_tasks_rx) = mpsc::unbounded();
+        let (new_child_tasks_tx, new_child_tasks_rx) = mpsc::unbounded();
 
         let background = Arc::new(Background {
             log_target: log_target.clone(),
@@ -217,143 +217,21 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
         });
 
         // Spawns the background task that actually runs the logic of that JSON-RPC service.
-        let max_parallel_requests = config.max_parallel_requests;
-        (config.tasks_executor)(
-            log_target,
+        (config.tasks_executor)(log_target, {
+            let max_parallel_requests = config.max_parallel_requests;
+            let responses_sender = config.responses_sender;
+
             future::Abortable::new(
                 async move {
-                    let mut tasks = stream::FuturesUnordered::new();
-
-                    tasks.push({
-                        let background = background.clone();
-                        let mut responses_sender = config.responses_sender;
-                        async move {
-                            loop {
-                                let message = background
-                                    .requests_subscriptions
-                                    .next_response(&background.client_id)
-                                    .await;
-
-                                if log::log_enabled!(log::Level::Debug) {
-                                    let trunc_message = crate::util::truncate_str_iter(
-                                        message.chars().filter(|c| !c.is_control()),
-                                        100,
-                                    )
-                                    .collect::<String>();
-                                    log::debug!(
-                                        target: &background.log_target,
-                                        "JSON-RPC <= {}", trunc_message
-                                    );
-                                }
-
-                                let _ = responses_sender.send(message).await;
-                            }
-                        }
-                        .boxed()
-                    });
-
-                    for _ in 0..max_parallel_requests.get() {
-                        let background = background.clone();
-                        tasks.push(
-                            async move {
-                                loop {
-                                    background.handle_request().await
-                                }
-                            }
-                            .boxed(),
-                        );
-                    }
-
-                    tasks.push(
-                        async move {
-                            loop {
-                                let mut cache = background.cache.lock().await;
-
-                                // Subscribe to new runtime service blocks in order to push them in the
-                                // cache as soon as they are available.
-                                let mut subscribe_all = background
-                                    .runtime_service
-                                    .subscribe_all(8, cache.recent_pinned_blocks.cap())
-                                    .await;
-
-                                cache.subscription_id = Some(subscribe_all.new_blocks.id());
-                                cache.recent_pinned_blocks.clear();
-                                debug_assert!(cache.recent_pinned_blocks.cap() >= 1);
-
-                                let finalized_block_hash = header::hash_from_scale_encoded_header(
-                                    &subscribe_all.finalized_block_scale_encoded_header,
-                                );
-                                cache.recent_pinned_blocks.put(
-                                    finalized_block_hash,
-                                    subscribe_all.finalized_block_scale_encoded_header,
-                                );
-
-                                for block in subscribe_all.non_finalized_blocks_ancestry_order {
-                                    if cache.recent_pinned_blocks.len()
-                                        == cache.recent_pinned_blocks.cap()
-                                    {
-                                        let (hash, _) =
-                                            cache.recent_pinned_blocks.pop_lru().unwrap();
-                                        subscribe_all.new_blocks.unpin_block(&hash).await;
-                                    }
-
-                                    let hash = header::hash_from_scale_encoded_header(
-                                        &block.scale_encoded_header,
-                                    );
-                                    cache
-                                        .recent_pinned_blocks
-                                        .put(hash, block.scale_encoded_header);
-                                }
-
-                                drop(cache);
-
-                                loop {
-                                    let notification = subscribe_all.new_blocks.next().await;
-                                    match notification {
-                                        Some(runtime_service::Notification::Block(block)) => {
-                                            let mut cache = background.cache.try_lock().unwrap();
-
-                                            if cache.recent_pinned_blocks.len()
-                                                == cache.recent_pinned_blocks.cap()
-                                            {
-                                                let (hash, _) =
-                                                    cache.recent_pinned_blocks.pop_lru().unwrap();
-                                                subscribe_all.new_blocks.unpin_block(&hash).await;
-                                            }
-
-                                            let hash = header::hash_from_scale_encoded_header(
-                                                &block.scale_encoded_header,
-                                            );
-                                            cache
-                                                .recent_pinned_blocks
-                                                .put(hash, block.scale_encoded_header);
-                                        }
-                                        Some(runtime_service::Notification::Finalized {
-                                            ..
-                                        }) => {}
-                                        None => break,
-                                    }
-                                }
-                            }
-                        }
-                        .boxed(),
-                    );
-
-                    loop {
-                        futures::select! {
-                            () = tasks.select_next_some() => {},
-                            task = new_child_tasks_rx.next() => {
-                                let task = task.unwrap();
-                                tasks.push(task);
-                            }
-                        }
-                    }
+                    background
+                        .run(new_child_tasks_rx, max_parallel_requests, responses_sender)
+                        .await
                 },
                 background_abort_registration,
             )
             .map(|_| ())
-            .boxed(),
-        );
+            .boxed()
+        });
 
         client
     }
@@ -574,6 +452,130 @@ struct Cache {
 }
 
 impl<TPlat: Platform> Background<TPlat> {
+    async fn run(
+        self: Arc<Self>,
+        mut new_child_tasks_rx: mpsc::UnboundedReceiver<future::BoxFuture<'static, ()>>,
+        max_parallel_requests: NonZeroU32,
+        mut responses_sender: mpsc::Sender<String>,
+    ) -> ! {
+        let mut tasks = stream::FuturesUnordered::new();
+
+        tasks.push({
+            let me = self.clone();
+            async move {
+                loop {
+                    let message = me.requests_subscriptions.next_response(&me.client_id).await;
+
+                    if log::log_enabled!(log::Level::Debug) {
+                        let trunc_message = crate::util::truncate_str_iter(
+                            message.chars().filter(|c| !c.is_control()),
+                            100,
+                        )
+                        .collect::<String>();
+                        log::debug!(
+                            target: &me.log_target,
+                            "JSON-RPC <= {}", trunc_message
+                        );
+                    }
+
+                    let _ = responses_sender.send(message).await;
+                }
+            }
+            .boxed()
+        });
+
+        for _ in 0..max_parallel_requests.get() {
+            let me = self.clone();
+            tasks.push(
+                async move {
+                    loop {
+                        me.handle_request().await
+                    }
+                }
+                .boxed(),
+            );
+        }
+
+        tasks.push({
+            let me = self.clone();
+            async move {
+                loop {
+                    let mut cache = me.cache.lock().await;
+
+                    // Subscribe to new runtime service blocks in order to push them in the
+                    // cache as soon as they are available.
+                    let mut subscribe_all = me
+                        .runtime_service
+                        .subscribe_all(8, cache.recent_pinned_blocks.cap())
+                        .await;
+
+                    cache.subscription_id = Some(subscribe_all.new_blocks.id());
+                    cache.recent_pinned_blocks.clear();
+                    debug_assert!(cache.recent_pinned_blocks.cap() >= 1);
+
+                    let finalized_block_hash = header::hash_from_scale_encoded_header(
+                        &subscribe_all.finalized_block_scale_encoded_header,
+                    );
+                    cache.recent_pinned_blocks.put(
+                        finalized_block_hash,
+                        subscribe_all.finalized_block_scale_encoded_header,
+                    );
+
+                    for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                        if cache.recent_pinned_blocks.len() == cache.recent_pinned_blocks.cap() {
+                            let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
+                            subscribe_all.new_blocks.unpin_block(&hash).await;
+                        }
+
+                        let hash =
+                            header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                        cache
+                            .recent_pinned_blocks
+                            .put(hash, block.scale_encoded_header);
+                    }
+
+                    drop(cache);
+
+                    loop {
+                        let notification = subscribe_all.new_blocks.next().await;
+                        match notification {
+                            Some(runtime_service::Notification::Block(block)) => {
+                                let mut cache = me.cache.try_lock().unwrap();
+
+                                if cache.recent_pinned_blocks.len()
+                                    == cache.recent_pinned_blocks.cap()
+                                {
+                                    let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
+                                    subscribe_all.new_blocks.unpin_block(&hash).await;
+                                }
+
+                                let hash = header::hash_from_scale_encoded_header(
+                                    &block.scale_encoded_header,
+                                );
+                                cache
+                                    .recent_pinned_blocks
+                                    .put(hash, block.scale_encoded_header);
+                            }
+                            Some(runtime_service::Notification::Finalized { .. }) => {}
+                            None => break,
+                        }
+                    }
+                }
+            }
+            .boxed()
+        });
+
+        loop {
+            futures::select! {
+                () = tasks.select_next_some() => {},
+                task = new_child_tasks_rx.next() => {
+                    let task = task.unwrap();
+                    tasks.push(task);
+                }
+            }
+        }
+    }
+
     async fn handle_request(self: &Arc<Self>) {
         let (json_rpc_request, state_machine_request_id) =
             self.requests_subscriptions.next_request().await;
