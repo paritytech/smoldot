@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import test from 'ava';
-import * as fs from 'fs';
+import * as fs from 'node:fs';
 import { start } from "../dist/index.js";
 
 const westendSpec = fs.readFileSync('./test/westend.json', 'utf8');

@@ -15,10 +15,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import * as child_process from 'child_process';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as zlib from 'zlib';
+import * as child_process from 'node:child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as zlib from 'node:zlib';
 
 // Which Cargo profile to use to compile the Rust. Should be either `debug` or `release`, based
 // on the CLI options passed by the user.
