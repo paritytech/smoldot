@@ -609,14 +609,7 @@ impl<TPlat: Platform> Background<TPlat> {
         // of lines of code) have their dedicated methods.
         match call {
             methods::MethodCall::author_pendingExtrinsics {} => {
-                // TODO: ask transactions service
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::author_pendingExtrinsics(Vec::new())
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.author_pending_extrinsics(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::author_submitExtrinsic { transaction } => {
                 self.author_submit_extrinsic(request_id, &state_machine_request_id, transaction).await;
@@ -1216,6 +1209,22 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::author_pendingExtrinsics`].
+    async fn author_pending_extrinsics(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        // TODO: ask transactions service
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::author_pendingExtrinsics(Vec::new())
+                    .to_json_response(request_id),
+            )
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chain_getHeader`].
