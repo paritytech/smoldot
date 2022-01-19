@@ -897,33 +897,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_call(request_id, &state_machine_request_id, follow_subscription_id, hash, function, call_parameters).await;
             }
             methods::MethodCall::chainHead_unstable_stopCall { subscription_id } => {
-                let state_machine_subscription =
-                    if let Some((abort_handle, state_machine_subscription)) = self
-                        .subscriptions
-                        .lock()
-                        .await
-                        .misc
-                        .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadCall))
-                    {
-                        abort_handle.abort();
-                        Some(state_machine_subscription)
-                    } else {
-                        None
-                    };
-
-                if let Some(state_machine_subscription) = &state_machine_subscription {
-                    self.requests_subscriptions
-                        .stop_subscription(state_machine_subscription)
-                        .await;
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chainHead_unstable_stopCall(())
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_head_unstable_stop_call(request_id, &state_machine_request_id, subscription_id).await;
             }
             methods::MethodCall::chainHead_unstable_stopStorage { subscription_id } => {
                 self.chain_head_unstable_stop_storage(request_id, &state_machine_request_id, subscription_id).await;
@@ -1007,6 +981,40 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_stopCall`].
+    async fn chain_head_unstable_stop_call(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        subscription_id: &str,
+    ) {
+        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
+            self.subscriptions
+                .lock()
+                .await
+                .misc
+                .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadCall))
+        {
+            abort_handle.abort();
+            Some(state_machine_subscription)
+        } else {
+            None
+        };
+
+        if let Some(state_machine_subscription) = &state_machine_subscription {
+            self.requests_subscriptions
+                .stop_subscription(state_machine_subscription)
+                .await;
+        }
+
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chainHead_unstable_stopCall(()).to_json_response(request_id),
+            )
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_stopStorage`].
