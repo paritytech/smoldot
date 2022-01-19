@@ -1117,29 +1117,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } => {
-                let response = match multiaddr.parse::<multiaddr::Multiaddr>() {
-                    Ok(addr)
-                        if matches!(addr.iter().last(), Some(multiaddr::ProtocolRef::P2p(_))) =>
-                    {
-                        // TODO: actually use address
-                        methods::Response::sudo_unstable_p2pDiscover(())
-                            .to_json_response(request_id)
-                    }
-                    Ok(_) => json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::InvalidParams,
-                        Some(&serde_json::to_string("multiaddr doesn't end with /p2p").unwrap()),
-                    ),
-                    Err(err) => json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::InvalidParams,
-                        Some(&serde_json::to_string(&err.to_string()).unwrap()),
-                    ),
-                };
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
-                    .await;
+                self.sudo_unstable_p2p_discover(request_id, &state_machine_request_id, multiaddr).await;
             }
             methods::MethodCall::sudo_unstable_version {} => {
                 self.sudo_unstable_version(request_id, &state_machine_request_id).await;
@@ -1176,8 +1154,41 @@ impl<TPlat: Platform> Background<TPlat> {
         }
     }
 
+    /// Handles a call to [`methods::MethodCall::sudo_unstable_p2pDiscover`].
+    async fn sudo_unstable_p2p_discover(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        multiaddr: &str,
+    ) {
+        let response = match multiaddr.parse::<multiaddr::Multiaddr>() {
+            Ok(addr) if matches!(addr.iter().last(), Some(multiaddr::ProtocolRef::P2p(_))) => {
+                // TODO: actually use address
+                methods::Response::sudo_unstable_p2pDiscover(()).to_json_response(request_id)
+            }
+            Ok(_) => json_rpc::parse::build_error_response(
+                request_id,
+                json_rpc::parse::ErrorResponse::InvalidParams,
+                Some(&serde_json::to_string("multiaddr doesn't end with /p2p").unwrap()),
+            ),
+            Err(err) => json_rpc::parse::build_error_response(
+                request_id,
+                json_rpc::parse::ErrorResponse::InvalidParams,
+                Some(&serde_json::to_string(&err.to_string()).unwrap()),
+            ),
+        };
+
+        self.requests_subscriptions
+            .respond(state_machine_request_id, response)
+            .await;
+    }
+
     /// Handles a call to [`methods::MethodCall::sudo_unstable_version`].
-    async fn sudo_unstable_version(self: &Arc<Self>, request_id: &str, state_machine_request_id: &requests_subscriptions::RequestId) {
+    async fn sudo_unstable_version(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
