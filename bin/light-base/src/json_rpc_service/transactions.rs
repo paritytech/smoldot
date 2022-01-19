@@ -35,7 +35,13 @@ impl<TPlat: Platform> Background<TPlat> {
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
     ) {
-        // TODO: ask transactions service
+        // Because multiple different chains ("chain" in the context of the public API of smoldot)
+        // might share the same transactions service, it could be possible for chain A to submit
+        // a transaction and then for chain B to read it by calling `author_pendingExtrinsics`.
+        // This would make it possible for the API user of chain A to be able to communicate with
+        // the API user of chain B. While the implications of permitting this are unclear, it is
+        // not a bad idea to prevent this communication from happening. Consequently, we always
+        // return an empty list of pending extrinsics.
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
