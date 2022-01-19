@@ -1191,14 +1191,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.system_health(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::system_localListenAddresses {} => {
-                // Wasm node never listens on any address.
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::system_localListenAddresses(Vec::new())
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.system_local_listen_addresses(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::system_localPeerId {} => {
                 self.system_local_peer_id(request_id, &state_machine_request_id).await;
@@ -1695,6 +1688,22 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::system_localListenAddresses`].
+    async fn system_local_listen_addresses(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        // Wasm node never listens on any address.
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::system_localListenAddresses(Vec::new())
+                    .to_json_response(request_id),
+            )
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::system_chain`].
