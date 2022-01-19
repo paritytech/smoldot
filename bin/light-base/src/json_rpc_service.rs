@@ -609,8 +609,7 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        // Most calls are handled directly in this method's body. The most voluminous (in terms
-        // of lines of code) have their dedicated methods.
+        // Each call is handled in a separate method.
         match call {
             methods::MethodCall::author_pendingExtrinsics {} => {
                 self.author_pending_extrinsics(request_id, &state_machine_request_id).await;
