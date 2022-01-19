@@ -972,117 +972,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::state_subscribeRuntimeVersion {} => {
-                let state_machine_subscription = match self
-                    .requests_subscriptions
-                    .start_subscription(&state_machine_request_id, 1)
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                        self.requests_subscriptions
-                            .respond(
-                                &state_machine_request_id,
-                                json_rpc::parse::build_error_response(
-                                    request_id,
-                                    json_rpc::parse::ErrorResponse::ServerError(
-                                        -32000,
-                                        "Too many active subscriptions",
-                                    ),
-                                    None,
-                                ),
-                            )
-                            .await;
-                        return;
-                    }
-                };
-
-                let subscription_id = self
-                    .next_subscription_id
-                    .fetch_add(1, atomic::Ordering::Relaxed)
-                    .to_string();
-
-                let abort_registration = {
-                    let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
-                    let mut subscriptions_list = self.subscriptions.lock().await;
-                    subscriptions_list.misc.insert(
-                        (subscription_id.clone(), SubscriptionTy::RuntimeSpec),
-                        (abort_handle, state_machine_subscription.clone()),
-                    );
-                    abort_registration
-                };
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::state_subscribeRuntimeVersion(&subscription_id)
-                            .to_json_response(request_id),
-                    )
-                    .await;
-
-                let task = {
-                    let me = self.clone();
-                    async move {
-                        let (current_spec, spec_changes) =
-                            me.runtime_service.subscribe_runtime_version().await;
-                        let spec_changes =
-                            stream::iter(iter::once(current_spec)).chain(spec_changes);
-                        futures::pin_mut!(spec_changes);
-
-                        loop {
-                            let new_runtime = spec_changes.next().await;
-                            let notification_body = if let Ok(runtime_spec) = new_runtime.unwrap() {
-                                let runtime_spec = runtime_spec.decode();
-                                methods::ServerToClient::state_runtimeVersion {
-                                    subscription: &subscription_id,
-                                    result: Some(methods::RuntimeVersion {
-                                        spec_name: runtime_spec.spec_name.into(),
-                                        impl_name: runtime_spec.impl_name.into(),
-                                        authoring_version: u64::from(
-                                            runtime_spec.authoring_version,
-                                        ),
-                                        spec_version: u64::from(runtime_spec.spec_version),
-                                        impl_version: u64::from(runtime_spec.impl_version),
-                                        transaction_version: runtime_spec
-                                            .transaction_version
-                                            .map(u64::from),
-                                        apis: runtime_spec
-                                            .apis
-                                            .map(|api| {
-                                                (
-                                                    methods::HexString(api.name_hash.to_vec()),
-                                                    api.version,
-                                                )
-                                            })
-                                            .collect(),
-                                    }),
-                                }
-                                .to_json_call_object_parameters(None)
-                            } else {
-                                methods::ServerToClient::state_runtimeVersion {
-                                    subscription: &subscription_id,
-                                    result: None,
-                                }
-                                .to_json_call_object_parameters(None)
-                            };
-
-                            me.requests_subscriptions
-                                .set_queued_notification(
-                                    &state_machine_subscription,
-                                    0,
-                                    notification_body,
-                                )
-                                .await;
-                        }
-                    }
-                };
-
-                self.new_child_tasks_tx
-                    .lock()
-                    .await
-                    .unbounded_send(Box::pin(
-                        future::Abortable::new(task, abort_registration).map(|_| ()),
-                    ))
-                    .unwrap();
+                self.state_subscribe_runtime_version(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::state_unsubscribeRuntimeVersion { subscription } => {
                 self.state_unsubscribe_runtime_version(request_id, &state_machine_request_id, subscription).await;
@@ -1606,6 +1496,115 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_subscribeRuntimeVersion`].
+    async fn state_subscribe_runtime_version(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        let state_machine_subscription = match self
+            .requests_subscriptions
+            .start_subscription(&state_machine_request_id, 1)
+            .await
+        {
+            Ok(v) => v,
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                self.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Too many active subscriptions",
+                            ),
+                            None,
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let subscription_id = self
+            .next_subscription_id
+            .fetch_add(1, atomic::Ordering::Relaxed)
+            .to_string();
+
+        let abort_registration = {
+            let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
+            let mut subscriptions_list = self.subscriptions.lock().await;
+            subscriptions_list.misc.insert(
+                (subscription_id.clone(), SubscriptionTy::RuntimeSpec),
+                (abort_handle, state_machine_subscription.clone()),
+            );
+            abort_registration
+        };
+
+        self.requests_subscriptions
+            .respond(
+                &state_machine_request_id,
+                methods::Response::state_subscribeRuntimeVersion(&subscription_id)
+                    .to_json_response(request_id),
+            )
+            .await;
+
+        let task = {
+            let me = self.clone();
+            async move {
+                let (current_spec, spec_changes) =
+                    me.runtime_service.subscribe_runtime_version().await;
+                let spec_changes = stream::iter(iter::once(current_spec)).chain(spec_changes);
+                futures::pin_mut!(spec_changes);
+
+                loop {
+                    let new_runtime = spec_changes.next().await;
+                    let notification_body = if let Ok(runtime_spec) = new_runtime.unwrap() {
+                        let runtime_spec = runtime_spec.decode();
+                        methods::ServerToClient::state_runtimeVersion {
+                            subscription: &subscription_id,
+                            result: Some(methods::RuntimeVersion {
+                                spec_name: runtime_spec.spec_name.into(),
+                                impl_name: runtime_spec.impl_name.into(),
+                                authoring_version: u64::from(runtime_spec.authoring_version),
+                                spec_version: u64::from(runtime_spec.spec_version),
+                                impl_version: u64::from(runtime_spec.impl_version),
+                                transaction_version: runtime_spec
+                                    .transaction_version
+                                    .map(u64::from),
+                                apis: runtime_spec
+                                    .apis
+                                    .map(|api| {
+                                        (methods::HexString(api.name_hash.to_vec()), api.version)
+                                    })
+                                    .collect(),
+                            }),
+                        }
+                        .to_json_call_object_parameters(None)
+                    } else {
+                        methods::ServerToClient::state_runtimeVersion {
+                            subscription: &subscription_id,
+                            result: None,
+                        }
+                        .to_json_call_object_parameters(None)
+                    };
+
+                    me.requests_subscriptions
+                        .set_queued_notification(&state_machine_subscription, 0, notification_body)
+                        .await;
+                }
+            }
+        };
+
+        self.new_child_tasks_tx
+            .lock()
+            .await
+            .unbounded_send(Box::pin(
+                future::Abortable::new(task, abort_registration).map(|_| ()),
+            ))
+            .unwrap();
     }
 
     /// Handles a call to [`methods::MethodCall::state_unsubscribeRuntimeVersion`].
