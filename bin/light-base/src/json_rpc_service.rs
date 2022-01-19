@@ -1220,13 +1220,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::system_localPeerId {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::system_localPeerId(&self.peer_id_base58)
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.system_local_peer_id(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::system_name {} => {
                 self.requests_subscriptions
@@ -1740,6 +1734,21 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::system_localPeerId`].
+    async fn system_local_peer_id(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::system_localPeerId(&self.peer_id_base58)
+                    .to_json_response(request_id),
+            )
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::system_peers`].
