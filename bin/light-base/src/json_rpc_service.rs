@@ -1238,29 +1238,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::system_peers {} => {
-                let response = methods::Response::system_peers(
-                    self.sync_service
-                        .syncing_peers()
-                        .await
-                        .map(
-                            |(peer_id, role, best_number, best_hash)| methods::SystemPeer {
-                                peer_id: peer_id.to_string(),
-                                roles: match role {
-                                    protocol::Role::Authority => methods::SystemPeerRole::Authority,
-                                    protocol::Role::Full => methods::SystemPeerRole::Full,
-                                    protocol::Role::Light => methods::SystemPeerRole::Light,
-                                },
-                                best_hash: methods::HashHexString(best_hash),
-                                best_number,
-                            },
-                        )
-                        .collect(),
-                )
-                .to_json_response(request_id);
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
-                    .await;
+                self.system_peers(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::system_properties {} => {
                 self.requests_subscriptions
@@ -1762,6 +1740,36 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::system_peers`].
+    async fn system_peers(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        let response = methods::Response::system_peers(
+            self.sync_service
+                .syncing_peers()
+                .await
+                .map(
+                    |(peer_id, role, best_number, best_hash)| methods::SystemPeer {
+                        peer_id: peer_id.to_string(),
+                        roles: match role {
+                            protocol::Role::Authority => methods::SystemPeerRole::Authority,
+                            protocol::Role::Full => methods::SystemPeerRole::Full,
+                            protocol::Role::Light => methods::SystemPeerRole::Light,
+                        },
+                        best_hash: methods::HashHexString(best_hash),
+                        best_number,
+                    },
+                )
+                .collect(),
+        )
+        .to_json_response(request_id);
+        self.requests_subscriptions
+            .respond(state_machine_request_id, response)
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::author_submitExtrinsic`].
