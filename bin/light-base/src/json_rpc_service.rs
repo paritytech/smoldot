@@ -738,14 +738,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::chain_getFinalizedHead {} => {
-                // TODO: maybe optimize?
-                let response = methods::Response::chain_getFinalizedHead(methods::HashHexString(
-                    header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_finalized().await.0),
-                ))
-                .to_json_response(request_id);
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
+                self.get_finalized_head(request_id, &state_machine_request_id)
                     .await;
             }
             methods::MethodCall::chain_getHeader { hash } => {
@@ -2405,6 +2398,25 @@ impl<TPlat: Platform> Background<TPlat> {
                 }
             }
         };
+
+        self.requests_subscriptions
+            .respond(&state_machine_request_id, response)
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::chain_getFinalizedHead`].
+    async fn get_finalized_head(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        // TODO: maybe optimize?
+        let response = methods::Response::chain_getFinalizedHead(methods::HashHexString(
+            header::hash_from_scale_encoded_header(
+                &self.runtime_service.subscribe_finalized().await.0,
+            ),
+        ))
+        .to_json_response(request_id);
 
         self.requests_subscriptions
             .respond(&state_machine_request_id, response)
