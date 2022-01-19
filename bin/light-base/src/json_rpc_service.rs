@@ -1194,20 +1194,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::system_health {} => {
-                let response = methods::Response::system_health(methods::SystemHealth {
-                    // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
-                    // is finished and that the block notifications report blocks that are
-                    // believed to be near the head of the chain.
-                    is_syncing: !self.runtime_service.is_near_head_of_chain_heuristic().await,
-                    peers: u64::try_from(self.sync_service.syncing_peers().await.len())
-                        .unwrap_or(u64::max_value()),
-                    should_have_peers: self.chain_is_live,
-                })
-                .to_json_response(request_id);
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
-                    .await;
+                self.system_health(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::system_localListenAddresses {} => {
                 // Wasm node never listens on any address.
@@ -1714,6 +1701,27 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::system_health`].
+    async fn system_health(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        let response = methods::Response::system_health(methods::SystemHealth {
+            // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
+            // is finished and that the block notifications report blocks that are
+            // believed to be near the head of the chain.
+            is_syncing: !self.runtime_service.is_near_head_of_chain_heuristic().await,
+            peers: u64::try_from(self.sync_service.syncing_peers().await.len())
+                .unwrap_or(u64::max_value()),
+            should_have_peers: self.chain_is_live,
+        })
+        .to_json_response(request_id);
+        self.requests_subscriptions
+            .respond(state_machine_request_id, response)
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::system_version`].
