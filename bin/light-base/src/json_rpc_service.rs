@@ -1025,44 +1025,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 follow_subscription_id,
                 hash,
             } => {
-                let valid = {
-                    let mut lock = self.subscriptions.lock().await;
-                    if let Some(subscription) =
-                        lock.chain_head_follow.get_mut(follow_subscription_id)
-                    {
-                        if subscription.pinned_blocks_headers.remove(&hash.0).is_some() {
-                            if let Some(runtime_subscribe_all) = subscription.runtime_subscribe_all {
-                                self.runtime_service.unpin_block(runtime_subscribe_all, &hash.0).await;
-                            }
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
-                        true
-                    }
-                };
-
-                if valid {
-                    self.requests_subscriptions
-                        .respond(
-                            &state_machine_request_id,
-                            methods::Response::chainHead_unstable_unpin(())
-                                .to_json_response(request_id),
-                        )
-                        .await;
-                } else {
-                    self.requests_subscriptions
-                        .respond(
-                            &state_machine_request_id,
-                            json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::InvalidParams,
-                                None,
-                            ),
-                        )
-                        .await;
-                }
+                self.chain_head_unstable_unpin(request_id, &state_machine_request_id, follow_subscription_id, hash).await;
             }
             methods::MethodCall::chainHead_unstable_unfollow {
                 follow_subscription_id,
@@ -1113,6 +1076,53 @@ impl<TPlat: Platform> Background<TPlat> {
                     )
                     .await;
             }
+        }
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_unpin`].
+    async fn chain_head_unstable_unpin(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        follow_subscription_id: &str,
+        hash: methods::HashHexString,
+    ) {
+        let valid = {
+            let mut lock = self.subscriptions.lock().await;
+            if let Some(subscription) = lock.chain_head_follow.get_mut(follow_subscription_id) {
+                if subscription.pinned_blocks_headers.remove(&hash.0).is_some() {
+                    if let Some(runtime_subscribe_all) = subscription.runtime_subscribe_all {
+                        self.runtime_service
+                            .unpin_block(runtime_subscribe_all, &hash.0)
+                            .await;
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                true
+            }
+        };
+
+        if valid {
+            self.requests_subscriptions
+                .respond(
+                    state_machine_request_id,
+                    methods::Response::chainHead_unstable_unpin(()).to_json_response(request_id),
+                )
+                .await;
+        } else {
+            self.requests_subscriptions
+                .respond(
+                    state_machine_request_id,
+                    json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::InvalidParams,
+                        None,
+                    ),
+                )
+                .await;
         }
     }
 
