@@ -790,18 +790,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.payment_query_info(request_id, &state_machine_request_id, &extrinsic.0, hash.as_ref().map(|h| &h.0)).await;
             }
             methods::MethodCall::rpc_methods {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::rpc_methods(methods::RpcMethods {
-                            version: 1,
-                            methods: methods::MethodCall::method_names()
-                                .map(|n| n.into())
-                                .collect(),
-                        })
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.rpc_methods(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::state_getKeysPaged {
                 prefix,
@@ -1345,6 +1334,26 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::rpc_methods`].
+    async fn rpc_methods(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::rpc_methods(methods::RpcMethods {
+                    version: 1,
+                    methods: methods::MethodCall::method_names()
+                        .map(|n| n.into())
+                        .collect(),
+                })
+                .to_json_response(request_id),
+            )
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::state_getKeysPaged`].
