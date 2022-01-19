@@ -609,44 +609,10 @@ impl<TPlat: Platform> Background<TPlat> {
         // of lines of code) have their dedicated methods.
         match call {
             methods::MethodCall::author_pendingExtrinsics {} => {
-                // TODO: ask transactions service
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::author_pendingExtrinsics(Vec::new())
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.author_pending_extrinsics(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::author_submitExtrinsic { transaction } => {
-                // Note that this function is misnamed. It should really be called
-                // "author_submitTransaction".
-
-                // In Substrate, `author_submitExtrinsic` returns the hash of the transaction. It
-                // is unclear whether it has to actually be the hash of the transaction or if it
-                // could be any opaque value. Additionally, there isn't any other JSON-RPC method
-                // that accepts as parameter the value returned here. When in doubt, we return
-                // the hash as well.
-                let mut hash_context = blake2_rfc::blake2b::Blake2b::new(32);
-                hash_context.update(&transaction.0);
-                let mut transaction_hash: [u8; 32] = Default::default();
-                transaction_hash.copy_from_slice(hash_context.finalize().as_bytes());
-
-                // Send the transaction to the transactions service. It will be sent to the
-                // rest of the network asynchronously.
-                self.transactions_service
-                    .submit_transaction(transaction.0)
-                    .await;
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::author_submitExtrinsic(methods::HashHexString(
-                            transaction_hash,
-                        ))
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.author_submit_extrinsic(request_id, &state_machine_request_id, transaction).await;
             }
             methods::MethodCall::author_submitAndWatchExtrinsic { transaction } => {
                 self.submit_and_watch_transaction(
@@ -658,254 +624,48 @@ impl<TPlat: Platform> Background<TPlat> {
                 .await
             }
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
-                let state_machine_subscription =
-                    if let Some((abort_handle, state_machine_subscription)) = self
-                        .subscriptions
-                        .lock()
-                        .await
-                        .misc
-                        .remove(&(subscription.to_owned(), SubscriptionTy::TransactionLegacy))
-                    {
-                        abort_handle.abort();
-                        Some(state_machine_subscription)
-                    } else {
-                        None
-                    };
-
-                if let Some(state_machine_subscription) = &state_machine_subscription {
-                    self.requests_subscriptions
-                        .stop_subscription(state_machine_subscription)
-                        .await;
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::author_unwatchExtrinsic(
-                            state_machine_subscription.is_some(),
-                        )
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.author_unwatch_extrinsic(request_id, &state_machine_request_id, subscription).await;
             }
             methods::MethodCall::chain_getBlock { hash } => {
-                // `hash` equal to `None` means "the current best block".
-                let hash = match hash {
-                    Some(h) => h.0,
-                    None => header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0),
-                };
-
-                // Block bodies and justifications aren't stored locally. Ask the network.
-                let result = self
-                    .sync_service
-                    .clone()
-                    .block_query(
-                        hash,
-                        protocol::BlocksRequestFields {
-                            header: true,
-                            body: true,
-                            justifications: true,
-                        },
-                    )
-                    .await;
-
-                // The `block_query` function guarantees that the header and body are present and
-                // are correct.
-
-                let response = if let Ok(block) = result {
-                    methods::Response::chain_getBlock(methods::Block {
-                        extrinsics: block
-                            .body
-                            .unwrap()
-                            .into_iter()
-                            .map(methods::HexString)
-                            .collect(),
-                        header: methods::Header::from_scale_encoded_header(&block.header.unwrap())
-                            .unwrap(),
-                        justifications: block.justifications,
-                    })
-                    .to_json_response(request_id)
-                } else {
-                    json_rpc::parse::build_success_response(request_id, "null")
-                };
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
-                    .await;
+                self.chain_get_block(request_id, &state_machine_request_id, hash).await;
             }
             methods::MethodCall::chain_getBlockHash { height } => {
-                self.get_block_hash(request_id, &state_machine_request_id, height)
+                self.chain_get_block_hash(request_id, &state_machine_request_id, height)
                     .await;
             }
             methods::MethodCall::chain_getFinalizedHead {} => {
-                // TODO: maybe optimize?
-                let response = methods::Response::chain_getFinalizedHead(methods::HashHexString(
-                    header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_finalized().await.0),
-                ))
-                .to_json_response(request_id);
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
+                self.chain_get_finalized_head(request_id, &state_machine_request_id)
                     .await;
             }
             methods::MethodCall::chain_getHeader { hash } => {
-                let hash = match hash {
-                    Some(h) => h.0,
-                    None => header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0),
-                };
-
-                let fut = self.header_query(&hash);
-                let header = fut.await;
-                let response = match header {
-                    Ok(header) => {
-                        // In the case of a parachain, it is possible for the header to be in
-                        // a format that smoldot isn't capable of parsing. In that situation,
-                        // we take of liberty of returning a JSON-RPC error.
-                        match methods::Header::from_scale_encoded_header(&header) {
-                            Ok(decoded) => methods::Response::chain_getHeader(decoded)
-                                .to_json_response(request_id),
-                            Err(error) => json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::ServerError(
-                                    -32000,
-                                    &format!("Failed to decode header: {}", error),
-                                ),
-                                None,
-                            ),
-                        }
-                    }
-                    Err(()) => {
-                        // Failed to retreive the header.
-                        // TODO: error or null?
-                        json_rpc::parse::build_success_response(request_id, "null")
-                    }
-                };
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
-                    .await;
+                self.chain_get_header(request_id, &state_machine_request_id, hash).await;
             }
             methods::MethodCall::chain_subscribeAllHeads {} => {
-                self.subscribe_all_heads(request_id, &state_machine_request_id)
+                self.chain_subscribe_all_heads(request_id, &state_machine_request_id)
                     .await;
             }
             methods::MethodCall::chain_subscribeFinalizedHeads {} => {
-                self.subscribe_finalized_heads(request_id, &state_machine_request_id)
+                self.chain_subscribe_finalized_heads(request_id, &state_machine_request_id)
                     .await;
             }
             methods::MethodCall::chain_subscribeNewHeads {} => {
-                self.subscribe_new_heads(request_id, &state_machine_request_id)
+                self.chain_subscribe_new_heads(request_id, &state_machine_request_id)
                     .await;
             }
             methods::MethodCall::chain_unsubscribeAllHeads { subscription } => {
-                let state_machine_subscription =
-                    if let Some((abort_handle, state_machine_subscription)) = self
-                        .subscriptions
-                        .lock()
-                        .await
-                        .misc
-                        .remove(&(subscription.to_owned(), SubscriptionTy::AllHeads))
-                    {
-                        abort_handle.abort();
-                        Some(state_machine_subscription)
-                    } else {
-                        None
-                    };
-
-                if let Some(state_machine_subscription) = &state_machine_subscription {
-                    self.requests_subscriptions
-                        .stop_subscription(state_machine_subscription)
-                        .await;
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chain_unsubscribeAllHeads(
-                            state_machine_subscription.is_some(),
-                        )
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_unsubscribe_all_heads(request_id, &state_machine_request_id, subscription).await;
             }
             methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
-                let state_machine_subscription =
-                    if let Some((abort_handle, state_machine_subscription)) = self
-                        .subscriptions
-                        .lock()
-                        .await
-                        .misc
-                        .remove(&(subscription.to_owned(), SubscriptionTy::FinalizedHeads))
-                    {
-                        abort_handle.abort();
-                        Some(state_machine_subscription)
-                    } else {
-                        None
-                    };
-
-                if let Some(state_machine_subscription) = &state_machine_subscription {
-                    self.requests_subscriptions
-                        .stop_subscription(state_machine_subscription)
-                        .await;
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chain_unsubscribeFinalizedHeads(
-                            state_machine_subscription.is_some(),
-                        )
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_unsubscribe_finalized_heads(request_id, &state_machine_request_id, subscription).await;
             }
             methods::MethodCall::chain_unsubscribeNewHeads { subscription } => {
-                let state_machine_subscription =
-                    if let Some((abort_handle, state_machine_subscription)) = self
-                        .subscriptions
-                        .lock()
-                        .await
-                        .misc
-                        .remove(&(subscription.to_owned(), SubscriptionTy::NewHeads))
-                    {
-                        abort_handle.abort();
-                        Some(state_machine_subscription)
-                    } else {
-                        None
-                    };
-
-                if let Some(state_machine_subscription) = &state_machine_subscription {
-                    self.requests_subscriptions
-                        .stop_subscription(state_machine_subscription)
-                        .await;
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chain_unsubscribeNewHeads(
-                            state_machine_subscription.is_some(),
-                        )
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_unsubscribe_new_heads(request_id, &state_machine_request_id, subscription).await;
             }
             methods::MethodCall::payment_queryInfo { extrinsic, hash } => {
                 self.payment_query_info(request_id, &state_machine_request_id, &extrinsic.0, hash.as_ref().map(|h| &h.0)).await;
             }
             methods::MethodCall::rpc_methods {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::rpc_methods(methods::RpcMethods {
-                            version: 1,
-                            methods: methods::MethodCall::method_names()
-                                .map(|n| n.into())
-                                .collect(),
-                        })
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.rpc_methods(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::state_getKeysPaged {
                 prefix,
@@ -913,365 +673,28 @@ impl<TPlat: Platform> Background<TPlat> {
                 start_key,
                 hash,
             } => {
-                assert!(hash.is_none()); // TODO: not implemented
-
-                let block_hash = header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
-
-                let mut cache = self.cache.lock().await;
-                let (state_root, block_number) = {
-                    // TODO: no /!\
-                    let block = cache.recent_pinned_blocks.get(&block_hash).unwrap();
-                    match header::decode(block) {
-                        Ok(d) => (*d.state_root, d.number),
-                        Err(_) => {
-                            json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::ServerError(
-                                    -32000,
-                                    "Failed to decode block header",
-                                ),
-                                None,
-                            );
-                            return;
-                        }
-                    }
-                };
-                drop(cache);
-
-                let outcome = self
-                    .sync_service
-                    .clone()
-                    .storage_prefix_keys_query(
-                        block_number,
-                        &block_hash,
-                        &prefix.unwrap().0, // TODO: don't unwrap! what is this Option?
-                        &state_root,
-                    )
-                    .await;
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        match outcome {
-                            Ok(keys) => {
-                                // TODO: instead of requesting all keys with that prefix from the network, pass `start_key` to the network service
-                                let out = keys
-                                    .into_iter()
-                                    .filter(|k| {
-                                        start_key.as_ref().map_or(true, |start| k >= &start.0)
-                                    }) // TODO: not sure if start should be in the set or not?
-                                    .map(methods::HexString)
-                                    .take(usize::try_from(count).unwrap_or(usize::max_value()))
-                                    .collect::<Vec<_>>();
-                                methods::Response::state_getKeysPaged(out)
-                                    .to_json_response(request_id)
-                            }
-                            Err(error) => json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::ServerError(
-                                    -32000,
-                                    &error.to_string(),
-                                ),
-                                None,
-                            ),
-                        },
-                    )
-                    .await;
+                self.state_get_keys_paged(request_id, &state_machine_request_id, prefix, count, start_key, hash).await;
             }
             methods::MethodCall::state_queryStorageAt { keys, at } => {
-                let best_block= header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
-
-                let cache = self.cache.lock().await;
-
-                let at = at.as_ref().map(|h| h.0).unwrap_or(best_block);
-
-                // TODO: have no idea what this describes actually
-                let mut out = methods::StorageChangeSet {
-                    block: methods::HashHexString(best_block),
-                    changes: Vec::new(),
-                };
-
-                drop(cache);
-
-                let fut = self.storage_query(keys.iter(), &at);
-                if let Ok(values) = fut.await {
-                    for (value, key) in values.into_iter().zip(keys) {
-                        out.changes.push((key, value.map(methods::HexString)));
-                    }
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::state_queryStorageAt(vec![out])
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.state_query_storage_at(request_id, &state_machine_request_id, keys, at).await;
             }
             methods::MethodCall::state_getMetadata { hash } => {
-                let block_hash = if let Some(hash) = hash {
-                    hash.0
-                } else {
-                    header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0)
-                };
-
-                let result = self.runtime_call(&block_hash, "Metadata_metadata",iter::empty::<Vec<u8>>()).await;
-                let result = result.as_ref().map(|output| remove_metadata_length_prefix(&output));
-
-                let response = match result {
-                    Ok(Ok(metadata)) => {
-                        methods::Response::state_getMetadata(methods::HexString(metadata.to_vec()))
-                            .to_json_response(request_id)
-                    }
-                    Ok(Err(error)) => json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::ServerError(
-                            -32000,
-                            &format!("Failed to decode metadata from runtime: {}", error)
-                        ),
-                        None,
-                    ),
-                    Err(error) => {
-                        log::warn!(
-                            target: &self.log_target,
-                            "Returning error from `state_getMetadata`. \
-                            API user might not function properly. Error: {}",
-                            error
-                        );
-                        json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                            None,
-                        )
-                    }
-                };
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
-                    .await;
+                self.state_get_metadata(request_id, &state_machine_request_id, hash).await;
             }
             methods::MethodCall::state_getStorage { key, hash } => {
-                let hash = hash
-                    .as_ref()
-                    .map(|h| h.0)
-                    .unwrap_or(header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0));
-
-                let fut = self.storage_query(iter::once(&key.0), &hash);
-                let response = fut.await;
-                let response = match response.map(|mut r| r.pop().unwrap()) {
-                    Ok(Some(value)) => {
-                        methods::Response::state_getStorage(methods::HexString(value.to_owned())) // TODO: overhead
-                            .to_json_response(request_id)
-                    }
-                    Ok(None) => json_rpc::parse::build_success_response(request_id, "null"),
-                    Err(error) => json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                        None,
-                    ),
-                };
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
-                    .await;
+                self.state_get_storage(request_id, &state_machine_request_id, key, hash).await;
             }
             methods::MethodCall::state_subscribeRuntimeVersion {} => {
-                let state_machine_subscription = match self
-                    .requests_subscriptions
-                    .start_subscription(&state_machine_request_id, 1)
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                        self.requests_subscriptions
-                            .respond(
-                                &state_machine_request_id,
-                                json_rpc::parse::build_error_response(
-                                    request_id,
-                                    json_rpc::parse::ErrorResponse::ServerError(
-                                        -32000,
-                                        "Too many active subscriptions",
-                                    ),
-                                    None,
-                                ),
-                            )
-                            .await;
-                        return;
-                    }
-                };
-
-                let subscription_id = self
-                    .next_subscription_id
-                    .fetch_add(1, atomic::Ordering::Relaxed)
-                    .to_string();
-
-                let abort_registration = {
-                    let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
-                    let mut subscriptions_list = self.subscriptions.lock().await;
-                    subscriptions_list.misc.insert(
-                        (subscription_id.clone(), SubscriptionTy::RuntimeSpec),
-                        (abort_handle, state_machine_subscription.clone()),
-                    );
-                    abort_registration
-                };
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::state_subscribeRuntimeVersion(&subscription_id)
-                            .to_json_response(request_id),
-                    )
-                    .await;
-
-                let task = {
-                    let me = self.clone();
-                    async move {
-                        let (current_spec, spec_changes) =
-                            me.runtime_service.subscribe_runtime_version().await;
-                        let spec_changes =
-                            stream::iter(iter::once(current_spec)).chain(spec_changes);
-                        futures::pin_mut!(spec_changes);
-
-                        loop {
-                            let new_runtime = spec_changes.next().await;
-                            let notification_body = if let Ok(runtime_spec) = new_runtime.unwrap() {
-                                let runtime_spec = runtime_spec.decode();
-                                methods::ServerToClient::state_runtimeVersion {
-                                    subscription: &subscription_id,
-                                    result: Some(methods::RuntimeVersion {
-                                        spec_name: runtime_spec.spec_name.into(),
-                                        impl_name: runtime_spec.impl_name.into(),
-                                        authoring_version: u64::from(
-                                            runtime_spec.authoring_version,
-                                        ),
-                                        spec_version: u64::from(runtime_spec.spec_version),
-                                        impl_version: u64::from(runtime_spec.impl_version),
-                                        transaction_version: runtime_spec
-                                            .transaction_version
-                                            .map(u64::from),
-                                        apis: runtime_spec
-                                            .apis
-                                            .map(|api| {
-                                                (
-                                                    methods::HexString(api.name_hash.to_vec()),
-                                                    api.version,
-                                                )
-                                            })
-                                            .collect(),
-                                    }),
-                                }
-                                .to_json_call_object_parameters(None)
-                            } else {
-                                methods::ServerToClient::state_runtimeVersion {
-                                    subscription: &subscription_id,
-                                    result: None,
-                                }
-                                .to_json_call_object_parameters(None)
-                            };
-
-                            me.requests_subscriptions
-                                .set_queued_notification(
-                                    &state_machine_subscription,
-                                    0,
-                                    notification_body,
-                                )
-                                .await;
-                        }
-                    }
-                };
-
-                self.new_child_tasks_tx
-                    .lock()
-                    .await
-                    .unbounded_send(Box::pin(
-                        future::Abortable::new(task, abort_registration).map(|_| ()),
-                    ))
-                    .unwrap();
+                self.state_subscribe_runtime_version(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::state_unsubscribeRuntimeVersion { subscription } => {
-                let state_machine_subscription =
-                    if let Some((abort_handle, state_machine_subscription)) = self
-                        .subscriptions
-                        .lock()
-                        .await
-                        .misc
-                        .remove(&(subscription.to_owned(), SubscriptionTy::RuntimeSpec))
-                    {
-                        abort_handle.abort();
-                        Some(state_machine_subscription)
-                    } else {
-                        None
-                    };
-
-                if let Some(state_machine_subscription) = &state_machine_subscription {
-                    self.requests_subscriptions
-                        .stop_subscription(state_machine_subscription)
-                        .await;
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::state_unsubscribeRuntimeVersion(
-                            state_machine_subscription.is_some(),
-                        )
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.state_unsubscribe_runtime_version(request_id, &state_machine_request_id, subscription).await;
             }
             methods::MethodCall::state_subscribeStorage { list } => {
-                if list.is_empty() {
-                    // When the list of keys is empty, that means we want to subscribe to *all*
-                    // storage changes. It is not possible to reasonably implement this in a
-                    // light client.
-                    self.requests_subscriptions
-                        .respond(
-                            &state_machine_request_id,
-                            json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::ServerError(
-                                    -32000,
-                                    "Subscribing to all storage changes isn't supported",
-                                ),
-                                None,
-                            ),
-                        )
-                        .await;
-                } else {
-                    self.subscribe_storage(request_id, &state_machine_request_id, list)
-                        .await;
-                }
+                self.state_subscribe_storage(request_id, &state_machine_request_id, list).await;
             }
             methods::MethodCall::state_unsubscribeStorage { subscription } => {
-                let state_machine_subscription =
-                    if let Some((abort_handle, state_machine_subscription)) = self
-                        .subscriptions
-                        .lock()
-                        .await
-                        .misc
-                        .remove(&(subscription.to_owned(), SubscriptionTy::Storage))
-                    {
-                        abort_handle.abort();
-                        Some(state_machine_subscription)
-                    } else {
-                        None
-                    };
-
-                if let Some(state_machine_subscription) = &state_machine_subscription {
-                    self.requests_subscriptions
-                        .stop_subscription(state_machine_subscription)
-                        .await;
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::state_unsubscribeStorage(
-                            state_machine_subscription.is_some(),
-                        )
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.state_unsubscribe_storage(request_id, &state_machine_request_id, subscription).await;
             }
             methods::MethodCall::state_getRuntimeVersion { at } => {
                 self.state_get_runtime_version(request_id, &state_machine_request_id, at.as_ref().map(|h| &h.0)).await;
@@ -1280,269 +703,42 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.account_next_index(request_id, &state_machine_request_id, account).await;
             }
             methods::MethodCall::system_chain {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::system_chain(&self.chain_name)
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.system_chain(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::system_chainType {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::system_chainType(&self.chain_ty)
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.system_chain_type(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::system_health {} => {
-                let response = methods::Response::system_health(methods::SystemHealth {
-                    // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
-                    // is finished and that the block notifications report blocks that are
-                    // believed to be near the head of the chain.
-                    is_syncing: !self.runtime_service.is_near_head_of_chain_heuristic().await,
-                    peers: u64::try_from(self.sync_service.syncing_peers().await.len())
-                        .unwrap_or(u64::max_value()),
-                    should_have_peers: self.chain_is_live,
-                })
-                .to_json_response(request_id);
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
-                    .await;
+                self.system_health(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::system_localListenAddresses {} => {
-                // Wasm node never listens on any address.
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::system_localListenAddresses(Vec::new())
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.system_local_listen_addresses(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::system_localPeerId {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::system_localPeerId(&self.peer_id_base58)
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.system_local_peer_id(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::system_name {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::system_name(&self.system_name)
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.system_name(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::system_peers {} => {
-                let response = methods::Response::system_peers(
-                    self.sync_service
-                        .syncing_peers()
-                        .await
-                        .map(
-                            |(peer_id, role, best_number, best_hash)| methods::SystemPeer {
-                                peer_id: peer_id.to_string(),
-                                roles: match role {
-                                    protocol::Role::Authority => methods::SystemPeerRole::Authority,
-                                    protocol::Role::Full => methods::SystemPeerRole::Full,
-                                    protocol::Role::Light => methods::SystemPeerRole::Light,
-                                },
-                                best_hash: methods::HashHexString(best_hash),
-                                best_number,
-                            },
-                        )
-                        .collect(),
-                )
-                .to_json_response(request_id);
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
-                    .await;
+                self.system_peers(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::system_properties {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::system_properties(
-                            serde_json::from_str(&self.chain_properties_json).unwrap(),
-                        )
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.system_properties(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::system_version {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::system_version(&self.system_version)
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.system_version(request_id, &state_machine_request_id).await;
             }
 
             methods::MethodCall::chainHead_unstable_stopBody { subscription_id } => {
-                let state_machine_subscription =
-                    if let Some((abort_handle, state_machine_subscription)) = self
-                        .subscriptions
-                        .lock()
-                        .await
-                        .misc
-                        .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadBody))
-                    {
-                        abort_handle.abort();
-                        Some(state_machine_subscription)
-                    } else {
-                        None
-                    };
-
-                if let Some(state_machine_subscription) = &state_machine_subscription {
-                    self.requests_subscriptions
-                        .stop_subscription(state_machine_subscription)
-                        .await;
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chainHead_unstable_stopBody(())
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_head_unstable_stop_body(request_id, &state_machine_request_id, subscription_id).await;
             }
             methods::MethodCall::chainHead_unstable_body {
                 follow_subscription_id,
                 hash,
                 .. // TODO: network_config
             } => {
-                // Determine whether the requested block hash is valid.
-                let block_is_valid = {
-                    let lock = self.subscriptions.lock().await;
-                    if let Some(subscription) = lock.chain_head_follow.get(follow_subscription_id) {
-                        if !subscription.pinned_blocks_headers.contains_key(&hash.0) {
-                            self.requests_subscriptions
-                                .respond(
-                                    &state_machine_request_id,
-                                    json_rpc::parse::build_error_response(
-                                        request_id,
-                                        json_rpc::parse::ErrorResponse::InvalidParams,
-                                        None,
-                                    ),
-                                )
-                                .await;
-                            return;
-                        }
-
-                        true
-                    } else {
-                        false
-                    }
-                };
-
-                let state_machine_subscription = match self
-                    .requests_subscriptions
-                    .start_subscription(&state_machine_request_id, 1)
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                        self.requests_subscriptions
-                            .respond(
-                                &state_machine_request_id,
-                                json_rpc::parse::build_error_response(
-                                    request_id,
-                                    json_rpc::parse::ErrorResponse::ServerError(
-                                        -32000,
-                                        "Too many active subscriptions",
-                                    ),
-                                    None,
-                                ),
-                            )
-                            .await;
-                        return;
-                    }
-                };
-
-                let subscription_id = self
-                    .next_subscription_id
-                    .fetch_add(1, atomic::Ordering::Relaxed)
-                    .to_string();
-
-                let abort_registration = {
-                    let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
-                    let mut subscriptions_list = self.subscriptions.lock().await;
-                    subscriptions_list.misc.insert(
-                        (subscription_id.clone(), SubscriptionTy::ChainHeadBody),
-                        (abort_handle, state_machine_subscription.clone()),
-                    );
-                    abort_registration
-                };
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chainHead_unstable_body(&subscription_id)
-                            .to_json_response(request_id),
-                    )
-                    .await;
-
-                let task = {
-                    let me = self.clone();
-                    async move {
-                        let response = if block_is_valid {
-                            // TODO: right now we query the header because the underlying function returns an error if we don't
-                            let response = me.sync_service.clone()
-                                .block_query(hash.0, protocol::BlocksRequestFields { header: true, body: true, justifications: false  }).await;
-                            match response {
-                                Ok(block_data) => {
-                                    methods::ServerToClient::chainHead_unstable_bodyEvent {
-                                        subscription: &subscription_id,
-                                        result: methods::ChainHeadBodyEvent::Done {
-                                            value: block_data.body.unwrap()
-                                                .into_iter()
-                                                .map(methods::HexString)
-                                                .collect()
-                                        },
-                                    }
-                                    .to_json_call_object_parameters(None)
-                                }
-                                Err(()) => {
-                                    methods::ServerToClient::chainHead_unstable_bodyEvent {
-                                        subscription: &subscription_id,
-                                        result: methods::ChainHeadBodyEvent::Inaccessible {},
-                                    }
-                                    .to_json_call_object_parameters(None)
-                                }
-                            }
-                        } else {
-                            methods::ServerToClient::chainHead_unstable_bodyEvent {
-                                subscription: &subscription_id,
-                                result: methods::ChainHeadBodyEvent::Disjoint {},
-                            }
-                            .to_json_call_object_parameters(None)
-                        };
-
-                        me.requests_subscriptions.set_queued_notification(&state_machine_subscription, 0, response).await;
-
-                        me.requests_subscriptions.stop_subscription(&state_machine_subscription).await;
-                        let _ = me.subscriptions.lock().await.misc
-                            .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadBody));
-                    }
-                };
-
-                self.new_child_tasks_tx
-                    .lock()
-                    .await
-                    .unbounded_send(Box::pin(
-                        future::Abortable::new(task, abort_registration).map(|_| ()),
-                    ))
-                    .unwrap();
+                self.chain_head_unstable_body(request_id, &state_machine_request_id, follow_subscription_id, hash).await;
             }
             methods::MethodCall::chainHead_unstable_call {
                 follow_subscription_id,
@@ -1554,62 +750,10 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_call(request_id, &state_machine_request_id, follow_subscription_id, hash, function, call_parameters).await;
             }
             methods::MethodCall::chainHead_unstable_stopCall { subscription_id } => {
-                let state_machine_subscription =
-                    if let Some((abort_handle, state_machine_subscription)) = self
-                        .subscriptions
-                        .lock()
-                        .await
-                        .misc
-                        .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadCall))
-                    {
-                        abort_handle.abort();
-                        Some(state_machine_subscription)
-                    } else {
-                        None
-                    };
-
-                if let Some(state_machine_subscription) = &state_machine_subscription {
-                    self.requests_subscriptions
-                        .stop_subscription(state_machine_subscription)
-                        .await;
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chainHead_unstable_stopCall(())
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_head_unstable_stop_call(request_id, &state_machine_request_id, subscription_id).await;
             }
             methods::MethodCall::chainHead_unstable_stopStorage { subscription_id } => {
-                let state_machine_subscription =
-                    if let Some((abort_handle, state_machine_subscription)) = self
-                        .subscriptions
-                        .lock()
-                        .await
-                        .misc
-                        .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadStorage))
-                    {
-                        abort_handle.abort();
-                        Some(state_machine_subscription)
-                    } else {
-                        None
-                    };
-
-                if let Some(state_machine_subscription) = &state_machine_subscription {
-                    self.requests_subscriptions
-                        .stop_subscription(state_machine_subscription)
-                        .await;
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chainHead_unstable_stopStorage(())
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_head_unstable_stop_storage(request_id, &state_machine_request_id, subscription_id).await;
             }
             methods::MethodCall::chainHead_unstable_storage {
                 follow_subscription_id,
@@ -1626,189 +770,39 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::chainHead_unstable_genesisHash {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chainHead_unstable_genesisHash(methods::HashHexString(
-                            self.genesis_block,
-                        ))
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_head_unstable_genesis_hash(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::chainHead_unstable_header {
                 follow_subscription_id,
                 hash,
             } => {
-                let response = {
-                    let lock = self.subscriptions.lock().await;
-                    if let Some(subscription) = lock.chain_head_follow.get(follow_subscription_id) {
-                        subscription
-                            .pinned_blocks_headers
-                            .get(&hash.0)
-                            .cloned()
-                            .map(Some)
-                    } else {
-                        Some(None)
-                    }
-                };
-
-                if let Some(response) = response {
-                    self.requests_subscriptions
-                        .respond(
-                            &state_machine_request_id,
-                            methods::Response::chainHead_unstable_header(
-                                response.map(methods::HexString),
-                            )
-                            .to_json_response(request_id),
-                        )
-                        .await;
-                } else {
-                    // Reached if the subscription is valid but the block couldn't be found in
-                    // `pinned_blocks_headers`.
-                    self.requests_subscriptions
-                        .respond(
-                            &state_machine_request_id,
-                            json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::InvalidParams,
-                                None,
-                            ),
-                        )
-                        .await;
-                }
+                self.chain_head_unstable_header(request_id, &state_machine_request_id, follow_subscription_id, hash).await;
             }
             methods::MethodCall::chainHead_unstable_unpin {
                 follow_subscription_id,
                 hash,
             } => {
-                let valid = {
-                    let mut lock = self.subscriptions.lock().await;
-                    if let Some(subscription) =
-                        lock.chain_head_follow.get_mut(follow_subscription_id)
-                    {
-                        if subscription.pinned_blocks_headers.remove(&hash.0).is_some() {
-                            if let Some(runtime_subscribe_all) = subscription.runtime_subscribe_all {
-                                self.runtime_service.unpin_block(runtime_subscribe_all, &hash.0).await;
-                            }
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
-                        true
-                    }
-                };
-
-                if valid {
-                    self.requests_subscriptions
-                        .respond(
-                            &state_machine_request_id,
-                            methods::Response::chainHead_unstable_unpin(())
-                                .to_json_response(request_id),
-                        )
-                        .await;
-                } else {
-                    self.requests_subscriptions
-                        .respond(
-                            &state_machine_request_id,
-                            json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::InvalidParams,
-                                None,
-                            ),
-                        )
-                        .await;
-                }
+                self.chain_head_unstable_unpin(request_id, &state_machine_request_id, follow_subscription_id, hash).await;
             }
             methods::MethodCall::chainHead_unstable_unfollow {
                 follow_subscription_id,
             } => {
-                if let Some(subscription) = self
-                    .subscriptions
-                    .lock()
-                    .await
-                    .chain_head_follow
-                    .remove(follow_subscription_id)
-                {
-                    subscription.abort_handle.abort();
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chainHead_unstable_unfollow(())
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_head_unstable_unfollow(request_id, &state_machine_request_id, follow_subscription_id).await;
             }
             methods::MethodCall::chainSpec_unstable_chainName {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chainSpec_unstable_chainName(&self.chain_name)
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_spec_unstable_chain_name(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::chainSpec_unstable_genesisHash {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chainSpec_unstable_genesisHash(methods::HashHexString(
-                            self.genesis_block,
-                        ))
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_spec_unstable_genesis_hash(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::chainSpec_unstable_properties {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chainSpec_unstable_properties(
-                            serde_json::from_str(&self.chain_properties_json).unwrap(),
-                        )
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_spec_unstable_properties(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } => {
-                let response = match multiaddr.parse::<multiaddr::Multiaddr>() {
-                    Ok(addr)
-                        if matches!(addr.iter().last(), Some(multiaddr::ProtocolRef::P2p(_))) =>
-                    {
-                        // TODO: actually use address
-                        methods::Response::sudo_unstable_p2pDiscover(())
-                            .to_json_response(request_id)
-                    }
-                    Ok(_) => json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::InvalidParams,
-                        Some(&serde_json::to_string("multiaddr doesn't end with /p2p").unwrap()),
-                    ),
-                    Err(err) => json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::InvalidParams,
-                        Some(&serde_json::to_string(&err.to_string()).unwrap()),
-                    ),
-                };
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
-                    .await;
+                self.sudo_unstable_p2p_discover(request_id, &state_machine_request_id, multiaddr).await;
             }
             methods::MethodCall::sudo_unstable_version {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::sudo_unstable_version(&format!(
-                            "{} {}",
-                            self.system_name, self.system_version
-                        ))
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.sudo_unstable_version(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::transaction_unstable_submitAndWatch { transaction } => {
                 self.submit_and_watch_transaction(
@@ -1820,33 +814,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 .await
             }
             methods::MethodCall::transaction_unstable_unwatch { subscription } => {
-                let state_machine_subscription =
-                    if let Some((abort_handle, state_machine_subscription)) = self
-                        .subscriptions
-                        .lock()
-                        .await
-                        .misc
-                        .remove(&(subscription.to_owned(), SubscriptionTy::Transaction))
-                    {
-                        abort_handle.abort();
-                        Some(state_machine_subscription)
-                    } else {
-                        None
-                    };
-
-                if let Some(state_machine_subscription) = &state_machine_subscription {
-                    self.requests_subscriptions
-                        .stop_subscription(state_machine_subscription)
-                        .await;
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::transaction_unstable_unwatch(())
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.transaction_unstable_unwatch(request_id, &state_machine_request_id, subscription).await;
             }
 
             _method => {
@@ -1866,6 +834,1336 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_stopBody`].
+    async fn chain_head_unstable_stop_body(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        subscription_id: &str,
+    ) {
+        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
+            self.subscriptions
+                .lock()
+                .await
+                .misc
+                .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadBody))
+        {
+            abort_handle.abort();
+            Some(state_machine_subscription)
+        } else {
+            None
+        };
+
+        if let Some(state_machine_subscription) = &state_machine_subscription {
+            self.requests_subscriptions
+                .stop_subscription(state_machine_subscription)
+                .await;
+        }
+
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chainHead_unstable_stopBody(()).to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_body`].
+    async fn chain_head_unstable_body(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        follow_subscription_id: &str,
+        hash: methods::HashHexString,
+    ) {
+        // Determine whether the requested block hash is valid.
+        let block_is_valid = {
+            let lock = self.subscriptions.lock().await;
+            if let Some(subscription) = lock.chain_head_follow.get(follow_subscription_id) {
+                if !subscription.pinned_blocks_headers.contains_key(&hash.0) {
+                    self.requests_subscriptions
+                        .respond(
+                            &state_machine_request_id,
+                            json_rpc::parse::build_error_response(
+                                request_id,
+                                json_rpc::parse::ErrorResponse::InvalidParams,
+                                None,
+                            ),
+                        )
+                        .await;
+                    return;
+                }
+
+                true
+            } else {
+                false
+            }
+        };
+
+        let state_machine_subscription = match self
+            .requests_subscriptions
+            .start_subscription(&state_machine_request_id, 1)
+            .await
+        {
+            Ok(v) => v,
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                self.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Too many active subscriptions",
+                            ),
+                            None,
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let subscription_id = self
+            .next_subscription_id
+            .fetch_add(1, atomic::Ordering::Relaxed)
+            .to_string();
+
+        let abort_registration = {
+            let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
+            let mut subscriptions_list = self.subscriptions.lock().await;
+            subscriptions_list.misc.insert(
+                (subscription_id.clone(), SubscriptionTy::ChainHeadBody),
+                (abort_handle, state_machine_subscription.clone()),
+            );
+            abort_registration
+        };
+
+        self.requests_subscriptions
+            .respond(
+                &state_machine_request_id,
+                methods::Response::chainHead_unstable_body(&subscription_id)
+                    .to_json_response(request_id),
+            )
+            .await;
+
+        let task = {
+            let me = self.clone();
+            async move {
+                let response = if block_is_valid {
+                    // TODO: right now we query the header because the underlying function returns an error if we don't
+                    let response = me
+                        .sync_service
+                        .clone()
+                        .block_query(
+                            hash.0,
+                            protocol::BlocksRequestFields {
+                                header: true,
+                                body: true,
+                                justifications: false,
+                            },
+                        )
+                        .await;
+                    match response {
+                        Ok(block_data) => methods::ServerToClient::chainHead_unstable_bodyEvent {
+                            subscription: &subscription_id,
+                            result: methods::ChainHeadBodyEvent::Done {
+                                value: block_data
+                                    .body
+                                    .unwrap()
+                                    .into_iter()
+                                    .map(methods::HexString)
+                                    .collect(),
+                            },
+                        }
+                        .to_json_call_object_parameters(None),
+                        Err(()) => methods::ServerToClient::chainHead_unstable_bodyEvent {
+                            subscription: &subscription_id,
+                            result: methods::ChainHeadBodyEvent::Inaccessible {},
+                        }
+                        .to_json_call_object_parameters(None),
+                    }
+                } else {
+                    methods::ServerToClient::chainHead_unstable_bodyEvent {
+                        subscription: &subscription_id,
+                        result: methods::ChainHeadBodyEvent::Disjoint {},
+                    }
+                    .to_json_call_object_parameters(None)
+                };
+
+                me.requests_subscriptions
+                    .set_queued_notification(&state_machine_subscription, 0, response)
+                    .await;
+
+                me.requests_subscriptions
+                    .stop_subscription(&state_machine_subscription)
+                    .await;
+                let _ = me
+                    .subscriptions
+                    .lock()
+                    .await
+                    .misc
+                    .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadBody));
+            }
+        };
+
+        self.new_child_tasks_tx
+            .lock()
+            .await
+            .unbounded_send(Box::pin(
+                future::Abortable::new(task, abort_registration).map(|_| ()),
+            ))
+            .unwrap();
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_stopCall`].
+    async fn chain_head_unstable_stop_call(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        subscription_id: &str,
+    ) {
+        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
+            self.subscriptions
+                .lock()
+                .await
+                .misc
+                .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadCall))
+        {
+            abort_handle.abort();
+            Some(state_machine_subscription)
+        } else {
+            None
+        };
+
+        if let Some(state_machine_subscription) = &state_machine_subscription {
+            self.requests_subscriptions
+                .stop_subscription(state_machine_subscription)
+                .await;
+        }
+
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chainHead_unstable_stopCall(()).to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_stopStorage`].
+    async fn chain_head_unstable_stop_storage(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        subscription_id: &str,
+    ) {
+        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
+            self.subscriptions
+                .lock()
+                .await
+                .misc
+                .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadStorage))
+        {
+            abort_handle.abort();
+            Some(state_machine_subscription)
+        } else {
+            None
+        };
+
+        if let Some(state_machine_subscription) = &state_machine_subscription {
+            self.requests_subscriptions
+                .stop_subscription(state_machine_subscription)
+                .await;
+        }
+
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chainHead_unstable_stopStorage(()).to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_genesisHash`].
+    async fn chain_head_unstable_genesis_hash(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chainHead_unstable_genesisHash(methods::HashHexString(
+                    self.genesis_block,
+                ))
+                .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_header`].
+    async fn chain_head_unstable_header(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        follow_subscription_id: &str,
+        hash: methods::HashHexString,
+    ) {
+        let response = {
+            let lock = self.subscriptions.lock().await;
+            if let Some(subscription) = lock.chain_head_follow.get(follow_subscription_id) {
+                subscription
+                    .pinned_blocks_headers
+                    .get(&hash.0)
+                    .cloned()
+                    .map(Some)
+            } else {
+                Some(None)
+            }
+        };
+
+        if let Some(response) = response {
+            self.requests_subscriptions
+                .respond(
+                    state_machine_request_id,
+                    methods::Response::chainHead_unstable_header(response.map(methods::HexString))
+                        .to_json_response(request_id),
+                )
+                .await;
+        } else {
+            // Reached if the subscription is valid but the block couldn't be found in
+            // `pinned_blocks_headers`.
+            self.requests_subscriptions
+                .respond(
+                    state_machine_request_id,
+                    json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::InvalidParams,
+                        None,
+                    ),
+                )
+                .await;
+        }
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_unpin`].
+    async fn chain_head_unstable_unpin(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        follow_subscription_id: &str,
+        hash: methods::HashHexString,
+    ) {
+        let valid = {
+            let mut lock = self.subscriptions.lock().await;
+            if let Some(subscription) = lock.chain_head_follow.get_mut(follow_subscription_id) {
+                if subscription.pinned_blocks_headers.remove(&hash.0).is_some() {
+                    if let Some(runtime_subscribe_all) = subscription.runtime_subscribe_all {
+                        self.runtime_service
+                            .unpin_block(runtime_subscribe_all, &hash.0)
+                            .await;
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                true
+            }
+        };
+
+        if valid {
+            self.requests_subscriptions
+                .respond(
+                    state_machine_request_id,
+                    methods::Response::chainHead_unstable_unpin(()).to_json_response(request_id),
+                )
+                .await;
+        } else {
+            self.requests_subscriptions
+                .respond(
+                    state_machine_request_id,
+                    json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::InvalidParams,
+                        None,
+                    ),
+                )
+                .await;
+        }
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_unfollow`].
+    async fn chain_head_unstable_unfollow(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        follow_subscription_id: &str,
+    ) {
+        if let Some(subscription) = self
+            .subscriptions
+            .lock()
+            .await
+            .chain_head_follow
+            .remove(follow_subscription_id)
+        {
+            subscription.abort_handle.abort();
+        }
+
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chainHead_unstable_unfollow(()).to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainSpec_unstable_chainName`].
+    async fn chain_spec_unstable_chain_name(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chainSpec_unstable_chainName(&self.chain_name)
+                    .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainSpec_unstable_genesisHash`].
+    async fn chain_spec_unstable_genesis_hash(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chainSpec_unstable_genesisHash(methods::HashHexString(
+                    self.genesis_block,
+                ))
+                .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainSpec_unstable_properties`].
+    async fn chain_spec_unstable_properties(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chainSpec_unstable_properties(
+                    serde_json::from_str(&self.chain_properties_json).unwrap(),
+                )
+                .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::sudo_unstable_p2pDiscover`].
+    async fn sudo_unstable_p2p_discover(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        multiaddr: &str,
+    ) {
+        let response = match multiaddr.parse::<multiaddr::Multiaddr>() {
+            Ok(addr) if matches!(addr.iter().last(), Some(multiaddr::ProtocolRef::P2p(_))) => {
+                // TODO: actually use address
+                methods::Response::sudo_unstable_p2pDiscover(()).to_json_response(request_id)
+            }
+            Ok(_) => json_rpc::parse::build_error_response(
+                request_id,
+                json_rpc::parse::ErrorResponse::InvalidParams,
+                Some(&serde_json::to_string("multiaddr doesn't end with /p2p").unwrap()),
+            ),
+            Err(err) => json_rpc::parse::build_error_response(
+                request_id,
+                json_rpc::parse::ErrorResponse::InvalidParams,
+                Some(&serde_json::to_string(&err.to_string()).unwrap()),
+            ),
+        };
+
+        self.requests_subscriptions
+            .respond(state_machine_request_id, response)
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::sudo_unstable_version`].
+    async fn sudo_unstable_version(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::sudo_unstable_version(&format!(
+                    "{} {}",
+                    self.system_name, self.system_version
+                ))
+                .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::transaction_unstable_unwatch`].
+    async fn transaction_unstable_unwatch(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        subscription: &str,
+    ) {
+        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
+            self.subscriptions
+                .lock()
+                .await
+                .misc
+                .remove(&(subscription.to_owned(), SubscriptionTy::Transaction))
+        {
+            abort_handle.abort();
+            Some(state_machine_subscription)
+        } else {
+            None
+        };
+
+        if let Some(state_machine_subscription) = &state_machine_subscription {
+            self.requests_subscriptions
+                .stop_subscription(state_machine_subscription)
+                .await;
+        }
+
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::transaction_unstable_unwatch(()).to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::author_pendingExtrinsics`].
+    async fn author_pending_extrinsics(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        // TODO: ask transactions service
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::author_pendingExtrinsics(Vec::new())
+                    .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::chain_getHeader`].
+    async fn chain_get_header(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        hash: Option<methods::HashHexString>,
+    ) {
+        let hash = match hash {
+            Some(h) => h.0,
+            None => header::hash_from_scale_encoded_header(
+                &self.runtime_service.subscribe_best().await.0,
+            ),
+        };
+
+        let fut = self.header_query(&hash);
+        let header = fut.await;
+
+        let response = match header {
+            Ok(header) => {
+                // In the case of a parachain, it is possible for the header to be in
+                // a format that smoldot isn't capable of parsing. In that situation,
+                // we take of liberty of returning a JSON-RPC error.
+                match methods::Header::from_scale_encoded_header(&header) {
+                    Ok(decoded) => {
+                        methods::Response::chain_getHeader(decoded).to_json_response(request_id)
+                    }
+                    Err(error) => json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(
+                            -32000,
+                            &format!("Failed to decode header: {}", error),
+                        ),
+                        None,
+                    ),
+                }
+            }
+            Err(()) => {
+                // Failed to retreive the header.
+                // TODO: error or null?
+                json_rpc::parse::build_success_response(request_id, "null")
+            }
+        };
+
+        self.requests_subscriptions
+            .respond(state_machine_request_id, response)
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::chain_unsubscribeAllHeads`].
+    async fn chain_unsubscribe_all_heads(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        subscription: String,
+    ) {
+        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
+            self.subscriptions
+                .lock()
+                .await
+                .misc
+                .remove(&(subscription.to_owned(), SubscriptionTy::AllHeads))
+        {
+            abort_handle.abort();
+            Some(state_machine_subscription)
+        } else {
+            None
+        };
+
+        if let Some(state_machine_subscription) = &state_machine_subscription {
+            self.requests_subscriptions
+                .stop_subscription(state_machine_subscription)
+                .await;
+        }
+
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chain_unsubscribeAllHeads(state_machine_subscription.is_some())
+                    .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::chain_unsubscribeFinalizedHeads`].
+    async fn chain_unsubscribe_finalized_heads(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        subscription: String,
+    ) {
+        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
+            self.subscriptions
+                .lock()
+                .await
+                .misc
+                .remove(&(subscription.to_owned(), SubscriptionTy::FinalizedHeads))
+        {
+            abort_handle.abort();
+            Some(state_machine_subscription)
+        } else {
+            None
+        };
+
+        if let Some(state_machine_subscription) = &state_machine_subscription {
+            self.requests_subscriptions
+                .stop_subscription(state_machine_subscription)
+                .await;
+        }
+
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chain_unsubscribeFinalizedHeads(
+                    state_machine_subscription.is_some(),
+                )
+                .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::chain_unsubscribeNewHeads`].
+    async fn chain_unsubscribe_new_heads(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        subscription: String,
+    ) {
+        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
+            self.subscriptions
+                .lock()
+                .await
+                .misc
+                .remove(&(subscription.to_owned(), SubscriptionTy::NewHeads))
+        {
+            abort_handle.abort();
+            Some(state_machine_subscription)
+        } else {
+            None
+        };
+
+        if let Some(state_machine_subscription) = &state_machine_subscription {
+            self.requests_subscriptions
+                .stop_subscription(state_machine_subscription)
+                .await;
+        }
+
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chain_unsubscribeNewHeads(state_machine_subscription.is_some())
+                    .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::rpc_methods`].
+    async fn rpc_methods(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::rpc_methods(methods::RpcMethods {
+                    version: 1,
+                    methods: methods::MethodCall::method_names()
+                        .map(|n| n.into())
+                        .collect(),
+                })
+                .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_getKeysPaged`].
+    async fn state_get_keys_paged(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        prefix: Option<methods::HexString>,
+        count: u32,
+        start_key: Option<methods::HexString>,
+        hash: Option<methods::HashHexString>,
+    ) {
+        assert!(hash.is_none()); // TODO: not implemented
+
+        let block_hash =
+            header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
+
+        let mut cache = self.cache.lock().await;
+        let (state_root, block_number) = {
+            // TODO: no /!\
+            let block = cache.recent_pinned_blocks.get(&block_hash).unwrap();
+            match header::decode(block) {
+                Ok(d) => (*d.state_root, d.number),
+                Err(_) => {
+                    json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(
+                            -32000,
+                            "Failed to decode block header",
+                        ),
+                        None,
+                    );
+                    return;
+                }
+            }
+        };
+        drop(cache);
+
+        let outcome = self
+            .sync_service
+            .clone()
+            .storage_prefix_keys_query(
+                block_number,
+                &block_hash,
+                &prefix.unwrap().0, // TODO: don't unwrap! what is this Option?
+                &state_root,
+            )
+            .await;
+
+        self.requests_subscriptions
+            .respond(
+                &state_machine_request_id,
+                match outcome {
+                    Ok(keys) => {
+                        // TODO: instead of requesting all keys with that prefix from the network, pass `start_key` to the network service
+                        let out = keys
+                            .into_iter()
+                            .filter(|k| start_key.as_ref().map_or(true, |start| k >= &start.0)) // TODO: not sure if start should be in the set or not?
+                            .map(methods::HexString)
+                            .take(usize::try_from(count).unwrap_or(usize::max_value()))
+                            .collect::<Vec<_>>();
+                        methods::Response::state_getKeysPaged(out).to_json_response(request_id)
+                    }
+                    Err(error) => json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                        None,
+                    ),
+                },
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_queryStorageAt`].
+    async fn state_query_storage_at(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        keys: Vec<methods::HexString>,
+        at: Option<methods::HashHexString>,
+    ) {
+        let best_block =
+            header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
+
+        let cache = self.cache.lock().await;
+
+        let at = at.as_ref().map(|h| h.0).unwrap_or(best_block);
+
+        let mut out = methods::StorageChangeSet {
+            block: methods::HashHexString(best_block),
+            changes: Vec::new(),
+        };
+
+        drop(cache);
+
+        let fut = self.storage_query(keys.iter(), &at);
+
+        if let Ok(values) = fut.await {
+            for (value, key) in values.into_iter().zip(keys) {
+                out.changes.push((key, value.map(methods::HexString)));
+            }
+        }
+
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::state_queryStorageAt(vec![out]).to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_getMetadata`].
+    async fn state_get_metadata(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        hash: Option<methods::HashHexString>,
+    ) {
+        let block_hash = if let Some(hash) = hash {
+            hash.0
+        } else {
+            header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0)
+        };
+
+        let result = self
+            .runtime_call(&block_hash, "Metadata_metadata", iter::empty::<Vec<u8>>())
+            .await;
+        let result = result
+            .as_ref()
+            .map(|output| remove_metadata_length_prefix(&output));
+
+        let response = match result {
+            Ok(Ok(metadata)) => {
+                methods::Response::state_getMetadata(methods::HexString(metadata.to_vec()))
+                    .to_json_response(request_id)
+            }
+            Ok(Err(error)) => json_rpc::parse::build_error_response(
+                request_id,
+                json_rpc::parse::ErrorResponse::ServerError(
+                    -32000,
+                    &format!("Failed to decode metadata from runtime: {}", error),
+                ),
+                None,
+            ),
+            Err(error) => {
+                log::warn!(
+                    target: &self.log_target,
+                    "Returning error from `state_getMetadata`. \
+                            API user might not function properly. Error: {}",
+                    error
+                );
+                json_rpc::parse::build_error_response(
+                    request_id,
+                    json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                    None,
+                )
+            }
+        };
+
+        self.requests_subscriptions
+            .respond(state_machine_request_id, response)
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_getStorage`].
+    async fn state_get_storage(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        key: methods::HexString,
+        hash: Option<methods::HashHexString>,
+    ) {
+        let hash = hash
+            .as_ref()
+            .map(|h| h.0)
+            .unwrap_or(header::hash_from_scale_encoded_header(
+                &self.runtime_service.subscribe_best().await.0,
+            ));
+
+        let fut = self.storage_query(iter::once(&key.0), &hash);
+        let response = fut.await;
+        let response = match response.map(|mut r| r.pop().unwrap()) {
+            Ok(Some(value)) => {
+                methods::Response::state_getStorage(methods::HexString(value.to_owned())) // TODO: overhead
+                    .to_json_response(request_id)
+            }
+            Ok(None) => json_rpc::parse::build_success_response(request_id, "null"),
+            Err(error) => json_rpc::parse::build_error_response(
+                request_id,
+                json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                None,
+            ),
+        };
+
+        self.requests_subscriptions
+            .respond(state_machine_request_id, response)
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_subscribeRuntimeVersion`].
+    async fn state_subscribe_runtime_version(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        let state_machine_subscription = match self
+            .requests_subscriptions
+            .start_subscription(&state_machine_request_id, 1)
+            .await
+        {
+            Ok(v) => v,
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                self.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Too many active subscriptions",
+                            ),
+                            None,
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let subscription_id = self
+            .next_subscription_id
+            .fetch_add(1, atomic::Ordering::Relaxed)
+            .to_string();
+
+        let abort_registration = {
+            let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
+            let mut subscriptions_list = self.subscriptions.lock().await;
+            subscriptions_list.misc.insert(
+                (subscription_id.clone(), SubscriptionTy::RuntimeSpec),
+                (abort_handle, state_machine_subscription.clone()),
+            );
+            abort_registration
+        };
+
+        self.requests_subscriptions
+            .respond(
+                &state_machine_request_id,
+                methods::Response::state_subscribeRuntimeVersion(&subscription_id)
+                    .to_json_response(request_id),
+            )
+            .await;
+
+        let task = {
+            let me = self.clone();
+            async move {
+                let (current_spec, spec_changes) =
+                    me.runtime_service.subscribe_runtime_version().await;
+                let spec_changes = stream::iter(iter::once(current_spec)).chain(spec_changes);
+                futures::pin_mut!(spec_changes);
+
+                loop {
+                    let new_runtime = spec_changes.next().await;
+                    let notification_body = if let Ok(runtime_spec) = new_runtime.unwrap() {
+                        let runtime_spec = runtime_spec.decode();
+                        methods::ServerToClient::state_runtimeVersion {
+                            subscription: &subscription_id,
+                            result: Some(methods::RuntimeVersion {
+                                spec_name: runtime_spec.spec_name.into(),
+                                impl_name: runtime_spec.impl_name.into(),
+                                authoring_version: u64::from(runtime_spec.authoring_version),
+                                spec_version: u64::from(runtime_spec.spec_version),
+                                impl_version: u64::from(runtime_spec.impl_version),
+                                transaction_version: runtime_spec
+                                    .transaction_version
+                                    .map(u64::from),
+                                apis: runtime_spec
+                                    .apis
+                                    .map(|api| {
+                                        (methods::HexString(api.name_hash.to_vec()), api.version)
+                                    })
+                                    .collect(),
+                            }),
+                        }
+                        .to_json_call_object_parameters(None)
+                    } else {
+                        methods::ServerToClient::state_runtimeVersion {
+                            subscription: &subscription_id,
+                            result: None,
+                        }
+                        .to_json_call_object_parameters(None)
+                    };
+
+                    me.requests_subscriptions
+                        .set_queued_notification(&state_machine_subscription, 0, notification_body)
+                        .await;
+                }
+            }
+        };
+
+        self.new_child_tasks_tx
+            .lock()
+            .await
+            .unbounded_send(Box::pin(
+                future::Abortable::new(task, abort_registration).map(|_| ()),
+            ))
+            .unwrap();
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_unsubscribeRuntimeVersion`].
+    async fn state_unsubscribe_runtime_version(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        subscription: &str,
+    ) {
+        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
+            self.subscriptions
+                .lock()
+                .await
+                .misc
+                .remove(&(subscription.to_owned(), SubscriptionTy::RuntimeSpec))
+        {
+            abort_handle.abort();
+            Some(state_machine_subscription)
+        } else {
+            None
+        };
+        if let Some(state_machine_subscription) = &state_machine_subscription {
+            self.requests_subscriptions
+                .stop_subscription(state_machine_subscription)
+                .await;
+        }
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::state_unsubscribeRuntimeVersion(
+                    state_machine_subscription.is_some(),
+                )
+                .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_subscribeStorage`].
+    async fn state_subscribe_storage(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        list: Vec<methods::HexString>,
+    ) {
+        if list.is_empty() {
+            // When the list of keys is empty, that means we want to subscribe to *all*
+            // storage changes. It is not possible to reasonably implement this in a
+            // light client.
+            self.requests_subscriptions
+                .respond(
+                    state_machine_request_id,
+                    json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(
+                            -32000,
+                            "Subscribing to all storage changes isn't supported",
+                        ),
+                        None,
+                    ),
+                )
+                .await;
+        } else {
+            self.subscribe_storage(request_id, state_machine_request_id, list)
+                .await;
+        }
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_unsubscribeStorage`].
+    async fn state_unsubscribe_storage(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        subscription: &str,
+    ) {
+        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
+            self.subscriptions
+                .lock()
+                .await
+                .misc
+                .remove(&(subscription.to_owned(), SubscriptionTy::Storage))
+        {
+            abort_handle.abort();
+            Some(state_machine_subscription)
+        } else {
+            None
+        };
+        if let Some(state_machine_subscription) = &state_machine_subscription {
+            self.requests_subscriptions
+                .stop_subscription(state_machine_subscription)
+                .await;
+        }
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::state_unsubscribeStorage(state_machine_subscription.is_some())
+                    .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::system_chainType`].
+    async fn system_chain_type(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::system_chainType(&self.chain_ty).to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::system_localListenAddresses`].
+    async fn system_local_listen_addresses(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        // Wasm node never listens on any address.
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::system_localListenAddresses(Vec::new())
+                    .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::system_chain`].
+    async fn system_chain(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::system_chain(&self.chain_name).to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::system_health`].
+    async fn system_health(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        let response = methods::Response::system_health(methods::SystemHealth {
+            // In smoldot, `is_syncing` equal to `false` means that GrandPa warp sync
+            // is finished and that the block notifications report blocks that are
+            // believed to be near the head of the chain.
+            is_syncing: !self.runtime_service.is_near_head_of_chain_heuristic().await,
+            peers: u64::try_from(self.sync_service.syncing_peers().await.len())
+                .unwrap_or(u64::max_value()),
+            should_have_peers: self.chain_is_live,
+        })
+        .to_json_response(request_id);
+        self.requests_subscriptions
+            .respond(state_machine_request_id, response)
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::system_version`].
+    async fn system_version(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::system_version(&self.system_version)
+                    .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::system_name`].
+    async fn system_name(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::system_name(&self.system_name).to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::system_properties`].
+    async fn system_properties(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::system_properties(
+                    serde_json::from_str(&self.chain_properties_json).unwrap(),
+                )
+                .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::system_localPeerId`].
+    async fn system_local_peer_id(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::system_localPeerId(&self.peer_id_base58)
+                    .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::system_peers`].
+    async fn system_peers(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        let response = methods::Response::system_peers(
+            self.sync_service
+                .syncing_peers()
+                .await
+                .map(
+                    |(peer_id, role, best_number, best_hash)| methods::SystemPeer {
+                        peer_id: peer_id.to_string(),
+                        roles: match role {
+                            protocol::Role::Authority => methods::SystemPeerRole::Authority,
+                            protocol::Role::Full => methods::SystemPeerRole::Full,
+                            protocol::Role::Light => methods::SystemPeerRole::Light,
+                        },
+                        best_hash: methods::HashHexString(best_hash),
+                        best_number,
+                    },
+                )
+                .collect(),
+        )
+        .to_json_response(request_id);
+        self.requests_subscriptions
+            .respond(state_machine_request_id, response)
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::author_submitExtrinsic`].
+    async fn author_submit_extrinsic(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        transaction: methods::HexString,
+    ) {
+        // Note that this function is misnamed. It should really be called
+        // "author_submitTransaction".
+
+        // In Substrate, `author_submitExtrinsic` returns the hash of the transaction. It
+        // is unclear whether it has to actually be the hash of the transaction or if it
+        // could be any opaque value. Additionally, there isn't any other JSON-RPC method
+        // that accepts as parameter the value returned here. When in doubt, we return
+        // the hash as well.
+
+        let mut hash_context = blake2_rfc::blake2b::Blake2b::new(32);
+        hash_context.update(&transaction.0);
+        let mut transaction_hash: [u8; 32] = Default::default();
+        transaction_hash.copy_from_slice(hash_context.finalize().as_bytes());
+        self.transactions_service
+            .submit_transaction(transaction.0)
+            .await;
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::author_submitExtrinsic(methods::HashHexString(transaction_hash))
+                    .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::author_unwatchExtrinsic`].
+    async fn author_unwatch_extrinsic(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        subscription: &str,
+    ) {
+        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
+            self.subscriptions
+                .lock()
+                .await
+                .misc
+                .remove(&(subscription.to_owned(), SubscriptionTy::TransactionLegacy))
+        {
+            abort_handle.abort();
+            Some(state_machine_subscription)
+        } else {
+            None
+        };
+        if let Some(state_machine_subscription) = &state_machine_subscription {
+            self.requests_subscriptions
+                .stop_subscription(state_machine_subscription)
+                .await;
+        }
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::author_unwatchExtrinsic(state_machine_subscription.is_some())
+                    .to_json_response(request_id),
+            )
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::system_accountNextIndex`].
@@ -2375,8 +2673,61 @@ impl<TPlat: Platform> Background<TPlat> {
             .unwrap();
     }
 
+    /// Handles a call to [`methods::MethodCall::chain_getBlock`].
+    async fn chain_get_block(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        hash: Option<methods::HashHexString>,
+    ) {
+        // `hash` equal to `None` means "the current best block".
+        let hash = match hash {
+            Some(h) => h.0,
+            None => header::hash_from_scale_encoded_header(
+                &self.runtime_service.subscribe_best().await.0,
+            ),
+        };
+
+        // Block bodies and justifications aren't stored locally. Ask the network.
+        let result = self
+            .sync_service
+            .clone()
+            .block_query(
+                hash,
+                protocol::BlocksRequestFields {
+                    header: true,
+                    body: true,
+                    justifications: true,
+                },
+            )
+            .await;
+
+        // The `block_query` function guarantees that the header and body are present and
+        // are correct.
+
+        let response = if let Ok(block) = result {
+            methods::Response::chain_getBlock(methods::Block {
+                extrinsics: block
+                    .body
+                    .unwrap()
+                    .into_iter()
+                    .map(methods::HexString)
+                    .collect(),
+                header: methods::Header::from_scale_encoded_header(&block.header.unwrap()).unwrap(),
+                justifications: block.justifications,
+            })
+            .to_json_response(request_id)
+        } else {
+            json_rpc::parse::build_success_response(request_id, "null")
+        };
+
+        self.requests_subscriptions
+            .respond(&state_machine_request_id, response)
+            .await;
+    }
+
     /// Handles a call to [`methods::MethodCall::chain_getBlockHash`].
-    async fn get_block_hash(
+    async fn chain_get_block_hash(
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
@@ -2411,8 +2762,27 @@ impl<TPlat: Platform> Background<TPlat> {
             .await;
     }
 
+    /// Handles a call to [`methods::MethodCall::chain_getFinalizedHead`].
+    async fn chain_get_finalized_head(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        // TODO: maybe optimize?
+        let response = methods::Response::chain_getFinalizedHead(methods::HashHexString(
+            header::hash_from_scale_encoded_header(
+                &self.runtime_service.subscribe_finalized().await.0,
+            ),
+        ))
+        .to_json_response(request_id);
+
+        self.requests_subscriptions
+            .respond(&state_machine_request_id, response)
+            .await;
+    }
+
     /// Handles a call to [`methods::MethodCall::chain_subscribeAllHeads`].
-    async fn subscribe_all_heads(
+    async fn chain_subscribe_all_heads(
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
@@ -2535,7 +2905,7 @@ impl<TPlat: Platform> Background<TPlat> {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeNewHeads`].
-    async fn subscribe_new_heads(
+    async fn chain_subscribe_new_heads(
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
@@ -2632,7 +3002,7 @@ impl<TPlat: Platform> Background<TPlat> {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeFinalizedHeads`].
-    async fn subscribe_finalized_heads(
+    async fn chain_subscribe_finalized_heads(
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
