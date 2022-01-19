@@ -905,71 +905,10 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::state_getMetadata { hash } => {
-                let block_hash = if let Some(hash) = hash {
-                    hash.0
-                } else {
-                    header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0)
-                };
-
-                let result = self.runtime_call(&block_hash, "Metadata_metadata",iter::empty::<Vec<u8>>()).await;
-                let result = result.as_ref().map(|output| remove_metadata_length_prefix(&output));
-
-                let response = match result {
-                    Ok(Ok(metadata)) => {
-                        methods::Response::state_getMetadata(methods::HexString(metadata.to_vec()))
-                            .to_json_response(request_id)
-                    }
-                    Ok(Err(error)) => json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::ServerError(
-                            -32000,
-                            &format!("Failed to decode metadata from runtime: {}", error)
-                        ),
-                        None,
-                    ),
-                    Err(error) => {
-                        log::warn!(
-                            target: &self.log_target,
-                            "Returning error from `state_getMetadata`. \
-                            API user might not function properly. Error: {}",
-                            error
-                        );
-                        json_rpc::parse::build_error_response(
-                            request_id,
-                            json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                            None,
-                        )
-                    }
-                };
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
-                    .await;
+                self.state_get_metadata(request_id, &state_machine_request_id, hash).await;
             }
             methods::MethodCall::state_getStorage { key, hash } => {
-                let hash = hash
-                    .as_ref()
-                    .map(|h| h.0)
-                    .unwrap_or(header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0));
-
-                let fut = self.storage_query(iter::once(&key.0), &hash);
-                let response = fut.await;
-                let response = match response.map(|mut r| r.pop().unwrap()) {
-                    Ok(Some(value)) => {
-                        methods::Response::state_getStorage(methods::HexString(value.to_owned())) // TODO: overhead
-                            .to_json_response(request_id)
-                    }
-                    Ok(None) => json_rpc::parse::build_success_response(request_id, "null"),
-                    Err(error) => json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                        None,
-                    ),
-                };
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
-                    .await;
+                self.state_get_storage(request_id, &state_machine_request_id, key, hash).await;
             }
             methods::MethodCall::state_subscribeRuntimeVersion {} => {
                 self.state_subscribe_runtime_version(request_id, &state_machine_request_id).await;
@@ -1496,6 +1435,94 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_getMetadata`].
+    async fn state_get_metadata(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        hash: Option<methods::HashHexString>,
+    ) {
+        let block_hash = if let Some(hash) = hash {
+            hash.0
+        } else {
+            header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0)
+        };
+
+        let result = self
+            .runtime_call(&block_hash, "Metadata_metadata", iter::empty::<Vec<u8>>())
+            .await;
+        let result = result
+            .as_ref()
+            .map(|output| remove_metadata_length_prefix(&output));
+
+        let response = match result {
+            Ok(Ok(metadata)) => {
+                methods::Response::state_getMetadata(methods::HexString(metadata.to_vec()))
+                    .to_json_response(request_id)
+            }
+            Ok(Err(error)) => json_rpc::parse::build_error_response(
+                request_id,
+                json_rpc::parse::ErrorResponse::ServerError(
+                    -32000,
+                    &format!("Failed to decode metadata from runtime: {}", error),
+                ),
+                None,
+            ),
+            Err(error) => {
+                log::warn!(
+                    target: &self.log_target,
+                    "Returning error from `state_getMetadata`. \
+                            API user might not function properly. Error: {}",
+                    error
+                );
+                json_rpc::parse::build_error_response(
+                    request_id,
+                    json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                    None,
+                )
+            }
+        };
+
+        self.requests_subscriptions
+            .respond(state_machine_request_id, response)
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_getStorage`].
+    async fn state_get_storage(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        key: methods::HexString,
+        hash: Option<methods::HashHexString>,
+    ) {
+        let hash = hash
+            .as_ref()
+            .map(|h| h.0)
+            .unwrap_or(header::hash_from_scale_encoded_header(
+                &self.runtime_service.subscribe_best().await.0,
+            ));
+
+        let fut = self.storage_query(iter::once(&key.0), &hash);
+        let response = fut.await;
+        let response = match response.map(|mut r| r.pop().unwrap()) {
+            Ok(Some(value)) => {
+                methods::Response::state_getStorage(methods::HexString(value.to_owned())) // TODO: overhead
+                    .to_json_response(request_id)
+            }
+            Ok(None) => json_rpc::parse::build_success_response(request_id, "null"),
+            Err(error) => json_rpc::parse::build_error_response(
+                request_id,
+                json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                None,
+            ),
+        };
+
+        self.requests_subscriptions
+            .respond(state_machine_request_id, response)
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::state_subscribeRuntimeVersion`].
