@@ -764,128 +764,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 hash,
                 .. // TODO: network_config
             } => {
-                // Determine whether the requested block hash is valid.
-                let block_is_valid = {
-                    let lock = self.subscriptions.lock().await;
-                    if let Some(subscription) = lock.chain_head_follow.get(follow_subscription_id) {
-                        if !subscription.pinned_blocks_headers.contains_key(&hash.0) {
-                            self.requests_subscriptions
-                                .respond(
-                                    &state_machine_request_id,
-                                    json_rpc::parse::build_error_response(
-                                        request_id,
-                                        json_rpc::parse::ErrorResponse::InvalidParams,
-                                        None,
-                                    ),
-                                )
-                                .await;
-                            return;
-                        }
-
-                        true
-                    } else {
-                        false
-                    }
-                };
-
-                let state_machine_subscription = match self
-                    .requests_subscriptions
-                    .start_subscription(&state_machine_request_id, 1)
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
-                        self.requests_subscriptions
-                            .respond(
-                                &state_machine_request_id,
-                                json_rpc::parse::build_error_response(
-                                    request_id,
-                                    json_rpc::parse::ErrorResponse::ServerError(
-                                        -32000,
-                                        "Too many active subscriptions",
-                                    ),
-                                    None,
-                                ),
-                            )
-                            .await;
-                        return;
-                    }
-                };
-
-                let subscription_id = self
-                    .next_subscription_id
-                    .fetch_add(1, atomic::Ordering::Relaxed)
-                    .to_string();
-
-                let abort_registration = {
-                    let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
-                    let mut subscriptions_list = self.subscriptions.lock().await;
-                    subscriptions_list.misc.insert(
-                        (subscription_id.clone(), SubscriptionTy::ChainHeadBody),
-                        (abort_handle, state_machine_subscription.clone()),
-                    );
-                    abort_registration
-                };
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chainHead_unstable_body(&subscription_id)
-                            .to_json_response(request_id),
-                    )
-                    .await;
-
-                let task = {
-                    let me = self.clone();
-                    async move {
-                        let response = if block_is_valid {
-                            // TODO: right now we query the header because the underlying function returns an error if we don't
-                            let response = me.sync_service.clone()
-                                .block_query(hash.0, protocol::BlocksRequestFields { header: true, body: true, justifications: false  }).await;
-                            match response {
-                                Ok(block_data) => {
-                                    methods::ServerToClient::chainHead_unstable_bodyEvent {
-                                        subscription: &subscription_id,
-                                        result: methods::ChainHeadBodyEvent::Done {
-                                            value: block_data.body.unwrap()
-                                                .into_iter()
-                                                .map(methods::HexString)
-                                                .collect()
-                                        },
-                                    }
-                                    .to_json_call_object_parameters(None)
-                                }
-                                Err(()) => {
-                                    methods::ServerToClient::chainHead_unstable_bodyEvent {
-                                        subscription: &subscription_id,
-                                        result: methods::ChainHeadBodyEvent::Inaccessible {},
-                                    }
-                                    .to_json_call_object_parameters(None)
-                                }
-                            }
-                        } else {
-                            methods::ServerToClient::chainHead_unstable_bodyEvent {
-                                subscription: &subscription_id,
-                                result: methods::ChainHeadBodyEvent::Disjoint {},
-                            }
-                            .to_json_call_object_parameters(None)
-                        };
-
-                        me.requests_subscriptions.set_queued_notification(&state_machine_subscription, 0, response).await;
-
-                        me.requests_subscriptions.stop_subscription(&state_machine_subscription).await;
-                        let _ = me.subscriptions.lock().await.misc
-                            .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadBody));
-                    }
-                };
-
-                self.new_child_tasks_tx
-                    .lock()
-                    .await
-                    .unbounded_send(Box::pin(
-                        future::Abortable::new(task, abort_registration).map(|_| ()),
-                    ))
-                    .unwrap();
+                self.chain_head_unstable_body(request_id, &state_machine_request_id, follow_subscription_id, hash).await;
             }
             methods::MethodCall::chainHead_unstable_call {
                 follow_subscription_id,
@@ -981,6 +860,154 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_body`].
+    async fn chain_head_unstable_body(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        follow_subscription_id: &str,
+        hash: methods::HashHexString,
+    ) {
+        // Determine whether the requested block hash is valid.
+        let block_is_valid = {
+            let lock = self.subscriptions.lock().await;
+            if let Some(subscription) = lock.chain_head_follow.get(follow_subscription_id) {
+                if !subscription.pinned_blocks_headers.contains_key(&hash.0) {
+                    self.requests_subscriptions
+                        .respond(
+                            &state_machine_request_id,
+                            json_rpc::parse::build_error_response(
+                                request_id,
+                                json_rpc::parse::ErrorResponse::InvalidParams,
+                                None,
+                            ),
+                        )
+                        .await;
+                    return;
+                }
+
+                true
+            } else {
+                false
+            }
+        };
+
+        let state_machine_subscription = match self
+            .requests_subscriptions
+            .start_subscription(&state_machine_request_id, 1)
+            .await
+        {
+            Ok(v) => v,
+            Err(requests_subscriptions::StartSubscriptionError::LimitReached) => {
+                self.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                "Too many active subscriptions",
+                            ),
+                            None,
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let subscription_id = self
+            .next_subscription_id
+            .fetch_add(1, atomic::Ordering::Relaxed)
+            .to_string();
+
+        let abort_registration = {
+            let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
+            let mut subscriptions_list = self.subscriptions.lock().await;
+            subscriptions_list.misc.insert(
+                (subscription_id.clone(), SubscriptionTy::ChainHeadBody),
+                (abort_handle, state_machine_subscription.clone()),
+            );
+            abort_registration
+        };
+
+        self.requests_subscriptions
+            .respond(
+                &state_machine_request_id,
+                methods::Response::chainHead_unstable_body(&subscription_id)
+                    .to_json_response(request_id),
+            )
+            .await;
+
+        let task = {
+            let me = self.clone();
+            async move {
+                let response = if block_is_valid {
+                    // TODO: right now we query the header because the underlying function returns an error if we don't
+                    let response = me
+                        .sync_service
+                        .clone()
+                        .block_query(
+                            hash.0,
+                            protocol::BlocksRequestFields {
+                                header: true,
+                                body: true,
+                                justifications: false,
+                            },
+                        )
+                        .await;
+                    match response {
+                        Ok(block_data) => methods::ServerToClient::chainHead_unstable_bodyEvent {
+                            subscription: &subscription_id,
+                            result: methods::ChainHeadBodyEvent::Done {
+                                value: block_data
+                                    .body
+                                    .unwrap()
+                                    .into_iter()
+                                    .map(methods::HexString)
+                                    .collect(),
+                            },
+                        }
+                        .to_json_call_object_parameters(None),
+                        Err(()) => methods::ServerToClient::chainHead_unstable_bodyEvent {
+                            subscription: &subscription_id,
+                            result: methods::ChainHeadBodyEvent::Inaccessible {},
+                        }
+                        .to_json_call_object_parameters(None),
+                    }
+                } else {
+                    methods::ServerToClient::chainHead_unstable_bodyEvent {
+                        subscription: &subscription_id,
+                        result: methods::ChainHeadBodyEvent::Disjoint {},
+                    }
+                    .to_json_call_object_parameters(None)
+                };
+
+                me.requests_subscriptions
+                    .set_queued_notification(&state_machine_subscription, 0, response)
+                    .await;
+
+                me.requests_subscriptions
+                    .stop_subscription(&state_machine_subscription)
+                    .await;
+                let _ = me
+                    .subscriptions
+                    .lock()
+                    .await
+                    .misc
+                    .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadBody));
+            }
+        };
+
+        self.new_child_tasks_tx
+            .lock()
+            .await
+            .unbounded_send(Box::pin(
+                future::Abortable::new(task, abort_registration).map(|_| ()),
+            ))
+            .unwrap();
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_stopCall`].
