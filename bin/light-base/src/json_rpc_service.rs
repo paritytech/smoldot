@@ -1086,13 +1086,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::chainSpec_unstable_chainName {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chainSpec_unstable_chainName(&self.chain_name)
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_spec_unstable_chain_name(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::chainSpec_unstable_genesisHash {} => {
                 self.chain_spec_unstable_genesis_hash(request_id, &state_machine_request_id).await;
@@ -1136,6 +1130,21 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainSpec_unstable_chainName`].
+    async fn chain_spec_unstable_chain_name(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chainSpec_unstable_chainName(&self.chain_name)
+                    .to_json_response(request_id),
+            )
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chainSpec_unstable_genesisHash`].
