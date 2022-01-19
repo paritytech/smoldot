@@ -1223,13 +1223,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.system_local_peer_id(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::system_name {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::system_name(&self.system_name)
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.system_name(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::system_peers {} => {
                 self.system_peers(request_id, &state_machine_request_id).await;
@@ -1238,13 +1232,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.system_properties(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::system_version {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::system_version(&self.system_version)
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.system_version(request_id, &state_machine_request_id).await;
             }
 
             methods::MethodCall::chainHead_unstable_stopBody { subscription_id } => {
@@ -1726,6 +1714,35 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::system_version`].
+    async fn system_version(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::system_version(&self.system_version)
+                    .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::system_name`].
+    async fn system_name(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::system_name(&self.system_name).to_json_response(request_id),
+            )
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::system_properties`].
