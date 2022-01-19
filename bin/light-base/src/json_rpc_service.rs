@@ -1095,15 +1095,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::chainSpec_unstable_genesisHash {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chainSpec_unstable_genesisHash(methods::HashHexString(
-                            self.genesis_block,
-                        ))
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_spec_unstable_genesis_hash(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::chainSpec_unstable_properties {} => {
                 self.chain_spec_unstable_properties(request_id, &state_machine_request_id).await;
@@ -1146,8 +1138,29 @@ impl<TPlat: Platform> Background<TPlat> {
         }
     }
 
+    /// Handles a call to [`methods::MethodCall::chainSpec_unstable_genesisHash`].
+    async fn chain_spec_unstable_genesis_hash(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chainSpec_unstable_genesisHash(methods::HashHexString(
+                    self.genesis_block,
+                ))
+                .to_json_response(request_id),
+            )
+            .await;
+    }
+
     /// Handles a call to [`methods::MethodCall::chainSpec_unstable_properties`].
-    async fn chain_spec_unstable_properties(self: &Arc<Self>, request_id: &str, state_machine_request_id: &requests_subscriptions::RequestId) {
+    async fn chain_spec_unstable_properties(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
