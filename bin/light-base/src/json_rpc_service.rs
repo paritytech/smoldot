@@ -756,35 +756,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::chain_unsubscribeNewHeads { subscription } => {
-                let state_machine_subscription =
-                    if let Some((abort_handle, state_machine_subscription)) = self
-                        .subscriptions
-                        .lock()
-                        .await
-                        .misc
-                        .remove(&(subscription.to_owned(), SubscriptionTy::NewHeads))
-                    {
-                        abort_handle.abort();
-                        Some(state_machine_subscription)
-                    } else {
-                        None
-                    };
-
-                if let Some(state_machine_subscription) = &state_machine_subscription {
-                    self.requests_subscriptions
-                        .stop_subscription(state_machine_subscription)
-                        .await;
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chain_unsubscribeNewHeads(
-                            state_machine_subscription.is_some(),
-                        )
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_unsubscribe_new_heads(request_id, &state_machine_request_id, subscription).await;
             }
             methods::MethodCall::payment_queryInfo { extrinsic, hash } => {
                 self.payment_query_info(request_id, &state_machine_request_id, &extrinsic.0, hash.as_ref().map(|h| &h.0)).await;
@@ -1334,6 +1306,41 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::chain_unsubscribeNewHeads`].
+    async fn chain_unsubscribe_new_heads(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        subscription: String,
+    ) {
+        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
+            self.subscriptions
+                .lock()
+                .await
+                .misc
+                .remove(&(subscription.to_owned(), SubscriptionTy::NewHeads))
+        {
+            abort_handle.abort();
+            Some(state_machine_subscription)
+        } else {
+            None
+        };
+
+        if let Some(state_machine_subscription) = &state_machine_subscription {
+            self.requests_subscriptions
+                .stop_subscription(state_machine_subscription)
+                .await;
+        }
+
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chain_unsubscribeNewHeads(state_machine_subscription.is_some())
+                    .to_json_response(request_id),
+            )
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::rpc_methods`].
