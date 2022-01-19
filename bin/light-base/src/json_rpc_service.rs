@@ -1142,16 +1142,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::sudo_unstable_version {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::sudo_unstable_version(&format!(
-                            "{} {}",
-                            self.system_name, self.system_version
-                        ))
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.sudo_unstable_version(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::transaction_unstable_submitAndWatch { transaction } => {
                 self.submit_and_watch_transaction(
@@ -1183,6 +1174,20 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::sudo_unstable_version`].
+    async fn sudo_unstable_version(self: &Arc<Self>, request_id: &str, state_machine_request_id: &requests_subscriptions::RequestId) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::sudo_unstable_version(&format!(
+                    "{} {}",
+                    self.system_name, self.system_version
+                ))
+                .to_json_response(request_id),
+            )
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::transaction_unstable_unwatch`].
