@@ -983,43 +983,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 follow_subscription_id,
                 hash,
             } => {
-                let response = {
-                    let lock = self.subscriptions.lock().await;
-                    if let Some(subscription) = lock.chain_head_follow.get(follow_subscription_id) {
-                        subscription
-                            .pinned_blocks_headers
-                            .get(&hash.0)
-                            .cloned()
-                            .map(Some)
-                    } else {
-                        Some(None)
-                    }
-                };
-
-                if let Some(response) = response {
-                    self.requests_subscriptions
-                        .respond(
-                            &state_machine_request_id,
-                            methods::Response::chainHead_unstable_header(
-                                response.map(methods::HexString),
-                            )
-                            .to_json_response(request_id),
-                        )
-                        .await;
-                } else {
-                    // Reached if the subscription is valid but the block couldn't be found in
-                    // `pinned_blocks_headers`.
-                    self.requests_subscriptions
-                        .respond(
-                            &state_machine_request_id,
-                            json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::InvalidParams,
-                                None,
-                            ),
-                        )
-                        .await;
-                }
+                self.chain_head_unstable_header(request_id, &state_machine_request_id, follow_subscription_id, hash).await;
             }
             methods::MethodCall::chainHead_unstable_unpin {
                 follow_subscription_id,
@@ -1076,6 +1040,51 @@ impl<TPlat: Platform> Background<TPlat> {
                     )
                     .await;
             }
+        }
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_header`].
+    async fn chain_head_unstable_header(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        follow_subscription_id: &str,
+        hash: methods::HashHexString,
+    ) {
+        let response = {
+            let lock = self.subscriptions.lock().await;
+            if let Some(subscription) = lock.chain_head_follow.get(follow_subscription_id) {
+                subscription
+                    .pinned_blocks_headers
+                    .get(&hash.0)
+                    .cloned()
+                    .map(Some)
+            } else {
+                Some(None)
+            }
+        };
+
+        if let Some(response) = response {
+            self.requests_subscriptions
+                .respond(
+                    state_machine_request_id,
+                    methods::Response::chainHead_unstable_header(response.map(methods::HexString))
+                        .to_json_response(request_id),
+                )
+                .await;
+        } else {
+            // Reached if the subscription is valid but the block couldn't be found in
+            // `pinned_blocks_headers`.
+            self.requests_subscriptions
+                .respond(
+                    state_machine_request_id,
+                    json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::InvalidParams,
+                        None,
+                    ),
+                )
+                .await;
         }
     }
 
