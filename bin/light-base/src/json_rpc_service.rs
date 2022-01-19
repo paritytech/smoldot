@@ -689,49 +689,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::chain_getBlock { hash } => {
-                // `hash` equal to `None` means "the current best block".
-                let hash = match hash {
-                    Some(h) => h.0,
-                    None => header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0),
-                };
-
-                // Block bodies and justifications aren't stored locally. Ask the network.
-                let result = self
-                    .sync_service
-                    .clone()
-                    .block_query(
-                        hash,
-                        protocol::BlocksRequestFields {
-                            header: true,
-                            body: true,
-                            justifications: true,
-                        },
-                    )
-                    .await;
-
-                // The `block_query` function guarantees that the header and body are present and
-                // are correct.
-
-                let response = if let Ok(block) = result {
-                    methods::Response::chain_getBlock(methods::Block {
-                        extrinsics: block
-                            .body
-                            .unwrap()
-                            .into_iter()
-                            .map(methods::HexString)
-                            .collect(),
-                        header: methods::Header::from_scale_encoded_header(&block.header.unwrap())
-                            .unwrap(),
-                        justifications: block.justifications,
-                    })
-                    .to_json_response(request_id)
-                } else {
-                    json_rpc::parse::build_success_response(request_id, "null")
-                };
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
-                    .await;
+                self.get_block(request_id, &state_machine_request_id, hash).await;
             }
             methods::MethodCall::chain_getBlockHash { height } => {
                 self.get_block_hash(request_id, &state_machine_request_id, height)
@@ -2366,6 +2324,59 @@ impl<TPlat: Platform> Background<TPlat> {
                 future::Abortable::new(task, abort_registration).map(|_| ()),
             ))
             .unwrap();
+    }
+
+    /// Handles a call to [`methods::MethodCall::chain_getBlock`].
+    async fn get_block(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        hash: Option<methods::HashHexString>,
+    ) {
+        // `hash` equal to `None` means "the current best block".
+        let hash = match hash {
+            Some(h) => h.0,
+            None => header::hash_from_scale_encoded_header(
+                &self.runtime_service.subscribe_best().await.0,
+            ),
+        };
+
+        // Block bodies and justifications aren't stored locally. Ask the network.
+        let result = self
+            .sync_service
+            .clone()
+            .block_query(
+                hash,
+                protocol::BlocksRequestFields {
+                    header: true,
+                    body: true,
+                    justifications: true,
+                },
+            )
+            .await;
+
+        // The `block_query` function guarantees that the header and body are present and
+        // are correct.
+
+        let response = if let Ok(block) = result {
+            methods::Response::chain_getBlock(methods::Block {
+                extrinsics: block
+                    .body
+                    .unwrap()
+                    .into_iter()
+                    .map(methods::HexString)
+                    .collect(),
+                header: methods::Header::from_scale_encoded_header(&block.header.unwrap()).unwrap(),
+                justifications: block.justifications,
+            })
+            .to_json_response(request_id)
+        } else {
+            json_rpc::parse::build_success_response(request_id, "null")
+        };
+
+        self.requests_subscriptions
+            .respond(&state_machine_request_id, response)
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chain_getBlockHash`].
