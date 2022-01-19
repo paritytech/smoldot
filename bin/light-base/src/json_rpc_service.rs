@@ -627,29 +627,29 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.author_unwatch_extrinsic(request_id, &state_machine_request_id, subscription).await;
             }
             methods::MethodCall::chain_getBlock { hash } => {
-                self.get_block(request_id, &state_machine_request_id, hash).await;
+                self.chain_get_block(request_id, &state_machine_request_id, hash).await;
             }
             methods::MethodCall::chain_getBlockHash { height } => {
-                self.get_block_hash(request_id, &state_machine_request_id, height)
+                self.chain_get_block_hash(request_id, &state_machine_request_id, height)
                     .await;
             }
             methods::MethodCall::chain_getFinalizedHead {} => {
-                self.get_finalized_head(request_id, &state_machine_request_id)
+                self.chain_get_finalized_head(request_id, &state_machine_request_id)
                     .await;
             }
             methods::MethodCall::chain_getHeader { hash } => {
                 self.chain_get_header(request_id, &state_machine_request_id, hash).await;
             }
             methods::MethodCall::chain_subscribeAllHeads {} => {
-                self.subscribe_all_heads(request_id, &state_machine_request_id)
+                self.chain_subscribe_all_heads(request_id, &state_machine_request_id)
                     .await;
             }
             methods::MethodCall::chain_subscribeFinalizedHeads {} => {
-                self.subscribe_finalized_heads(request_id, &state_machine_request_id)
+                self.chain_subscribe_finalized_heads(request_id, &state_machine_request_id)
                     .await;
             }
             methods::MethodCall::chain_subscribeNewHeads {} => {
-                self.subscribe_new_heads(request_id, &state_machine_request_id)
+                self.chain_subscribe_new_heads(request_id, &state_machine_request_id)
                     .await;
             }
             methods::MethodCall::chain_unsubscribeAllHeads { subscription } => {
@@ -2674,7 +2674,7 @@ impl<TPlat: Platform> Background<TPlat> {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_getBlock`].
-    async fn get_block(
+    async fn chain_get_block(
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
@@ -2727,7 +2727,7 @@ impl<TPlat: Platform> Background<TPlat> {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_getBlockHash`].
-    async fn get_block_hash(
+    async fn chain_get_block_hash(
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
@@ -2763,7 +2763,7 @@ impl<TPlat: Platform> Background<TPlat> {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_getFinalizedHead`].
-    async fn get_finalized_head(
+    async fn chain_get_finalized_head(
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
@@ -2782,7 +2782,7 @@ impl<TPlat: Platform> Background<TPlat> {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeAllHeads`].
-    async fn subscribe_all_heads(
+    async fn chain_subscribe_all_heads(
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
@@ -2905,7 +2905,7 @@ impl<TPlat: Platform> Background<TPlat> {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeNewHeads`].
-    async fn subscribe_new_heads(
+    async fn chain_subscribe_new_heads(
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
@@ -3002,7 +3002,7 @@ impl<TPlat: Platform> Background<TPlat> {
     }
 
     /// Handles a call to [`methods::MethodCall::chain_subscribeFinalizedHeads`].
-    async fn subscribe_finalized_heads(
+    async fn chain_subscribe_finalized_heads(
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
