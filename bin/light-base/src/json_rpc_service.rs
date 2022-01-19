@@ -1085,58 +1085,10 @@ impl<TPlat: Platform> Background<TPlat> {
                     .unwrap();
             }
             methods::MethodCall::state_unsubscribeRuntimeVersion { subscription } => {
-                let state_machine_subscription =
-                    if let Some((abort_handle, state_machine_subscription)) = self
-                        .subscriptions
-                        .lock()
-                        .await
-                        .misc
-                        .remove(&(subscription.to_owned(), SubscriptionTy::RuntimeSpec))
-                    {
-                        abort_handle.abort();
-                        Some(state_machine_subscription)
-                    } else {
-                        None
-                    };
-
-                if let Some(state_machine_subscription) = &state_machine_subscription {
-                    self.requests_subscriptions
-                        .stop_subscription(state_machine_subscription)
-                        .await;
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::state_unsubscribeRuntimeVersion(
-                            state_machine_subscription.is_some(),
-                        )
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.state_unsubscribe_runtime_version(request_id, &state_machine_request_id, subscription).await;
             }
             methods::MethodCall::state_subscribeStorage { list } => {
-                if list.is_empty() {
-                    // When the list of keys is empty, that means we want to subscribe to *all*
-                    // storage changes. It is not possible to reasonably implement this in a
-                    // light client.
-                    self.requests_subscriptions
-                        .respond(
-                            &state_machine_request_id,
-                            json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::ServerError(
-                                    -32000,
-                                    "Subscribing to all storage changes isn't supported",
-                                ),
-                                None,
-                            ),
-                        )
-                        .await;
-                } else {
-                    self.subscribe_storage(request_id, &state_machine_request_id, list)
-                        .await;
-                }
+                self.state_subscribe_storage(request_id, &state_machine_request_id, list).await;
             }
             methods::MethodCall::state_unsubscribeStorage { subscription } => {
                 self.state_unsubscribe_storage(request_id, &state_machine_request_id, subscription).await;
@@ -1653,6 +1605,71 @@ impl<TPlat: Platform> Background<TPlat> {
                     )
                     .await;
             }
+        }
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_unsubscribeRuntimeVersion`].
+    async fn state_unsubscribe_runtime_version(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        subscription: &str,
+    ) {
+        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
+            self.subscriptions
+                .lock()
+                .await
+                .misc
+                .remove(&(subscription.to_owned(), SubscriptionTy::RuntimeSpec))
+        {
+            abort_handle.abort();
+            Some(state_machine_subscription)
+        } else {
+            None
+        };
+        if let Some(state_machine_subscription) = &state_machine_subscription {
+            self.requests_subscriptions
+                .stop_subscription(state_machine_subscription)
+                .await;
+        }
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::state_unsubscribeRuntimeVersion(
+                    state_machine_subscription.is_some(),
+                )
+                .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_subscribeStorage`].
+    async fn state_subscribe_storage(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        list: Vec<methods::HexString>,
+    ) {
+        if list.is_empty() {
+            // When the list of keys is empty, that means we want to subscribe to *all*
+            // storage changes. It is not possible to reasonably implement this in a
+            // light client.
+            self.requests_subscriptions
+                .respond(
+                    state_machine_request_id,
+                    json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(
+                            -32000,
+                            "Subscribing to all storage changes isn't supported",
+                        ),
+                        None,
+                    ),
+                )
+                .await;
+        } else {
+            self.subscribe_storage(request_id, state_machine_request_id, list)
+                .await;
         }
     }
 
