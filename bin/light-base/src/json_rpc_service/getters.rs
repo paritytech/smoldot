@@ -27,22 +27,6 @@ use smoldot::{
 use std::{str, sync::Arc};
 
 impl<TPlat: Platform> Background<TPlat> {
-    /// Handles a call to [`methods::MethodCall::author_pendingExtrinsics`].
-    pub(super) async fn author_pending_extrinsics(
-        self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
-    ) {
-        // TODO: ask transactions service
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::author_pendingExtrinsics(Vec::new())
-                    .to_json_response(request_id),
-            )
-            .await;
-    }
-
     /// Handles a call to [`methods::MethodCall::chain_getFinalizedHead`].
     pub(super) async fn chain_get_finalized_head(
         self: &Arc<Self>,
