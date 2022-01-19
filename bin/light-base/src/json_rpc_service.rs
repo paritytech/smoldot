@@ -1067,23 +1067,7 @@ impl<TPlat: Platform> Background<TPlat> {
             methods::MethodCall::chainHead_unstable_unfollow {
                 follow_subscription_id,
             } => {
-                if let Some(subscription) = self
-                    .subscriptions
-                    .lock()
-                    .await
-                    .chain_head_follow
-                    .remove(follow_subscription_id)
-                {
-                    subscription.abort_handle.abort();
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chainHead_unstable_unfollow(())
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_head_unstable_unfollow(request_id, &state_machine_request_id, follow_subscription_id).await;
             }
             methods::MethodCall::chainSpec_unstable_chainName {} => {
                 self.chain_spec_unstable_chain_name(request_id, &state_machine_request_id).await;
@@ -1130,6 +1114,31 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_unfollow`].
+    async fn chain_head_unstable_unfollow(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        follow_subscription_id: &str,
+    ) {
+        if let Some(subscription) = self
+            .subscriptions
+            .lock()
+            .await
+            .chain_head_follow
+            .remove(follow_subscription_id)
+        {
+            subscription.abort_handle.abort();
+        }
+
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chainHead_unstable_unfollow(()).to_json_response(request_id),
+            )
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chainSpec_unstable_chainName`].
