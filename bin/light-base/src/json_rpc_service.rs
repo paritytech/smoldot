@@ -1176,13 +1176,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.account_next_index(request_id, &state_machine_request_id, account).await;
             }
             methods::MethodCall::system_chain {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::system_chain(&self.chain_name)
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.system_chain(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::system_chainType {} => {
                 self.requests_subscriptions
@@ -1701,6 +1695,20 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::system_chain`].
+    async fn system_chain(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::system_chain(&self.chain_name).to_json_response(request_id),
+            )
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::system_health`].
