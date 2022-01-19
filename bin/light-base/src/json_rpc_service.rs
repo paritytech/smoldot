@@ -1106,15 +1106,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::chainSpec_unstable_properties {} => {
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chainSpec_unstable_properties(
-                            serde_json::from_str(&self.chain_properties_json).unwrap(),
-                        )
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_spec_unstable_properties(request_id, &state_machine_request_id).await;
             }
             methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } => {
                 self.sudo_unstable_p2p_discover(request_id, &state_machine_request_id, multiaddr).await;
@@ -1152,6 +1144,19 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainSpec_unstable_properties`].
+    async fn chain_spec_unstable_properties(self: &Arc<Self>, request_id: &str, state_machine_request_id: &requests_subscriptions::RequestId) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chainSpec_unstable_properties(
+                    serde_json::from_str(&self.chain_properties_json).unwrap(),
+                )
+                .to_json_response(request_id),
+            )
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::sudo_unstable_p2pDiscover`].
