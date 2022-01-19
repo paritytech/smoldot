@@ -809,70 +809,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 start_key,
                 hash,
             } => {
-                assert!(hash.is_none()); // TODO: not implemented
-
-                let block_hash = header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
-
-                let mut cache = self.cache.lock().await;
-                let (state_root, block_number) = {
-                    // TODO: no /!\
-                    let block = cache.recent_pinned_blocks.get(&block_hash).unwrap();
-                    match header::decode(block) {
-                        Ok(d) => (*d.state_root, d.number),
-                        Err(_) => {
-                            json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::ServerError(
-                                    -32000,
-                                    "Failed to decode block header",
-                                ),
-                                None,
-                            );
-                            return;
-                        }
-                    }
-                };
-                drop(cache);
-
-                let outcome = self
-                    .sync_service
-                    .clone()
-                    .storage_prefix_keys_query(
-                        block_number,
-                        &block_hash,
-                        &prefix.unwrap().0, // TODO: don't unwrap! what is this Option?
-                        &state_root,
-                    )
-                    .await;
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        match outcome {
-                            Ok(keys) => {
-                                // TODO: instead of requesting all keys with that prefix from the network, pass `start_key` to the network service
-                                let out = keys
-                                    .into_iter()
-                                    .filter(|k| {
-                                        start_key.as_ref().map_or(true, |start| k >= &start.0)
-                                    }) // TODO: not sure if start should be in the set or not?
-                                    .map(methods::HexString)
-                                    .take(usize::try_from(count).unwrap_or(usize::max_value()))
-                                    .collect::<Vec<_>>();
-                                methods::Response::state_getKeysPaged(out)
-                                    .to_json_response(request_id)
-                            }
-                            Err(error) => json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::ServerError(
-                                    -32000,
-                                    &error.to_string(),
-                                ),
-                                None,
-                            ),
-                        },
-                    )
-                    .await;
+                self.state_get_keys_paged(request_id, &state_machine_request_id, prefix, count, start_key, hash).await;
             }
             methods::MethodCall::state_queryStorageAt { keys, at } => {
                 self.state_query_storage_at(request_id, &state_machine_request_id, keys, at).await;
@@ -1408,6 +1345,77 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_getKeysPaged`].
+    async fn state_get_keys_paged(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        prefix: Option<methods::HexString>,
+        count: u32,
+        start_key: Option<methods::HexString>,
+        hash: Option<methods::HashHexString>,
+    ) {
+        assert!(hash.is_none()); // TODO: not implemented
+
+        let block_hash =
+            header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
+
+        let mut cache = self.cache.lock().await;
+        let (state_root, block_number) = {
+            // TODO: no /!\
+            let block = cache.recent_pinned_blocks.get(&block_hash).unwrap();
+            match header::decode(block) {
+                Ok(d) => (*d.state_root, d.number),
+                Err(_) => {
+                    json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(
+                            -32000,
+                            "Failed to decode block header",
+                        ),
+                        None,
+                    );
+                    return;
+                }
+            }
+        };
+        drop(cache);
+
+        let outcome = self
+            .sync_service
+            .clone()
+            .storage_prefix_keys_query(
+                block_number,
+                &block_hash,
+                &prefix.unwrap().0, // TODO: don't unwrap! what is this Option?
+                &state_root,
+            )
+            .await;
+
+        self.requests_subscriptions
+            .respond(
+                &state_machine_request_id,
+                match outcome {
+                    Ok(keys) => {
+                        // TODO: instead of requesting all keys with that prefix from the network, pass `start_key` to the network service
+                        let out = keys
+                            .into_iter()
+                            .filter(|k| start_key.as_ref().map_or(true, |start| k >= &start.0)) // TODO: not sure if start should be in the set or not?
+                            .map(methods::HexString)
+                            .take(usize::try_from(count).unwrap_or(usize::max_value()))
+                            .collect::<Vec<_>>();
+                        methods::Response::state_getKeysPaged(out).to_json_response(request_id)
+                    }
+                    Err(error) => json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                        None,
+                    ),
+                },
+            )
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::state_queryStorageAt`].
