@@ -619,34 +619,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::author_submitExtrinsic { transaction } => {
-                // Note that this function is misnamed. It should really be called
-                // "author_submitTransaction".
-
-                // In Substrate, `author_submitExtrinsic` returns the hash of the transaction. It
-                // is unclear whether it has to actually be the hash of the transaction or if it
-                // could be any opaque value. Additionally, there isn't any other JSON-RPC method
-                // that accepts as parameter the value returned here. When in doubt, we return
-                // the hash as well.
-                let mut hash_context = blake2_rfc::blake2b::Blake2b::new(32);
-                hash_context.update(&transaction.0);
-                let mut transaction_hash: [u8; 32] = Default::default();
-                transaction_hash.copy_from_slice(hash_context.finalize().as_bytes());
-
-                // Send the transaction to the transactions service. It will be sent to the
-                // rest of the network asynchronously.
-                self.transactions_service
-                    .submit_transaction(transaction.0)
-                    .await;
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::author_submitExtrinsic(methods::HashHexString(
-                            transaction_hash,
-                        ))
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.author_submit_extrinsic(request_id, &state_machine_request_id, transaction).await;
             }
             methods::MethodCall::author_submitAndWatchExtrinsic { transaction } => {
                 self.submit_and_watch_transaction(
@@ -658,35 +631,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 .await
             }
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
-                let state_machine_subscription =
-                    if let Some((abort_handle, state_machine_subscription)) = self
-                        .subscriptions
-                        .lock()
-                        .await
-                        .misc
-                        .remove(&(subscription.to_owned(), SubscriptionTy::TransactionLegacy))
-                    {
-                        abort_handle.abort();
-                        Some(state_machine_subscription)
-                    } else {
-                        None
-                    };
-
-                if let Some(state_machine_subscription) = &state_machine_subscription {
-                    self.requests_subscriptions
-                        .stop_subscription(state_machine_subscription)
-                        .await;
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::author_unwatchExtrinsic(
-                            state_machine_subscription.is_some(),
-                        )
-                        .to_json_response(request_id),
-                    )
-                    .await;
+                self.author_unwatch_extrinsic(request_id, &state_machine_request_id, subscription).await;
             }
             methods::MethodCall::chain_getBlock { hash } => {
                 self.get_block(request_id, &state_machine_request_id, hash).await;
@@ -1817,6 +1762,71 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::author_submitExtrinsic`].
+    async fn author_submit_extrinsic(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        transaction: methods::HexString,
+    ) {
+        // Note that this function is misnamed. It should really be called
+        // "author_submitTransaction".
+
+        // In Substrate, `author_submitExtrinsic` returns the hash of the transaction. It
+        // is unclear whether it has to actually be the hash of the transaction or if it
+        // could be any opaque value. Additionally, there isn't any other JSON-RPC method
+        // that accepts as parameter the value returned here. When in doubt, we return
+        // the hash as well.
+
+        let mut hash_context = blake2_rfc::blake2b::Blake2b::new(32);
+        hash_context.update(&transaction.0);
+        let mut transaction_hash: [u8; 32] = Default::default();
+        transaction_hash.copy_from_slice(hash_context.finalize().as_bytes());
+        self.transactions_service
+            .submit_transaction(transaction.0)
+            .await;
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::author_submitExtrinsic(methods::HashHexString(transaction_hash))
+                    .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::author_unwatchExtrinsic`].
+    async fn author_unwatch_extrinsic(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        subscription: &str,
+    ) {
+        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
+            self.subscriptions
+                .lock()
+                .await
+                .misc
+                .remove(&(subscription.to_owned(), SubscriptionTy::TransactionLegacy))
+        {
+            abort_handle.abort();
+            Some(state_machine_subscription)
+        } else {
+            None
+        };
+        if let Some(state_machine_subscription) = &state_machine_subscription {
+            self.requests_subscriptions
+                .stop_subscription(state_machine_subscription)
+                .await;
+        }
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::author_unwatchExtrinsic(state_machine_subscription.is_some())
+                    .to_json_response(request_id),
+            )
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::system_accountNextIndex`].
