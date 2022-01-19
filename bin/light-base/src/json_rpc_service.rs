@@ -875,34 +875,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::state_queryStorageAt { keys, at } => {
-                let best_block= header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
-
-                let cache = self.cache.lock().await;
-
-                let at = at.as_ref().map(|h| h.0).unwrap_or(best_block);
-
-                // TODO: have no idea what this describes actually
-                let mut out = methods::StorageChangeSet {
-                    block: methods::HashHexString(best_block),
-                    changes: Vec::new(),
-                };
-
-                drop(cache);
-
-                let fut = self.storage_query(keys.iter(), &at);
-                if let Ok(values) = fut.await {
-                    for (value, key) in values.into_iter().zip(keys) {
-                        out.changes.push((key, value.map(methods::HexString)));
-                    }
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::state_queryStorageAt(vec![out])
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.state_query_storage_at(request_id, &state_machine_request_id, keys, at).await;
             }
             methods::MethodCall::state_getMetadata { hash } => {
                 self.state_get_metadata(request_id, &state_machine_request_id, hash).await;
@@ -1435,6 +1408,44 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_queryStorageAt`].
+    async fn state_query_storage_at(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        keys: Vec<methods::HexString>,
+        at: Option<methods::HashHexString>,
+    ) {
+        let best_block =
+            header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
+
+        let cache = self.cache.lock().await;
+
+        let at = at.as_ref().map(|h| h.0).unwrap_or(best_block);
+
+        let mut out = methods::StorageChangeSet {
+            block: methods::HashHexString(best_block),
+            changes: Vec::new(),
+        };
+
+        drop(cache);
+
+        let fut = self.storage_query(keys.iter(), &at);
+
+        if let Ok(values) = fut.await {
+            for (value, key) in values.into_iter().zip(keys) {
+                out.changes.push((key, value.map(methods::HexString)));
+            }
+        }
+
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::state_queryStorageAt(vec![out]).to_json_response(request_id),
+            )
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::state_getMetadata`].
