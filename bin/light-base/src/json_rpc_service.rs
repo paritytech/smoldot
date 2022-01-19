@@ -645,41 +645,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::chain_getHeader { hash } => {
-                let hash = match hash {
-                    Some(h) => h.0,
-                    None => header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0),
-                };
-
-                let fut = self.header_query(&hash);
-                let header = fut.await;
-                let response = match header {
-                    Ok(header) => {
-                        // In the case of a parachain, it is possible for the header to be in
-                        // a format that smoldot isn't capable of parsing. In that situation,
-                        // we take of liberty of returning a JSON-RPC error.
-                        match methods::Header::from_scale_encoded_header(&header) {
-                            Ok(decoded) => methods::Response::chain_getHeader(decoded)
-                                .to_json_response(request_id),
-                            Err(error) => json_rpc::parse::build_error_response(
-                                request_id,
-                                json_rpc::parse::ErrorResponse::ServerError(
-                                    -32000,
-                                    &format!("Failed to decode header: {}", error),
-                                ),
-                                None,
-                            ),
-                        }
-                    }
-                    Err(()) => {
-                        // Failed to retreive the header.
-                        // TODO: error or null?
-                        json_rpc::parse::build_success_response(request_id, "null")
-                    }
-                };
-
-                self.requests_subscriptions
-                    .respond(&state_machine_request_id, response)
-                    .await;
+                self.chain_get_header(request_id, &state_machine_request_id, hash).await;
             }
             methods::MethodCall::chain_subscribeAllHeads {} => {
                 self.subscribe_all_heads(request_id, &state_machine_request_id)
@@ -1250,6 +1216,54 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::chain_getHeader`].
+    async fn chain_get_header(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        hash: Option<methods::HashHexString>,
+    ) {
+        let hash = match hash {
+            Some(h) => h.0,
+            None => header::hash_from_scale_encoded_header(
+                &self.runtime_service.subscribe_best().await.0,
+            ),
+        };
+
+        let fut = self.header_query(&hash);
+        let header = fut.await;
+
+        let response = match header {
+            Ok(header) => {
+                // In the case of a parachain, it is possible for the header to be in
+                // a format that smoldot isn't capable of parsing. In that situation,
+                // we take of liberty of returning a JSON-RPC error.
+                match methods::Header::from_scale_encoded_header(&header) {
+                    Ok(decoded) => {
+                        methods::Response::chain_getHeader(decoded).to_json_response(request_id)
+                    }
+                    Err(error) => json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::ServerError(
+                            -32000,
+                            &format!("Failed to decode header: {}", error),
+                        ),
+                        None,
+                    ),
+                }
+            }
+            Err(()) => {
+                // Failed to retreive the header.
+                // TODO: error or null?
+                json_rpc::parse::build_success_response(request_id, "null")
+            }
+        };
+
+        self.requests_subscriptions
+            .respond(state_machine_request_id, response)
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chain_unsubscribeAllHeads`].
