@@ -731,33 +731,7 @@ impl<TPlat: Platform> Background<TPlat> {
             }
 
             methods::MethodCall::chainHead_unstable_stopBody { subscription_id } => {
-                let state_machine_subscription =
-                    if let Some((abort_handle, state_machine_subscription)) = self
-                        .subscriptions
-                        .lock()
-                        .await
-                        .misc
-                        .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadBody))
-                    {
-                        abort_handle.abort();
-                        Some(state_machine_subscription)
-                    } else {
-                        None
-                    };
-
-                if let Some(state_machine_subscription) = &state_machine_subscription {
-                    self.requests_subscriptions
-                        .stop_subscription(state_machine_subscription)
-                        .await;
-                }
-
-                self.requests_subscriptions
-                    .respond(
-                        &state_machine_request_id,
-                        methods::Response::chainHead_unstable_stopBody(())
-                            .to_json_response(request_id),
-                    )
-                    .await;
+                self.chain_head_unstable_stop_body(request_id, &state_machine_request_id, subscription_id).await;
             }
             methods::MethodCall::chainHead_unstable_body {
                 follow_subscription_id,
@@ -860,6 +834,40 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_stopBody`].
+    async fn chain_head_unstable_stop_body(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        subscription_id: &str,
+    ) {
+        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
+            self.subscriptions
+                .lock()
+                .await
+                .misc
+                .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadBody))
+        {
+            abort_handle.abort();
+            Some(state_machine_subscription)
+        } else {
+            None
+        };
+
+        if let Some(state_machine_subscription) = &state_machine_subscription {
+            self.requests_subscriptions
+                .stop_subscription(state_machine_subscription)
+                .await;
+        }
+
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chainHead_unstable_stopBody(()).to_json_response(request_id),
+            )
+            .await;
     }
 
     /// Handles a call to [`methods::MethodCall::chainHead_unstable_body`].
