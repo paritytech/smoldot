@@ -95,19 +95,58 @@ impl<TPlat: Platform> Background<TPlat> {
             ),
         };
 
+        // Try to determine the block number by looking for the block in cache.
+        // The request can be fulfilled no matter whether the block number is known or not, but
+        // knowing it will lead to a better selection of peers, and thus increase the chances of
+        // the requests succeeding.
+        let block_number = {
+            let mut cache_lock = self.cache.lock().await;
+            let cache_lock = &mut *cache_lock;
+
+            if let Some(future) = cache_lock.block_state_root_hashes_numbers.get_mut(&hash) {
+                let _ = future.now_or_never();
+            }
+
+            match (
+                cache_lock
+                    .recent_pinned_blocks
+                    .get(&hash)
+                    .map(|h| header::decode(h)),
+                cache_lock.block_state_root_hashes_numbers.get(&hash),
+            ) {
+                (Some(Ok(header)), _) => Some(header.number),
+                (_, Some(future::MaybeDone::Done(Ok((_, num))))) => Some(*num),
+                _ => None,
+            }
+        };
+
         // Block bodies and justifications aren't stored locally. Ask the network.
-        let result = self
-            .sync_service
-            .clone()
-            .block_query(
-                hash,
-                protocol::BlocksRequestFields {
-                    header: true,
-                    body: true,
-                    justifications: true,
-                },
-            )
-            .await;
+        let result = if let Some(block_number) = block_number {
+            self.sync_service
+                .clone()
+                .block_query(
+                    block_number,
+                    hash,
+                    protocol::BlocksRequestFields {
+                        header: true,
+                        body: true,
+                        justifications: true,
+                    },
+                )
+                .await
+        } else {
+            self.sync_service
+                .clone()
+                .block_query_unknown_number(
+                    hash,
+                    protocol::BlocksRequestFields {
+                        header: true,
+                        body: true,
+                        justifications: true,
+                    },
+                )
+                .await
+        };
 
         // The `block_query` function guarantees that the header and body are present and
         // are correct.
@@ -187,25 +226,58 @@ impl<TPlat: Platform> Background<TPlat> {
         // Try to look in the cache of recent blocks. If not found, ask the peer-to-peer network.
         // `header` is `Err` if and only if the network request failed.
         let scale_encoded_header = {
-            let mut cache = self.cache.lock().await;
-            if let Some(header) = cache.recent_pinned_blocks.get(&hash) {
+            let mut cache_lock = self.cache.lock().await;
+            if let Some(header) = cache_lock.recent_pinned_blocks.get(&hash) {
                 Ok(header.clone())
             } else {
-                drop::<MutexGuard<_>>(cache);
+                // Header isn't known locally. We need to ask the network.
+                // First, try to determine the block number by looking into the cache.
+                // The request can be fulfilled no matter whether it is found, but knowing it will
+                // lead to a better selection of peers, and thus increase the chances of the
+                // requests succeeding.
+                let block_number = if let Some(future) =
+                    cache_lock.block_state_root_hashes_numbers.get_mut(&hash)
+                {
+                    let _ = future.now_or_never();
 
-                // Header isn't known locally. Ask the network.
-                let result = self
-                    .sync_service
-                    .clone()
-                    .block_query(
-                        hash,
-                        protocol::BlocksRequestFields {
-                            header: true,
-                            body: false,
-                            justifications: false,
-                        },
-                    )
-                    .await;
+                    match future {
+                        future::MaybeDone::Done(Ok((_, num))) => Some(*num),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
+                // Release the lock as we're going to start a long asynchronous operation.
+                drop::<MutexGuard<_>>(cache_lock);
+
+                // Actual network query.
+                let result = if let Some(block_number) = block_number {
+                    self.sync_service
+                        .clone()
+                        .block_query(
+                            block_number,
+                            hash,
+                            protocol::BlocksRequestFields {
+                                header: true,
+                                body: false,
+                                justifications: false,
+                            },
+                        )
+                        .await
+                } else {
+                    self.sync_service
+                        .clone()
+                        .block_query_unknown_number(
+                            hash,
+                            protocol::BlocksRequestFields {
+                                header: true,
+                                body: false,
+                                justifications: false,
+                            },
+                        )
+                        .await
+                };
 
                 // The `block_query` method guarantees that the header is present and valid.
                 if let Ok(block) = result {

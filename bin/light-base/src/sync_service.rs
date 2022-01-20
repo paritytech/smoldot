@@ -267,6 +267,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
     // TODO: doc; explain the guarantees
     pub async fn block_query(
         self: Arc<Self>,
+        block_number: u64,
         hash: [u8; 32],
         fields: protocol::BlocksRequestFields,
     ) -> Result<protocol::BlockData, ()> {
@@ -281,7 +282,44 @@ impl<TPlat: Platform> SyncService<TPlat> {
         };
 
         // TODO: better peers selection ; don't just take the first 3
-        // TODO: must only ask the peers that know about this block
+        for target in self
+            .peers_assumed_know_blocks(block_number, &hash)
+            .await
+            .take(NUM_ATTEMPTS)
+        {
+            let mut result = match self
+                .network_service
+                .clone()
+                .blocks_request(target, self.network_chain_index, request_config.clone())
+                .await
+            {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+
+            return Ok(result.remove(0));
+        }
+
+        Err(())
+    }
+
+    // TODO: doc; explain the guarantees
+    pub async fn block_query_unknown_number(
+        self: Arc<Self>,
+        hash: [u8; 32],
+        fields: protocol::BlocksRequestFields,
+    ) -> Result<protocol::BlockData, ()> {
+        // TODO: better error?
+        const NUM_ATTEMPTS: usize = 3;
+
+        let request_config = protocol::BlocksRequestConfig {
+            start: protocol::BlocksRequestConfigStart::Hash(hash),
+            desired_count: NonZeroU32::new(1).unwrap(),
+            direction: protocol::BlocksRequestDirection::Ascending,
+            fields: fields.clone(),
+        };
+
+        // TODO: better peers selection ; don't just take the first 3
         for target in self.network_service.peers_list().await.take(NUM_ATTEMPTS) {
             let mut result = match self
                 .network_service

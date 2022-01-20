@@ -903,7 +903,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             // The sync service knows which peers are potentially aware of
                             // this block.
                             let result = sync_service
-                                .block_query(
+                                .block_query_unknown_number(
                                     hash,
                                     protocol::BlocksRequestFields {
                                         header: true,
