@@ -838,13 +838,14 @@ impl<TPlat: Platform> Background<TPlat> {
             return;
         }
 
-        // Determine whether the requested block hash is valid, and if so its state trie root.
-        let block_storage_root = {
+        // Determine whether the requested block hash is valid, and if so its state trie root
+        // and number.
+        let block_storage_root_number = {
             let lock = self.subscriptions.lock().await;
             if let Some(subscription) = lock.chain_head_follow.get(follow_subscription_id) {
                 if let Some(header) = subscription.pinned_blocks_headers.get(&hash.0) {
                     if let Ok(decoded) = header::decode(&header) {
-                        Some(*decoded.state_root)
+                        Some((*decoded.state_root, decoded.number))
                     } else {
                         None // TODO: what to return?!
                     }
@@ -916,56 +917,62 @@ impl<TPlat: Platform> Background<TPlat> {
         let task = {
             let me = self.clone();
             async move {
-                let response = if let Some(block_storage_root) = block_storage_root {
-                    let response = me
-                        .sync_service
-                        .clone()
-                        .storage_query(&hash.0, &block_storage_root, iter::once(&key.0))
-                        .await;
-                    match response {
-                        Ok(values) => {
-                            // `storage_query` returns a list of values because it can perform
-                            // multiple queries at once. In our situation, we only start one query
-                            // and as such the outcome only ever contains one element.
-                            debug_assert_eq!(values.len(), 1);
-                            let value = values.into_iter().next().unwrap();
+                let response =
+                    if let Some((block_storage_root, block_number)) = block_storage_root_number {
+                        let response = me
+                            .sync_service
+                            .clone()
+                            .storage_query(
+                                block_number,
+                                &hash.0,
+                                &block_storage_root,
+                                iter::once(&key.0),
+                            )
+                            .await;
+                        match response {
+                            Ok(values) => {
+                                // `storage_query` returns a list of values because it can perform
+                                // multiple queries at once. In our situation, we only start one query
+                                // and as such the outcome only ever contains one element.
+                                debug_assert_eq!(values.len(), 1);
+                                let value = values.into_iter().next().unwrap();
 
-                            let output = match ty {
-                                methods::StorageQueryType::Value => {
-                                    value.map(|v| methods::HexString(v).to_string())
-                                }
-                                methods::StorageQueryType::Size => {
-                                    value.map(|v| v.len().to_string())
-                                }
-                                methods::StorageQueryType::Hash => value.map(|v| {
-                                    methods::HexString(
-                                        blake2_rfc::blake2b::blake2b(32, &[], &v)
-                                            .as_bytes()
-                                            .to_vec(),
-                                    )
-                                    .to_string()
-                                }),
-                            };
+                                let output = match ty {
+                                    methods::StorageQueryType::Value => {
+                                        value.map(|v| methods::HexString(v).to_string())
+                                    }
+                                    methods::StorageQueryType::Size => {
+                                        value.map(|v| v.len().to_string())
+                                    }
+                                    methods::StorageQueryType::Hash => value.map(|v| {
+                                        methods::HexString(
+                                            blake2_rfc::blake2b::blake2b(32, &[], &v)
+                                                .as_bytes()
+                                                .to_vec(),
+                                        )
+                                        .to_string()
+                                    }),
+                                };
 
-                            methods::ServerToClient::chainHead_unstable_storageEvent {
-                                subscription: &subscription_id,
-                                result: methods::ChainHeadStorageEvent::Done { value: output },
+                                methods::ServerToClient::chainHead_unstable_storageEvent {
+                                    subscription: &subscription_id,
+                                    result: methods::ChainHeadStorageEvent::Done { value: output },
+                                }
+                                .to_json_call_object_parameters(None)
                             }
-                            .to_json_call_object_parameters(None)
+                            Err(_) => methods::ServerToClient::chainHead_unstable_storageEvent {
+                                subscription: &subscription_id,
+                                result: methods::ChainHeadStorageEvent::Inaccessible {},
+                            }
+                            .to_json_call_object_parameters(None),
                         }
-                        Err(_) => methods::ServerToClient::chainHead_unstable_storageEvent {
+                    } else {
+                        methods::ServerToClient::chainHead_unstable_storageEvent {
                             subscription: &subscription_id,
-                            result: methods::ChainHeadStorageEvent::Inaccessible {},
+                            result: methods::ChainHeadStorageEvent::Disjoint {},
                         }
-                        .to_json_call_object_parameters(None),
-                    }
-                } else {
-                    methods::ServerToClient::chainHead_unstable_storageEvent {
-                        subscription: &subscription_id,
-                        result: methods::ChainHeadStorageEvent::Disjoint {},
-                    }
-                    .to_json_call_object_parameters(None)
-                };
+                        .to_json_call_object_parameters(None)
+                    };
 
                 me.requests_subscriptions
                     .set_queued_notification(&state_machine_subscription, 0, response)
