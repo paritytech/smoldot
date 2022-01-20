@@ -1007,11 +1007,14 @@ impl<TPlat: Platform> Background<TPlat> {
         follow_subscription_id: &str,
         hash: methods::HashHexString,
     ) {
-        // Determine whether the requested block hash is valid.
-        let block_is_valid = {
+        // Determine whether the requested block hash is valid, and if yes its number.
+        let block_number = {
             let lock = self.subscriptions.lock().await;
             if let Some(subscription) = lock.chain_head_follow.get(follow_subscription_id) {
-                if !subscription.pinned_blocks_headers.contains_key(&hash.0) {
+                if let Some(header) = subscription.pinned_blocks_headers.get(&hash.0) {
+                    let decoded = header::decode(&header).unwrap(); // TODO: unwrap?
+                    Some(decoded.number)
+                } else {
                     self.requests_subscriptions
                         .respond(
                             &state_machine_request_id,
@@ -1024,10 +1027,8 @@ impl<TPlat: Platform> Background<TPlat> {
                         .await;
                     return;
                 }
-
-                true
             } else {
-                false
+                None
             }
         };
 
@@ -1081,12 +1082,13 @@ impl<TPlat: Platform> Background<TPlat> {
         let task = {
             let me = self.clone();
             async move {
-                let response = if block_is_valid {
+                let response = if let Some(block_number) = block_number {
                     // TODO: right now we query the header because the underlying function returns an error if we don't
                     let response = me
                         .sync_service
                         .clone()
                         .block_query(
+                            block_number,
                             hash.0,
                             protocol::BlocksRequestFields {
                                 header: true,

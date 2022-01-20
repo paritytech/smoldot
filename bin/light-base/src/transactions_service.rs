@@ -444,7 +444,7 @@ async fn background_task<TPlat: Platform>(
             // Start block bodies downloads that need to be started.
             while worker.block_downloads.len() < worker.max_concurrent_downloads {
                 // TODO: prioritize best chain?
-                let block_hash = worker
+                let block_hash_number = worker
                     .pending_transactions
                     .missing_block_bodies()
                     .find(|(_, block)| {
@@ -462,8 +462,12 @@ async fn background_task<TPlat: Platform>(
 
                         true
                     })
-                    .map(|(b, _)| *b);
-                let block_hash = match block_hash {
+                    .map(|(hash, block)| {
+                        // TODO: unwrap?! should only insert valid blocks in the worker
+                        let decoded = header::decode(&block.scale_encoded_header).unwrap();
+                        (*hash, decoded.number)
+                    });
+                let (block_hash, block_number) = match block_hash_number {
                     Some(b) => b,
                     None => break,
                 };
@@ -471,6 +475,7 @@ async fn background_task<TPlat: Platform>(
                 // Actual download start.
                 worker.block_downloads.push({
                     let download_future = worker.sync_service.clone().block_query(
+                        block_number,
                         block_hash,
                         protocol::BlocksRequestFields {
                             body: true,
