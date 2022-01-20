@@ -701,6 +701,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                             move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
                         }),
                         sync_service: running_chain.sync_service,
+                        network_service: (running_chain.network_service, 0), // TODO: 0?
                         transactions_service: running_chain.transactions_service,
                         runtime_service: running_chain.runtime_service,
                         chain_spec: &chain_spec,
