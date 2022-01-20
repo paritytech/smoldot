@@ -42,7 +42,7 @@ mod getters;
 mod state_chain;
 mod transactions;
 
-use crate::{runtime_service, sync_service, transactions_service, Platform};
+use crate::{network_service, runtime_service, sync_service, transactions_service, Platform};
 
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
@@ -76,6 +76,10 @@ pub struct Config<'a, TPlat: Platform> {
 
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
+
+    /// Access to the network, and index of the chain to sync from the point of view of the
+    /// network service.
+    pub network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
 
     /// Service responsible for synchronizing the chain.
     pub sync_service: Arc<sync_service::SyncService<TPlat>>,
@@ -198,6 +202,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             peer_id_base58: config.peer_id.to_base58(),
             system_name: config.system_name,
             system_version: config.system_version,
+            network_service: config.network_service,
             sync_service: config.sync_service,
             runtime_service: config.runtime_service,
             transactions_service: config.transactions_service,
@@ -350,6 +355,8 @@ struct Background<TPlat: Platform> {
     /// Value to return when the `system_version` RPC is called.
     system_version: String,
 
+    /// See [`Config::network_service`].
+    network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
     /// See [`Config::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     /// See [`Config::runtime_service`].
@@ -875,9 +882,32 @@ impl<TPlat: Platform> Background<TPlat> {
         multiaddr: &str,
     ) {
         let response = match multiaddr.parse::<multiaddr::Multiaddr>() {
-            Ok(addr) if matches!(addr.iter().last(), Some(multiaddr::ProtocolRef::P2p(_))) => {
-                // TODO: actually use address
-                methods::Response::sudo_unstable_p2pDiscover(()).to_json_response(request_id)
+            Ok(mut addr) if matches!(addr.iter().last(), Some(multiaddr::ProtocolRef::P2p(_))) => {
+                let peer_id_bytes = match addr.iter().last() {
+                    Some(multiaddr::ProtocolRef::P2p(peer_id)) => peer_id.into_owned(),
+                    _ => unreachable!(),
+                };
+                addr.pop();
+
+                match PeerId::from_bytes(peer_id_bytes) {
+                    Ok(peer_id) => {
+                        self.network_service
+                            .0
+                            .discover(
+                                &TPlat::now(),
+                                self.network_service.1,
+                                iter::once((peer_id, iter::once(addr))),
+                            )
+                            .await;
+                        methods::Response::sudo_unstable_p2pDiscover(())
+                            .to_json_response(request_id)
+                    }
+                    Err(_) => json_rpc::parse::build_error_response(
+                        request_id,
+                        json_rpc::parse::ErrorResponse::InvalidParams,
+                        Some(&serde_json::to_string("multiaddr doesn't end with /p2p").unwrap()),
+                    ),
+                }
             }
             Ok(_) => json_rpc::parse::build_error_response(
                 request_id,

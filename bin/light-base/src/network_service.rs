@@ -891,6 +891,16 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         sent_peers
     }
 
+    /// See [`service::ChainNetwork::discover`].
+    pub async fn discover(
+        &self,
+        now: &TPlat::Instant,
+        chain_index: usize,
+        list: impl IntoIterator<Item = (PeerId, impl IntoIterator<Item = Multiaddr>)>,
+    ) {
+        self.inner.network.discover(now, chain_index, list).await
+    }
+
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
     /// with.
     pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
