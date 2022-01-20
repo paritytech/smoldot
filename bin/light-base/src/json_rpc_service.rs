@@ -949,7 +949,7 @@ impl<TPlat: Platform> Background<TPlat> {
         keys: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
         hash: &[u8; 32],
     ) -> Result<Vec<Option<Vec<u8>>>, StorageQueryError> {
-        let (state_trie_root_hash, _) = self
+        let (state_trie_root_hash, block_number) = self
             .state_trie_root_hash(&hash)
             .await
             .map_err(|()| StorageQueryError::FindStorageRootHashError)?;
@@ -957,7 +957,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let result = self
             .sync_service
             .clone()
-            .storage_query(hash, &state_trie_root_hash, keys)
+            .storage_query(block_number, hash, &state_trie_root_hash, keys)
             .await
             .map_err(StorageQueryError::StorageRetrieval)?;
 
@@ -1014,6 +1014,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         .sync_service
                         .clone()
                         .storage_query(
+                            block_number,
                             block_hash,
                             &state_trie_root_hash,
                             iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),

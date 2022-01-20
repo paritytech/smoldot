@@ -2055,10 +2055,12 @@ impl<TPlat: Platform> Background<TPlat> {
                         let sync_service = self.sync_service.clone();
                         let block_hash = download_params.block_user_data.hash;
                         let state_root = *decoded_header.state_root;
+                        let block_number = decoded_header.number;
 
                         Box::pin(async move {
                             let result = sync_service
                                 .storage_query(
+                                    block_number,
                                     &block_hash,
                                     &state_root,
                                     iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),

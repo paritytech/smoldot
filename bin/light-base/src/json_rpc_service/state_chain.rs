@@ -915,6 +915,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         .sync_service
                         .clone()
                         .storage_query(
+                            block_number,
                             &block_hash,
                             &state_trie_root_hash,
                             iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
@@ -1350,7 +1351,10 @@ impl<TPlat: Platform> Background<TPlat> {
                             };
 
                             let block_hash = header::hash_from_scale_encoded_header(&block);
-                            let state_trie_root = header::decode(&block).unwrap().state_root;
+                            let (state_trie_root, block_number) = {
+                                let decoded = header::decode(&block).unwrap();
+                                (decoded.state_root, decoded.number)
+                            };
 
                             let mut out = methods::StorageChangeSet {
                                 block: methods::HashHexString(block_hash),
@@ -1361,7 +1365,12 @@ impl<TPlat: Platform> Background<TPlat> {
                                 // TODO: parallelism?
                                 match sync_service
                                     .clone()
-                                    .storage_query(&block_hash, state_trie_root, iter::once(&key.0))
+                                    .storage_query(
+                                        block_number,
+                                        &block_hash,
+                                        state_trie_root,
+                                        iter::once(&key.0),
+                                    )
                                     .await
                                 {
                                     Ok(mut values) => {

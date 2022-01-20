@@ -302,9 +302,10 @@ impl<TPlat: Platform> SyncService<TPlat> {
     /// Performs one or more storage proof requests in order to find the value of the given
     /// `requested_keys`.
     ///
-    /// Must be passed a block hash and the Merkle value of the root node of the storage trie of
-    /// this same block. The value of `storage_trie_root` corresponds to the value in the
-    /// [`smoldot::header::HeaderRef::state_root`] field.
+    /// Must be passed a block hash, a block number, and the Merkle value of the root node of the
+    /// storage trie of this same block. The value of `block_number` corresponds to the value
+    /// in the [`smoldot::header::HeaderRef::number`] field, and the value of `storage_trie_root`
+    /// corresponds to the value in the [`smoldot::header::HeaderRef::state_root`] field.
     ///
     /// Returns the storage values of `requested_keys` in the storage of the block, or an error if
     /// it couldn't be determined. If `Ok`, the `Vec` is guaranteed to have the same number of
@@ -316,6 +317,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
     /// peers is done through reasonable heuristics.
     pub async fn storage_query(
         self: Arc<Self>,
+        block_number: u64,
         block_hash: &[u8; 32],
         storage_trie_root: &[u8; 32],
         requested_keys: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
@@ -325,8 +327,11 @@ impl<TPlat: Platform> SyncService<TPlat> {
         let mut outcome_errors = Vec::with_capacity(NUM_ATTEMPTS);
 
         // TODO: better peers selection ; don't just take the first 3
-        // TODO: must only ask the peers that know about this block
-        for target in self.network_service.peers_list().await.take(NUM_ATTEMPTS) {
+        for target in self
+            .peers_assumed_know_blocks(block_number, block_hash)
+            .await
+            .take(NUM_ATTEMPTS)
+        {
             let result = self
                 .network_service
                 .clone()
