@@ -889,7 +889,12 @@ where
         &self,
         now: &TNow,
         chain_index: usize,
-        list: impl IntoIterator<Item = (peer_id::PeerId, impl IntoIterator<Item = multiaddr::Multiaddr>)>,
+        list: impl IntoIterator<
+            Item = (
+                peer_id::PeerId,
+                impl IntoIterator<Item = multiaddr::Multiaddr>,
+            ),
+        >,
     ) {
         let mut lock = self.ephemeral_guarded.lock().await;
         let lock = &mut *lock; // Avoids borrow checker issues.
