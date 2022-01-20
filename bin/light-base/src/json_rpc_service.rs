@@ -848,6 +848,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 methods::MethodCall::system_nodeRoles { .. } |
                 methods::MethodCall::system_removeReservedPeer { .. }
             ) => {
+                // TODO: implement the ones that make sense to implement ^
                 log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
                 self.requests_subscriptions
                     .respond(
