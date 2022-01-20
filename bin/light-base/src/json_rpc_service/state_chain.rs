@@ -21,7 +21,7 @@ use super::{Background, Platform, RuntimeCallError, SubscriptionTy};
 
 use crate::runtime_service;
 
-use futures::prelude::*;
+use futures::{lock::MutexGuard, prelude::*};
 use smoldot::{
     header,
     json_rpc::{self, methods, requests_subscriptions},
@@ -176,6 +176,7 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         hash: Option<methods::HashHexString>,
     ) {
+        // `hash` equal to `None` means "best block".
         let hash = match hash {
             Some(h) => h.0,
             None => header::hash_from_scale_encoded_header(
@@ -183,10 +184,42 @@ impl<TPlat: Platform> Background<TPlat> {
             ),
         };
 
-        let fut = self.header_query(&hash);
-        let header = fut.await;
+        // Try to look in the cache of recent blocks. If not found, ask the peer-to-peer network.
+        // `header` is `Err` if and only if the network request failed.
+        let scale_encoded_header = {
+            let mut cache = self.cache.lock().await;
+            if let Some(header) = cache.recent_pinned_blocks.get(&hash) {
+                Ok(header.clone())
+            } else {
+                drop::<MutexGuard<_>>(cache);
 
-        let response = match header {
+                // Header isn't known locally. Ask the network.
+                let result = self
+                    .sync_service
+                    .clone()
+                    .block_query(
+                        hash,
+                        protocol::BlocksRequestFields {
+                            header: true,
+                            body: false,
+                            justifications: false,
+                        },
+                    )
+                    .await;
+
+                // The `block_query` method guarantees that the header is present and valid.
+                if let Ok(block) = result {
+                    let header = block.header.unwrap();
+                    debug_assert_eq!(header::hash_from_scale_encoded_header(&header), hash);
+                    Ok(header)
+                } else {
+                    Err(())
+                }
+            }
+        };
+
+        // Build the JSON-RPC response.
+        let response = match scale_encoded_header {
             Ok(header) => {
                 // In the case of a parachain, it is possible for the header to be in
                 // a format that smoldot isn't capable of parsing. In that situation,
@@ -206,7 +239,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 }
             }
             Err(()) => {
-                // Failed to retreive the header.
+                // Failed to retrieve the header.
                 // TODO: error or null?
                 json_rpc::parse::build_success_response(request_id, "null")
             }

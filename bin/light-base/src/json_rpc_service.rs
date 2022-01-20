@@ -1109,45 +1109,6 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         }
     }
-
-    fn header_query(&'_ self, hash: &[u8; 32]) -> impl Future<Output = Result<Vec<u8>, ()>> + '_ {
-        // TODO: had to go through hoops to make it compile; clean up
-        let hash = *hash;
-        let sync_service = self.sync_service.clone();
-
-        async move {
-            // TODO: risk of deadlock here?
-            {
-                let mut cache = self.cache.lock().await;
-                let cache = &mut *cache;
-
-                if let Some(header) = cache.recent_pinned_blocks.get(&hash) {
-                    return Ok(header.clone());
-                }
-            }
-
-            // Header isn't known locally. Ask the networ
-            let fut = sync_service.block_query(
-                hash,
-                protocol::BlocksRequestFields {
-                    header: true,
-                    body: false,
-                    justifications: false,
-                },
-            );
-            let result = fut.await;
-
-            // Note that the `block_query` method guarantees that the header is present
-            // and valid.
-            if let Ok(block) = result {
-                let header = block.header.unwrap();
-                debug_assert_eq!(header::hash_from_scale_encoded_header(&header), hash);
-                Ok(header)
-            } else {
-                Err(())
-            }
-        }
-    }
 }
 
 fn convert_runtime_spec(
