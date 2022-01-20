@@ -820,7 +820,35 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.transaction_unstable_unwatch(request_id, &state_machine_request_id, subscription).await;
             }
 
-            _method => {
+            _method @ (
+                methods::MethodCall::account_nextIndex { .. } |
+                methods::MethodCall::author_hasKey { .. } |
+                methods::MethodCall::author_hasSessionKeys { .. } |
+                methods::MethodCall::author_insertKey { .. } |
+                methods::MethodCall::author_removeExtrinsic { .. } |
+                methods::MethodCall::author_rotateKeys { .. } |
+                methods::MethodCall::babe_epochAuthorship { .. } |
+                methods::MethodCall::childstate_getKeys { .. } |
+                methods::MethodCall::childstate_getStorage { .. } |
+                methods::MethodCall::childstate_getStorageHash { .. } |
+                methods::MethodCall::childstate_getStorageSize { .. } |
+                methods::MethodCall::grandpa_roundState { .. } |
+                methods::MethodCall::offchain_localStorageGet { .. } |
+                methods::MethodCall::offchain_localStorageSet { .. } |
+                methods::MethodCall::state_call { .. } |
+                methods::MethodCall::state_getKeys { .. } |
+                methods::MethodCall::state_getPairs { .. } |
+                methods::MethodCall::state_getReadProof { .. } |
+                methods::MethodCall::state_getStorageHash { .. } |
+                methods::MethodCall::state_getStorageSize { .. } |
+                methods::MethodCall::state_queryStorage { .. } |
+                methods::MethodCall::system_addReservedPeer { .. } |
+                methods::MethodCall::system_dryRun { .. } |
+                methods::MethodCall::system_networkState { .. } |
+                methods::MethodCall::system_nodeRoles { .. } |
+                methods::MethodCall::system_removeReservedPeer { .. }
+            ) => {
+                // TODO: implement the ones that make sense to implement ^
                 log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
                 self.requests_subscriptions
                     .respond(
