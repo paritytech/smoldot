@@ -741,64 +741,67 @@ impl<TPlat: Platform> Background<TPlat> {
         start_key: Option<methods::HexString>,
         hash: Option<methods::HashHexString>,
     ) {
-        assert!(hash.is_none()); // TODO: not implemented
+        // `hash` equal to `None` means "best block".
+        let hash = match hash {
+            Some(h) => h.0,
+            None => header::hash_from_scale_encoded_header(
+                &self.runtime_service.subscribe_best().await.0,
+            ),
+        };
 
-        let block_hash =
-            header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
-
-        let mut cache = self.cache.lock().await;
-        let (state_root, block_number) = {
-            // TODO: no /!\
-            let block = cache.recent_pinned_blocks.get(&block_hash).unwrap();
-            match header::decode(block) {
-                Ok(d) => (*d.state_root, d.number),
-                Err(_) => {
-                    json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::ServerError(
-                            -32000,
-                            "Failed to decode block header",
+        // Obtain the state trie root and height of the requested block.
+        // This is necessary to perform network storage queries.
+        let (state_root, block_number) = match self.state_trie_root_hash(&hash).await {
+            Ok(v) => v,
+            Err(()) => {
+                self.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                &"Failed to fetch block information",
+                            ),
+                            None,
                         ),
-                        None,
-                    );
-                    return;
-                }
+                    )
+                    .await;
+                return;
             }
         };
-        drop(cache);
 
         let outcome = self
             .sync_service
             .clone()
             .storage_prefix_keys_query(
                 block_number,
-                &block_hash,
+                &hash,
                 &prefix.unwrap().0, // TODO: don't unwrap! what is this Option?
                 &state_root,
             )
             .await;
 
+        let response = match outcome {
+            Ok(keys) => {
+                // TODO: instead of requesting all keys with that prefix from the network, pass `start_key` to the network service
+                let out = keys
+                    .into_iter()
+                    .filter(|k| start_key.as_ref().map_or(true, |start| k >= &start.0)) // TODO: not sure if start should be in the set or not?
+                    .map(methods::HexString)
+                    .take(usize::try_from(count).unwrap_or(usize::max_value()))
+                    .collect::<Vec<_>>();
+                methods::Response::state_getKeysPaged(out).to_json_response(request_id)
+            }
+            Err(error) => json_rpc::parse::build_error_response(
+                request_id,
+                json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                None,
+            ),
+        };
+
         self.requests_subscriptions
-            .respond(
-                &state_machine_request_id,
-                match outcome {
-                    Ok(keys) => {
-                        // TODO: instead of requesting all keys with that prefix from the network, pass `start_key` to the network service
-                        let out = keys
-                            .into_iter()
-                            .filter(|k| start_key.as_ref().map_or(true, |start| k >= &start.0)) // TODO: not sure if start should be in the set or not?
-                            .map(methods::HexString)
-                            .take(usize::try_from(count).unwrap_or(usize::max_value()))
-                            .collect::<Vec<_>>();
-                        methods::Response::state_getKeysPaged(out).to_json_response(request_id)
-                    }
-                    Err(error) => json_rpc::parse::build_error_response(
-                        request_id,
-                        json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
-                        None,
-                    ),
-                },
-            )
+            .respond(&state_machine_request_id, response)
             .await;
     }
 
