@@ -48,7 +48,7 @@ use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{
     chain::fork_tree,
     chain_spec,
-    executor::{self, host, read_only_runtime_host},
+    executor::{host, read_only_runtime_host},
     header,
     json_rpc::{self, methods, requests_subscriptions},
     libp2p::{multiaddr, PeerId},
@@ -1109,33 +1109,6 @@ impl<TPlat: Platform> Background<TPlat> {
                 }
             }
         }
-    }
-}
-
-fn convert_runtime_spec(
-    runtime: &Result<executor::CoreVersion, runtime_service::RuntimeError>,
-) -> methods::MaybeRuntimeSpec {
-    match &runtime {
-        Ok(runtime) => {
-            let runtime = runtime.decode();
-            methods::MaybeRuntimeSpec::Valid {
-                spec: methods::RuntimeSpec {
-                    impl_name: runtime.impl_name,
-                    spec_name: runtime.spec_name,
-                    impl_version: runtime.impl_version,
-                    spec_version: runtime.spec_version,
-                    authoring_version: runtime.authoring_version,
-                    transaction_version: runtime.transaction_version,
-                    apis: runtime
-                        .apis
-                        .map(|api| (methods::HexString(api.name_hash.to_vec()), api.version))
-                        .collect(),
-                },
-            }
-        }
-        Err(error) => methods::MaybeRuntimeSpec::Invalid {
-            error: error.to_string(),
-        },
     }
 }
 
