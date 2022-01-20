@@ -1096,8 +1096,12 @@ impl<TPlat: Platform> Background<TPlat> {
                     };
                     runtime_call = get.inject_value(storage_value.map(iter::once));
                 }
-                read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
-                    todo!() // TODO:
+                read_only_runtime_host::RuntimeHostVm::NextKey(nk) => {
+                    // TODO:
+                    runtime_call_lock.unlock(
+                        read_only_runtime_host::RuntimeHostVm::NextKey(nk).into_prototype(),
+                    );
+                    break Err(RuntimeCallError::NextKeyForbidden);
                 }
                 read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
                     runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
@@ -1188,4 +1192,5 @@ enum RuntimeCallError {
     Call(runtime_service::RuntimeCallError),
     StartError(host::StartErr),
     ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
+    NextKeyForbidden,
 }
