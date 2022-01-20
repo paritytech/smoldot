@@ -259,6 +259,9 @@ pub enum ValidateTransactionError {
     Call(runtime_service::RuntimeCallError),
     /// Error during the validation runtime call.
     Validation(validate::Error),
+    /// Tried to access the next key of a storage key. This isn't possible through a call request
+    /// at the moment.
+    NextKeyForbidden,
 }
 
 /// Message sent from the foreground service to the background.
@@ -1030,8 +1033,10 @@ async fn validate_transaction<TPlat: Platform>(
                 };
                 validation_in_progress = get.inject_value(storage_value.map(iter::once));
             }
-            validate::Query::NextKey(_) => {
-                todo!() // TODO:
+            validate::Query::NextKey(nk) => {
+                // TODO:
+                runtime_call_lock.unlock(validate::Query::NextKey(nk).into_prototype());
+                break Err(ValidateTransactionError::NextKeyForbidden);
             }
             validate::Query::PrefixKeys(prefix) => {
                 // TODO: lots of allocations because I couldn't figure how to make this annoying borrow checker happy

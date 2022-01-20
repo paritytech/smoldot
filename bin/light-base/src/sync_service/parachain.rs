@@ -548,8 +548,11 @@ async fn parahead<TPlat: Platform>(
                 };
                 runtime_call = get.inject_value(storage_value.map(iter::once));
             }
-            read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
-                todo!() // TODO:
+            read_only_runtime_host::RuntimeHostVm::NextKey(nk) => {
+                // TODO:
+                runtime_call_lock
+                    .unlock(read_only_runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
+                return Err(ParaheadError::NextKeyForbidden);
             }
             read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
                 runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
@@ -574,6 +577,7 @@ enum ParaheadError {
     ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
     NoCore,
     InvalidRuntimeOutput(para::Error),
+    NextKeyForbidden,
 }
 
 impl ParaheadError {
@@ -586,6 +590,7 @@ impl ParaheadError {
             ParaheadError::ReadOnlyRuntime(_) => false,
             ParaheadError::NoCore => false,
             ParaheadError::InvalidRuntimeOutput(_) => false,
+            ParaheadError::NextKeyForbidden => false,
         }
     }
 }

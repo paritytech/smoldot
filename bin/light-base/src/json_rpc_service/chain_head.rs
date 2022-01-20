@@ -230,8 +230,18 @@ impl<TPlat: Platform> Background<TPlat> {
                                             runtime_call =
                                                 get.inject_value(storage_value.map(iter::once));
                                         }
-                                        read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
-                                            todo!() // TODO:
+                                        read_only_runtime_host::RuntimeHostVm::NextKey(nk) => {
+                                            runtime_call_lock.unlock(
+                                                read_only_runtime_host::RuntimeHostVm::NextKey(nk)
+                                                    .into_prototype(),
+                                            );
+                                            break methods::ServerToClient::chainHead_unstable_callEvent {
+                                                    subscription: &subscription_id,
+                                                    result: methods::ChainHeadCallEvent::Inaccessible {
+                                                        error: &"getting next key not implemented",
+                                                    },
+                                                }
+                                                .to_json_call_object_parameters(None);
                                         }
                                         read_only_runtime_host::RuntimeHostVm::StorageRoot(
                                             storage_root,
