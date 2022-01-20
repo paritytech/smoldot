@@ -116,40 +116,6 @@ impl<TPlat: Platform> Background<TPlat> {
             .await;
     }
 
-    /// Handles a call to [`methods::MethodCall::transaction_unstable_unwatch`].
-    pub(super) async fn transaction_unstable_unwatch(
-        self: &Arc<Self>,
-        request_id: &str,
-        state_machine_request_id: &requests_subscriptions::RequestId,
-        subscription: &str,
-    ) {
-        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
-            self.subscriptions
-                .lock()
-                .await
-                .misc
-                .remove(&(subscription.to_owned(), SubscriptionTy::Transaction))
-        {
-            abort_handle.abort();
-            Some(state_machine_subscription)
-        } else {
-            None
-        };
-
-        if let Some(state_machine_subscription) = &state_machine_subscription {
-            self.requests_subscriptions
-                .stop_subscription(state_machine_subscription)
-                .await;
-        }
-
-        self.requests_subscriptions
-            .respond(
-                state_machine_request_id,
-                methods::Response::transaction_unstable_unwatch(()).to_json_response(request_id),
-            )
-            .await;
-    }
-
     /// Handles a call to [`methods::MethodCall::author_submitAndWatchExtrinsic`] (if `is_legacy`
     /// is `true`) or to [`methods::MethodCall::transaction_unstable_submitAndWatch`] (if
     /// `is_legacy` is `false`).
@@ -427,5 +393,39 @@ impl<TPlat: Platform> Background<TPlat> {
                 future::Abortable::new(task, abort_registration).map(|_| ()),
             ))
             .unwrap();
+    }
+
+    /// Handles a call to [`methods::MethodCall::transaction_unstable_unwatch`].
+    pub(super) async fn transaction_unstable_unwatch(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        subscription: &str,
+    ) {
+        let state_machine_subscription = if let Some((abort_handle, state_machine_subscription)) =
+            self.subscriptions
+                .lock()
+                .await
+                .misc
+                .remove(&(subscription.to_owned(), SubscriptionTy::Transaction))
+        {
+            abort_handle.abort();
+            Some(state_machine_subscription)
+        } else {
+            None
+        };
+
+        if let Some(state_machine_subscription) = &state_machine_subscription {
+            self.requests_subscriptions
+                .stop_subscription(state_machine_subscription)
+                .await;
+        }
+
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::transaction_unstable_unwatch(()).to_json_response(request_id),
+            )
+            .await;
     }
 }
