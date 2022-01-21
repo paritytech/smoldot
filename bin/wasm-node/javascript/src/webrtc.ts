@@ -69,7 +69,7 @@
 //
 // ## DTLS+SCTP
 //
-// RFCs: https://datatracker.ietf.org/doc/html/rfc8841
+// RFC: https://datatracker.ietf.org/doc/html/rfc8841
 //
 // In both cases (TCP or UDP), the next layer is DTLS. DTLS is similar to the well-known TLS
 // protocol, except that it doesn't guarantee ordering of delivery (as this is instead provided
@@ -102,7 +102,6 @@ webrtc.addEventListener("negotiationneeded", async (_event) => {
 
     console.log(webrtc.localDescription!.sdp);
 
-    // See RFC 8866 (SDP in general) and RFC 8122 (for the fingerprint)
     const remoteSdp = "v=0" + "\n" +
         "o=- " + (Date.now() / 1000).toFixed() + " 0 IN IP4 0.0.0.0" + "\n" +
         "s=-" + "\n" +
