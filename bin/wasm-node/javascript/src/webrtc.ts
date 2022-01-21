@@ -90,6 +90,14 @@
 // TCP connections.
 //
 // TODO: this is only one potential solution; see ongoing discussion in https://github.com/libp2p/specs/issues/220
+// # About main thread vs worker
+//
+// You might wonder why this code is not executed within the WebWorker.
+// The reason is that at the time of writing it is not allowed to create WebRTC connections within
+// a WebWorker.
+//
+// See also https://github.com/w3c/webrtc-extensions/issues/64
+//
 
 const webrtc = new RTCPeerConnection();
 webrtc.createDataChannel("data", { ordered: true, negotiated: true, id: 0 });
