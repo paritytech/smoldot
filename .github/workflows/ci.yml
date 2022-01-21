@@ -53,7 +53,7 @@ jobs:
     - uses: Swatinem/rust-cache@v1
     - uses: actions/setup-node@v2.5.1
       with:
-        node-version: '12'
+        node-version: '14'
     - run: apt-get update && apt install -y binaryen # For `wasm-opt`
     - run: cd bin/wasm-node/javascript && RUSTFLAGS=-Dwarnings npm install-ci-test
 
@@ -68,7 +68,7 @@ jobs:
     - uses: Swatinem/rust-cache@v1
     - uses: actions/setup-node@v2.5.1
       with:
-        node-version: '12'
+        node-version: '14'
     - run: cargo install twiggy  # TODO: somehow cache this in order to not compile twiggy every single time
     - run: git checkout ${{ github.event.pull_request.base.sha }}
     - run: cd bin/wasm-node/javascript && npm ci && npm run-script build

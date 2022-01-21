@@ -914,7 +914,12 @@ async fn blocks_request_response(
                     } else {
                         None
                     },
-                    justification: None, // TODO: justifications aren't saved in database at the moment
+                    justifications: if config.fields.justifications {
+                        // TODO: justifications aren't saved in database at the moment
+                        Some(Vec::new())
+                    } else {
+                        None
+                    },
                 });
             }
 

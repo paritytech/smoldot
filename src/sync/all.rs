@@ -1099,7 +1099,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     blocks.map(|iter| {
                         iter.map(|block| all_forks::RequestSuccessBlock {
                             scale_encoded_header: block.scale_encoded_header,
-                            scale_encoded_justification: block.scale_encoded_justification,
+                            scale_encoded_justifications: block
+                                .scale_encoded_justifications
+                                .into_iter(),
                         })
                     }),
                 );
@@ -1130,7 +1132,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         .map(|iter| {
                             iter.map(|block| optimistic::RequestSuccessBlock {
                                 scale_encoded_header: block.scale_encoded_header,
-                                scale_encoded_justification: block.scale_encoded_justification,
+                                scale_encoded_justifications: block.scale_encoded_justifications,
                                 scale_encoded_extrinsics: block.scale_encoded_extrinsics,
                                 user_data: block.user_data,
                             })
@@ -1235,8 +1237,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 // the runtime to the API user. The API user might then immediately throw away
                 // this runtime, but we don't care enough about this possibility to optimize
                 // this.
-                let (grandpa_warp_sync, error) =
-                    sync.set_virtual_machine_params(code, heap_pages, ExecHint::CompileAheadOfTime);
+                // TODO: make `allow_unresolved_imports` configurable
+                let (grandpa_warp_sync, error) = sync.set_virtual_machine_params(
+                    code,
+                    heap_pages,
+                    ExecHint::CompileAheadOfTime,
+                    false,
+                );
 
                 if let Some(_error) = error {
                     // TODO: error handling
@@ -1449,7 +1456,7 @@ impl RequestDetail {
 
 pub struct BlockRequestSuccessBlock<TBl> {
     pub scale_encoded_header: Vec<u8>,
-    pub scale_encoded_justification: Option<Vec<u8>>,
+    pub scale_encoded_justifications: Vec<([u8; 4], Vec<u8>)>,
     pub scale_encoded_extrinsics: Vec<Vec<u8>>,
     pub user_data: TBl,
 }
@@ -1593,8 +1600,8 @@ pub struct Block<TBl> {
     /// Header of the block.
     pub header: header::Header,
 
-    /// SCALE-encoded justification of this block, if any.
-    pub justification: Option<Vec<u8>>,
+    /// SCALE-encoded justifications of this block, if any.
+    pub justifications: Vec<([u8; 4], Vec<u8>)>,
 
     /// User data associated to the block.
     pub user_data: TBl,
@@ -1754,7 +1761,7 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
                             .map(|b| Block {
                                 full: None, // TODO: wrong
                                 header: b.0,
-                                justification: None, // TODO: wrong
+                                justifications: Vec::new(), // TODO: wrong
                                 user_data: b.1,
                             })
                             .collect(),
@@ -1781,7 +1788,7 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
                             .into_iter()
                             .map(|b| Block {
                                 header: b.header,
-                                justification: b.justification,
+                                justifications: b.justifications,
                                 user_data: b.user_data,
                                 full: b.full.map(|b| BlockFull {
                                     body: b.body,

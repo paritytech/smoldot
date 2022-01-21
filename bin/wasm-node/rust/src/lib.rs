@@ -116,8 +116,8 @@ lazy_static::lazy_static! {
     static ref CLIENT: Mutex<Option<init::Client<Vec<future::AbortHandle>, platform::Platform>>> = Mutex::new(None);
 }
 
-fn init(max_log_level: u32) {
-    let init_out = init::init(max_log_level);
+fn init(max_log_level: u32, enable_current_task: u32) {
+    let init_out = init::init(max_log_level, enable_current_task != 0);
 
     let mut client_lock = crate::CLIENT.lock().unwrap();
     assert!(client_lock.is_none());

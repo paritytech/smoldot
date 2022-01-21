@@ -211,6 +211,25 @@ extern "C" {
     /// The connection must currently be in the `Open` state. See the documentation of
     /// [`connection_new`] for details.
     pub fn connection_send(id: u32, ptr: u32, len: u32);
+
+    /// Called when the Wasm execution enters the context of a certain task. This is useful for
+    /// debugging purposes.
+    ///
+    /// Only one task can be currently executing at any time.
+    ///
+    /// The name of the task is a UTF-8 string found in the memory of the WebAssembly virtual
+    /// machine at offset `ptr` and with length `len`.
+    ///
+    /// This function is called only if `enable_current_task` was non-zero when calling [`init`].
+    pub fn current_task_entered(ptr: u32, len: u32);
+
+    /// Called when the Wasm execution leave the context of a certain task. This is useful for
+    /// debugging purposes.
+    ///
+    /// Only one task can be currently executing at any time.
+    ///
+    /// This function is called only if `enable_current_task` was non-zero when calling [`init`].
+    pub fn current_task_exit();
 }
 
 /// Initializes the client.
@@ -221,9 +240,13 @@ extern "C" {
 ///
 /// The client will emit log messages by calling the [`log()`] function, provided the log level is
 /// inferior or equal to the value of `max_log_level` passed here.
+///
+/// If `enbable_current_task` is non-zero, smoldot will call the [`current_task_entered`] and
+/// [`current_task_exit`] functions to report when it enters and leaves tasks. This slightly
+/// slows everything down, but is useful for debugging purposes.
 #[no_mangle]
-pub extern "C" fn init(max_log_level: u32) {
-    crate::init(max_log_level)
+pub extern "C" fn init(max_log_level: u32, enable_current_task: u32) {
+    crate::init(max_log_level, enable_current_task)
 }
 
 /// Allocates a buffer of the given length, with an alignment of 1.

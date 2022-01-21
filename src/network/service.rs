@@ -882,6 +882,54 @@ where
             .await
     }
 
+    /// Inserts the given list of nodes into the list of known nodes held within the state machine.
+    ///
+    /// The service might, but without guarantee, try to connect to these nodes in the future.
+    pub async fn discover(
+        &self,
+        now: &TNow,
+        chain_index: usize,
+        list: impl IntoIterator<
+            Item = (
+                peer_id::PeerId,
+                impl IntoIterator<Item = multiaddr::Multiaddr>,
+            ),
+        >,
+    ) {
+        let mut lock = self.ephemeral_guarded.lock().await;
+        let lock = &mut *lock; // Avoids borrow checker issues.
+
+        let kbuckets = &mut lock.chains[chain_index].kbuckets;
+
+        for (peer_id, discovered_addrs) in list {
+            let mut discovered_addrs = discovered_addrs.into_iter().peekable();
+
+            // Check whether there is any address in the iterator at all before inserting the
+            // node in the buckets.
+            if discovered_addrs.peek().is_none() {
+                continue;
+            }
+
+            // TODO: also insert addresses in kbuckets of other chains? a bit unclear
+            if let Ok(mut kbuckets_addrs) = kbuckets.entry(&peer_id).or_insert(
+                addresses::Addresses::with_capacity(self.max_addresses_per_peer.get()),
+                now,
+                kademlia::kbuckets::PeerState::Disconnected,
+            ) {
+                for to_insert in discovered_addrs {
+                    if kbuckets_addrs.get_mut().len() >= self.max_addresses_per_peer.get() {
+                        continue;
+                    }
+
+                    kbuckets_addrs.get_mut().insert_discovered(to_insert);
+                }
+
+                // List of addresses must never be empty.
+                debug_assert!(!kbuckets_addrs.get_mut().is_empty());
+            }
+        }
+    }
+
     /// After calling [`ChainNetwork::next_start_connect`], notifies the [`ChainNetwork`] of the
     /// success of the dialing attempt.
     ///
@@ -2346,34 +2394,9 @@ where
 
     /// Insert the results in the [`ChainNetwork`].
     pub async fn insert(self, now: &TNow) {
-        let mut lock = self.service.ephemeral_guarded.lock().await;
-        let lock = &mut *lock; // Avoids borrow checker issues.
-
-        let kbuckets = &mut lock.chains[self.chain_index].kbuckets;
-
-        for (peer_id, discovered_addrs) in self.outcome {
-            if discovered_addrs.is_empty() {
-                continue;
-            }
-
-            // TODO: also insert addresses in kbuckets of other chains? a bit unclear
-            if let Ok(mut kbuckets_addrs) = kbuckets.entry(&peer_id).or_insert(
-                addresses::Addresses::with_capacity(self.service.max_addresses_per_peer.get()),
-                now,
-                kademlia::kbuckets::PeerState::Disconnected,
-            ) {
-                for to_insert in discovered_addrs {
-                    if kbuckets_addrs.get_mut().len() >= self.service.max_addresses_per_peer.get() {
-                        continue;
-                    }
-
-                    kbuckets_addrs.get_mut().insert_discovered(to_insert);
-                }
-
-                // List of addresses must never be empty.
-                debug_assert!(!kbuckets_addrs.get_mut().is_empty());
-            }
-        }
+        self.service
+            .discover(now, self.chain_index, self.outcome)
+            .await
     }
 }
 

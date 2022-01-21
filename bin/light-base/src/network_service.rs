@@ -629,7 +629,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     "Connection({}) <= BlocksRequest(start: {}, num: {}, descending: {:?}, header: {:?}, body: {:?}, justifications: {:?})",
                     target, HashDisplay(hash), config.desired_count.get(),
                     matches!(config.direction, protocol::BlocksRequestDirection::Descending),
-                    config.fields.header, config.fields.body, config.fields.justification
+                    config.fields.header, config.fields.body, config.fields.justifications
                 );
             }
             protocol::BlocksRequestConfigStart::Number(number) => {
@@ -638,7 +638,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     "Connection({}) <= BlocksRequest(start: #{}, num: {}, descending: {:?}, header: {:?}, body: {:?}, justifications: {:?})",
                     target, number, config.desired_count.get(),
                     matches!(config.direction, protocol::BlocksRequestDirection::Descending),
-                    config.fields.header, config.fields.body, config.fields.justification
+                    config.fields.header, config.fields.body, config.fields.justifications
                 );
             }
         }
@@ -659,7 +659,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     BytesDisplay(blocks.iter().fold(0, |sum, block| {
                         let block_size = block.header.as_ref().map_or(0, |h| h.len()) +
                             block.body.as_ref().map_or(0, |b| b.iter().fold(0, |s, e| s + e.len())) +
-                            block.justification.as_ref().map_or(0, |j| j.len());
+                            block.justifications.as_ref().into_iter().flat_map(|l| l.iter()).fold(0, |s, j| s + j.1.len());
                         sum + u64::try_from(block_size).unwrap()
                     }))
                 );
@@ -889,6 +889,16 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         }
 
         sent_peers
+    }
+
+    /// See [`service::ChainNetwork::discover`].
+    pub async fn discover(
+        &self,
+        now: &TPlat::Instant,
+        chain_index: usize,
+        list: impl IntoIterator<Item = (PeerId, impl IntoIterator<Item = Multiaddr>)>,
+    ) {
+        self.inner.network.discover(now, chain_index, list).await
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection

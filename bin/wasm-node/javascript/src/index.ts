@@ -15,17 +15,5 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// This small dummy module re-exports some types from NodeJS.
-//
-// A rule in the `package.json` overrides it with `compat-browser.js` when in a browser.
-
-import { parentPort } from 'worker_threads';
-
-export { default as net } from 'net';
-export { Worker } from 'worker_threads';
-
-export const workerOnMessage = (worker, callback) => worker.on('message', callback);
-export const workerOnError = (worker, callback) => worker.on('error', callback);
-export const workerTerminate = (worker) => worker.terminate().then(() => {});
-export const postMessage = (msg) => parentPort.postMessage(msg);
-export const setOnMessage = (callback) => parentPort.on('message', callback);
+export { HealthChecker, SmoldotHealth, healthChecker } from './health.js';
+export * from './client.js'; // TODO: precise exports

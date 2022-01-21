@@ -501,6 +501,7 @@ impl RuntimeCompilation {
             code,
             self.heap_pages,
             vm::ExecHint::CompileAheadOfTime,
+            false,
         ) {
             Ok(vm) => vm,
             Err(err) => {
