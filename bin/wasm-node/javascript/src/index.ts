@@ -17,3 +17,5 @@
 
 export { HealthChecker, SmoldotHealth, healthChecker } from './health.js';
 export * from './client.js'; // TODO: precise exports
+
+import './webrtc.js'; // TODO: remove this, just for prototyping
