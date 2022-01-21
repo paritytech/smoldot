@@ -105,8 +105,8 @@ webrtc.createDataChannel("data", { ordered: true, negotiated: true, id: 0 });
 webrtc.addEventListener("negotiationneeded", async (_event) => {
     const offer = await webrtc.createOffer();
     // TODO: just for testing; this substitution must be done properly
-    const tweaked = offer.sdp?.replace('UDP', 'TCP');
-    await webrtc.setLocalDescription({ type: "offer", sdp: tweaked });
+    //const tweaked = offer.sdp?.replace('UDP', 'TCP');
+    await webrtc.setLocalDescription({ type: "offer", sdp: offer.sdp });
 
     console.log(webrtc.localDescription!.sdp);
 
@@ -116,7 +116,7 @@ webrtc.addEventListener("negotiationneeded", async (_event) => {
         "t=0 0" + "\n" +
         "a=group:BUNDLE 0" + "\n" +
         // TODO: MUST use the value contained in the offer
-        "m=application 41000 TCP/DTLS/SCTP webrtc-datachannel" + "\n" +
+        "m=application 41000 UDP/DTLS/SCTP webrtc-datachannel" + "\n" +
         "c=IN IP4 127.0.0.1" + "\n" +
         "a=mid:0" + "\n" +
         "a=sendrecv" + "\n" +
@@ -128,6 +128,6 @@ webrtc.addEventListener("negotiationneeded", async (_event) => {
         "a=setup:passive" + "\n" +  // Indicates that the remote DTLS server will only listen for incoming connections. (RFC5763)
         "a=sctp-port:5000" + "\n" +
         "a=max-message-size:100000" + "\n" +
-        "a=candidate:0 1 TCP 2113667327 127.0.0.1 41000 typ host" + "\n";
+        "a=candidate:0 1 UDP 2113667327 127.0.0.1 41000 typ host" + "\n";
     webrtc.setRemoteDescription({ type: "answer", sdp: remoteSdp });
 });
