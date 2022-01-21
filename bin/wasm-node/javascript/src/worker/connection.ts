@@ -19,7 +19,7 @@ import { Buffer } from 'buffer';
 import Websocket from 'websocket';
 import * as compat from '../compat/index.js';
 
-import type { Socket as TcpSocket } from 'net';
+import type { Socket as TcpSocket } from 'node:net';
 
 /**
  * Connection to a remote node.
