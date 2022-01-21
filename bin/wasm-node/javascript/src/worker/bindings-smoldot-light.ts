@@ -21,11 +21,9 @@
 //! of that object with the Wasm instance.
 
 import { Buffer } from 'buffer';
-import Websocket from 'websocket';
 import * as compat from '../compat/index.js';
+import * as connection from './connection.js';
 import type { SmoldotWasmInstance } from './bindings.js';
-
-import type { Socket as TcpSocket } from 'net';
 
 export interface Config {
     instance?: SmoldotWasmInstance,
@@ -42,7 +40,7 @@ export interface Config {
 export default function (config: Config): compat.WasmModuleImports {
     // Used below to store the list of all connections.
     // The indices within this array are chosen by the Rust code.
-    let connections: Record<number, TcpWrapped | WebSocketWrapped> = {};
+    let connections: Record<number, connection.Connection> = {};
 
     return {
         // Must exit with an error. A human-readable message can be found in the WebAssembly
@@ -140,99 +138,36 @@ export default function (config: Config): compat.WasmModuleImports {
             }
 
             try {
-                const addr = Buffer.from(instance.exports.memory.buffer)
+                const address = Buffer.from(instance.exports.memory.buffer)
                     .toString('utf8', addr_ptr, addr_ptr + addr_len);
 
-                let connection: TcpWrapped | WebSocketWrapped;
-
-                // Attempt to parse the multiaddress.
-                // Note: peers can decide of the content of `addr`, meaning that it shouldn't be
-                // trusted.
-                const wsParsed = addr.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss)$/);
-                const tcpParsed = addr.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)$/);
-
-                if (wsParsed != null) {
-                    const proto = (wsParsed[4] == 'ws') ? 'ws' : 'wss';
-                    if (
-                        (proto == 'ws' && config.forbidWs) ||
-                        (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && config.forbidNonLocalWs) ||
-                        (proto == 'wss' && config.forbidWss)
-                    ) {
-                        throw new ConnectionError('Connection type not allowed');
-                    }
-
-                    const url = (wsParsed[1] == 'ip6') ?
-                        (proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]) :
-                        (proto + "://" + wsParsed[2] + ":" + wsParsed[3]);
-
-                    connection = {
-                        ty: 'websocket',
-                        socket: new Websocket.w3cwebsocket(url)
-                    };
-                    connection.socket.binaryType = 'arraybuffer';
-
-                    connection.socket.onopen = () => {
+                const connec = connection.connect({
+                    address,
+                    forbidTcp: config.forbidTcp,
+                    forbidWs: config.forbidWs,
+                    forbidNonLocalWs: config.forbidNonLocalWs,
+                    forbidWss: config.forbidWss,
+                    onOpen: () => {
                         instance.exports.connection_open(id);
-                    };
-                    connection.socket.onclose = (event) => {
-                        const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
+                    },
+                    onClose: (message: string) => {
                         const len = Buffer.byteLength(message, 'utf8');
                         const ptr = instance.exports.alloc(len) >>> 0;
                         Buffer.from(instance.exports.memory.buffer).write(message, ptr);
                         instance.exports.connection_closed(id, ptr, len);
-                    };
-                    connection.socket.onmessage = (msg) => {
-                        const message = Buffer.from(msg.data as ArrayBuffer);
+                    },
+                    onMessage: (message: Buffer) => {
                         const ptr = instance.exports.alloc(message.length) >>> 0;
                         message.copy(Buffer.from(instance.exports.memory.buffer), ptr);
                         instance.exports.connection_message(id, ptr, message.length);
-                    };
-
-                } else if (tcpParsed != null) {
-                    // `net` module will be missing when we're not in NodeJS.
-                    if (!compat.isTcpAvailable() || config.forbidTcp) {
-                        throw new ConnectionError('TCP connections not available');
                     }
+                });
 
-                    const socket = compat.createConnection({
-                        host: tcpParsed[2],
-                        port: parseInt(tcpParsed[3]!, 10),
-                    });
-
-                    connection = { ty: 'tcp', socket };
-                    connection.socket.setNoDelay();
-
-                    connection.socket.on('connect', () => {
-                        if (socket.destroyed) return;
-                        instance.exports.connection_open(id);
-                    });
-                    connection.socket.on('close', (hasError) => {
-                        if (socket.destroyed) return;
-                        // NodeJS doesn't provide a reason why the closing happened, but only
-                        // whether it was caused by an error.
-                        const message = hasError ? "Error" : "Closed gracefully";
-                        const len = Buffer.byteLength(message, 'utf8');
-                        const ptr = instance.exports.alloc(len) >>> 0;
-                        Buffer.from(instance.exports.memory.buffer).write(message, ptr);
-                        instance.exports.connection_closed(id, ptr, len);
-                    });
-                    connection.socket.on('error', () => { });
-                    connection.socket.on('data', (message) => {
-                        if (socket.destroyed) return;
-                        const ptr = instance.exports.alloc(message.length) >>> 0;
-                        message.copy(Buffer.from(instance.exports.memory.buffer), ptr);
-                        instance.exports.connection_message(id, ptr, message.length);
-                    });
-
-                } else {
-                    throw new ConnectionError('Unrecognized multiaddr format');
-                }
-
-                connections[id] = connection;
+                connections[id] = connec;
                 return 0;
 
             } catch (error) {
-                const isBadAddress = error instanceof ConnectionError;
+                const isBadAddress = error instanceof connection.ConnectionError;
                 let errorStr = "Unknown error";
                 if (error instanceof Error) {
                     errorStr = error.toString();
@@ -250,20 +185,8 @@ export default function (config: Config): compat.WasmModuleImports {
 
         // Must close and destroy the connection object.
         connection_close: (id: number) => {
-            let connection = connections[id]!;
-            if (connection.ty == 'websocket') {
-                // WebSocket
-                // We can't set these fields to null because the TypeScript definitions don't
-                // allow it, but we can set them to dummy values.
-                connection.socket.onopen = () => { };
-                connection.socket.onclose = () => { };
-                connection.socket.onmessage = () => { };
-                connection.socket.onerror = () => { };
-                connection.socket.close();
-            } else {
-                // TCP
-                connection.socket.destroy();
-            }
+            const connection = connections[id]!;
+            connection.close();
             delete connections[id];
         },
 
@@ -275,15 +198,9 @@ export default function (config: Config): compat.WasmModuleImports {
             ptr >>>= 0;
             len >>>= 0;
 
-            let data = Buffer.from(instance.exports.memory.buffer).slice(ptr, ptr + len);
-            let connection = connections[id]!;
-            if (connection.ty == 'websocket') {
-                // WebSocket
-                connection.socket.send(data);
-            } else {
-                // TCP
-                connection.socket.write(data);
-            }
+            const data = Buffer.from(instance.exports.memory.buffer).slice(ptr, ptr + len);
+            const connection = connections[id]!;
+            connection.send(data);
         },
 
         current_task_entered: (ptr: number, len: number) => {
@@ -302,20 +219,4 @@ export default function (config: Config): compat.WasmModuleImports {
                 config.currentTaskCallback(null);
         }
     };
-}
-
-class ConnectionError extends Error {
-    constructor(message: string) {
-        super(message);
-    }
-}
-
-interface TcpWrapped {
-    ty: 'tcp',
-    socket: TcpSocket,
-}
-
-interface WebSocketWrapped {
-    ty: 'websocket',
-    socket: Websocket.w3cwebsocket,
 }
