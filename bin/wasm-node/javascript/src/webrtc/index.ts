@@ -82,12 +82,10 @@
 // problematic as at this stage we have no way to know the certificate that the remote is going
 // to use.
 //
-// To solve that problem, instead of generating a random certificate, like you normally would, the
-// certificate is instead generated deterministically using the `PeerId` of the remote as a seed.
-// Because the `PeerId` is a public information, the certificate (and its private key) is also a
-// public information. As such, this certificate won't offer any protection and another encryption
-// layer will need to be negotiated on top of the DTLS+SCTP stream, like is the case for plain
-// TCP connections.
+// To solve that problem, instead of each node generating their own random certificate, like you
+// normally would, every libp2p node uses the same hardcoded publicly-known certificate.
+// As such, the TLS layer won't offer any protection and another encryption layer will need to be
+// negotiated on top of the DTLS+SCTP stream, like is the case for plain TCP connections.
 //
 // TODO: this is only one potential solution; see ongoing discussion in https://github.com/libp2p/specs/issues/220
 // # About main thread vs worker
@@ -100,7 +98,6 @@
 //
 
 import * as sdp from './sdp-parse.js';
-import generateCertificate from './certificate-generate';
 
 export enum Protocol {
     Tcp = 'tcp',
@@ -163,8 +160,11 @@ export function connect(targetIp: string, protocol: Protocol, targetPort: number
             // anyway. (RFC8839)
             "a=ice-ufrag:" + genRandomIceCredentials(false) + "\n" +
             "a=ice-pwd:" + genRandomIceCredentials(true) + "\n" +
-            // Fingerprint of the certificate that the server will use during the TLS handshake. (RFC8122)
-            "a=fingerprint:" + await genCertificateFingerprint(targetPeerId) + "\n" +
+            // Fingerprint of the certificate that the server will use during the TLS
+            // handshake. (RFC8122)
+            // As explained at the top-level documentation, we use a hardcoded certificate.
+            // TODO: proper certificate and fingerprint
+            "a=fingerprint:sha-256 39:60:F3:A0:32:3E:17:B5:34:CE:61:07:51:FB:F3:7E:7B:32:9F:DC:69:1F:C4:B5:0A:38:3C:FC:A6:0D:91:0A" + "\n" +
             // RFC8842
             // TODO: ?
             "a=tls-id:1111111111111" + "\n" +
@@ -190,27 +190,4 @@ function genRandomIceCredentials(isPassword: boolean): string {
     let data = new Uint8Array((isPassword ? 128 : 24) / 8);
     window.crypto.getRandomValues(data);
     return [...data].map(x => x.toString(16).padStart(2, '0')).join('');
-}
-
-async function genCertificateFingerprint(targetPeerId: ArrayBuffer): Promise<string> {
-    const certificate = generateCertificate(targetPeerId);
-
-    // Note that we use a browser-provided function here, but that's fine because WebRTC
-    // only works in browsers anyway.
-    const certificateDigest = await window.crypto.subtle.digest('SHA-256', certificate);
-
-    let output = "sha256 ";
-    let firstByte = true;
-    for (const byte of new Uint8Array(certificateDigest)) {
-        if (firstByte) {
-            firstByte = false;
-        } else {
-            output += ':';
-        }
-
-        // The fingerprint MUST be uppercase according to RFC8122.
-        output += byte.toString(16).toUpperCase();
-    }
-
-    return output;
 }
