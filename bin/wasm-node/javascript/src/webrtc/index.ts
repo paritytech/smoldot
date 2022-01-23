@@ -124,19 +124,35 @@ export function connect(targetIp: string, protocol: Protocol, targetPort: number
         // Note that the trailing line feed is important, as otherwise Chrome fails to parse
         // the payload.
         const remoteSdp =
+            // Version of the SDP protocol. Always 0. (RFC8866)
             "v=0" + "\n" +
+            // Identifies the creator of the SDP document. We are allowed to use dummy values
+            // (`-` and `0.0.0.0`) to remain anonymous, which we do. Note that "IN" means
+            // "Internet". (RFC8866)
+            // TODO: handle IPv6
             "o=- " + (Date.now() / 1000).toFixed() + " 0 IN IP4 0.0.0.0" + "\n" +
+            // Name for the session. We are allowed to pass a dummy `-`. (RFC8866)
             "s=-" + "\n" +
+            // Start and end of the validity of the session. `0 0` means that the session never
+            // expires. (RFC8866)
             "t=0 0" + "\n" +
+            // TODO: remove eventually; this was added just for testing because things didn't seem to work
             "a=group:BUNDLE 0" + "\n" +
 
-            // TODO: MUST use the value contained in the offer
+            // A `m=` line describes a request to establish a certain protocol.
+            // The protocol in this line (i.e. `TCP/DTLS/SCTP` or `UDP/DTLS/SCTP`) must always be
+            // the same as the one in the offer. We know that this is true because we tweak the
+            // offer to match the protocol.
+            // The `<fmt>` component must always be `webrtc-datachannel` for WebRTC.
+            // The rest of the SDP payload adds attributes to this specific media stream.
+            // RFCs: 8839, 8866, 8841
             "m=application " + targetPort + " " + (protocol == Protocol.Tcp ? "TCP" : "UDP") + "/DTLS/SCTP webrtc-datachannel" + "\n" +
             // Indicates the IP address of the remote.
             // Note that "IN" means "Internet".
             // TODO: precise format? note that domain names are also acceptable
             // TODO: handle IPv6
             "c=IN IP4 " + targetIp + "\n" +
+            // TODO: remove eventually; goes together with `mid:0`
             "a=mid:0" + "\n" +
             // Indicates bidirectional mode for the data channel. (RFC8866)
             "a=sendrecv" + "\n" +
@@ -150,11 +166,15 @@ export function connect(targetIp: string, protocol: Protocol, targetPort: number
             // Fingerprint of the certificate that the server will use during the TLS handshake. (RFC8122)
             "a=fingerprint:" + await genCertificateFingerprint(targetPeerId) + "\n" +
             // RFC8842
-            "a=tls-id:1111111111111" + "\n" +  // TODO:
+            // TODO: ?
+            "a=tls-id:1111111111111" + "\n" +
             // Indicates that the remote DTLS server will only listen for incoming connections. (RFC5763)
             "a=setup:passive" + "\n" +
+            // TODO: doc
             "a=sctp-port:5000" + "\n" +
+            // TODO: doc
             "a=max-message-size:100000" + "\n" +
+            // TODO: doc
             "a=candidate:0 1 " + (protocol == Protocol.Tcp ? "TCP" : "UDP") + " 2113667327 " + targetIp + " " + targetPort + " typ host" + "\n";
 
         await webrtc.setRemoteDescription({ type: "answer", sdp: remoteSdp });
