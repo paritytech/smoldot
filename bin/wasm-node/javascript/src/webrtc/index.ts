@@ -198,7 +198,7 @@ function genRandomPayload(entryopyBits: number): string {
     // Note that the grammar is letter, digits, +, and /. In other words, this is base64 except
     // without the potential trailing `=`. This trailing `=` is annoying to handle so we just use
     // hexadecimal.
-    let data = new Uint8Array((entryopyBits ? 128 : 24) / 8);
+    let data = new Uint8Array(Math.ceil(entryopyBits / 8));
     window.crypto.getRandomValues(data);
     return [...data].map(x => x.toString(16).padStart(2, '0')).join('');
 }
