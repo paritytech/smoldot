@@ -157,7 +157,7 @@ export function connect(targetIp: string, protocol: Protocol, targetPort: number
             "a=max-message-size:100000" + "\n" +
             "a=candidate:0 1 " + (protocol == Protocol.Tcp ? "TCP" : "UDP") + " 2113667327 " + targetIp + " " + targetPort + " typ host" + "\n";
 
-        webrtc.setRemoteDescription({ type: "answer", sdp: remoteSdp });
+        await webrtc.setRemoteDescription({ type: "answer", sdp: remoteSdp });
     });
 }
 
