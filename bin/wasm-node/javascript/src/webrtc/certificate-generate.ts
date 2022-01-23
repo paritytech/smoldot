@@ -15,7 +15,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-export { HealthChecker, SmoldotHealth, healthChecker } from './health.js';
-export * from './client.js'; // TODO: precise exports
-
-import './webrtc/index.js'; // TODO: remove this, just for prototyping
+/**
+ * Deterministically generate the DER of the X.509 certificate corresponding to the
+ * provided PeerId.
+ *
+ * @param peerId Bytes representation of a PeerId. If you have a string version (for example
+ * `12Kwoo...` or `Qm...`), then you need to base58-decode it.
+ */
+export default function(peerId: ArrayBuffer): ArrayBuffer {
+    throw new Error("Not implemented");
+}

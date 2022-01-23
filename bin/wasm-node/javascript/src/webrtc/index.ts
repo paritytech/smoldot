@@ -19,7 +19,7 @@
 //
 // ## ICE
 //
-// RFCs: 8839, 8845
+// RFCs: 8839, 8445
 // See also: https://tools.ietf.org/id/draft-ietf-rtcweb-sdp-08.html#rfc.section.5.2.3
 //
 // The WebRTC protocol uses ICE in order to establish a connection.
@@ -69,7 +69,7 @@
 //
 // ## DTLS+SCTP
 //
-// RFC: https://datatracker.ietf.org/doc/html/rfc8841
+// RFCs: 8841, 8832
 //
 // In both cases (TCP or UDP), the next layer is DTLS. DTLS is similar to the well-known TLS
 // protocol, except that it doesn't guarantee ordering of delivery (as this is instead provided
@@ -99,35 +99,98 @@
 // See also https://github.com/w3c/webrtc-extensions/issues/64
 //
 
-const webrtc = new RTCPeerConnection();
-webrtc.createDataChannel("data", { ordered: true, negotiated: true, id: 0 });
+import * as sdp from './sdp-parse.js';
+import generateCertificate from './certificate-generate';
 
-webrtc.addEventListener("negotiationneeded", async (_event) => {
-    const offer = await webrtc.createOffer();
-    // TODO: just for testing; this substitution must be done properly
-    //const tweaked = offer.sdp?.replace('UDP', 'TCP');
-    await webrtc.setLocalDescription({ type: "offer", sdp: offer.sdp });
+export enum Protocol {
+    Tcp = 'tcp',
+    Udp = 'udp',
+}
 
-    console.log(webrtc.localDescription!.sdp);
+export function connect(targetIp: string, protocol: Protocol, targetPort: number, targetPeerId: ArrayBuffer) {
+    const webrtc = new RTCPeerConnection();
+    webrtc.createDataChannel("data", { ordered: true, negotiated: true, id: 0 });
 
-    const remoteSdp = "v=0" + "\n" +
-        "o=- " + (Date.now() / 1000).toFixed() + " 0 IN IP4 0.0.0.0" + "\n" +
-        "s=-" + "\n" +
-        "t=0 0" + "\n" +
-        "a=group:BUNDLE 0" + "\n" +
-        // TODO: MUST use the value contained in the offer
-        "m=application 41000 UDP/DTLS/SCTP webrtc-datachannel" + "\n" +
-        "c=IN IP4 127.0.0.1" + "\n" +
-        "a=mid:0" + "\n" +
-        "a=sendrecv" + "\n" +
-        "a=ice-options:ice2" + "\n" +
-        "a=ice-pwd:asd88fgpdd777uzjYhagZg" + "\n" +
-        "a=ice-ufrag:8hhY" + "\n" +
-        "a=fingerprint:sha-256 39:60:F3:A0:32:3E:17:B5:34:CE:61:07:51:FB:F3:7E:7B:32:9F:DC:69:1F:C4:B5:0A:38:3C:FC:A6:0D:91:0A" + "\n" +
-        "a=tls-id:1111111111111" + "\n" +  // TODO:
-        "a=setup:passive" + "\n" +  // Indicates that the remote DTLS server will only listen for incoming connections. (RFC5763)
-        "a=sctp-port:5000" + "\n" +
-        "a=max-message-size:100000" + "\n" +
-        "a=candidate:0 1 UDP 2113667327 127.0.0.1 41000 typ host" + "\n";
-    webrtc.setRemoteDescription({ type: "answer", sdp: remoteSdp });
-});
+    webrtc.addEventListener("negotiationneeded", async (_event) => {
+        const sdpOffer = (await webrtc.createOffer()).sdp!;
+        const parsedSdpOffer = sdp.parseSdp(sdpOffer);
+        // TODO: just for testing; this substitution must be done properly
+        //const tweaked = offer.sdp?.replace('UDP', 'TCP');
+        await webrtc.setLocalDescription({ type: 'offer', sdp: sdpOffer });
+
+        console.log(webrtc.localDescription!.sdp);
+
+        // Generate the fake SDP response.
+        // Note that the trailing line feed is important, as otherwise Chrome fails to parse
+        // the payload.
+        const remoteSdp =
+            "v=0" + "\n" +
+            "o=- " + (Date.now() / 1000).toFixed() + " 0 IN IP4 0.0.0.0" + "\n" +
+            "s=-" + "\n" +
+            "t=0 0" + "\n" +
+            "a=group:BUNDLE 0" + "\n" +
+
+            // TODO: MUST use the value contained in the offer
+            "m=application " + targetPort + " " + (protocol == Protocol.Tcp ? "TCP" : "UDP") + "/DTLS/SCTP webrtc-datachannel" + "\n" +
+            // Indicates the IP address of the remote.
+            // Note that "IN" means "Internet".
+            // TODO: precise format? note that domain names are also acceptable
+            // TODO: handle IPv6
+            "c=IN IP4 " + targetIp + "\n" +
+            "a=mid:0" + "\n" +
+            // Indicates bidirectional mode for the data channel. (RFC8866)
+            "a=sendrecv" + "\n" +
+            // Indicates that we are complying with RFC8839 (as oppposed to the legacy RFC5245).
+            "a=ice-options:ice2" + "\n" +
+            // Randomly-generated username and password (the line after). Used only for
+            // connectivity checks, which is irrelevant for our situation, but it is mandatory
+            // anyway. (RFC8839)
+            "a=ice-ufrag:" + genRandomIceCredentials(false) + "\n" +
+            "a=ice-pwd:" + genRandomIceCredentials(true) + "\n" +
+            // Fingerprint of the certificate that the server will use during the TLS handshake. (RFC8122)
+            "a=fingerprint:" + await genCertificateFingerprint(targetPeerId) + "\n" +
+            // RFC8842
+            "a=tls-id:1111111111111" + "\n" +  // TODO:
+            // Indicates that the remote DTLS server will only listen for incoming connections. (RFC5763)
+            "a=setup:passive" + "\n" +
+            "a=sctp-port:5000" + "\n" +
+            "a=max-message-size:100000" + "\n" +
+            "a=candidate:0 1 " + (protocol == Protocol.Tcp ? "TCP" : "UDP") + " 2113667327 " + targetIp + " " + targetPort + " typ host" + "\n";
+
+        webrtc.setRemoteDescription({ type: "answer", sdp: remoteSdp });
+    });
+}
+
+function genRandomIceCredentials(isPassword: boolean): string {
+    // The username must have at least 24 bits of entropy, and the password at least 128 bits
+    // of entropy. See RFC8845.
+    // Note that the grammar is letter, digits, +, and /. In other words, this is base64 except
+    // without the potential trailing `=`. This trailing `=` is annoying to handle so we just use
+    // hexadecimal.
+    let data = new Uint8Array((isPassword ? 128 : 24) / 8);
+    window.crypto.getRandomValues(data);
+    return [...data].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+
+async function genCertificateFingerprint(targetPeerId: ArrayBuffer): Promise<string> {
+    const certificate = generateCertificate(targetPeerId);
+
+    // Note that we use a browser-provided function here, but that's fine because WebRTC
+    // only works in browsers anyway.
+    const certificateDigest = await window.crypto.subtle.digest('SHA-256', certificate);
+
+    let output = "sha256 ";
+    let firstByte = true;
+    for (const byte of new Uint8Array(certificateDigest)) {
+        if (firstByte) {
+            firstByte = false;
+        } else {
+            output += ':';
+        }
+
+        // The fingerprint MUST be uppercase according to RFC8122.
+        output += byte.toString(16).toUpperCase();
+    }
+
+    return output;
+}
