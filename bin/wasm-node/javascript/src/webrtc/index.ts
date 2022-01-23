@@ -99,18 +99,15 @@
 
 import * as sdp from './sdp-parse.js';
 
-export enum Protocol {
-    Tcp = 'tcp',
-    Udp = 'udp',
-}
-
-export function connect(targetIp: string, protocol: Protocol, targetPort: number, targetPeerId: ArrayBuffer) {
+export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: number) {
     const webrtc = new RTCPeerConnection();
-    webrtc.createDataChannel("data", { ordered: true, negotiated: true, id: 0 });
+
+    const dataChannel = webrtc.createDataChannel("data", { ordered: true, negotiated: true, id: 0 });
+    dataChannel.binaryType = 'arraybuffer';
 
     webrtc.addEventListener("negotiationneeded", async (_event) => {
         const sdpOffer = (await webrtc.createOffer()).sdp!;
-        const parsedSdpOffer = sdp.parseSdp(sdpOffer);
+        sdp.parseSdp(sdpOffer);
         // TODO: just for testing; this substitution must be done properly
         //const tweaked = offer.sdp?.replace('UDP', 'TCP');
         await webrtc.setLocalDescription({ type: 'offer', sdp: sdpOffer });
@@ -145,7 +142,7 @@ export function connect(targetIp: string, protocol: Protocol, targetPort: number
             // The `<fmt>` component must always be `webrtc-datachannel` for WebRTC.
             // The rest of the SDP payload adds attributes to this specific media stream.
             // RFCs: 8839, 8866, 8841
-            "m=application " + targetPort + " " + (protocol == Protocol.Tcp ? "TCP" : "UDP") + "/DTLS/SCTP webrtc-datachannel" + "\n" +
+            "m=application " + targetPort + " " + (protocol == 'tcp' ? "TCP" : "UDP") + "/DTLS/SCTP webrtc-datachannel" + "\n" +
             // Indicates the IP address of the remote.
             // Note that "IN" means "Internet".
             // TODO: precise format? note that domain names are also acceptable
@@ -168,7 +165,7 @@ export function connect(targetIp: string, protocol: Protocol, targetPort: number
             // handshake. (RFC8122)
             // As explained at the top-level documentation, we use a hardcoded certificate.
             // TODO: proper certificate and fingerprint
-            "a=fingerprint:sha-256 39:60:F3:A0:32:3E:17:B5:34:CE:61:07:51:FB:F3:7E:7B:32:9F:DC:69:1F:C4:B5:0A:38:3C:FC:A6:0D:91:0A" + "\n" +
+            "a=fingerprint:sha-256 3A:30:CE:4D:FE:21:BB:84:1A:37:58:87:96:44:47:B8:88:3E:EB:D5:A5:18:B5:D5:F2:BD:B7:AA:10:D4:BE:70" + "\n" +
             // The ICE protocol uses a "TLS ID" system to indicate whether a fresh DTLS connection
             // must be reopened in case of ICE renegotiation. Considering that ICE renegotiations
             // never happen in our use case, we can simply put a random value and not care about
@@ -176,7 +173,7 @@ export function connect(targetIp: string, protocol: Protocol, targetPort: number
             // offer contains one. (RFC8842)
             // TODO: is it true that renegotiations never happen? what about a connection closing?
             // TODO: If the answerer receives an offer that does not contain an SDP "tls-id" attribute, the answerer MUST NOT insert a "tls-id" attribute in the answer.
-            "a=tls-id:" + genRandomPayload(120) + "\n" +
+            // TODO: right now browsers don't send it "a=tls-id:" + genRandomPayload(120) + "\n" +
             // Indicates that the remote DTLS server will only listen for incoming
             // connections. (RFC5763)
             "a=setup:passive" + "\n" +
@@ -185,10 +182,18 @@ export function connect(targetIp: string, protocol: Protocol, targetPort: number
             // TODO: doc
             "a=max-message-size:100000" + "\n" +
             // TODO: doc
-            "a=candidate:0 1 " + (protocol == Protocol.Tcp ? "TCP" : "UDP") + " 2113667327 " + targetIp + " " + targetPort + " typ host" + "\n";
+            "a=candidate:0 1 " + (protocol == 'tcp' ? "TCP" : "UDP") + " 2113667327 " + targetIp + " " + targetPort + " typ host" + "\n";
 
         await webrtc.setRemoteDescription({ type: "answer", sdp: remoteSdp });
     });
+
+    dataChannel.onopen = () => {
+        console.log('open!');
+    };
+
+    dataChannel.onerror = (error) => {
+        console.log('error! ' + error);
+    };
 }
 
 /**

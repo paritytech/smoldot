@@ -18,4 +18,6 @@
 export { HealthChecker, SmoldotHealth, healthChecker } from './health.js';
 export * from './client.js'; // TODO: precise exports
 
-import './webrtc/index.js'; // TODO: remove this, just for prototyping
+// TODO: remove this, just for prototyping
+import connect from './webrtc/index.js';
+connect('127.0.0.1', 'udp', 41000);

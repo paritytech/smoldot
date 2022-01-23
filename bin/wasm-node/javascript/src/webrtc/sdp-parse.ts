@@ -15,21 +15,18 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-export type SdpBody = SdpMediaSection | SdpMiscSection;
-
-export interface SdpMediaSection {
-    type: 'media-section',
-    media: string,
-    port: number,
-    proto: string,
-    fmt: string,
-    lines: string[],
-}
-
-export interface SdpMiscSection {
-    type: 'misc-section',
-    lines: string[],
-}
+export type SdpBody =
+    {
+        type: 'media-section',
+        media: string,
+        port: number,
+        proto: string,
+        fmt: string,
+        lines: string[],
+    } | {
+        type: 'misc-section',
+        lines: string[],
+    };
 
 /**
  * Parses a SDP document and returns a decoded version.
