@@ -115,6 +115,7 @@ export function connect(targetIp: string, protocol: Protocol, targetPort: number
         //const tweaked = offer.sdp?.replace('UDP', 'TCP');
         await webrtc.setLocalDescription({ type: 'offer', sdp: sdpOffer });
 
+        // TODO: remove
         console.log(webrtc.localDescription!.sdp);
 
         // Generate the fake SDP response.
@@ -126,6 +127,7 @@ export function connect(targetIp: string, protocol: Protocol, targetPort: number
             // Identifies the creator of the SDP document. We are allowed to use dummy values
             // (`-` and `0.0.0.0`) to remain anonymous, which we do. Note that "IN" means
             // "Internet". (RFC8866)
+            // TODO: is that true that we're allowed to set 0.0.0.0?
             // TODO: handle IPv6
             "o=- " + (Date.now() / 1000).toFixed() + " 0 IN IP4 0.0.0.0" + "\n" +
             // Name for the session. We are allowed to pass a dummy `-`. (RFC8866)
@@ -158,17 +160,25 @@ export function connect(targetIp: string, protocol: Protocol, targetPort: number
             // Randomly-generated username and password (the line after). Used only for
             // connectivity checks, which is irrelevant for our situation, but it is mandatory
             // anyway. (RFC8839)
-            "a=ice-ufrag:" + genRandomIceCredentials(false) + "\n" +
-            "a=ice-pwd:" + genRandomIceCredentials(true) + "\n" +
+            // The username must have at least 24 bits of entropy, and the password at least 128
+            // bits of entropy. (RFC8845)
+            "a=ice-ufrag:" + genRandomPayload(24) + "\n" +
+            "a=ice-pwd:" + genRandomPayload(128) + "\n" +
             // Fingerprint of the certificate that the server will use during the TLS
             // handshake. (RFC8122)
             // As explained at the top-level documentation, we use a hardcoded certificate.
             // TODO: proper certificate and fingerprint
             "a=fingerprint:sha-256 39:60:F3:A0:32:3E:17:B5:34:CE:61:07:51:FB:F3:7E:7B:32:9F:DC:69:1F:C4:B5:0A:38:3C:FC:A6:0D:91:0A" + "\n" +
-            // RFC8842
-            // TODO: ?
-            "a=tls-id:1111111111111" + "\n" +
-            // Indicates that the remote DTLS server will only listen for incoming connections. (RFC5763)
+            // The ICE protocol uses a "TLS ID" system to indicate whether a fresh DTLS connection
+            // must be reopened in case of ICE renegotiation. Considering that ICE renegotiations
+            // never happen in our use case, we can simply put a random value and not care about
+            // it. Note however that the TLS ID in the answer must be present if and only if the
+            // offer contains one. (RFC8842)
+            // TODO: is it true that renegotiations never happen? what about a connection closing?
+            // TODO: If the answerer receives an offer that does not contain an SDP "tls-id" attribute, the answerer MUST NOT insert a "tls-id" attribute in the answer.
+            "a=tls-id:" + genRandomPayload(120) + "\n" +
+            // Indicates that the remote DTLS server will only listen for incoming
+            // connections. (RFC5763)
             "a=setup:passive" + "\n" +
             // TODO: doc
             "a=sctp-port:5000" + "\n" +
@@ -181,13 +191,14 @@ export function connect(targetIp: string, protocol: Protocol, targetPort: number
     });
 }
 
-function genRandomIceCredentials(isPassword: boolean): string {
-    // The username must have at least 24 bits of entropy, and the password at least 128 bits
-    // of entropy. See RFC8845.
+/**
+ * Generates a random payload whose grammar is: ALPHA / DIGIT / "+" / "/"
+ */
+function genRandomPayload(entryopyBits: number): string {
     // Note that the grammar is letter, digits, +, and /. In other words, this is base64 except
     // without the potential trailing `=`. This trailing `=` is annoying to handle so we just use
     // hexadecimal.
-    let data = new Uint8Array((isPassword ? 128 : 24) / 8);
+    let data = new Uint8Array((entryopyBits ? 128 : 24) / 8);
     window.crypto.getRandomValues(data);
     return [...data].map(x => x.toString(16).padStart(2, '0')).join('');
 }
