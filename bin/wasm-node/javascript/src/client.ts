@@ -434,16 +434,8 @@ export function start(options?: ClientOptions): Client {
             if (!databaseContentPromises)
               return Promise.reject(new AlreadyDestroyedError());
 
-            // TODO: because of https://github.com/microsoft/TypeScript/issues/11498 we need to define the callbacks as possibly null, and go through `unknown`
-            let resolve;
-            let reject;
-            const promise: Promise<string> = new Promise((res, rej) => {
-              resolve = res;
-              reject = rej;
-            });
-            databaseContentPromises.push({
-              resolve: resolve as unknown as (data: string) => void,
-              reject: reject as unknown as (error: Error) => void,
+            const promise: Promise<string> = new Promise((resolve, reject) => {
+              databaseContentPromises.push({ resolve, reject });
             });
 
             const twoPower32 = (1 << 30) * 4;  // `1 << 31` and `1 << 32` in JavaScript don't give the value that you expect.
