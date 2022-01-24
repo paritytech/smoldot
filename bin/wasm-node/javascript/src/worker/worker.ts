@@ -79,7 +79,7 @@ function injectMessage(instance: SmoldotWasmInstance, message: messages.ToWorker
       } else {
         const errorMsgLen = instance.exports.chain_error_len(chainId) >>> 0;
         const errorMsgPtr = instance.exports.chain_error_ptr(chainId) >>> 0;
-        const errorMsg = Buffer.from((instance.exports.memory as WebAssembly.Memory).buffer)
+        const errorMsg = Buffer.from(instance.exports.memory.buffer)
           .toString('utf8', errorMsgPtr, errorMsgPtr + errorMsgLen);
         instance.exports.remove_chain(chainId);
         postMessage({ kind: 'chainAddedErr', error: new Error(errorMsg) });
