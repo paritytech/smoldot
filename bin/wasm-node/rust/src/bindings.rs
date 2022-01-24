@@ -365,8 +365,8 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 ///
 /// Responses and notifications are sent back using [`json_rpc_respond`].
 ///
-/// It is forbidden to call this function on a chain that was created with `json_rpc_running`
-/// equal to 0.
+/// It is forbidden to call this function on an erroneous chain or a chain that was created with
+/// `json_rpc_running` equal to 0.
 #[no_mangle]
 pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) {
     super::json_rpc_send(text_ptr, text_len, chain_id)
@@ -387,6 +387,8 @@ pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) {
 ///
 /// [`database_content_ready`] will not be called if you remove the chain with [`remove_chain`]
 /// while the operation is in progress.
+///
+/// It is forbidden to call this function on an erroneous chain.
 #[no_mangle]
 pub extern "C" fn database_content(chain_id: u32, max_size: u32) {
     super::database_content(chain_id, max_size)

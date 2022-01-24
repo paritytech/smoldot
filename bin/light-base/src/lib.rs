@@ -826,8 +826,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     ///
     /// # Panic
     ///
-    /// Panics if the [`ChainId`] is invalid, or if [`AddChainConfig::json_rpc_responses`] was
-    /// `None` when adding the chain.
+    /// Panics if the [`ChainId`] is invalid, is erroneous, or if
+    /// [`AddChainConfig::json_rpc_responses`] was `None` when adding the chain.
     ///
     pub fn json_rpc_request(
         &mut self,
