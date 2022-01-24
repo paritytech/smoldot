@@ -459,8 +459,8 @@ export function start(options?: ClientOptions): Client {
             // function has returned. We solve that by removing the information immediately.
             if (!chains.delete(chainId))
               throw new AlreadyDestroyedError();
-            if (!chainIds.delete(newChain))
-              throw new Error('Inconsistent internal state');
+            console.assert(chainIds.has(newChain));
+            chainIds.delete(newChain);
             postMessage(worker, { ty: 'removeChain', chainId });
           },
         };
