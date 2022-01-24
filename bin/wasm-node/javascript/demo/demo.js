@@ -193,11 +193,11 @@ wsServer.on('request', function (request) {
     }
 
     const connection = request.accept(request.requestedProtocols[0], request.origin);
-    console.log((new Date()) + ' Connection accepted.');
+    console.log('(demo) New JSON-RPC client connected:' + request.remoteAddress + '.');
 
     chain
         .catch((error) => {
-            console.error("Error while adding chain: " + error);
+            console.error("(demo) Error while adding chain: " + error);
             connection.close(400);
         });
 
@@ -212,7 +212,7 @@ wsServer.on('request', function (request) {
                         chain.relay.sendJsonRpc(message.utf8Data);
                 })
                 .catch((error) => {
-                    console.error("Error during JSON-RPC request: " + error);
+                    console.error("(demo) Error during JSON-RPC request: " + error);
                     process.exit(1);
                 });
         } else {
@@ -222,7 +222,7 @@ wsServer.on('request', function (request) {
 
     // When the connection closes, remove the chains that have been added.
     connection.on('close', function (reasonCode, description) {
-        console.log((new Date()) + ' Peer ' + connection.remoteAddress + ' disconnected.');
+        console.log("(demo) JSON-RPC client " + connection.remoteAddress + ' disconnected.');
         chain.then(chain => {
             chain.relay.remove();
             if (chain.para)
