@@ -71,8 +71,8 @@ let server = http.createServer(function (request, response) {
     response.end();
 });
 server.listen(9944, function () {
-    console.log('Server is listening on port 9944');
-    console.log('Visit one of:');
+    console.log('JSON-RPC server now listening on port 9944');
+    console.log('Please visit one of:');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fwestend');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fwestmint');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fadz');
@@ -80,6 +80,7 @@ server.listen(9944, function () {
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fstatemine');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fpolkadot');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Frococo');
+    console.log('');
 });
 let wsServer = new websocket.server({
     httpServer: server,
