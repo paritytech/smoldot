@@ -193,7 +193,7 @@ wsServer.on('request', function (request) {
     }
 
     const connection = request.accept(request.requestedProtocols[0], request.origin);
-    console.log('(demo) New JSON-RPC client connected:' + request.remoteAddress + '.');
+    console.log('(demo) New JSON-RPC client connected: ' + request.remoteAddress + '.');
 
     chain
         .catch((error) => {
