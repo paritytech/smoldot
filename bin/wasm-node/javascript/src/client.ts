@@ -454,14 +454,14 @@ export function start(options?: ClientOptions): Client {
           remove: () => {
             if (workerError)
               throw workerError;
-            if (!chains.has(chainId))
-              throw new AlreadyDestroyedError();
-            postMessage(worker, { ty: 'removeChain', chainId });
             // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
             // response or database content concerning that `chainId` to arrive after the `remove`
             // function has returned. We solve that by removing the information immediately.
-            chains.delete(chainId);
+            if (!chains.delete(chainId))
+              throw new AlreadyDestroyedError();
+            console.assert(chainIds.has(newChain));
             chainIds.delete(newChain);
+            postMessage(worker, { ty: 'removeChain', chainId });
           },
         };
 
