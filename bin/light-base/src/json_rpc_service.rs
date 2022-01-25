@@ -477,6 +477,9 @@ struct Cache {
 }
 
 impl<TPlat: Platform> Background<TPlat> {
+    /// Runs the background task forever.
+    ///
+    /// This should only ever be called once for each service.
     async fn run(
         self: Arc<Self>,
         mut new_child_tasks_rx: mpsc::UnboundedReceiver<future::BoxFuture<'static, ()>>,
