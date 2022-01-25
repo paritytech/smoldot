@@ -177,8 +177,6 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
 
         let log_target = format!("json-rpc-{}", config.log_name);
 
-        let (background_abort, background_abort_registration) = future::AbortHandle::new_pair();
-
         // Channel used in the background in order to spawn new tasks scoped to the background.
         let (new_child_tasks_tx, new_child_tasks_rx) = mpsc::unbounded();
 
@@ -218,6 +216,8 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
         });
 
         // Spawns the background task that actually runs the logic of that JSON-RPC service.
+        // This background task is abortable through the `background_abort` handle.
+        let (background_abort, background_abort_registration) = future::AbortHandle::new_pair();
         (config.tasks_executor)(log_target.clone(), {
             let max_parallel_requests = config.max_parallel_requests;
             let responses_sender = config.responses_sender;
