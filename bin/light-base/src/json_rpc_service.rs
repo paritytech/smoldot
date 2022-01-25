@@ -345,6 +345,9 @@ struct Background<TPlat: Platform> {
     log_target: String,
 
     /// State machine holding all the clients, requests, and subscriptions.
+    ///
+    /// Only requests that are valid JSON-RPC are insert into the state machine. However, requests
+    /// can try to call an unknown method, or have invalid parameters.
     requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions>,
 
     /// Identifier of the unique client within the [`Background::requests_subscriptions`].
