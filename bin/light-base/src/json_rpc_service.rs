@@ -467,8 +467,14 @@ impl<TPlat: Platform> Background<TPlat> {
         max_parallel_requests: NonZeroU32,
         mut responses_sender: mpsc::Sender<String>,
     ) -> ! {
+        // The body of this function consists in building a list of tasks, then running them.
         let mut tasks = stream::FuturesUnordered::new();
 
+        // One task is dedicated to pulling JSON-RPC responses and notifications from the inner
+        // state machine, and sending them on the `responses_sender`.
+        // Because this task does `responses_sender.send(...).await`, it can go to sleep if the
+        // receiving side of the channel isn't pulled quickly enough. This will in turn
+        // back-pressure the inner state machine.
         tasks.push({
             let me = self.clone();
             async move {
@@ -476,14 +482,13 @@ impl<TPlat: Platform> Background<TPlat> {
                     let message = me.requests_subscriptions.next_response(&me.client_id).await;
 
                     if log::log_enabled!(log::Level::Debug) {
-                        let trunc_message = crate::util::truncate_str_iter(
-                            message.chars().filter(|c| !c.is_control()),
-                            100,
-                        )
-                        .collect::<String>();
                         log::debug!(
                             target: &me.log_target,
-                            "JSON-RPC <= {}", trunc_message
+                            "JSON-RPC <= {}",
+                            crate::util::truncate_str_iter(
+                                message.chars().filter(|c| !c.is_control()),
+                                100,
+                            ).collect::<String>()
                         );
                     }
 
@@ -493,6 +498,10 @@ impl<TPlat: Platform> Background<TPlat> {
             .boxed()
         });
 
+        // A certain number of tasks (`max_parallel_requests`) are dedicated to pulling requests
+        // from the inner state machine and processing them.
+        // Each task can only process one request at a time, which is why we spawn one task per
+        // desired level of parallelism.
         for _ in 0..max_parallel_requests.get() {
             let me = self.clone();
             tasks.push(
@@ -505,6 +514,10 @@ impl<TPlat: Platform> Background<TPlat> {
             );
         }
 
+        // Spawn one task dedicated to filling the `Cache` with new blocks from the runtime
+        // service.
+        // TODO: this is actually racy, as a block subscription task could report a new block to a client, and then client can query it, before this block has been been added to the cache
+        // TODO: extract to separate function
         tasks.push({
             let me = self.clone();
             async move {
@@ -574,6 +587,10 @@ impl<TPlat: Platform> Background<TPlat> {
             .boxed()
         });
 
+        // Now that `tasks` is full, we start running them forever.
+        // The `new_child_tasks_rx` channel is also polled, in order to be able to spawn new
+        // tasks.
+        // TODO: consider removing this `new_child_tasks_rx` mechanism, in order to be guaranteed a fixed number of tasks
         loop {
             futures::select! {
                 () = tasks.select_next_some() => {},
@@ -585,6 +602,7 @@ impl<TPlat: Platform> Background<TPlat> {
         }
     }
 
+    /// Pulls one request from the inner state machine, and processes it.
     async fn handle_request(self: &Arc<Self>) {
         let (json_rpc_request, state_machine_request_id) =
             self.requests_subscriptions.next_request().await;
@@ -606,6 +624,9 @@ impl<TPlat: Platform> Background<TPlat> {
                 return;
             }
             Err(error) => {
+                // If the request isn't even a valid JSON-RPC request, we can't even send back
+                // a response. We have no choice but to silently discard the request.
+                // TODO: pre-filter the requests instead
                 log::warn!(
                     target: &self.log_target,
                     "Ignoring malformed JSON-RPC call: {}", error
