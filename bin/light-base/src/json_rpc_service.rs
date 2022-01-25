@@ -581,7 +581,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         let notification = subscribe_all.new_blocks.next().await;
                         match notification {
                             Some(runtime_service::Notification::Block(block)) => {
-                                let mut cache = me.cache.try_lock().unwrap();
+                                let mut cache = me.cache.lock().await;
 
                                 if cache.recent_pinned_blocks.len()
                                     == cache.recent_pinned_blocks.cap()
