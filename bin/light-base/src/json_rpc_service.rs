@@ -177,23 +177,13 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
 
         let log_target = format!("json-rpc-{}", config.log_name);
 
-        let (background_abort, background_abort_registration) = future::AbortHandle::new_pair();
-
-        let client = JsonRpcService {
-            log_target: log_target.clone(),
-            requests_subscriptions: requests_subscriptions.clone(),
-            client_id: client_id.clone(),
-            background_abort,
-            platform: PhantomData,
-        };
-
         // Channel used in the background in order to spawn new tasks scoped to the background.
         let (new_child_tasks_tx, new_child_tasks_rx) = mpsc::unbounded();
 
         let background = Arc::new(Background {
             log_target: log_target.clone(),
-            requests_subscriptions,
-            client_id,
+            requests_subscriptions: requests_subscriptions.clone(),
+            client_id: client_id.clone(),
             new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
             chain_name: config.chain_spec.name().to_owned(),
             chain_ty: config.chain_spec.chain_type().to_owned(),
@@ -226,7 +216,9 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
         });
 
         // Spawns the background task that actually runs the logic of that JSON-RPC service.
-        (config.tasks_executor)(log_target, {
+        // This background task is abortable through the `background_abort` handle.
+        let (background_abort, background_abort_registration) = future::AbortHandle::new_pair();
+        (config.tasks_executor)(log_target.clone(), {
             let max_parallel_requests = config.max_parallel_requests;
             let responses_sender = config.responses_sender;
 
@@ -242,7 +234,13 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             .boxed()
         });
 
-        client
+        JsonRpcService {
+            log_target,
+            requests_subscriptions,
+            client_id,
+            background_abort,
+            platform: PhantomData,
+        }
     }
 
     /// Queues the given JSON-RPC request to be processed in the background.
@@ -252,15 +250,25 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
     /// isn't polled often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
     /// JSON-RPC response to immediately send back to the user.
     pub fn queue_rpc_request(&mut self, json_rpc_request: String) -> Result<(), HandleRpcError> {
+        // If the request isn't even a valid JSON-RPC request, we can't even send back a response.
+        // We have no choice but to immediately refuse the request.
+        if let Err(error) = json_rpc::parse::parse_call(&json_rpc_request) {
+            log::warn!(
+                target: &self.log_target,
+                "Refused malformed JSON-RPC request: {}", error
+            );
+            return Err(HandleRpcError::MalformedJsonRpc(error));
+        }
+
+        // Logging the request before it is queued.
         if log::log_enabled!(log::Level::Debug) {
-            let trunc_request = crate::util::truncate_str_iter(
-                json_rpc_request.chars().filter(|c| !c.is_control()),
-                100,
-            )
-            .collect::<String>();
             log::debug!(
                 target: &self.log_target,
-                "JSON-RPC => {}", trunc_request
+                "JSON-RPC => {}",
+                crate::util::truncate_str_iter(
+                    json_rpc_request.chars().filter(|c| !c.is_control()),
+                    100,
+                ).collect::<String>()
             );
         }
 
@@ -301,6 +309,9 @@ pub enum HandleRpcError {
         /// Value that was passed as parameter to [`JsonRpcService::queue_rpc_request`].
         json_rpc_request: String,
     },
+    /// The request isn't a valid JSON-RPC request.
+    #[display(fmt = "The request isn't a valid JSON-RPC request: {}", _0)]
+    MalformedJsonRpc(json_rpc::parse::ParseError),
 }
 
 impl HandleRpcError {
@@ -309,7 +320,10 @@ impl HandleRpcError {
     /// Returns `None` if the JSON-RPC requests isn't valid JSON-RPC or if the call was a
     /// notification.
     pub fn into_json_rpc_error(self) -> Option<String> {
-        let HandleRpcError::Overloaded { json_rpc_request } = self;
+        let json_rpc_request = match self {
+            HandleRpcError::Overloaded { json_rpc_request } => json_rpc_request,
+            HandleRpcError::MalformedJsonRpc(_) => return None,
+        };
 
         match json_rpc::parse::parse_call(&json_rpc_request) {
             Ok(call) => match call.id_json {
@@ -331,6 +345,9 @@ struct Background<TPlat: Platform> {
     log_target: String,
 
     /// State machine holding all the clients, requests, and subscriptions.
+    ///
+    /// Only requests that are valid JSON-RPC are insert into the state machine. However, requests
+    /// can try to call an unknown method, or have invalid parameters.
     requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions>,
 
     /// Identifier of the unique client within the [`Background::requests_subscriptions`].
@@ -463,14 +480,23 @@ struct Cache {
 }
 
 impl<TPlat: Platform> Background<TPlat> {
+    /// Runs the background task forever.
+    ///
+    /// This should only ever be called once for each service.
     async fn run(
         self: Arc<Self>,
         mut new_child_tasks_rx: mpsc::UnboundedReceiver<future::BoxFuture<'static, ()>>,
         max_parallel_requests: NonZeroU32,
         mut responses_sender: mpsc::Sender<String>,
     ) -> ! {
+        // The body of this function consists in building a list of tasks, then running them.
         let mut tasks = stream::FuturesUnordered::new();
 
+        // One task is dedicated to pulling JSON-RPC responses and notifications from the inner
+        // state machine, and sending them on the `responses_sender`.
+        // Because this task does `responses_sender.send(...).await`, it can go to sleep if the
+        // receiving side of the channel isn't pulled quickly enough. This will in turn
+        // back-pressure the inner state machine.
         tasks.push({
             let me = self.clone();
             async move {
@@ -478,14 +504,13 @@ impl<TPlat: Platform> Background<TPlat> {
                     let message = me.requests_subscriptions.next_response(&me.client_id).await;
 
                     if log::log_enabled!(log::Level::Debug) {
-                        let trunc_message = crate::util::truncate_str_iter(
-                            message.chars().filter(|c| !c.is_control()),
-                            100,
-                        )
-                        .collect::<String>();
                         log::debug!(
                             target: &me.log_target,
-                            "JSON-RPC <= {}", trunc_message
+                            "JSON-RPC <= {}",
+                            crate::util::truncate_str_iter(
+                                message.chars().filter(|c| !c.is_control()),
+                                100,
+                            ).collect::<String>()
                         );
                     }
 
@@ -495,6 +520,10 @@ impl<TPlat: Platform> Background<TPlat> {
             .boxed()
         });
 
+        // A certain number of tasks (`max_parallel_requests`) are dedicated to pulling requests
+        // from the inner state machine and processing them.
+        // Each task can only process one request at a time, which is why we spawn one task per
+        // desired level of parallelism.
         for _ in 0..max_parallel_requests.get() {
             let me = self.clone();
             tasks.push(
@@ -507,6 +536,10 @@ impl<TPlat: Platform> Background<TPlat> {
             );
         }
 
+        // Spawn one task dedicated to filling the `Cache` with new blocks from the runtime
+        // service.
+        // TODO: this is actually racy, as a block subscription task could report a new block to a client, and then client can query it, before this block has been been added to the cache
+        // TODO: extract to separate function
         tasks.push({
             let me = self.clone();
             async move {
@@ -551,7 +584,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         let notification = subscribe_all.new_blocks.next().await;
                         match notification {
                             Some(runtime_service::Notification::Block(block)) => {
-                                let mut cache = me.cache.try_lock().unwrap();
+                                let mut cache = me.cache.lock().await;
 
                                 if cache.recent_pinned_blocks.len()
                                     == cache.recent_pinned_blocks.cap()
@@ -576,6 +609,10 @@ impl<TPlat: Platform> Background<TPlat> {
             .boxed()
         });
 
+        // Now that `tasks` is full, we start running them forever.
+        // The `new_child_tasks_rx` channel is also polled, in order to be able to spawn new
+        // tasks.
+        // TODO: consider removing this `new_child_tasks_rx` mechanism, in order to be guaranteed a fixed number of tasks
         loop {
             futures::select! {
                 () = tasks.select_next_some() => {},
@@ -587,6 +624,7 @@ impl<TPlat: Platform> Background<TPlat> {
         }
     }
 
+    /// Pulls one request from the inner state machine, and processes it.
     async fn handle_request(self: &Arc<Self>) {
         let (json_rpc_request, state_machine_request_id) =
             self.requests_subscriptions.next_request().await;
@@ -594,7 +632,7 @@ impl<TPlat: Platform> Background<TPlat> {
         // Check whether the JSON-RPC request is correct, and bail out if it isn't.
         let (request_id, call) = match methods::parse_json_call(&json_rpc_request) {
             Ok((request_id, call)) => {
-                log::debug!(target: &self.log_target, "Handler <= Request(id_json={:?})", request_id);
+                log::debug!(target: &self.log_target, "Handler <= Request(id_json={:?}, method={})", request_id, call.name());
                 (request_id, call)
             }
             Err(methods::ParseError::Method { request_id, error }) => {
@@ -607,12 +645,10 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
                 return;
             }
-            Err(error) => {
-                log::warn!(
-                    target: &self.log_target,
-                    "Ignoring malformed JSON-RPC call: {}", error
-                );
-                return;
+            Err(_) => {
+                // We make sure to not insert in the state machine requests that are not valid
+                // JSON-RPC requests.
+                unreachable!()
             }
         };
 
