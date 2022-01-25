@@ -629,7 +629,7 @@ impl<TPlat: Platform> Background<TPlat> {
         // Check whether the JSON-RPC request is correct, and bail out if it isn't.
         let (request_id, call) = match methods::parse_json_call(&json_rpc_request) {
             Ok((request_id, call)) => {
-                log::debug!(target: &self.log_target, "Handler <= Request(id_json={:?})", request_id);
+                log::debug!(target: &self.log_target, "Handler <= Request(id_json={:?}, method={})", request_id, call.name());
                 (request_id, call)
             }
             Err(methods::ParseError::Method { request_id, error }) => {
