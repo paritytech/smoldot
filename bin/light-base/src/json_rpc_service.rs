@@ -250,15 +250,25 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
     /// isn't polled often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
     /// JSON-RPC response to immediately send back to the user.
     pub fn queue_rpc_request(&mut self, json_rpc_request: String) -> Result<(), HandleRpcError> {
+        // If the request isn't even a valid JSON-RPC request, we can't even send back a response.
+        // We have no choice but to immediately refuse the request.
+        if let Err(error) = json_rpc::parse::parse_call(&json_rpc_request) {
+            log::warn!(
+                target: &self.log_target,
+                "Refused malformed JSON-RPC request: {}", error
+            );
+            return Err(HandleRpcError::MalformedJsonRpc(error));
+        }
+
+        // Logging the request before it is queued.
         if log::log_enabled!(log::Level::Debug) {
-            let trunc_request = crate::util::truncate_str_iter(
-                json_rpc_request.chars().filter(|c| !c.is_control()),
-                100,
-            )
-            .collect::<String>();
             log::debug!(
                 target: &self.log_target,
-                "JSON-RPC => {}", trunc_request
+                "JSON-RPC => {}",
+                crate::util::truncate_str_iter(
+                    json_rpc_request.chars().filter(|c| !c.is_control()),
+                    100,
+                ).collect::<String>()
             );
         }
 
@@ -299,6 +309,9 @@ pub enum HandleRpcError {
         /// Value that was passed as parameter to [`JsonRpcService::queue_rpc_request`].
         json_rpc_request: String,
     },
+    /// The request isn't a valid JSON-RPC request.
+    #[display(fmt = "The request isn't a valid JSON-RPC request: {}", _0)]
+    MalformedJsonRpc(json_rpc::parse::ParseError),
 }
 
 impl HandleRpcError {
@@ -307,7 +320,10 @@ impl HandleRpcError {
     /// Returns `None` if the JSON-RPC requests isn't valid JSON-RPC or if the call was a
     /// notification.
     pub fn into_json_rpc_error(self) -> Option<String> {
-        let HandleRpcError::Overloaded { json_rpc_request } = self;
+        let json_rpc_request = match self {
+            HandleRpcError::Overloaded { json_rpc_request } => json_rpc_request,
+            HandleRpcError::MalformedJsonRpc(_) => return None,
+        };
 
         match json_rpc::parse::parse_call(&json_rpc_request) {
             Ok(call) => match call.id_json {
@@ -623,15 +639,10 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
                 return;
             }
-            Err(error) => {
-                // If the request isn't even a valid JSON-RPC request, we can't even send back
-                // a response. We have no choice but to silently discard the request.
-                // TODO: pre-filter the requests instead
-                log::warn!(
-                    target: &self.log_target,
-                    "Ignoring malformed JSON-RPC call: {}", error
-                );
-                return;
+            Err(_) => {
+                // We make sure to not insert in the state machine requests that are not valid
+                // JSON-RPC requests.
+                unreachable!()
             }
         };
 
