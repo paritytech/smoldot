@@ -179,21 +179,13 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
 
         let (background_abort, background_abort_registration) = future::AbortHandle::new_pair();
 
-        let client = JsonRpcService {
-            log_target: log_target.clone(),
-            requests_subscriptions: requests_subscriptions.clone(),
-            client_id: client_id.clone(),
-            background_abort,
-            platform: PhantomData,
-        };
-
         // Channel used in the background in order to spawn new tasks scoped to the background.
         let (new_child_tasks_tx, new_child_tasks_rx) = mpsc::unbounded();
 
         let background = Arc::new(Background {
             log_target: log_target.clone(),
-            requests_subscriptions,
-            client_id,
+            requests_subscriptions: requests_subscriptions.clone(),
+            client_id: client_id.clone(),
             new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
             chain_name: config.chain_spec.name().to_owned(),
             chain_ty: config.chain_spec.chain_type().to_owned(),
@@ -226,7 +218,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
         });
 
         // Spawns the background task that actually runs the logic of that JSON-RPC service.
-        (config.tasks_executor)(log_target, {
+        (config.tasks_executor)(log_target.clone(), {
             let max_parallel_requests = config.max_parallel_requests;
             let responses_sender = config.responses_sender;
 
@@ -242,7 +234,13 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             .boxed()
         });
 
-        client
+        JsonRpcService {
+            log_target,
+            requests_subscriptions,
+            client_id,
+            background_abort,
+            platform: PhantomData,
+        }
     }
 
     /// Queues the given JSON-RPC request to be processed in the background.
