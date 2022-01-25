@@ -19,10 +19,10 @@ import pako from 'pako';
 
 import { Buffer } from 'buffer';
 
-import { Config as SmoldotBindingsConfig, default as smoldot_light_builder } from './bindings-smoldot-light.js';
-import { Config as WasiConfig, default as wasi_builder } from './bindings-wasi.js';
+import { Config as SmoldotBindingsConfig, default as smolditLightBindingsBuilder } from './bindings-smoldot-light.js';
+import { Config as WasiConfig, default as wasiBindingsBuilder } from './bindings-wasi.js';
 
-import { default as wasm_base64 } from './autogen/wasm.js';
+import { default as wasmBase64 } from './autogen/wasm.js';
 
 import { SmoldotWasmInstance } from './bindings.js';
 
@@ -42,7 +42,7 @@ export async function startInstance(config: Config): Promise<SmoldotWasmInstance
     // different file.
     // This is suboptimal compared to using `instantiateStreaming`, but it is the most
     // cross-platform cross-bundler approach.
-    const wasmBytecode = pako.inflate(new Uint8Array(Buffer.from(wasm_base64, 'base64')));
+    const wasmBytecode = pako.inflate(new Uint8Array(Buffer.from(wasmBase64, 'base64')));
 
     // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
     const smoldotJsConfig: SmoldotBindingsConfig = {
@@ -59,9 +59,9 @@ export async function startInstance(config: Config): Promise<SmoldotWasmInstance
     // parameter provides their implementations.
     const result = await WebAssembly.instantiate(wasmBytecode, {
         // The functions with the "smoldot" prefix are specific to smoldot.
-        "smoldot": smoldot_light_builder(smoldotJsConfig),
+        "smoldot": smolditLightBindingsBuilder(smoldotJsConfig),
         // As the Rust code is compiled for wasi, some more wasi-specific imports exist.
-        "wasi_snapshot_preview1": wasi_builder(wasiConfig),
+        "wasi_snapshot_preview1": wasiBindingsBuilder(wasiConfig),
     });
 
     const instance = result.instance as SmoldotWasmInstance;
