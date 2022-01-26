@@ -678,6 +678,28 @@ impl<TSrc> Verifier<TSrc> {
                 }),
                 Ok(()),
             ),
+            Ok(warp_sync::Next::EmptyProof) => (
+                InProgressWarpSync::VirtualMachineParamsGet(VirtualMachineParamsGet {
+                    state: PostVerificationState {
+                        header: self
+                            .state
+                            .start_chain_information
+                            .as_ref()
+                            .finalized_block_header
+                            .into(),
+                        chain_information_finality: self
+                            .state
+                            .start_chain_information
+                            .as_ref()
+                            .finality
+                            .into(),
+                        start_chain_information: self.state.start_chain_information,
+                        sources: self.sources,
+                        warp_sync_source_id: self.warp_sync_source_id,
+                    },
+                }),
+                Ok(()),
+            ),
             Ok(warp_sync::Next::Success {
                 scale_encoded_header,
                 chain_information_finality,

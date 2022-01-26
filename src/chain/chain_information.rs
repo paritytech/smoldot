@@ -159,19 +159,7 @@ impl<'a> From<ChainInformationRef<'a>> for ChainInformation {
                     finalized_next_epoch_transition: finalized_next_epoch_transition.into(),
                 },
             },
-            finality: match info.finality {
-                ChainInformationFinalityRef::Outsourced => ChainInformationFinality::Outsourced,
-                ChainInformationFinalityRef::Grandpa {
-                    after_finalized_block_authorities_set_id,
-                    finalized_triggered_authorities,
-                    finalized_scheduled_change,
-                } => ChainInformationFinality::Grandpa {
-                    after_finalized_block_authorities_set_id,
-                    finalized_scheduled_change: finalized_scheduled_change
-                        .map(|(n, l)| (n, l.into())),
-                    finalized_triggered_authorities: finalized_triggered_authorities.into(),
-                },
-            },
+            finality: info.finality.into(),
         }
     }
 }
@@ -323,6 +311,23 @@ pub enum ChainInformationFinality {
         /// >           change is triggered is the same as the one where it is scheduled.
         finalized_scheduled_change: Option<(u64, Vec<header::GrandpaAuthority>)>,
     },
+}
+
+impl<'a> From<ChainInformationFinalityRef<'a>> for ChainInformationFinality {
+    fn from(finality: ChainInformationFinalityRef<'a>) -> ChainInformationFinality {
+        match finality {
+            ChainInformationFinalityRef::Outsourced => ChainInformationFinality::Outsourced,
+            ChainInformationFinalityRef::Grandpa {
+                after_finalized_block_authorities_set_id,
+                finalized_triggered_authorities,
+                finalized_scheduled_change,
+            } => ChainInformationFinality::Grandpa {
+                after_finalized_block_authorities_set_id,
+                finalized_scheduled_change: finalized_scheduled_change.map(|(n, l)| (n, l.into())),
+                finalized_triggered_authorities: finalized_triggered_authorities.into(),
+            },
+        }
+    }
 }
 
 /// Equivalent to a [`ChainInformation`] but referencing an existing structure. Cheap to copy.
