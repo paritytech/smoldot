@@ -124,7 +124,7 @@ pub fn warp_sync<TSrc>(
     }))
 }
 
-/// Error potentially returned by [`warp_sync`].
+/// Error potentially returned by [`warp_sync()`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum WarpSyncInitError {
     /// Chain doesn't use the Grandpa finality algorithm.
