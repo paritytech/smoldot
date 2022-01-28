@@ -215,6 +215,13 @@ impl ChainSpec {
         self.client_spec.protocol_id.as_deref().unwrap_or("sup")
     }
 
+    /// Returns the "fork id" of the chain. This is arbitrary string that can be used in order to
+    /// segregate nodes in case when multiple chains have the same genesis hash. Nodes should only
+    /// synchronize with nodes that have the same "fork id".
+    pub fn fork_id(&self) -> Option<&str> {
+        self.client_spec.fork_id.as_deref()
+    }
+
     // TODO: this API is probably unstable, as the meaning of the string is unclear
     pub fn relay_chain(&self) -> Option<(&str, u32)> {
         self.client_spec
