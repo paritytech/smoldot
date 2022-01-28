@@ -121,7 +121,7 @@ export function connect(config: Config): Connection {
     // Attempt to parse the multiaddress.
     // Note: peers can decide of the content of `addr`, meaning that it shouldn't be
     // trusted.
-    const wsParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss)$/);
+    const wsParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
     const tcpParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)$/);
 
     if (wsParsed != null) {
