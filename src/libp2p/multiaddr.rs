@@ -205,6 +205,7 @@ pub enum ProtocolRef<'a> {
     Tls,
     Udp(u16),
     Ws,
+    // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
     Wss,
 }
 
