@@ -132,11 +132,24 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     }),
                 }
             } else {
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::warp_sync(warp_sync::Config {
-                        start_chain_information: config.chain_information,
-                        sources_capacity: config.sources_capacity,
-                    }),
+                match warp_sync::warp_sync(warp_sync::Config {
+                    start_chain_information: config.chain_information,
+                    sources_capacity: config.sources_capacity,
+                }) {
+                    Ok(inner) => AllSyncInner::GrandpaWarpSync { inner },
+                    Err((chain_information, warp_sync::WarpSyncInitError::NotGrandpa)) => {
+                        // On error, `warp_sync` returns back the chain information that was
+                        // provided in its configuration.
+                        AllSyncInner::Optimistic {
+                            inner: optimistic::OptimisticSync::new(optimistic::Config {
+                                chain_information,
+                                sources_capacity: config.sources_capacity,
+                                blocks_capacity: config.blocks_capacity,
+                                download_ahead_blocks: config.download_ahead_blocks,
+                                full: None,
+                            }),
+                        }
+                    }
                 }
             },
             shared: Shared {

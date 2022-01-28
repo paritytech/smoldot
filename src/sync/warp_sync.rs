@@ -57,8 +57,8 @@
 use crate::{
     chain::chain_information::{
         self, babe_fetch_epoch, BabeEpochInformation, ChainInformation, ChainInformationConsensus,
-        ChainInformationConsensusRef, ChainInformationFinality, ValidChainInformation,
-        ValidChainInformationRef,
+        ChainInformationConsensusRef, ChainInformationFinality, ChainInformationFinalityRef,
+        ValidChainInformation, ValidChainInformationRef,
     },
     executor::{
         self,
@@ -100,15 +100,35 @@ pub struct Config {
 }
 
 /// Initializes the warp sync state machine.
-pub fn warp_sync<TSrc>(config: Config) -> InProgressWarpSync<TSrc> {
-    // TODO: detect if chain.start_chain_information is not using Grandpa
-    InProgressWarpSync::WaitingForSources(WaitingForSources {
+///
+/// On error, returns the [`ValidChainInformation`] that was provided in the configuration.
+pub fn warp_sync<TSrc>(
+    config: Config,
+) -> Result<InProgressWarpSync<TSrc>, (ValidChainInformation, WarpSyncInitError)> {
+    match config.start_chain_information.as_ref().finality {
+        ChainInformationFinalityRef::Grandpa { .. } => {}
+        _ => {
+            return Err((
+                config.start_chain_information,
+                WarpSyncInitError::NotGrandpa,
+            ))
+        }
+    }
+
+    Ok(InProgressWarpSync::WaitingForSources(WaitingForSources {
         state: PreVerificationState {
             start_chain_information: config.start_chain_information,
         },
         sources: slab::Slab::with_capacity(config.sources_capacity),
         previous_verifier_values: None,
-    })
+    }))
+}
+
+/// Error potentially returned by [`warp_sync()`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum WarpSyncInitError {
+    /// Chain doesn't use the Grandpa finality algorithm.
+    NotGrandpa,
 }
 
 /// Identifier for a source in the [`WarpSync`].
@@ -655,6 +675,28 @@ impl<TSrc> Verifier<TSrc> {
                     warp_sync_source_id: self.warp_sync_source_id,
                     final_set_of_fragments: self.final_set_of_fragments,
                     previous_verifier_values: self.previous_verifier_values,
+                }),
+                Ok(()),
+            ),
+            Ok(warp_sync::Next::EmptyProof) => (
+                InProgressWarpSync::VirtualMachineParamsGet(VirtualMachineParamsGet {
+                    state: PostVerificationState {
+                        header: self
+                            .state
+                            .start_chain_information
+                            .as_ref()
+                            .finalized_block_header
+                            .into(),
+                        chain_information_finality: self
+                            .state
+                            .start_chain_information
+                            .as_ref()
+                            .finality
+                            .into(),
+                        start_chain_information: self.state.start_chain_information,
+                        sources: self.sources,
+                        warp_sync_source_id: self.warp_sync_source_id,
+                    },
                 }),
                 Ok(()),
             ),

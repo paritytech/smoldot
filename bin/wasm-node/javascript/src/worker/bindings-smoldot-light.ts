@@ -126,12 +126,12 @@ export default function (config: Config): compat.WasmModuleImports {
 
         // Must create a new connection object. This implementation stores the created object in
         // `connections`.
-        connection_new: (id: number, addr_ptr: number, addr_len: number, error_ptr_ptr: number) => {
+        connection_new: (id: number, addrPtr: number, addrLen: number, errorPtrPtr: number) => {
             const instance = config.instance!;
 
-            addr_ptr >>>= 0;
-            addr_len >>>= 0;
-            error_ptr_ptr >>>= 0;
+            addrPtr >>>= 0;
+            addrLen >>>= 0;
+            errorPtrPtr >>>= 0;
 
             if (!!connections[id]) {
                 throw new Error("internal error: connection already allocated");
@@ -139,7 +139,7 @@ export default function (config: Config): compat.WasmModuleImports {
 
             try {
                 const address = Buffer.from(instance.exports.memory.buffer)
-                    .toString('utf8', addr_ptr, addr_ptr + addr_len);
+                    .toString('utf8', addrPtr, addrPtr + addrLen);
 
                 const connec = connection.connect({
                     address,
@@ -176,9 +176,9 @@ export default function (config: Config): compat.WasmModuleImports {
                 const len = Buffer.byteLength(errorStr, 'utf8');
                 const ptr = instance.exports.alloc(len) >>> 0;
                 mem.write(errorStr, ptr);
-                mem.writeUInt32LE(ptr, error_ptr_ptr);
-                mem.writeUInt32LE(len, error_ptr_ptr + 4);
-                mem.writeUInt8(isBadAddress ? 1 : 0, error_ptr_ptr + 8);
+                mem.writeUInt32LE(ptr, errorPtrPtr);
+                mem.writeUInt32LE(len, errorPtrPtr + 4);
+                mem.writeUInt8(isBadAddress ? 1 : 0, errorPtrPtr + 8);
                 return 1;
             }
         },
