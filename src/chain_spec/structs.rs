@@ -53,6 +53,8 @@ pub(super) struct ClientSpec {
     pub(super) boot_nodes: Vec<String>,
     pub(super) telemetry_endpoints: Option<Vec<(String, u8)>>,
     pub(super) protocol_id: Option<String>,
+    #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
+    pub(super) fork_id: Option<String>,
     pub(super) properties: Option<Box<serde_json::value::RawValue>>,
     // TODO: make use of this
     pub(super) fork_blocks: Option<Vec<(u64, HashHexString)>>,
