@@ -176,6 +176,9 @@ export type LogCallback = (level: number, target: string, message: string) => vo
 export interface ClientOptions {
   /**
    * Callback that the client will invoke in order to report a log event.
+   *
+   * By default, prints the log on the `console`. If you want to disable logging altogether,
+   * please pass an empty callback function.
    */
   logCallback?: LogCallback;
 
