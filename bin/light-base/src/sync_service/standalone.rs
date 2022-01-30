@@ -32,6 +32,7 @@ use std::{
     marker::PhantomData,
     num::{NonZeroU32, NonZeroU64},
     sync::Arc,
+    time::Duration,
 };
 
 /// Starts a sync service background task to synchronize a standalone chain (relay chain or not).
@@ -421,6 +422,7 @@ impl<TPlat: Platform> Task<TPlat> {
                                 justifications: request_justification,
                             },
                         },
+                        Duration::from_secs(10),
                     );
 
                     let (block_request, abort) = future::abortable(block_request);
@@ -439,6 +441,11 @@ impl<TPlat: Platform> Task<TPlat> {
                         peer_id,
                         self.network_chain_index,
                         sync_start_block_hash,
+                        // The timeout needs to be long enough to potentially download the maximum
+                        // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's
+                        // 128 seconds. Unfortunately, 128 seconds is way too large, and for
+                        // pragmatic reasons we use a lower value.
+                        Duration::from_secs(24),
                     );
 
                     let (grandpa_request, abort) = future::abortable(grandpa_request);
@@ -462,6 +469,7 @@ impl<TPlat: Platform> Task<TPlat> {
                             block_hash,
                             keys: keys.clone().into_iter(),
                         },
+                        Duration::from_secs(16),
                     );
 
                     let keys = keys.clone();

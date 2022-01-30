@@ -621,6 +621,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         target: PeerId, // TODO: takes by value because of future longevity issue
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
+        timeout: Duration,
     ) -> Result<Vec<protocol::BlockData>, service::BlocksRequestError> {
         match &config.start {
             protocol::BlocksRequestConfigStart::Hash(hash) => {
@@ -646,7 +647,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         let result = self
             .inner
             .network
-            .blocks_request(TPlat::now(), &target, chain_index, config)
+            .blocks_request(TPlat::now(), &target, chain_index, config, timeout)
             .await;
 
         match &result {
@@ -698,6 +699,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         target: PeerId, // TODO: takes by value because of future longevity issue
         chain_index: usize,
         begin_hash: [u8; 32],
+        timeout: Duration,
     ) -> Result<protocol::GrandpaWarpSyncResponse, service::GrandpaWarpSyncRequestError> {
         log::debug!(
             target: "network", "Connection({}) <= GrandpaWarpSyncRequest({})",
@@ -707,7 +709,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         let result = self
             .inner
             .network
-            .grandpa_warp_sync_request(TPlat::now(), &target, chain_index, begin_hash)
+            .grandpa_warp_sync_request(TPlat::now(), &target, chain_index, begin_hash, timeout)
             .await;
 
         match &result {
@@ -774,6 +776,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         chain_index: usize,
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
+        timeout: Duration,
     ) -> Result<Vec<Vec<u8>>, service::StorageProofRequestError> {
         log::debug!(
             target: "network",
@@ -785,7 +788,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         let result = self
             .inner
             .network
-            .storage_proof_request(TPlat::now(), &target, chain_index, config)
+            .storage_proof_request(TPlat::now(), &target, chain_index, config, timeout)
             .await;
 
         match &result {
@@ -820,6 +823,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         chain_index: usize,
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::CallProofRequestConfig<'a, impl Iterator<Item = impl AsRef<[u8]>>>,
+        timeout: Duration,
     ) -> Result<Vec<Vec<u8>>, service::CallProofRequestError> {
         log::debug!(
             target: "network",
@@ -832,7 +836,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         let result = self
             .inner
             .network
-            .call_proof_request(TPlat::now(), &target, chain_index, config)
+            .call_proof_request(TPlat::now(), &target, chain_index, config, timeout)
             .await;
 
         match &result {

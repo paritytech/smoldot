@@ -718,7 +718,13 @@ impl NetworkService {
 
         self.inner
             .network
-            .blocks_request(Instant::now(), &target, chain_index, config)
+            .blocks_request(
+                Instant::now(),
+                &target,
+                chain_index,
+                config,
+                Duration::from_secs(12),
+            )
             .await
     }
 }

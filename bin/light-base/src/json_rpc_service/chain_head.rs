@@ -30,9 +30,13 @@ use smoldot::{
     network::protocol,
 };
 use std::{
+    cmp,
     collections::HashMap,
-    iter, str,
+    iter,
+    num::NonZeroU32,
+    str,
     sync::{atomic, Arc},
+    time::Duration,
 };
 
 impl<TPlat: Platform> Background<TPlat> {
@@ -45,7 +49,14 @@ impl<TPlat: Platform> Background<TPlat> {
         hash: methods::HashHexString,
         function_to_call: &str,
         call_parameters: methods::HexString,
+        network_config: Option<methods::NetworkConfig>,
     ) {
+        let network_config = network_config.unwrap_or(methods::NetworkConfig {
+            max_parallel: 1,
+            timeout_ms: 8000,
+            total_attempts: 3,
+        });
+
         let task = {
             let me = self.clone();
             let request_id = request_id.to_owned();
@@ -151,7 +162,16 @@ impl<TPlat: Platform> Background<TPlat> {
                 let pre_runtime_call = if let Some(pre_runtime_call) = &pre_runtime_call {
                     Some(
                         pre_runtime_call
-                            .start(&function_to_call, iter::once(&call_parameters.0))
+                            .start(
+                                &function_to_call,
+                                iter::once(&call_parameters.0),
+                                cmp::min(10, network_config.total_attempts),
+                                Duration::from_millis(u64::from(cmp::min(
+                                    20000,
+                                    network_config.timeout_ms,
+                                ))),
+                                NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
+                            )
                             .await,
                     )
                 } else {
@@ -815,7 +835,14 @@ impl<TPlat: Platform> Background<TPlat> {
         key: methods::HexString,
         child_key: Option<methods::HexString>,
         ty: methods::StorageQueryType,
+        network_config: Option<methods::NetworkConfig>,
     ) {
+        let network_config = network_config.unwrap_or(methods::NetworkConfig {
+            max_parallel: 1,
+            timeout_ms: 8000,
+            total_attempts: 3,
+        });
+
         if child_key.is_some() {
             self.requests_subscriptions
                 .respond(
@@ -927,6 +954,12 @@ impl<TPlat: Platform> Background<TPlat> {
                                 &hash.0,
                                 &block_storage_root,
                                 iter::once(&key.0),
+                                cmp::min(10, network_config.total_attempts),
+                                Duration::from_millis(u64::from(cmp::min(
+                                    20000,
+                                    network_config.timeout_ms,
+                                ))),
+                                NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
                             )
                             .await;
                         match response {
@@ -1006,7 +1039,14 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         follow_subscription_id: &str,
         hash: methods::HashHexString,
+        network_config: Option<methods::NetworkConfig>,
     ) {
+        let network_config = network_config.unwrap_or(methods::NetworkConfig {
+            max_parallel: 1,
+            timeout_ms: 4000,
+            total_attempts: 3,
+        });
+
         // Determine whether the requested block hash is valid, and if yes its number.
         let block_number = {
             let lock = self.subscriptions.lock().await;
@@ -1095,6 +1135,12 @@ impl<TPlat: Platform> Background<TPlat> {
                                 body: true,
                                 justifications: false,
                             },
+                            cmp::min(10, network_config.total_attempts),
+                            Duration::from_millis(u64::from(cmp::min(
+                                20000,
+                                network_config.timeout_ms,
+                            ))),
+                            NonZeroU32::new(network_config.max_parallel.clamp(1, 5)).unwrap(),
                         )
                         .await;
                     match response {
