@@ -994,9 +994,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 .await;
             }
 
-            _method
-            @
-            (methods::MethodCall::account_nextIndex { .. }
+            _method @ (methods::MethodCall::account_nextIndex { .. }
             | methods::MethodCall::author_hasKey { .. }
             | methods::MethodCall::author_hasSessionKeys { .. }
             | methods::MethodCall::author_insertKey { .. }
