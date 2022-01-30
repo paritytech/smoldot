@@ -25,8 +25,8 @@ use futures::{lock::MutexGuard, prelude::*};
 use smoldot::{
     header,
     json_rpc::{self, methods, requests_subscriptions},
-    metadata::remove_metadata_length_prefix,
     network::protocol,
+    remove_metadata_length_prefix,
 };
 use std::{
     iter, str,
@@ -902,11 +902,11 @@ impl<TPlat: Platform> Background<TPlat> {
                 methods::Response::state_getMetadata(methods::HexString(metadata.to_vec()))
                     .to_json_response(request_id)
             }
-            Ok(Err(error)) => json_rpc::parse::build_error_response(
+            Ok(Err(())) => json_rpc::parse::build_error_response(
                 request_id,
                 json_rpc::parse::ErrorResponse::ServerError(
                     -32000,
-                    &format!("Failed to decode metadata from runtime: {}", error),
+                    &format!("Failed to decode metadata from runtime"),
                 ),
                 None,
             ),
