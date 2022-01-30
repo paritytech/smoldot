@@ -69,14 +69,11 @@
 //! `ext_allocator_malloc_version_1` and `ext_allocator_free_version_1` host functions for this
 //! purpose. Calling `memory.grow` is forbidden.
 //!
-//! Consequently, the runtime code must export a global symbol named `__heap_base` of type `i32`.
-//! Any memory whose offset is below the value of `__heap_base` can be used at will by the
-//! program, while any memory above this value is available for use by the implementation of
-//! `ext_allocator_malloc_version_1`.
-//!
-//! The size of the memory available above `__heap_base` available to the WebAssembly virtual
-//! machine is always fixed, and is equal to the initial size of the memory plus the value of
-//! `heap_pages` that is passed as parameter to [`HostVmPrototype::new`].
+//! The runtime code must export a global symbol named `__heap_base` of type `i32`. Any memory
+//! whose offset is below the value of `__heap_base` can be used at will by the program, while
+//! any memory above `__heap_base` but below `__heap_base + heap_pages` (where `heap_pages` is
+//! the value passed as parameter to [`HostVmPrototype::new`]) is available for use by the
+//! implementation of `ext_allocator_malloc_version_1`.
 //!
 //! ## Entry points
 //!
@@ -233,8 +230,9 @@ pub struct HostVmPrototype {
 impl HostVmPrototype {
     /// Creates a new [`HostVmPrototype`]. Parses and potentially JITs the module.
     ///
-    /// The module can be either directly Wasm bytecode, or zstandard-compressed.
-    // TODO: document `heap_pages`; I know it comes from storage, but it's unclear what it means exactly
+    /// See the module-level documentation for an explanation of the value of `heap_pages`.
+    ///
+    /// The module can be either directly Wasm bytecode, or zstandard-compressed.eans exactly
     // TODO: have a proper Config struct
     pub fn new(
         module: impl AsRef<[u8]>,
