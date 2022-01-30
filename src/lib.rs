@@ -117,7 +117,7 @@
 //! - Generating the header of newly-created blocks.
 //! - Validating transactions received from third-parties, in order to later be potentially
 //! included in a block.
-//! - Providing the tools necessary to create transactions. See the [`metadata`] module.
+//! - Providing the tools necessary to create transactions.
 //!
 //! In other words, the runtime is responsible for all the actual *logic* behind the chain being
 //! run. For instance, when performing a transfer of tokens between one account and another, it is
