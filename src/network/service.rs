@@ -580,6 +580,7 @@ where
         target: &peer_id::PeerId,
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
+        timeout: Duration,
     ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
         if !config.fields.header {
             return Err(BlocksRequestError::NotVerifiable);
@@ -589,7 +590,7 @@ where
         let requested_fields = config.fields.clone();
 
         let mut result = self
-            .blocks_request_unchecked(now, target, chain_index, config)
+            .blocks_request_unchecked(now, target, chain_index, config, timeout)
             .await?;
 
         if result.is_empty() {
@@ -682,16 +683,12 @@ where
         target: &peer_id::PeerId,
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
+        timeout: Duration,
     ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
         let request_data = protocol::build_block_request(config).fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
             a
         });
-
-        // The timeout needs to be long enough to potentially download the maximum
-        // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
-        // TODO: 128 seconds is way too long, so we put 16 seconds instead for now
-        let timeout = now + Duration::from_secs(16);
 
         let response = self
             .inner
@@ -699,7 +696,7 @@ where
                 target,
                 self.protocol_index(chain_index, 0),
                 request_data,
-                timeout,
+                now + timeout,
             )
             .map_err(BlocksRequestError::Request)
             .await?;
@@ -713,13 +710,9 @@ where
         target: &peer_id::PeerId,
         chain_index: usize,
         begin_hash: [u8; 32],
+        timeout: Duration,
     ) -> Result<protocol::GrandpaWarpSyncResponse, GrandpaWarpSyncRequestError> {
         let request_data = begin_hash.to_vec();
-
-        // The timeout needs to be long enough to potentially download the maximum
-        // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
-        // TODO: 128 seconds is way too much so we temporarily put less, we need to reduce these 16 MiB to less
-        let timeout = now + Duration::from_secs(32);
 
         let response = self
             .inner
@@ -727,7 +720,7 @@ where
                 target,
                 self.protocol_index(chain_index, 3),
                 request_data,
-                timeout,
+                now + timeout,
             )
             .map_err(GrandpaWarpSyncRequestError::Request)
             .await?;
@@ -755,6 +748,7 @@ where
         chain_index: usize,
         block_hash: [u8; 32],
         start_key: &[u8],
+        timeout: Duration,
     ) -> Result<Vec<protocol::StateResponseEntry>, StateRequestError> {
         let request_data = protocol::build_state_request(protocol::StateRequestConfig {
             block_hash,
@@ -765,18 +759,13 @@ where
             a
         });
 
-        // The timeout needs to be long enough to potentially download the maximum
-        // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
-        // TODO: 128 seconds is way too much so we temporarily put less, we need to reduce these 16 MiB to less
-        let timeout = now + Duration::from_secs(32);
-
         let response = self
             .inner
             .request(
                 target,
                 self.protocol_index(chain_index, 4),
                 request_data,
-                timeout,
+                now + timeout,
             )
             .map_err(StateRequestError::Request)
             .await?;
@@ -792,6 +781,7 @@ where
         target: &peer_id::PeerId,
         chain_index: usize,
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
+        timeout: Duration,
     ) -> Result<Vec<Vec<u8>>, StorageProofRequestError> {
         let request_data =
             protocol::build_storage_proof_request(config).fold(Vec::new(), |mut a, b| {
@@ -799,18 +789,13 @@ where
                 a
             });
 
-        // The timeout needs to be long enough to potentially download the maximum
-        // response size of 10 MiB. Assuming a 128 kiB/sec connection, that's 80 seconds.
-        // TODO: 80 seconds is too much, reduce these 10 MiB to less?
-        let timeout = now + Duration::from_secs(80);
-
         let response = self
             .inner
             .request(
                 target,
                 self.protocol_index(chain_index, 1),
                 request_data,
-                timeout,
+                now + timeout,
             )
             .map_err(StorageProofRequestError::Request)
             .await?;
@@ -834,6 +819,7 @@ where
         target: &peer_id::PeerId,
         chain_index: usize,
         config: protocol::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
+        timeout: Duration,
     ) -> Result<Vec<Vec<u8>>, CallProofRequestError> {
         let request_data =
             protocol::build_call_proof_request(config).fold(Vec::new(), |mut a, b| {
@@ -841,18 +827,13 @@ where
                 a
             });
 
-        // The timeout needs to be long enough to potentially download the maximum
-        // response size of 10 MiB. Assuming a 128 kiB/sec connection, that's 80 seconds.
-        // TODO: 80 seconds is too much, reduce these 10 MiB to less?
-        let timeout = now + Duration::from_secs(80);
-
         let response = self
             .inner
             .request(
                 target,
                 self.protocol_index(chain_index, 1),
                 request_data,
-                timeout,
+                now + timeout,
             )
             .map_err(CallProofRequestError::Request)
             .await?;

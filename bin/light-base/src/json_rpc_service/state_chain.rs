@@ -29,8 +29,11 @@ use smoldot::{
     remove_metadata_length_prefix,
 };
 use std::{
-    iter, str,
+    iter,
+    num::NonZeroU32,
+    str,
     sync::{atomic, Arc},
+    time::Duration,
 };
 
 impl<TPlat: Platform> Background<TPlat> {
@@ -49,6 +52,9 @@ impl<TPlat: Platform> Background<TPlat> {
                 &block_hash,
                 "AccountNonceApi_account_nonce",
                 iter::once(&account.0),
+                4,
+                Duration::from_secs(4),
+                NonZeroU32::new(2).unwrap(),
             )
             .await;
 
@@ -132,6 +138,9 @@ impl<TPlat: Platform> Background<TPlat> {
                         body: true,
                         justifications: true,
                     },
+                    3,
+                    Duration::from_secs(8),
+                    NonZeroU32::new(1).unwrap(),
                 )
                 .await
         } else {
@@ -144,6 +153,9 @@ impl<TPlat: Platform> Background<TPlat> {
                         body: true,
                         justifications: true,
                     },
+                    3,
+                    Duration::from_secs(8),
+                    NonZeroU32::new(1).unwrap(),
                 )
                 .await
         };
@@ -263,6 +275,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                 body: false,
                                 justifications: false,
                             },
+                            3,
+                            Duration::from_secs(8),
+                            NonZeroU32::new(1).unwrap(),
                         )
                         .await
                 } else {
@@ -275,6 +290,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                 body: false,
                                 justifications: false,
                             },
+                            3,
+                            Duration::from_secs(8),
+                            NonZeroU32::new(1).unwrap(),
                         )
                         .await
                 };
@@ -768,6 +786,9 @@ impl<TPlat: Platform> Background<TPlat> {
                 &block_hash,
                 json_rpc::payment_info::PAYMENT_FEES_FUNCTION_NAME,
                 json_rpc::payment_info::payment_info_parameters(extrinsic),
+                4,
+                Duration::from_secs(4),
+                NonZeroU32::new(2).unwrap(),
             )
             .await;
 
@@ -851,6 +872,9 @@ impl<TPlat: Platform> Background<TPlat> {
                 &hash,
                 &prefix.unwrap().0, // TODO: don't unwrap! what is this Option?
                 &state_root,
+                3,
+                Duration::from_secs(12),
+                NonZeroU32::new(1).unwrap(),
             )
             .await;
 
@@ -891,7 +915,14 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         let result = self
-            .runtime_call(&block_hash, "Metadata_metadata", iter::empty::<Vec<u8>>())
+            .runtime_call(
+                &block_hash,
+                "Metadata_metadata",
+                iter::empty::<Vec<u8>>(),
+                3,
+                Duration::from_secs(8),
+                NonZeroU32::new(1).unwrap(),
+            )
             .await;
         let result = result
             .as_ref()
@@ -994,6 +1025,9 @@ impl<TPlat: Platform> Background<TPlat> {
                             &block_hash,
                             &state_trie_root_hash,
                             iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+                            3,
+                            Duration::from_secs(24),
+                            NonZeroU32::new(1).unwrap(),
                         )
                         .await
                         .map_err(runtime_service::RuntimeCallError::StorageQuery)
@@ -1073,7 +1107,13 @@ impl<TPlat: Platform> Background<TPlat> {
                 &self.runtime_service.subscribe_best().await.0,
             ));
 
-        let fut = self.storage_query(iter::once(&key.0), &hash);
+        let fut = self.storage_query(
+            iter::once(&key.0),
+            &hash,
+            3,
+            Duration::from_secs(12),
+            NonZeroU32::new(1).unwrap(),
+        );
         let response = fut.await;
         let response = match response.map(|mut r| r.pop().unwrap()) {
             Ok(Some(value)) => {
@@ -1115,7 +1155,13 @@ impl<TPlat: Platform> Background<TPlat> {
 
         drop(cache);
 
-        let fut = self.storage_query(keys.iter(), &at);
+        let fut = self.storage_query(
+            keys.iter(),
+            &at,
+            3,
+            Duration::from_secs(12),
+            NonZeroU32::new(1).unwrap(),
+        );
 
         if let Ok(values) = fut.await {
             for (value, key) in values.into_iter().zip(keys) {
@@ -1445,6 +1491,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                         &block_hash,
                                         state_trie_root,
                                         iter::once(&key.0),
+                                        4,
+                                        Duration::from_secs(12),
+                                        NonZeroU32::new(2).unwrap(),
                                     )
                                     .await
                                 {
