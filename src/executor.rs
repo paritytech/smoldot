@@ -183,7 +183,7 @@ pub struct CoreVersionRef<'a> {
     /// Older versions of Substrate didn't provide this field. `None` if the field is missing.
     pub transaction_version: Option<u32>,
 
-    /// Arbitrary version number corresponding to the state trie encoding version.
+    /// Version number of the state trie encoding version.
     ///
     /// This field has been added to Substrate on 24th December 2021. Older versions of Substrate
     /// didn't provide this field, in which case it will contain `None`.
