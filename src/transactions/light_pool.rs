@@ -369,6 +369,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Panics if no block with that hash has been inserted before.
     ///
     // TODO: is it correct to pass a `Result`, instead of just a `ValidTransaction`?
+    // TODO: can the block be the finalized block? (i.e. tree_root_hash)
     pub fn set_validation_result(
         &mut self,
         id: TransactionId,
@@ -760,6 +761,16 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                         .transaction_validations
                         .remove(&(tx_id, pruned_block.user_data.hash));
                     debug_assert!(_was_removed.is_some());
+
+                    if self
+                        .transaction_validations
+                        .range((tx_id, [0; 32])..=(tx_id, [0xff; 32]))
+                        .next()
+                        .is_none()
+                    {
+                        let _was_inserted = self.not_validated.insert(tx_id);
+                        debug_assert!(_was_inserted);
+                    }
                 }
 
                 out.push((
