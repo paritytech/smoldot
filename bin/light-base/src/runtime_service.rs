@@ -2195,20 +2195,36 @@ impl SuccessfulRuntime {
         // Since compiling the runtime is a CPU-intensive operation, we yield once before.
         crate::util::yield_once().await;
 
-        let vm = match executor::host::HostVmPrototype::new(
-            code.as_ref().ok_or(RuntimeError::CodeNotFound)?,
-            executor::storage_heap_pages_to_value(heap_pages.as_deref())
-                .map_err(RuntimeError::InvalidHeapPages)?,
-            executor::vm::ExecHint::CompileAheadOfTime,
-            true,
-        ) {
-            Ok(vm) => vm,
-            Err(error) => {
-                return Err(RuntimeError::Build(error));
-            }
+        // Parameters for `HostVmPrototype::new`.
+        let module = code.as_ref().ok_or(RuntimeError::CodeNotFound)?;
+        let heap_pages = executor::storage_heap_pages_to_value(heap_pages.as_deref())
+            .map_err(RuntimeError::InvalidHeapPages)?;
+        let exec_hint = executor::vm::ExecHint::CompileAheadOfTime;
+
+        // We try once with `allow_unresolved_imports: false`. If this fails, try again but with
+        // `allowed_unresolved_imports: true`.
+        // Having unresolved imports might cause errors later on, for example when validating
+        // transactions or getting the parachain heads, but for now we continue the execution
+        // and print a warning.
+        let error = match executor::host::HostVmPrototype::new(module, heap_pages, exec_hint, false)
+        {
+            Ok(vm) => return Self::from_virtual_machine(vm).await,
+            Err(error) => error,
         };
 
-        Self::from_virtual_machine(vm).await
+        match executor::host::HostVmPrototype::new(module, heap_pages, exec_hint, true) {
+            Ok(vm) => {
+                log::warn!(
+                    "Unresolved host functions in runtime. Smoldot might encounter errors later \
+                    on. Please report this issue in https://github.com/paritytech/smoldot\n\
+                    Detail: {}",
+                    error
+                );
+
+                Self::from_virtual_machine(vm).await
+            }
+            Err(error) => Err(RuntimeError::Build(error)),
+        }
     }
 
     async fn from_virtual_machine(
