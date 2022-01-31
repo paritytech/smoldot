@@ -182,6 +182,14 @@ pub struct CoreVersionRef<'a> {
     ///
     /// Older versions of Substrate didn't provide this field. `None` if the field is missing.
     pub transaction_version: Option<u32>,
+
+    /// Arbitrary version number corresponding to the state trie encoding version.
+    ///
+    /// This field has been added to Substrate on 24th December 2021. Older versions of Substrate
+    /// didn't provide this field, in which case it will contain `None`.
+    ///
+    /// `None` should be interpreted the same way as `Some(0)`.
+    pub state_version: Option<u8>,
 }
 
 /// Iterator to a list of APIs. See [`CoreVersionRef::apis`].
@@ -273,6 +281,10 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
                 nom::combinator::map(nom::number::complete::le_u32, Some),
                 nom::combinator::map(nom::combinator::eof, |_| None),
             )),
+            nom::branch::alt((
+                nom::combinator::map(nom::number::complete::u8, Some),
+                nom::combinator::map(nom::combinator::eof, |_| None),
+            )),
         )),
         |(
             spec_name,
@@ -282,6 +294,7 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
             impl_version,
             apis,
             transaction_version,
+            state_version,
         )| CoreVersionRef {
             spec_name,
             impl_name,
@@ -290,6 +303,7 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
             impl_version,
             apis,
             transaction_version,
+            state_version,
         },
     ))(scale_encoded);
 
