@@ -810,6 +810,7 @@ pub struct RuntimeSpec<'a> {
     pub impl_version: u32,
     #[serde(rename = "transactionVersion", skip_serializing_if = "Option::is_none")]
     pub transaction_version: Option<u32>,
+    // TODO: add `state_version`? would need a JSON-RPC API interface spec change
     pub apis: HashMap<HexString, u32, fnv::FnvBuildHasher>,
 }
 
@@ -827,6 +828,8 @@ pub struct RuntimeVersion<'a> {
     pub impl_version: u64,
     #[serde(rename = "transactionVersion", skip_serializing_if = "Option::is_none")]
     pub transaction_version: Option<u64>,
+    #[serde(rename = "stateVersion", skip_serializing_if = "Option::is_none")]
+    pub state_version: Option<u64>,
     // TODO: optimize?
     pub apis: Vec<(HexString, u32)>,
 }
