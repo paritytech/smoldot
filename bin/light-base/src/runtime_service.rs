@@ -72,6 +72,7 @@ use smoldot::{
 use std::{
     collections::BTreeMap,
     iter, mem,
+    num::NonZeroU32,
     pin::Pin,
     sync::{Arc, Weak},
     time::Duration,
@@ -1096,6 +1097,9 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
         &'a self,
         method: &'b str,
         parameter_vectored: impl Iterator<Item = impl AsRef<[u8]>> + Clone + 'b,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        max_parallel: NonZeroU32,
     ) -> Result<(RuntimeCallLock<'a>, executor::host::HostVmPrototype), RuntimeCallError> {
         // TODO: DRY :-/ this whole thing is messy
 
@@ -1114,6 +1118,9 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
                     method,
                     parameter_vectored: parameter_vectored.clone(),
                 },
+                total_attempts,
+                timeout_per_request,
+                max_parallel,
             )
             .await
             .map_err(RuntimeCallError::CallProof);
@@ -2064,6 +2071,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                     &block_hash,
                                     &state_root,
                                     iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+                                    3,
+                                    Duration::from_secs(20),
+                                    NonZeroU32::new(3).unwrap(),
                                 )
                                 .await;
 

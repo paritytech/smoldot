@@ -482,6 +482,9 @@ async fn background_task<TPlat: Platform>(
                             header: true, // TODO: must be true in order for the body to be verified; fix the sync_service to not require that
                             justifications: false,
                         },
+                        3,
+                        Duration::from_secs(8),
+                        NonZeroU32::new(3).unwrap(),
                     );
 
                     async move { (block_hash, download_future.await.map(|b| b.body.unwrap())) }
@@ -1001,6 +1004,9 @@ async fn validate_transaction<TPlat: Platform>(
                 source,
                 &block_hash,
             ),
+            1,
+            Duration::from_secs(8),
+            NonZeroU32::new(1).unwrap(),
         )
         .await
         .map_err(ValidateTransactionError::Call)?;

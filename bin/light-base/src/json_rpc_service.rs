@@ -61,6 +61,7 @@ use std::{
     num::NonZeroU32,
     str,
     sync::{atomic, Arc},
+    time::Duration,
 };
 
 /// Configuration for a JSON-RPC service.
@@ -655,10 +656,12 @@ impl<TPlat: Platform> Background<TPlat> {
         // Each call is handled in a separate method.
         match call {
             methods::MethodCall::author_pendingExtrinsics {} => {
-                self.author_pending_extrinsics(request_id, &state_machine_request_id).await;
+                self.author_pending_extrinsics(request_id, &state_machine_request_id)
+                    .await;
             }
             methods::MethodCall::author_submitExtrinsic { transaction } => {
-                self.author_submit_extrinsic(request_id, &state_machine_request_id, transaction).await;
+                self.author_submit_extrinsic(request_id, &state_machine_request_id, transaction)
+                    .await;
             }
             methods::MethodCall::author_submitAndWatchExtrinsic { transaction } => {
                 self.submit_and_watch_transaction(
@@ -670,10 +673,12 @@ impl<TPlat: Platform> Background<TPlat> {
                 .await
             }
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
-                self.author_unwatch_extrinsic(request_id, &state_machine_request_id, subscription).await;
+                self.author_unwatch_extrinsic(request_id, &state_machine_request_id, subscription)
+                    .await;
             }
             methods::MethodCall::chain_getBlock { hash } => {
-                self.chain_get_block(request_id, &state_machine_request_id, hash).await;
+                self.chain_get_block(request_id, &state_machine_request_id, hash)
+                    .await;
             }
             methods::MethodCall::chain_getBlockHash { height } => {
                 self.chain_get_block_hash(request_id, &state_machine_request_id, height)
@@ -684,7 +689,8 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::chain_getHeader { hash } => {
-                self.chain_get_header(request_id, &state_machine_request_id, hash).await;
+                self.chain_get_header(request_id, &state_machine_request_id, hash)
+                    .await;
             }
             methods::MethodCall::chain_subscribeAllHeads {} => {
                 self.chain_subscribe_all_heads(request_id, &state_machine_request_id)
@@ -699,19 +705,41 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::chain_unsubscribeAllHeads { subscription } => {
-                self.chain_unsubscribe_all_heads(request_id, &state_machine_request_id, subscription).await;
+                self.chain_unsubscribe_all_heads(
+                    request_id,
+                    &state_machine_request_id,
+                    subscription,
+                )
+                .await;
             }
             methods::MethodCall::chain_unsubscribeFinalizedHeads { subscription } => {
-                self.chain_unsubscribe_finalized_heads(request_id, &state_machine_request_id, subscription).await;
+                self.chain_unsubscribe_finalized_heads(
+                    request_id,
+                    &state_machine_request_id,
+                    subscription,
+                )
+                .await;
             }
             methods::MethodCall::chain_unsubscribeNewHeads { subscription } => {
-                self.chain_unsubscribe_new_heads(request_id, &state_machine_request_id, subscription).await;
+                self.chain_unsubscribe_new_heads(
+                    request_id,
+                    &state_machine_request_id,
+                    subscription,
+                )
+                .await;
             }
             methods::MethodCall::payment_queryInfo { extrinsic, hash } => {
-                self.payment_query_info(request_id, &state_machine_request_id, &extrinsic.0, hash.as_ref().map(|h| &h.0)).await;
+                self.payment_query_info(
+                    request_id,
+                    &state_machine_request_id,
+                    &extrinsic.0,
+                    hash.as_ref().map(|h| &h.0),
+                )
+                .await;
             }
             methods::MethodCall::rpc_methods {} => {
-                self.rpc_methods(request_id, &state_machine_request_id).await;
+                self.rpc_methods(request_id, &state_machine_request_id)
+                    .await;
             }
             methods::MethodCall::state_getKeysPaged {
                 prefix,
@@ -719,87 +747,152 @@ impl<TPlat: Platform> Background<TPlat> {
                 start_key,
                 hash,
             } => {
-                self.state_get_keys_paged(request_id, &state_machine_request_id, prefix, count, start_key, hash).await;
+                self.state_get_keys_paged(
+                    request_id,
+                    &state_machine_request_id,
+                    prefix,
+                    count,
+                    start_key,
+                    hash,
+                )
+                .await;
             }
             methods::MethodCall::state_queryStorageAt { keys, at } => {
-                self.state_query_storage_at(request_id, &state_machine_request_id, keys, at).await;
+                self.state_query_storage_at(request_id, &state_machine_request_id, keys, at)
+                    .await;
             }
             methods::MethodCall::state_getMetadata { hash } => {
-                self.state_get_metadata(request_id, &state_machine_request_id, hash).await;
+                self.state_get_metadata(request_id, &state_machine_request_id, hash)
+                    .await;
             }
             methods::MethodCall::state_getStorage { key, hash } => {
-                self.state_get_storage(request_id, &state_machine_request_id, key, hash).await;
+                self.state_get_storage(request_id, &state_machine_request_id, key, hash)
+                    .await;
             }
             methods::MethodCall::state_subscribeRuntimeVersion {} => {
-                self.state_subscribe_runtime_version(request_id, &state_machine_request_id).await;
+                self.state_subscribe_runtime_version(request_id, &state_machine_request_id)
+                    .await;
             }
             methods::MethodCall::state_unsubscribeRuntimeVersion { subscription } => {
-                self.state_unsubscribe_runtime_version(request_id, &state_machine_request_id, subscription).await;
+                self.state_unsubscribe_runtime_version(
+                    request_id,
+                    &state_machine_request_id,
+                    subscription,
+                )
+                .await;
             }
             methods::MethodCall::state_subscribeStorage { list } => {
-                self.state_subscribe_storage(request_id, &state_machine_request_id, list).await;
+                self.state_subscribe_storage(request_id, &state_machine_request_id, list)
+                    .await;
             }
             methods::MethodCall::state_unsubscribeStorage { subscription } => {
-                self.state_unsubscribe_storage(request_id, &state_machine_request_id, subscription).await;
+                self.state_unsubscribe_storage(request_id, &state_machine_request_id, subscription)
+                    .await;
             }
             methods::MethodCall::state_getRuntimeVersion { at } => {
-                self.state_get_runtime_version(request_id, &state_machine_request_id, at.as_ref().map(|h| &h.0)).await;
+                self.state_get_runtime_version(
+                    request_id,
+                    &state_machine_request_id,
+                    at.as_ref().map(|h| &h.0),
+                )
+                .await;
             }
             methods::MethodCall::system_accountNextIndex { account } => {
-                self.account_next_index(request_id, &state_machine_request_id, account).await;
+                self.account_next_index(request_id, &state_machine_request_id, account)
+                    .await;
             }
             methods::MethodCall::system_chain {} => {
-                self.system_chain(request_id, &state_machine_request_id).await;
+                self.system_chain(request_id, &state_machine_request_id)
+                    .await;
             }
             methods::MethodCall::system_chainType {} => {
-                self.system_chain_type(request_id, &state_machine_request_id).await;
+                self.system_chain_type(request_id, &state_machine_request_id)
+                    .await;
             }
             methods::MethodCall::system_health {} => {
-                self.system_health(request_id, &state_machine_request_id).await;
+                self.system_health(request_id, &state_machine_request_id)
+                    .await;
             }
             methods::MethodCall::system_localListenAddresses {} => {
-                self.system_local_listen_addresses(request_id, &state_machine_request_id).await;
+                self.system_local_listen_addresses(request_id, &state_machine_request_id)
+                    .await;
             }
             methods::MethodCall::system_localPeerId {} => {
-                self.system_local_peer_id(request_id, &state_machine_request_id).await;
+                self.system_local_peer_id(request_id, &state_machine_request_id)
+                    .await;
             }
             methods::MethodCall::system_name {} => {
-                self.system_name(request_id, &state_machine_request_id).await;
+                self.system_name(request_id, &state_machine_request_id)
+                    .await;
             }
             methods::MethodCall::system_peers {} => {
-                self.system_peers(request_id, &state_machine_request_id).await;
+                self.system_peers(request_id, &state_machine_request_id)
+                    .await;
             }
             methods::MethodCall::system_properties {} => {
-                self.system_properties(request_id, &state_machine_request_id).await;
+                self.system_properties(request_id, &state_machine_request_id)
+                    .await;
             }
             methods::MethodCall::system_version {} => {
-                self.system_version(request_id, &state_machine_request_id).await;
+                self.system_version(request_id, &state_machine_request_id)
+                    .await;
             }
 
             methods::MethodCall::chainHead_unstable_stopBody { subscription_id } => {
-                self.chain_head_unstable_stop_body(request_id, &state_machine_request_id, subscription_id).await;
+                self.chain_head_unstable_stop_body(
+                    request_id,
+                    &state_machine_request_id,
+                    subscription_id,
+                )
+                .await;
             }
             methods::MethodCall::chainHead_unstable_body {
                 follow_subscription_id,
                 hash,
-                .. // TODO: network_config
+                network_config,
             } => {
-                self.chain_head_unstable_body(request_id, &state_machine_request_id, follow_subscription_id, hash).await;
+                self.chain_head_unstable_body(
+                    request_id,
+                    &state_machine_request_id,
+                    follow_subscription_id,
+                    hash,
+                    network_config,
+                )
+                .await;
             }
             methods::MethodCall::chainHead_unstable_call {
                 follow_subscription_id,
                 hash,
                 function,
                 call_parameters,
-                .. // TODO: network_config
+                network_config,
             } => {
-                self.chain_head_call(request_id, &state_machine_request_id, follow_subscription_id, hash, function, call_parameters).await;
+                self.chain_head_call(
+                    request_id,
+                    &state_machine_request_id,
+                    follow_subscription_id,
+                    hash,
+                    function,
+                    call_parameters,
+                    network_config,
+                )
+                .await;
             }
             methods::MethodCall::chainHead_unstable_stopCall { subscription_id } => {
-                self.chain_head_unstable_stop_call(request_id, &state_machine_request_id, subscription_id).await;
+                self.chain_head_unstable_stop_call(
+                    request_id,
+                    &state_machine_request_id,
+                    subscription_id,
+                )
+                .await;
             }
             methods::MethodCall::chainHead_unstable_stopStorage { subscription_id } => {
-                self.chain_head_unstable_stop_storage(request_id, &state_machine_request_id, subscription_id).await;
+                self.chain_head_unstable_stop_storage(
+                    request_id,
+                    &state_machine_request_id,
+                    subscription_id,
+                )
+                .await;
             }
             methods::MethodCall::chainHead_unstable_storage {
                 follow_subscription_id,
@@ -807,48 +900,81 @@ impl<TPlat: Platform> Background<TPlat> {
                 key,
                 child_key,
                 r#type: ty,
-                .. // TODO: network_config
+                network_config,
             } => {
-                self.chain_head_storage(request_id, &state_machine_request_id, follow_subscription_id, hash, key, child_key, ty).await;
+                self.chain_head_storage(
+                    request_id,
+                    &state_machine_request_id,
+                    follow_subscription_id,
+                    hash,
+                    key,
+                    child_key,
+                    ty,
+                    network_config,
+                )
+                .await;
             }
             methods::MethodCall::chainHead_unstable_follow { runtime_updates } => {
                 self.chain_head_follow(request_id, &state_machine_request_id, runtime_updates)
                     .await;
             }
             methods::MethodCall::chainHead_unstable_genesisHash {} => {
-                self.chain_head_unstable_genesis_hash(request_id, &state_machine_request_id).await;
+                self.chain_head_unstable_genesis_hash(request_id, &state_machine_request_id)
+                    .await;
             }
             methods::MethodCall::chainHead_unstable_header {
                 follow_subscription_id,
                 hash,
             } => {
-                self.chain_head_unstable_header(request_id, &state_machine_request_id, follow_subscription_id, hash).await;
+                self.chain_head_unstable_header(
+                    request_id,
+                    &state_machine_request_id,
+                    follow_subscription_id,
+                    hash,
+                )
+                .await;
             }
             methods::MethodCall::chainHead_unstable_unpin {
                 follow_subscription_id,
                 hash,
             } => {
-                self.chain_head_unstable_unpin(request_id, &state_machine_request_id, follow_subscription_id, hash).await;
+                self.chain_head_unstable_unpin(
+                    request_id,
+                    &state_machine_request_id,
+                    follow_subscription_id,
+                    hash,
+                )
+                .await;
             }
             methods::MethodCall::chainHead_unstable_unfollow {
                 follow_subscription_id,
             } => {
-                self.chain_head_unstable_unfollow(request_id, &state_machine_request_id, follow_subscription_id).await;
+                self.chain_head_unstable_unfollow(
+                    request_id,
+                    &state_machine_request_id,
+                    follow_subscription_id,
+                )
+                .await;
             }
             methods::MethodCall::chainSpec_unstable_chainName {} => {
-                self.chain_spec_unstable_chain_name(request_id, &state_machine_request_id).await;
+                self.chain_spec_unstable_chain_name(request_id, &state_machine_request_id)
+                    .await;
             }
             methods::MethodCall::chainSpec_unstable_genesisHash {} => {
-                self.chain_spec_unstable_genesis_hash(request_id, &state_machine_request_id).await;
+                self.chain_spec_unstable_genesis_hash(request_id, &state_machine_request_id)
+                    .await;
             }
             methods::MethodCall::chainSpec_unstable_properties {} => {
-                self.chain_spec_unstable_properties(request_id, &state_machine_request_id).await;
+                self.chain_spec_unstable_properties(request_id, &state_machine_request_id)
+                    .await;
             }
             methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } => {
-                self.sudo_unstable_p2p_discover(request_id, &state_machine_request_id, multiaddr).await;
+                self.sudo_unstable_p2p_discover(request_id, &state_machine_request_id, multiaddr)
+                    .await;
             }
             methods::MethodCall::sudo_unstable_version {} => {
-                self.sudo_unstable_version(request_id, &state_machine_request_id).await;
+                self.sudo_unstable_version(request_id, &state_machine_request_id)
+                    .await;
             }
             methods::MethodCall::transaction_unstable_submitAndWatch { transaction } => {
                 self.submit_and_watch_transaction(
@@ -860,37 +986,40 @@ impl<TPlat: Platform> Background<TPlat> {
                 .await
             }
             methods::MethodCall::transaction_unstable_unwatch { subscription } => {
-                self.transaction_unstable_unwatch(request_id, &state_machine_request_id, subscription).await;
+                self.transaction_unstable_unwatch(
+                    request_id,
+                    &state_machine_request_id,
+                    subscription,
+                )
+                .await;
             }
 
-            _method @ (
-                methods::MethodCall::account_nextIndex { .. } |
-                methods::MethodCall::author_hasKey { .. } |
-                methods::MethodCall::author_hasSessionKeys { .. } |
-                methods::MethodCall::author_insertKey { .. } |
-                methods::MethodCall::author_removeExtrinsic { .. } |
-                methods::MethodCall::author_rotateKeys { .. } |
-                methods::MethodCall::babe_epochAuthorship { .. } |
-                methods::MethodCall::childstate_getKeys { .. } |
-                methods::MethodCall::childstate_getStorage { .. } |
-                methods::MethodCall::childstate_getStorageHash { .. } |
-                methods::MethodCall::childstate_getStorageSize { .. } |
-                methods::MethodCall::grandpa_roundState { .. } |
-                methods::MethodCall::offchain_localStorageGet { .. } |
-                methods::MethodCall::offchain_localStorageSet { .. } |
-                methods::MethodCall::state_call { .. } |
-                methods::MethodCall::state_getKeys { .. } |
-                methods::MethodCall::state_getPairs { .. } |
-                methods::MethodCall::state_getReadProof { .. } |
-                methods::MethodCall::state_getStorageHash { .. } |
-                methods::MethodCall::state_getStorageSize { .. } |
-                methods::MethodCall::state_queryStorage { .. } |
-                methods::MethodCall::system_addReservedPeer { .. } |
-                methods::MethodCall::system_dryRun { .. } |
-                methods::MethodCall::system_networkState { .. } |
-                methods::MethodCall::system_nodeRoles { .. } |
-                methods::MethodCall::system_removeReservedPeer { .. }
-            ) => {
+            _method @ (methods::MethodCall::account_nextIndex { .. }
+            | methods::MethodCall::author_hasKey { .. }
+            | methods::MethodCall::author_hasSessionKeys { .. }
+            | methods::MethodCall::author_insertKey { .. }
+            | methods::MethodCall::author_removeExtrinsic { .. }
+            | methods::MethodCall::author_rotateKeys { .. }
+            | methods::MethodCall::babe_epochAuthorship { .. }
+            | methods::MethodCall::childstate_getKeys { .. }
+            | methods::MethodCall::childstate_getStorage { .. }
+            | methods::MethodCall::childstate_getStorageHash { .. }
+            | methods::MethodCall::childstate_getStorageSize { .. }
+            | methods::MethodCall::grandpa_roundState { .. }
+            | methods::MethodCall::offchain_localStorageGet { .. }
+            | methods::MethodCall::offchain_localStorageSet { .. }
+            | methods::MethodCall::state_call { .. }
+            | methods::MethodCall::state_getKeys { .. }
+            | methods::MethodCall::state_getPairs { .. }
+            | methods::MethodCall::state_getReadProof { .. }
+            | methods::MethodCall::state_getStorageHash { .. }
+            | methods::MethodCall::state_getStorageSize { .. }
+            | methods::MethodCall::state_queryStorage { .. }
+            | methods::MethodCall::system_addReservedPeer { .. }
+            | methods::MethodCall::system_dryRun { .. }
+            | methods::MethodCall::system_networkState { .. }
+            | methods::MethodCall::system_nodeRoles { .. }
+            | methods::MethodCall::system_removeReservedPeer { .. }) => {
                 // TODO: implement the ones that make sense to implement ^
                 log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
                 self.requests_subscriptions
@@ -1004,6 +1133,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                         body: false,
                                         justifications: false,
                                     },
+                                    4,
+                                    Duration::from_secs(8),
+                                    NonZeroU32::new(2).unwrap(),
                                 )
                                 .await;
 
@@ -1042,6 +1174,9 @@ impl<TPlat: Platform> Background<TPlat> {
         &self,
         keys: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
         hash: &[u8; 32],
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        max_parallel: NonZeroU32,
     ) -> Result<Vec<Option<Vec<u8>>>, StorageQueryError> {
         let (state_trie_root_hash, block_number) = self
             .state_trie_root_hash(&hash)
@@ -1051,7 +1186,15 @@ impl<TPlat: Platform> Background<TPlat> {
         let result = self
             .sync_service
             .clone()
-            .storage_query(block_number, hash, &state_trie_root_hash, keys)
+            .storage_query(
+                block_number,
+                hash,
+                &state_trie_root_hash,
+                keys,
+                total_attempts,
+                timeout_per_request,
+                max_parallel,
+            )
             .await
             .map_err(StorageQueryError::StorageRetrieval)?;
 
@@ -1065,6 +1208,9 @@ impl<TPlat: Platform> Background<TPlat> {
         block_hash: &[u8; 32],
         function_to_call: &str,
         call_parameters: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        max_parallel: NonZeroU32,
     ) -> Result<Vec<u8>, RuntimeCallError> {
         // This function contains two steps: obtaining the runtime of the block in question,
         // then performing the actual call. The first step is the longest and most difficult.
@@ -1112,6 +1258,9 @@ impl<TPlat: Platform> Background<TPlat> {
                             block_hash,
                             &state_trie_root_hash,
                             iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
+                            3,
+                            Duration::from_secs(20),
+                            NonZeroU32::new(1).unwrap(),
                         )
                         .await
                         .map_err(runtime_service::RuntimeCallError::StorageQuery)
@@ -1146,7 +1295,13 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         let (runtime_call_lock, virtual_machine) = precall
-            .start(function_to_call, call_parameters.clone())
+            .start(
+                function_to_call,
+                call_parameters.clone(),
+                total_attempts,
+                timeout_per_request,
+                max_parallel,
+            )
             .await
             .unwrap(); // TODO: don't unwrap
 

@@ -773,7 +773,7 @@ pub struct NetworkConfig {
     #[serde(rename = "totalAttempts")]
     pub total_attempts: u32,
     #[serde(rename = "maxParallel")]
-    pub max_parallel: u32,
+    pub max_parallel: u32, // TODO: NonZeroU32?
     #[serde(rename = "timeoutMs")]
     pub timeout_ms: u32,
 }

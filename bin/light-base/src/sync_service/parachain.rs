@@ -29,7 +29,7 @@ use smoldot::{
     network::protocol,
     sync::{all_forks::sources, para},
 };
-use std::{collections::HashMap, iter, sync::Arc, time::Duration};
+use std::{collections::HashMap, iter, num::NonZeroU32, sync::Arc, time::Duration};
 
 /// Starts a sync service background task to synchronize a parachain.
 pub(super) async fn start_parachain<TPlat: Platform>(
@@ -504,6 +504,9 @@ async fn parahead<TPlat: Platform>(
                 parachain_id,
                 para::OccupiedCoreAssumption::TimedOut,
             ),
+            6,
+            Duration::from_secs(10),
+            NonZeroU32::new(2).unwrap(),
         )
         .await
         .map_err(ParaheadError::Call)?;
