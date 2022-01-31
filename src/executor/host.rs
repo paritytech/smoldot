@@ -780,6 +780,27 @@ impl ReadyToRun {
             }};
         }
 
+        // TODO: implement properly and use an enum instead;  cc https://github.com/paritytech/smoldot/issues/1967
+        macro_rules! expect_state_version {
+            ($num:expr) => {{
+                match &params[$num] {
+                    vm::WasmValue::I32(0) => 0,
+                    vm::WasmValue::I32(1) => 1,
+                    v => {
+                        return HostVm::Error {
+                            error: Error::WrongParamTy {
+                                function: host_fn.name(),
+                                param_num: $num,
+                                expected: vm::ValueType::I32,
+                                actual: v.ty(),
+                            },
+                            prototype: self.inner.into_prototype(),
+                        }
+                    }
+                }
+            }};
+        }
+
         // TODO: implement all functions and remove this macro
         macro_rules! host_fn_not_implemented {
             () => {{
@@ -901,6 +922,14 @@ impl ReadyToRun {
             HostFunction::ext_storage_root_version_1 => {
                 HostVm::ExternalStorageRoot(ExternalStorageRoot { inner: self.inner })
             }
+            HostFunction::ext_storage_root_version_2 => {
+                let state_version = expect_state_version!(0);
+                match state_version {
+                    0 => HostVm::ExternalStorageRoot(ExternalStorageRoot { inner: self.inner }),
+                    1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
+                    _ => unreachable!(),
+                }
+            }
             HostFunction::ext_storage_changes_root_version_1 => {
                 // TODO: there's a parameter
                 HostVm::ExternalStorageChangesRoot(ExternalStorageChangesRoot { inner: self.inner })
@@ -996,6 +1025,7 @@ impl ReadyToRun {
                 host_fn_not_implemented!()
             }
             HostFunction::ext_default_child_storage_root_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_default_child_storage_root_version_2 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_public_keys_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_generate_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_sign_version_1 => host_fn_not_implemented!(),
@@ -1322,7 +1352,16 @@ impl ReadyToRun {
             HostFunction::ext_sandbox_memory_teardown_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_sandbox_instance_teardown_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_sandbox_get_global_val_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_trie_blake2_256_root_version_1 => {
+            HostFunction::ext_trie_blake2_256_root_version_1
+            | HostFunction::ext_trie_blake2_256_root_version_2 => {
+                if matches!(host_fn, HostFunction::ext_trie_blake2_256_root_version_2) {
+                    match expect_state_version!(1) {
+                        0 => {}
+                        1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
+                        _ => unreachable!(),
+                    }
+                }
+
                 let result = {
                     let input = expect_pointer_size!(0);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
@@ -1363,7 +1402,19 @@ impl ReadyToRun {
                     },
                 }
             }
-            HostFunction::ext_trie_blake2_256_ordered_root_version_1 => {
+            HostFunction::ext_trie_blake2_256_ordered_root_version_1
+            | HostFunction::ext_trie_blake2_256_ordered_root_version_2 => {
+                if matches!(
+                    host_fn,
+                    HostFunction::ext_trie_blake2_256_ordered_root_version_2
+                ) {
+                    match expect_state_version!(1) {
+                        0 => {}
+                        1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
+                        _ => unreachable!(),
+                    }
+                }
+
                 let result = {
                     let input = expect_pointer_size!(0);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
@@ -1399,6 +1450,7 @@ impl ReadyToRun {
                 }
             }
             HostFunction::ext_trie_keccak_256_ordered_root_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_trie_keccak_256_ordered_root_version_2 => host_fn_not_implemented!(),
             HostFunction::ext_misc_print_num_version_1 => {
                 let num = match params[0] {
                     vm::WasmValue::I64(v) => u64::from_ne_bytes(v.to_ne_bytes()),
@@ -2622,6 +2674,7 @@ externalities! {
     ext_storage_clear_prefix_version_1,
     ext_storage_clear_prefix_version_2,
     ext_storage_root_version_1,
+    ext_storage_root_version_2,
     ext_storage_changes_root_version_1,
     ext_storage_next_key_version_1,
     ext_storage_append_version_1,
@@ -2649,6 +2702,7 @@ externalities! {
     ext_default_child_storage_exists_version_1,
     ext_default_child_storage_next_key_version_1,
     ext_default_child_storage_root_version_1,
+    ext_default_child_storage_root_version_2,
     ext_crypto_ed25519_public_keys_version_1,
     ext_crypto_ed25519_generate_version_1,
     ext_crypto_ed25519_sign_version_1,
@@ -2701,8 +2755,11 @@ externalities! {
     ext_sandbox_instance_teardown_version_1,
     ext_sandbox_get_global_val_version_1,
     ext_trie_blake2_256_root_version_1,
+    ext_trie_blake2_256_root_version_2,
     ext_trie_blake2_256_ordered_root_version_1,
+    ext_trie_blake2_256_ordered_root_version_2,
     ext_trie_keccak_256_ordered_root_version_1,
+    ext_trie_keccak_256_ordered_root_version_2,
     ext_misc_print_num_version_1,
     ext_misc_print_utf8_version_1,
     ext_misc_print_hex_version_1,
@@ -2724,6 +2781,7 @@ impl HostFunction {
             HostFunction::ext_storage_clear_prefix_version_1 => 1,
             HostFunction::ext_storage_clear_prefix_version_2 => 2,
             HostFunction::ext_storage_root_version_1 => 0,
+            HostFunction::ext_storage_root_version_2 => 1,
             HostFunction::ext_storage_changes_root_version_1 => 1,
             HostFunction::ext_storage_next_key_version_1 => 1,
             HostFunction::ext_storage_append_version_1 => 2,
@@ -2751,6 +2809,7 @@ impl HostFunction {
             HostFunction::ext_default_child_storage_exists_version_1 => todo!(),
             HostFunction::ext_default_child_storage_next_key_version_1 => todo!(),
             HostFunction::ext_default_child_storage_root_version_1 => todo!(),
+            HostFunction::ext_default_child_storage_root_version_2 => todo!(),
             HostFunction::ext_crypto_ed25519_public_keys_version_1 => todo!(),
             HostFunction::ext_crypto_ed25519_generate_version_1 => todo!(),
             HostFunction::ext_crypto_ed25519_sign_version_1 => todo!(),
@@ -2803,8 +2862,11 @@ impl HostFunction {
             HostFunction::ext_sandbox_instance_teardown_version_1 => todo!(),
             HostFunction::ext_sandbox_get_global_val_version_1 => todo!(),
             HostFunction::ext_trie_blake2_256_root_version_1 => 1,
+            HostFunction::ext_trie_blake2_256_root_version_2 => 2,
             HostFunction::ext_trie_blake2_256_ordered_root_version_1 => 1,
+            HostFunction::ext_trie_blake2_256_ordered_root_version_2 => 2,
             HostFunction::ext_trie_keccak_256_ordered_root_version_1 => todo!(),
+            HostFunction::ext_trie_keccak_256_ordered_root_version_2 => todo!(),
             HostFunction::ext_misc_print_num_version_1 => 1,
             HostFunction::ext_misc_print_utf8_version_1 => 1,
             HostFunction::ext_misc_print_hex_version_1 => 1,
