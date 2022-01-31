@@ -909,6 +909,16 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                     .transaction_validations
                     .remove(&(tx_id, pruned.user_data.hash));
                 debug_assert!(_was_removed.is_some());
+
+                if self
+                    .transaction_validations
+                    .range((tx_id, [0; 32])..=(tx_id, [0xff; 32]))
+                    .next()
+                    .is_none()
+                {
+                    let _was_inserted = self.not_validated.insert(tx_id);
+                    debug_assert!(_was_inserted);
+                }
             }
 
             return_value.push(PruneBodyFinalized {
