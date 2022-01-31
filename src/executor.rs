@@ -185,6 +185,8 @@ pub struct CoreVersionRef<'a> {
 
     /// Version number of the state trie encoding version.
     ///
+    /// Version 0 corresponds to a different trie encoding than version 1.
+    ///
     /// This field has been added to Substrate on 24th December 2021. Older versions of Substrate
     /// didn't provide this field, in which case it will contain `None`.
     ///
