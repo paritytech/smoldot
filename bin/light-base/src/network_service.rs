@@ -555,7 +555,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                 Box::pin({
                     let network_service = network_service.clone();
                     let future = async move {
-                        let mut next_round = Duration::from_millis(500);
+                        let mut next_round = Duration::from_millis(1);
 
                         loop {
                             let peer = network_service.network.assign_slots(chain_index).await;
