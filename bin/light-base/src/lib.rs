@@ -459,6 +459,23 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
             None
         };
 
+        // Build the list of bootstrap nodes ahead of time.
+        // TODO: either leave this here if it's fallible, or move below if it's not fallible
+        let bootstrap_nodes = {
+            let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
+            for node in chain_spec.boot_nodes() {
+                let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
+                if let Some(multiaddr::ProtocolRef::P2p(peer_id)) = address.iter().last() {
+                    let peer_id = peer_id::PeerId::from_bytes(peer_id.to_vec()).unwrap(); // TODO: don't unwrap
+                    address.pop();
+                    list.push((peer_id, vec![address]));
+                } else {
+                    panic!() // TODO:
+                }
+            }
+            list
+        };
+
         // All the checks are performed above. Adding the chain can't fail anymore at this point.
 
         // Grab a couple of fields from the chain specification for later, as the chain
@@ -558,7 +575,6 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                 // The chain to add always has a corresponding chain running. Simply grab the
                 // existing services and existing log name.
                 // The `log_name` created above is discarded in favour of the existing log name.
-                // TODO: must add bootnodes to the existing network service, otherwise the existing chain with the same key might only be using malicious bootnodes
                 entry.get_mut().num_references =
                     NonZeroU32::new(entry.get_mut().num_references.get() + 1).unwrap();
                 let entry = entry.into_mut();
@@ -671,6 +687,32 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
         // Apart from its services, each chain also has an entry in `public_api_chains`.
         let public_api_chains_entry = self.public_api_chains.vacant_entry();
         let new_chain_id = ChainId(public_api_chains_entry.key());
+
+        // Multiple chains can share the same network service, but each specify different
+        // bootstrap nodes. In order to resolve this, each chain adds their own bootnodes to
+        // the network service after it has been initialized. This is done by adding a short-lived
+        // task that waits for the chain initialization to finish then adds the nodes.
+        self.new_task_tx
+            .unbounded_send(("network-service-add-bootnodes".to_owned(), {
+                // Clone `running_chain_init`.
+                let mut running_chain_init = match services_init {
+                    future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
+                    future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
+                    future::MaybeDone::Gone => unreachable!(),
+                };
+
+                async move {
+                    // Wait for the chain to finish initializing to proceed.
+                    (&mut running_chain_init).await;
+                    let running_chain = Pin::new(&mut running_chain_init).take_output().unwrap();
+                    running_chain
+                        .network_service
+                        .discover(&TPlat::now(), 0, bootstrap_nodes, true)
+                        .await;
+                }
+                .boxed()
+            }))
+            .unwrap();
 
         // JSON-RPC service initialization. This is done every time `add_chain` is called, even
         // if a similar chain already existed.
@@ -979,20 +1021,6 @@ async fn start_services<TPlat: Platform>(
             noise_key: network_noise_key,
             chains: vec![network_service::ConfigChain {
                 log_name: log_name.clone(),
-                bootstrap_nodes: {
-                    let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
-                    for node in chain_spec.boot_nodes() {
-                        let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
-                        if let Some(multiaddr::ProtocolRef::P2p(peer_id)) = address.iter().last() {
-                            let peer_id = peer_id::PeerId::from_bytes(peer_id.to_vec()).unwrap(); // TODO: don't unwrap
-                            address.pop();
-                            list.push((peer_id, address));
-                        } else {
-                            panic!() // TODO:
-                        }
-                    }
-                    list
-                },
                 has_grandpa_protocol: matches!(
                     chain_information.as_ref().finality,
                     chain::chain_information::ChainInformationFinalityRef::Grandpa { .. }

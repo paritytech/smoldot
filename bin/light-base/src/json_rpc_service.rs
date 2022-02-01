@@ -1062,6 +1062,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 &TPlat::now(),
                                 self.network_service.1,
                                 iter::once((peer_id, iter::once(addr))),
+                                false,
                             )
                             .await;
                         methods::Response::sudo_unstable_p2pDiscover(())

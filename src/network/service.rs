@@ -909,6 +909,9 @@ where
                 debug_assert!(!kbuckets_addrs.get_mut().is_empty());
             }
         }
+
+        // As we have new potential peers, ask the user to try open new connections.
+        self.start_connect_needed.notify_additional(1);
     }
 
     /// After calling [`ChainNetwork::next_start_connect`], notifies the [`ChainNetwork`] of the
