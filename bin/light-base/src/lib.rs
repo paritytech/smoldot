@@ -324,16 +324,16 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     /// for debugging purposes.
     pub fn new(
         tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
-        system_name: String,
-        system_version: String,
+        system_name: impl Into<String>,
+        system_version: impl Into<String>,
     ) -> Self {
         let expected_chains = 8;
         Client {
             new_task_tx: tasks_spawner,
             public_api_chains: slab::Slab::with_capacity(expected_chains),
             chains_by_key: HashMap::with_capacity(expected_chains),
-            system_name,
-            system_version,
+            system_name: system_name.into(),
+            system_version: system_version.into(),
         }
     }
 
