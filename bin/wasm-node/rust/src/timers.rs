@@ -83,7 +83,7 @@ impl Delay {
 
         // If the timer that has just been inserted is the one that ends the soonest, then
         // actually start the callback that will process timers.
-        // Ideally we would cancel or update the deadline of the previous call to
+        // Ideally we would instead cancel or update the deadline of the previous call to
         // `start_timer_wrap`, but this isn't possible.
         if lock.timers_queue.peek().unwrap().timer_id == timer_id {
             super::start_timer_wrap(when - now, process_timers);
