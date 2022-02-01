@@ -81,9 +81,11 @@ impl Delay {
             timer_id,
         });
 
-        // If this was the first timer being inserted, then actually start the callback that
-        // will process timers.
-        if lock.timers_queue.len() == 1 {
+        // If the timer that has just been inserted is the one that ends the soonest, then
+        // actually start the callback that will process timers.
+        // Ideally we would cancel or update the deadline of the previous call to
+        // `start_timer_wrap`, but this isn't possible.
+        if lock.timers_queue.peek().unwrap().timer_id == timer_id {
             super::start_timer_wrap(when - now, process_timers);
         }
 
@@ -212,8 +214,10 @@ fn process_timers() {
     let mut lock = TIMERS.try_lock().unwrap();
     let now = Instant::now();
 
-    // TODO: this assertion fails; figure out why; this shouldn't have any major consequence but still intriguing
-    //debug_assert!(lock.time_zero + lock.timers_queue.peek().unwrap().when_from_time_zero <= now);
+    // Note that this function can be called spuriously.
+    // For example, `process_timers` can be scheduled twice from two different timers, and the
+    // first call leads to both timers being finished, after which the second call will be
+    // spurious.
 
     // Figure out the next time (relative to `time_zero`) we should call `process_timers`.
     //
