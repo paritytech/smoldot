@@ -39,7 +39,7 @@
 use crate::Platform;
 
 use core::{cmp, num::NonZeroUsize, task::Poll, time::Duration};
-use futures::{channel::mpsc, prelude::*};
+use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use itertools::Itertools as _;
 use smoldot::{
     informant::{BytesDisplay, HashDisplay},
@@ -70,13 +70,13 @@ pub struct Config {
 }
 
 /// See [`Config::chains`].
+///
+/// Note that this configuration is intentionally missing a field containing the bootstrap
+/// nodes of the chain. Bootstrap nodes are supposed to be added afterwards by calling
+/// [`NetworkService::discover`].
 pub struct ConfigChain {
     /// Name of the chain, for logging purposes.
     pub log_name: String,
-
-    /// List of node identities and addresses that are known to belong to the chain's peer-to-pee
-    /// network.
-    pub bootstrap_nodes: Vec<(PeerId, Multiaddr)>,
 
     /// Hash of the genesis block of the chain. Sent to other nodes in order to determine whether
     /// the chains match.
@@ -115,7 +115,7 @@ struct NetworkServiceInner<TPlat: Platform> {
 
     /// List of nodes that are considered as important for logging purposes.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
-    important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
+    important_nodes: Mutex<HashSet<PeerId, fnv::FnvBuildHasher>>,
 
     /// Names of the various chains the network service connects to. Used only for logging
     /// purposes.
@@ -133,25 +133,13 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             .map(|_| mpsc::channel(16))
             .unzip();
 
-        let important_nodes = config
-            .chains
-            .iter()
-            .flat_map(|chain| chain.bootstrap_nodes.iter())
-            .map(|(peer_id, _)| peer_id.clone())
-            .collect::<HashSet<_, _>>();
-
         let num_chains = config.chains.len();
         let mut chains = Vec::with_capacity(num_chains);
-        // TODO: this `bootstrap_nodes` field is weird ; should we de-duplicate entry in known_nodes?
-        let mut known_nodes = Vec::new();
-
         let mut log_chain_names = Vec::with_capacity(num_chains);
 
         for chain in config.chains {
             chains.push(service::ChainConfig {
-                bootstrap_nodes: (known_nodes.len()
-                    ..(known_nodes.len() + chain.bootstrap_nodes.len()))
-                    .collect(),
+                bootstrap_nodes: Vec::new(),
                 in_slots: 3,
                 out_slots: 4,
                 grandpa_protocol_config: if chain.has_grandpa_protocol {
@@ -173,7 +161,6 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                 allow_inbound_block_requests: false,
             });
 
-            known_nodes.extend(chain.bootstrap_nodes);
             log_chain_names.push(chain.log_name);
         }
 
@@ -183,7 +170,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             network: service::ChainNetwork::new(service::Config {
                 now: TPlat::now(),
                 chains,
-                known_nodes,
+                known_nodes: Vec::new(),
                 connections_capacity: 32,
                 peers_capacity: 8,
                 max_addresses_per_peer: NonZeroUsize::new(5).unwrap(),
@@ -192,7 +179,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                 pending_api_events_buffer_size: NonZeroUsize::new(32).unwrap(),
                 randomness_seed: rand::random(),
             }),
-            important_nodes,
+            important_nodes: Mutex::new(HashSet::with_capacity_and_hasher(16, Default::default())),
             log_chain_names,
         });
 
@@ -374,8 +361,10 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                 .next_start_connect(|| TPlat::now())
                                 .await;
 
-                            let is_bootnode = network_service
+                            let is_important = network_service
                                 .important_nodes
+                                .lock()
+                                .await
                                 .contains(&start_connect.expected_peer_id);
 
                             // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`)
@@ -401,7 +390,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                     result = socket => result.map_err(Some),
                                 };
 
-                                match (&result, is_bootnode) {
+                                match (&result, is_important) {
                                     (Ok(_), _) => {}
                                     (Err(None), true) => {
                                         log::warn!(
@@ -480,7 +469,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                         id,
                                         start_connect.expected_peer_id,
                                         start_connect.multiaddr,
-                                        is_bootnode,
+                                        is_important,
                                     )
                                 }))
                                 .await;
@@ -566,7 +555,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                 Box::pin({
                     let network_service = network_service.clone();
                     let future = async move {
-                        let mut next_round = Duration::from_millis(500);
+                        let mut next_round = Duration::from_millis(1);
 
                         loop {
                             let peer = network_service.network.assign_slots(chain_index).await;
@@ -896,13 +885,25 @@ impl<TPlat: Platform> NetworkService<TPlat> {
     }
 
     /// See [`service::ChainNetwork::discover`].
+    ///
+    /// The `important_nodes` parameter indicates whether these nodes are considered note-worthy
+    /// and should have additional logging.
     pub async fn discover(
         &self,
         now: &TPlat::Instant,
         chain_index: usize,
         list: impl IntoIterator<Item = (PeerId, impl IntoIterator<Item = Multiaddr>)>,
+        important_nodes: bool,
     ) {
-        self.inner.network.discover(now, chain_index, list).await
+        if important_nodes {
+            let list = list.into_iter().collect::<Vec<_>>();
+            let to_add_important = list.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>();
+            let mut important_nodes_lock = self.inner.important_nodes.lock().await;
+            self.inner.network.discover(now, chain_index, list).await;
+            important_nodes_lock.extend(to_add_important);
+        } else {
+            self.inner.network.discover(now, chain_index, list).await
+        }
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
@@ -955,7 +956,7 @@ async fn connection_task<TPlat: Platform>(
     id: service::ConnectionId,
     expected_peer_id: PeerId,
     attemped_multiaddr: Multiaddr,
-    is_bootnode: bool,
+    is_important: bool,
 ) {
     let mut write_buffer = vec![0; 4096];
 
@@ -978,12 +979,12 @@ async fn connection_task<TPlat: Platform>(
             .await
         {
             Ok(rw) => rw,
-            Err(err) if is_bootnode => {
+            Err(err) if is_important => {
                 match err {
                     // Ungraceful termination.
                     ConnectionError::Established(_) | ConnectionError::Handshake(_) => {
                         log::warn!(
-                            target: "connections", "Error in connection with bootnode {}: {}",
+                            target: "connections", "Error in connection with node {}: {}",
                             expected_peer_id, err
                         );
                     }
