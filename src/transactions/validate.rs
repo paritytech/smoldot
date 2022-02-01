@@ -237,8 +237,8 @@ fn validate_transaction_runtime_parameters_inner<'a>(
     block_hash: &'a [u8],
 ) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + Clone + 'a {
     // The `TaggedTransactionQueue_validate_transaction` function expects a SCALE-encoded
-    // `(source, tx)`. The encoding is performed manually in order to avoid performing
-    // redundant data copies.
+    // `(source, tx, block_hash)`. The encoding is performed manually in order to avoid
+    // performing redundant data copies.
     let source = match source {
         TransactionSource::InBlock => &[0],
         TransactionSource::Local => &[1],
