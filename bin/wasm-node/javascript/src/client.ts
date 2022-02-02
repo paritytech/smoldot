@@ -506,7 +506,7 @@ export function start(options?: ClientOptions): Client {
     // A worker error should only happen in case of a critical error as the result of a bug
     // somewhere. Consequently, nothing is really in place to cleanly report the error.
     console.error(
-      "Smoldot has panicked " +
+      "Smoldot has panicked" +
       (workerCurrentTask.name ? (" while executing task `" + workerCurrentTask.name + "`") : "") +
       ". This is a bug in smoldot. Please open an issue at " +
       "https://github.com/paritytech/smoldot/issues with the following message:"
