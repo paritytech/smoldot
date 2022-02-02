@@ -139,7 +139,6 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
         for chain in config.chains {
             chains.push(service::ChainConfig {
-                bootstrap_nodes: Vec::new(),
                 in_slots: 3,
                 out_slots: 4,
                 grandpa_protocol_config: if chain.has_grandpa_protocol {
@@ -170,7 +169,6 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             network: service::ChainNetwork::new(service::Config {
                 now: TPlat::now(),
                 chains,
-                known_nodes: Vec::new(),
                 connections_capacity: 32,
                 peers_capacity: 8,
                 max_addresses_per_peer: NonZeroUsize::new(5).unwrap(),

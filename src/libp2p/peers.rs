@@ -109,12 +109,6 @@ pub struct Config {
     /// This value is important if [`Peers::next_event`] is called at a slower than the calls to
     /// [`Peers::read_write`] generate events.
     pub pending_api_events_buffer_size: NonZeroUsize,
-
-    // TODO: don't use BTreeSet
-    pub initial_desired_peers: BTreeSet<PeerId>,
-
-    // TODO: don't use BTreeSet
-    pub initial_desired_substreams: BTreeSet<(PeerId, usize)>,
 }
 
 pub use collection::ConnectionId;
@@ -134,51 +128,6 @@ where
     pub fn new(config: Config) -> Self {
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
 
-        let mut peer_indices = {
-            hashbrown::HashMap::with_capacity_and_hasher(
-                config.peers_capacity,
-                SipHasherBuild::new(randomness.sample(rand::distributions::Standard)),
-            )
-        };
-
-        let mut peers = slab::Slab::with_capacity(config.peers_capacity);
-
-        let mut peers_notifications_out = BTreeMap::new();
-
-        for peer_id in config.initial_desired_peers {
-            if let hashbrown::hash_map::Entry::Vacant(entry) = peer_indices.entry(peer_id) {
-                let peer_index = peers.insert(Peer {
-                    desired: true,
-                    peer_id: entry.key().clone(),
-                });
-
-                entry.insert(peer_index);
-            }
-        }
-
-        for (peer_id, notification_protocol) in config.initial_desired_substreams {
-            let peer_index = match peer_indices.entry(peer_id) {
-                hashbrown::hash_map::Entry::Occupied(entry) => *entry.into_mut(),
-                hashbrown::hash_map::Entry::Vacant(entry) => {
-                    let peer_index = peers.insert(Peer {
-                        desired: true,
-                        peer_id: entry.key().clone(),
-                    });
-
-                    *entry.insert(peer_index)
-                }
-            };
-
-            peers_notifications_out
-                .entry((peer_index, notification_protocol))
-                .or_insert(NotificationsOutState {
-                    desired: true,
-                    open: NotificationsOutOpenState::Closed,
-                });
-        }
-
-        let connections_peer_index = slab::Slab::with_capacity(config.connections_capacity);
-
         Peers {
             inner: collection::Network::new(collection::Config {
                 capacity: config.connections_capacity,
@@ -193,11 +142,14 @@ where
             guarded: Mutex::new(Guarded {
                 pending_desired_out_notifs: VecDeque::with_capacity(0), // TODO: capacity?
                 pending_inner_event: None,
-                connections: connections_peer_index,
+                connections: slab::Slab::with_capacity(config.connections_capacity),
                 connections_by_peer: BTreeMap::new(),
-                peer_indices,
-                peers,
-                peers_notifications_out,
+                peer_indices: hashbrown::HashMap::with_capacity_and_hasher(
+                    config.peers_capacity,
+                    SipHasherBuild::new(randomness.sample(rand::distributions::Standard)),
+                ),
+                peers: slab::Slab::with_capacity(config.peers_capacity),
+                peers_notifications_out: BTreeMap::new(),
                 peers_notifications_in: BTreeSet::new(),
                 requests_in: slab::Slab::new(), // TODO: capacity?
                 desired_in_notifications: slab::Slab::new(), // TODO: capacity?

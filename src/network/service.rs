@@ -26,7 +26,6 @@ use crate::util::{self, SipHasherBuild};
 
 use alloc::{
     borrow::Cow,
-    collections::BTreeSet,
     format,
     string::{String, ToString as _},
     vec::Vec,
@@ -78,9 +77,6 @@ pub struct Config<TNow> {
     /// used later in order to refer to a specific chain.
     pub chains: Vec<ChainConfig>,
 
-    // TODO: what about letting API users insert nodes later?
-    pub known_nodes: Vec<(peer_id::PeerId, multiaddr::Multiaddr)>,
-
     /// Key used for the encryption layer.
     /// This is a Noise static key, according to the Noise specification.
     /// Signed using the actual libp2p key.
@@ -122,10 +118,6 @@ pub struct ChainConfig {
     /// > **Note**: This value is typically found in the specification of the chain (the
     /// >           "chain spec").
     pub protocol_id: String,
-
-    /// List of node identities that are known to belong to this overlay network. The node
-    /// identities are indices in [`Config::known_nodes`].
-    pub bootstrap_nodes: Vec<usize>,
 
     /// If `Some`, the chain uses the GrandPa networking protocol.
     pub grandpa_protocol_config: Option<GrandpaState>,
@@ -348,63 +340,15 @@ where
         .collect();
 
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
-        let inner_randomness_seed = randomness.sample(rand::distributions::Standard);
-
-        let connections = hashbrown::HashSet::with_capacity_and_hasher(
-            config.peers_capacity,
-            SipHasherBuild::new(randomness.gen()),
-        );
-
-        let peers = hashbrown::HashMap::with_capacity_and_hasher(
-            config.peers_capacity,
-            SipHasherBuild::new(randomness.gen()),
-        );
-
-        let open_chains = hashbrown::HashSet::with_capacity_and_hasher(
-            config.peers_capacity * config.chains.len(),
-            SipHasherBuild::new(randomness.gen()),
-        );
-
-        let mut initial_desired_substreams = BTreeSet::new();
 
         let local_peer_id = PeerId::from_public_key(&peer_id::PublicKey::Ed25519(
             *config.noise_key.libp2p_public_ed25519_key(),
         ));
 
-        // TODO: this block below is a bit messy
-        let num_chains = config.chains.len();
-        let known_nodes = &config.known_nodes;
         let chains = config
             .chains
             .into_iter()
-            .enumerate()
-            .map(|(chain_index, chain)| {
-                let mut kbuckets = kademlia::kbuckets::KBuckets::new(
-                    local_peer_id.clone(),
-                    Duration::from_secs(20), // TODO: hardcoded
-                );
-
-                for node in chain.bootstrap_nodes.iter() {
-                    let (peer_id, addr) = &known_nodes[*node];
-                    // The insertion can fail if we have more bootnodes than the k-buckets have
-                    // entries.
-                    if let Ok(mut entry) = kbuckets.entry(peer_id).or_insert(
-                        addresses::Addresses::with_capacity(config.max_addresses_per_peer.get()),
-                        &config.now,
-                        kademlia::kbuckets::PeerState::Disconnected,
-                    ) {
-                        entry.get_mut().insert_discovered(addr.clone());
-                    }
-
-                    // TODO: remove this section once peer slots attribution is fleshed out
-                    for notifications_protocol in (0..NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
-                        .map(|n| n + NOTIFICATIONS_PROTOCOLS_PER_CHAIN * chain_index)
-                    {
-                        initial_desired_substreams
-                            .insert((peer_id.clone(), notifications_protocol));
-                    }
-                }
-
+            .map(|chain| {
                 EphemeralGuardedChain {
                     in_peers: hashbrown::HashSet::with_capacity_and_hasher(
                         usize::try_from(chain.in_slots).unwrap_or(0),
@@ -415,10 +359,13 @@ where
                         SipHasherBuild::new(randomness.gen()),
                     ),
                     chain_config: chain,
-                    kbuckets,
+                    kbuckets: kademlia::kbuckets::KBuckets::new(
+                        local_peer_id.clone(),
+                        Duration::from_secs(20), // TODO: hardcoded
+                    ),
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
 
         ChainNetwork {
             inner: peers::Peers::new(peers::Config {
@@ -426,27 +373,34 @@ where
                 peers_capacity: config.peers_capacity,
                 request_response_protocols,
                 noise_key: config.noise_key,
-                randomness_seed: inner_randomness_seed,
+                randomness_seed: randomness.sample(rand::distributions::Standard),
                 pending_api_events_buffer_size: config.pending_api_events_buffer_size,
                 notification_protocols,
                 ping_protocol: "/ipfs/ping/1.0.0".into(),
                 handshake_timeout: config.handshake_timeout,
-                initial_desired_peers: Default::default(), // Empty
-                initial_desired_substreams,
             }),
+            num_chains: chains.len(),
             next_event_guarded: Mutex::new(NextEventGuarded {
                 to_process_pre_event: None,
-                open_chains,
+                open_chains: hashbrown::HashSet::with_capacity_and_hasher(
+                    config.peers_capacity * chains.len(),
+                    SipHasherBuild::new(randomness.gen()),
+                ),
             }),
             ephemeral_guarded: Mutex::new(EphemeralGuarded {
-                num_pending_per_peer: peers,
+                num_pending_per_peer: hashbrown::HashMap::with_capacity_and_hasher(
+                    config.peers_capacity,
+                    SipHasherBuild::new(randomness.gen()),
+                ),
                 pending_ids: slab::Slab::with_capacity(config.peers_capacity),
-                connections,
+                connections: hashbrown::HashSet::with_capacity_and_hasher(
+                    config.peers_capacity,
+                    SipHasherBuild::new(randomness.gen()),
+                ),
                 chains,
             }),
             handshake_timeout: config.handshake_timeout,
             max_addresses_per_peer: config.max_addresses_per_peer,
-            num_chains,
             randomness: Mutex::new(randomness),
             start_connect_needed: event_listener::Event::new(),
         }
