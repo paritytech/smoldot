@@ -521,6 +521,7 @@ impl SyncBackground {
                             | all::ResponseOutcome::NotFinalizedChain { .. }
                             | all::ResponseOutcome::AllAlreadyInChain { .. } => {
                             }
+                            all::ResponseOutcome::WarpSyncError { .. } |
                             all::ResponseOutcome::WarpSyncFinished { .. } => {
                                 unreachable!()
                             }
