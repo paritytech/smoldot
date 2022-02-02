@@ -361,7 +361,7 @@ async fn background_task<TPlat: Platform>(
 
         log::debug!(
             target: &log_target,
-            "Transactions watcher moved to finalized block {}. Dropped transactions: {}.",
+            "Transactions watcher moved to finalized block {}. Dropped transactions: [{}].",
             HashDisplay(&initial_finalized_block_hash),
             dropped_transactions
         );
