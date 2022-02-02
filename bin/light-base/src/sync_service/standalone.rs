@@ -254,6 +254,13 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
             | all::ResponseOutcome::Queued
             | all::ResponseOutcome::NotFinalizedChain { .. }
             | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
+            all::ResponseOutcome::WarpSyncError { error } => {
+                log::warn!(
+                    target: &task.log_target,
+                    "Error during GrandPa warp syncing: {}",
+                    error
+                );
+            }
             all::ResponseOutcome::WarpSyncFinished {
                 finalized_block_runtime,
                 finalized_storage_code,
