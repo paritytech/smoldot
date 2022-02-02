@@ -1251,18 +1251,38 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 // this runtime, but we don't care enough about this possibility to optimize
                 // this.
                 // TODO: make `allow_unresolved_imports` configurable
-                let (grandpa_warp_sync, error) = sync.set_virtual_machine_params(
+                let outcome = sync.set_virtual_machine_params(
                     code,
                     heap_pages,
                     ExecHint::CompileAheadOfTime,
                     false,
                 );
 
-                if let Some(_error) = error {
-                    // TODO: error handling
+                match outcome {
+                    (warp_sync::WarpSync::InProgress(inner), None) => {
+                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                        ResponseOutcome::Queued
+                    }
+                    (warp_sync::WarpSync::InProgress(inner), Some(error)) => {
+                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                        ResponseOutcome::WarpSyncError { error }
+                    }
+                    (warp_sync::WarpSync::Finished(success), None) => {
+                        let (
+                            all_forks,
+                            finalized_block_runtime,
+                            finalized_storage_code,
+                            finalized_storage_heap_pages,
+                        ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
+                        self.inner = AllSyncInner::AllForks(all_forks);
+                        ResponseOutcome::WarpSyncFinished {
+                            finalized_block_runtime,
+                            finalized_storage_code,
+                            finalized_storage_heap_pages,
+                        }
+                    }
+                    (warp_sync::WarpSync::Finished(_), Some(_)) => unreachable!(),
                 }
-
-                self.inject_grandpa(grandpa_warp_sync)
             }
             (
                 AllSyncInner::GrandpaWarpSync {
@@ -1275,13 +1295,32 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let value = response.next().unwrap();
                 assert!(response.next().is_none());
 
-                let (grandpa_warp_sync, error) = sync.inject_value(value.map(iter::once));
-
-                if let Some(_error) = error {
-                    // TODO: error handling
+                let outcome = sync.inject_value(value.map(iter::once));
+                match outcome {
+                    (warp_sync::WarpSync::InProgress(inner), None) => {
+                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                        ResponseOutcome::Queued
+                    }
+                    (warp_sync::WarpSync::InProgress(inner), Some(error)) => {
+                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                        ResponseOutcome::WarpSyncError { error }
+                    }
+                    (warp_sync::WarpSync::Finished(success), None) => {
+                        let (
+                            all_forks,
+                            finalized_block_runtime,
+                            finalized_storage_code,
+                            finalized_storage_heap_pages,
+                        ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
+                        self.inner = AllSyncInner::AllForks(all_forks);
+                        ResponseOutcome::WarpSyncFinished {
+                            finalized_block_runtime,
+                            finalized_storage_code,
+                            finalized_storage_heap_pages,
+                        }
+                    }
+                    (warp_sync::WarpSync::Finished(_), Some(_)) => unreachable!(),
                 }
-
-                self.inject_grandpa(grandpa_warp_sync)
             }
             (
                 AllSyncInner::GrandpaWarpSync {
@@ -1289,9 +1328,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 },
                 Err(_),
             ) => {
-                let grandpa_warp_sync = sync.inject_error();
+                let inner = sync.inject_error();
                 // TODO: notify user of the problem
-                self.inject_grandpa(grandpa_warp_sync)
+                self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                ResponseOutcome::Queued
             }
             (
                 AllSyncInner::GrandpaWarpSync {
@@ -1299,9 +1339,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 },
                 Err(_),
             ) => {
-                let grandpa_warp_sync = sync.inject_error();
+                let inner = sync.inject_error();
                 // TODO: notify user of the problem
-                self.inject_grandpa(grandpa_warp_sync)
+                self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                ResponseOutcome::Queued
             }
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
             (other, _) => {
@@ -1311,33 +1352,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         };
 
         (user_data, outcome)
-    }
-
-    // TODO: questionable function
-    fn inject_grandpa(
-        &mut self,
-        grandpa_warp_sync: warp_sync::WarpSync<GrandpaWarpSyncSourceExtra<TSrc>>,
-    ) -> ResponseOutcome {
-        match grandpa_warp_sync {
-            warp_sync::WarpSync::InProgress(inner) => {
-                self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                ResponseOutcome::Queued
-            }
-            warp_sync::WarpSync::Finished(success) => {
-                let (
-                    all_forks,
-                    finalized_block_runtime,
-                    finalized_storage_code,
-                    finalized_storage_heap_pages,
-                ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
-                self.inner = AllSyncInner::AllForks(all_forks);
-                ResponseOutcome::WarpSyncFinished {
-                    finalized_block_runtime,
-                    finalized_storage_code,
-                    finalized_storage_heap_pages,
-                }
-            }
-        }
     }
 }
 
@@ -1573,6 +1587,12 @@ pub enum ResponseOutcome {
 
     /// Content of the response has been queued and will be processed later.
     Queued,
+
+    /// Content of the response is erroneous in the context of warp syncing.
+    WarpSyncError {
+        /// Error that happened.
+        error: warp_sync::Error,
+    },
 
     /// Response has made it possible to finish warp syncing.
     WarpSyncFinished {

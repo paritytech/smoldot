@@ -546,14 +546,14 @@ impl<TSrc> StorageGet<TSrc> {
     }
 
     /// Injects a failure to retrieve the storage value.
-    pub fn inject_error(self) -> WarpSync<TSrc> {
-        WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
+    pub fn inject_error(self) -> InProgressWarpSync<TSrc> {
+        InProgressWarpSync::warp_sync_request_from_next_source(
             self.state.sources,
             PreVerificationState {
                 start_chain_information: self.state.start_chain_information,
             },
             None,
-        ))
+        )
     }
 }
 
@@ -927,14 +927,14 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
     }
 
     /// Injects a failure to retrieve the parameters.
-    pub fn inject_error(self) -> WarpSync<TSrc> {
-        WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
+    pub fn inject_error(self) -> InProgressWarpSync<TSrc> {
+        InProgressWarpSync::warp_sync_request_from_next_source(
             self.state.sources,
             PreVerificationState {
                 start_chain_information: self.state.start_chain_information,
             },
             None,
-        ))
+        )
     }
 
     /// Set the code and heappages from storage using the keys `:code` and `:heappages`
