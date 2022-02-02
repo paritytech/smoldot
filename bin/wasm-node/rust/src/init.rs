@@ -59,6 +59,14 @@ pub(crate) fn init<TChain, TPlat: smoldot_light_base::Platform>(
         panic(info.to_string());
     }));
 
+    // First things first, print the version in order to make it easier to debug issues by
+    // reading logs provided by third parties.
+    log::info!(
+        target: "smoldot",
+        "Smoldot v{}",
+        env!("CARGO_PKG_VERSION")
+    );
+
     // Simple fool-proof check to make sure that randomness is properly implemented.
     assert_ne!(rand::random::<u64>(), 0);
     assert_ne!(rand::random::<u64>(), rand::random::<u64>());
@@ -145,9 +153,12 @@ pub(crate) fn init<TChain, TPlat: smoldot_light_base::Platform>(
                     let avg_up = u64::try_from(bytes_tx - previous_sent_bytes).unwrap() / interval;
                     previous_sent_bytes = bytes_tx;
 
+                    // Note that we also print the version at every interval, in order to increase
+                    // the chance of being able to know the version in case of truncated logs.
                     log::info!(
                         target: "smoldot",
-                        "Current memory usage: {}. Average download: {}/s. Average upload: {}/s.",
+                        "Smoldot v{}. Current memory usage: {}. Average download: {}/s. Average upload: {}/s.",
+                        env!("CARGO_PKG_VERSION"),
                         BytesDisplay(mem),
                         BytesDisplay(avg_dl),
                         BytesDisplay(avg_up)
