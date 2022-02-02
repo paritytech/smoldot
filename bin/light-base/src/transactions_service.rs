@@ -361,7 +361,7 @@ async fn background_task<TPlat: Platform>(
 
         log::debug!(
             target: &log_target,
-            "Transactions watcher moved to finalized block {}. Dropped transactions: [{}].",
+            "Reset(new_finalized={}. dropped-transactions={{{}}})",
             HashDisplay(&initial_finalized_block_hash),
             dropped_transactions
         );
@@ -508,7 +508,7 @@ async fn background_task<TPlat: Platform>(
 
                 log::debug!(
                     target: &log_target,
-                    "Started download of {}",
+                    "BlockDownloads <= Start(block={})",
                     HashDisplay(&block_hash)
                 );
             }
@@ -591,7 +591,7 @@ async fn background_task<TPlat: Platform>(
 
                     log::debug!(
                         target: &log_target,
-                        "{} for {}",
+                        "BlockDownloads => {}(block={})",
                         if block_body.is_ok() { "Success" } else { "Failed" },
                         HashDisplay(&block_hash)
                     );
@@ -649,7 +649,7 @@ async fn background_task<TPlat: Platform>(
                     // Perform the announce.
                     log::debug!(
                         target: &log_target,
-                        "Announcing {}",
+                        "NetworkService <= Announcing(tx={})",
                         HashDisplay(&blake2_hash(worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap()))
                     );
                     let peers_sent = worker.network_service
@@ -687,6 +687,8 @@ async fn background_task<TPlat: Platform>(
                         },
                     };
 
+                    let tx_hash = blake2_hash(worker.pending_transactions.scale_encoding(maybe_validated_tx_id).unwrap());
+
                     match validation_result {
                         Ok((block_hash, Ok(result))) => {
                             // The validation is made using the runtime service, while the state
@@ -696,26 +698,25 @@ async fn background_task<TPlat: Platform>(
                             if !worker.pending_transactions.has_block(&block_hash) {
                                 log::debug!(
                                     target: &log_target,
-                                    "Skipping success due to obsolete block {}",
+                                    "TxValidations => ObsoleteBlock(tx={}, block={})",
+                                    HashDisplay(&tx_hash),
                                     HashDisplay(&block_hash)
                                 );
                                 continue;
                             }
 
-                            let tx_hash = blake2_hash(worker.pending_transactions.scale_encoding(maybe_validated_tx_id).unwrap());
+                            log::debug!(
+                                target: &log_target,
+                                "TxValidations => Success(tx={}, block={}, result={:?})",
+                                HashDisplay(&tx_hash),
+                                HashDisplay(&block_hash),
+                                result // TODO: better show results
+                            );
 
                             log::info!(
                                 target: &log_target,
                                 "Successfully validated transaction {}",
                                 HashDisplay(&tx_hash)
-                            );
-
-                            log::debug!(
-                                target: &log_target,
-                                "Successfully validated transaction {} at {}: {:?}",
-                                HashDisplay(&tx_hash),
-                                HashDisplay(&block_hash),
-                                result
                             );
 
                             worker.pending_transactions
@@ -727,10 +728,17 @@ async fn background_task<TPlat: Platform>(
                             }.boxed());
                         }
                         Ok((_, Err(error))) => {
+                            log::debug!(
+                                target: &log_target,
+                                "TxValidations => Invalid(tx={}, error={:?})",
+                                HashDisplay(&tx_hash),
+                                error,
+                            );
+
                             log::warn!(
                                 target: &log_target,
                                 "Discarding invalid transaction {}: {:?}",
-                                HashDisplay(&blake2_hash(worker.pending_transactions.scale_encoding(maybe_validated_tx_id).unwrap())),
+                                HashDisplay(&tx_hash),
                                 error,
                             );
 
@@ -740,10 +748,17 @@ async fn background_task<TPlat: Platform>(
                             tx.update_status(TransactionStatus::Dropped(DropReason::Invalid(error)));
                         }
                         Err(error) => {
+                            log::debug!(
+                                target: &log_target,
+                                "TxValidations => Error(tx={}, error={:?})",
+                                HashDisplay(&tx_hash),
+                                error,
+                            );
+
                             log::warn!(
                                 target: &log_target,
                                 "Failed to validate transaction {}: {}",
-                                HashDisplay(&blake2_hash(worker.pending_transactions.scale_encoding(maybe_validated_tx_id).unwrap())),
+                                HashDisplay(&tx_hash),
                                 error
                             );
 
@@ -995,7 +1010,7 @@ async fn validate_transaction<TPlat: Platform>(
 
     log::debug!(
         target: log_target,
-        "Starting validation of {} against block {} (height: {:?})",
+        "TxValidations <= Start(tx={}, block={}, block_height={:?})",
         HashDisplay(&blake2_hash(scale_encoded_transaction.as_ref())),
         HashDisplay(runtime_lock.block_hash()),
         header::decode(block_scale_encoded_header)
