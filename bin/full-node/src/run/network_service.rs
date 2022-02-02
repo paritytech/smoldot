@@ -44,7 +44,7 @@ use smoldot::{
     network::{protocol, service},
 };
 use std::{
-    io,
+    io, iter,
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
     sync::Arc,
@@ -153,23 +153,13 @@ impl NetworkService {
             .map(|_| mpsc::channel(16))
             .unzip();
 
-        // TODO: code is messy
-        let mut known_nodes =
-            Vec::with_capacity(config.chains.iter().map(|c| c.bootstrap_nodes.len()).sum());
         let mut chains = Vec::with_capacity(config.chains.len());
         let mut databases = Vec::with_capacity(config.chains.len());
-        for chain in config.chains {
-            let mut bootstrap_nodes = Vec::with_capacity(chain.bootstrap_nodes.len());
-            for (peer_id, addr) in chain.bootstrap_nodes {
-                bootstrap_nodes.push(known_nodes.len());
-                known_nodes.push((peer_id, addr));
-            }
-
+        for chain in &config.chains {
             chains.push(service::ChainConfig {
-                bootstrap_nodes,
                 in_slots: 25,
                 out_slots: 25,
-                protocol_id: chain.protocol_id,
+                protocol_id: chain.protocol_id.clone(),
                 best_hash: chain.best_block.1,
                 best_number: chain.best_block.0,
                 genesis_hash: chain.genesis_block_hash,
@@ -187,7 +177,7 @@ impl NetworkService {
                 allow_inbound_block_requests: true,
             });
 
-            databases.push(chain.database);
+            databases.push(chain.database.clone());
         }
 
         // Initialize the inner network service.
@@ -200,7 +190,6 @@ impl NetworkService {
             network: service::ChainNetwork::new(service::Config {
                 now: Instant::now(),
                 chains,
-                known_nodes,
                 connections_capacity: 100, // TODO: ?
                 peers_capacity: 100,       // TODO: ?
                 noise_key: config.noise_key,
@@ -211,6 +200,20 @@ impl NetworkService {
             }),
             jaeger_service: config.jaeger_service,
         });
+
+        // Add the bootnodes to the inner state machine.
+        for (chain_index, chain) in config.chains.into_iter().enumerate() {
+            for (peer_id, addr) in chain.bootstrap_nodes {
+                inner
+                    .network
+                    .discover(
+                        &Instant::now(),
+                        chain_index,
+                        iter::once((peer_id, iter::once(addr))),
+                    )
+                    .await;
+            }
+        }
 
         let mut abort_handles = Vec::new();
 
