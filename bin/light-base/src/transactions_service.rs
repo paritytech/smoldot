@@ -70,6 +70,7 @@
 use crate::{network_service, runtime_service, sync_service, Platform};
 
 use futures::{channel::mpsc, lock::Mutex, prelude::*, stream::FuturesUnordered};
+use itertools::Itertools as _;
 use smoldot::{
     header,
     informant::HashDisplay,
@@ -324,6 +325,13 @@ async fn background_task<TPlat: Platform>(
         }
 
         // Reset the blocks tracking state machine.
+        let dropped_transactions = worker
+            .pending_transactions
+            .transactions_iter()
+            .map(|(tx_id, _)| {
+                HashDisplay(worker.pending_transactions.scale_encoding(tx_id).unwrap())
+            })
+            .join(",");
         worker.pending_transactions = light_pool::LightPool::new(light_pool::Config {
             transactions_capacity,
             blocks_capacity,
@@ -353,8 +361,9 @@ async fn background_task<TPlat: Platform>(
 
         log::debug!(
             target: &log_target,
-            "Transactions watcher moved to finalized block {}.",
+            "Transactions watcher moved to finalized block {}. Dropped transactions: [{}].",
             HashDisplay(&initial_finalized_block_hash),
+            dropped_transactions
         );
 
         loop {
