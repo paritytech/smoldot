@@ -164,7 +164,7 @@ pub struct VerifyConfig<'a> {
     /// Epoch that follows the epoch the parent block belongs to.
     ///
     /// The [`chain_information::BabeEpochInformationRef::start_slot_number`] must be `None` if
-    /// and only if the [`chain_information::BabeEpochInformationRef::epoch_index`] is `0̀ .
+    /// and only if the [`chain_information::BabeEpochInformationRef::epoch_index`] is `0`.
     pub parent_block_next_epoch: chain_information::BabeEpochInformationRef<'a>,
 }
 
