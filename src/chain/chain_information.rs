@@ -228,7 +228,9 @@ pub struct BabeEpochInformation {
 
     /// Slot at which the epoch starts.
     ///
-    /// Must be `None` if and only if `epoch_index` is 0.
+    /// Must be `None` if and only if the context is
+    /// [`ChainInformationConsensus::Babe::finalized_next_epoch_transition`] and
+    /// [`BabeEpochInformation::epoch_index`] is 0.
     pub start_slot_number: Option<u64>,
 
     /// List of authorities allowed to author blocks during this epoch.
@@ -355,6 +357,18 @@ impl<'a> ChainInformationRef<'a> {
             if let Err(err) = finalized_next_epoch_transition.validate() {
                 return Err(ValidityError::InvalidBabe(err));
             }
+
+            if finalized_next_epoch_transition.start_slot_number.is_some()
+                && (finalized_next_epoch_transition.epoch_index == 0)
+            {
+                return Err(ValidityError::UnexpectedBabeSlotStartNumber);
+            }
+            if finalized_next_epoch_transition.start_slot_number.is_none()
+                && (finalized_next_epoch_transition.epoch_index != 0)
+            {
+                return Err(ValidityError::MissingBabeSlotStartNumber);
+            }
+
             if let Some(finalized_block_epoch_information) = &finalized_block_epoch_information {
                 if let Err(err) = finalized_block_epoch_information.validate() {
                     return Err(ValidityError::InvalidBabe(err));
@@ -367,15 +381,7 @@ impl<'a> ChainInformationRef<'a> {
                 }
                 if finalized_block_epoch_information
                     .start_slot_number
-                    .is_some()
-                    && (finalized_block_epoch_information.epoch_index == 0)
-                {
-                    return Err(ValidityError::UnexpectedBabeSlotStartNumber);
-                }
-                if finalized_block_epoch_information
-                    .start_slot_number
                     .is_none()
-                    && (finalized_block_epoch_information.epoch_index != 0)
                 {
                     return Err(ValidityError::MissingBabeSlotStartNumber);
                 }
@@ -566,10 +572,10 @@ impl<'a> From<&'a ChainInformationFinality> for ChainInformationFinalityRef<'a> 
 /// Error when turning a [`ChainInformation`] into a [`ValidChainInformation`].
 #[derive(Debug, derive_more::Display)]
 pub enum ValidityError {
-    /// Found a Babe slot start number for Babe epoch number 0. Babe epoch 0 never has a starting
-    /// slot.
+    /// Found a Babe slot start number for future Babe epoch number 0. A future Babe epoch 0 has
+    /// no known starting slot.
     UnexpectedBabeSlotStartNumber,
-    /// Missing Babe slot start number for Babe epoch number other than 0.
+    /// Missing Babe slot start number for Babe epoch number other than future epoch 0.
     MissingBabeSlotStartNumber,
     /// Finalized block is block number 0, and a Babe epoch information has been provided. This
     /// would imply the existence of a block -1 and below.
