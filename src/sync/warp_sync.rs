@@ -679,6 +679,7 @@ impl<TSrc> Verifier<TSrc> {
                 Ok(()),
             ),
             Ok(warp_sync::Next::EmptyProof) => (
+                // TODO: should return success immediately; unfortunately the AllSync is quite complicated to update if we do this
                 InProgressWarpSync::VirtualMachineParamsGet(VirtualMachineParamsGet {
                     state: PostVerificationState {
                         header: self

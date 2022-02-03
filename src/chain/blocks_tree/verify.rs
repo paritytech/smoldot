@@ -372,8 +372,29 @@ impl<T> VerifyContext<T> {
                 VerifyConsensusSpecific::Babe { .. },
                 FinalizedConsensus::Babe { .. },
                 Some(BlockConsensus::Babe { next_epoch, .. }),
-            ) => BlockConsensus::Babe {
+            ) if next_epoch.start_slot_number.is_some() => BlockConsensus::Babe {
                 current_epoch: Some(next_epoch),
+                next_epoch: Arc::new(epoch_transition_target),
+            },
+
+            (
+                verify::header_body::SuccessConsensus::Babe {
+                    epoch_transition_target: Some(epoch_transition_target),
+                    slot_number,
+                    ..
+                },
+                VerifyConsensusSpecific::Babe { .. },
+                FinalizedConsensus::Babe { .. },
+                Some(BlockConsensus::Babe { next_epoch, .. }),
+            ) => BlockConsensus::Babe {
+                current_epoch: Some(Arc::new(chain_information::BabeEpochInformation {
+                    start_slot_number: Some(slot_number),
+                    allowed_slots: next_epoch.allowed_slots,
+                    epoch_index: next_epoch.epoch_index,
+                    authorities: next_epoch.authorities.clone(),
+                    c: next_epoch.c,
+                    randomness: next_epoch.randomness,
+                })),
                 next_epoch: Arc::new(epoch_transition_target),
             },
 
@@ -404,8 +425,32 @@ impl<T> VerifyContext<T> {
                     ..
                 },
                 None,
-            ) => BlockConsensus::Babe {
+            ) if next_epoch_transition.start_slot_number.is_some() => BlockConsensus::Babe {
                 current_epoch: Some(next_epoch_transition),
+                next_epoch: Arc::new(epoch_transition_target),
+            },
+
+            (
+                verify::header_body::SuccessConsensus::Babe {
+                    epoch_transition_target: Some(epoch_transition_target),
+                    slot_number,
+                    ..
+                },
+                VerifyConsensusSpecific::Babe { .. },
+                FinalizedConsensus::Babe {
+                    next_epoch_transition,
+                    ..
+                },
+                None,
+            ) => BlockConsensus::Babe {
+                current_epoch: Some(Arc::new(chain_information::BabeEpochInformation {
+                    start_slot_number: Some(slot_number),
+                    allowed_slots: next_epoch_transition.allowed_slots,
+                    authorities: next_epoch_transition.authorities.clone(),
+                    c: next_epoch_transition.c,
+                    epoch_index: next_epoch_transition.epoch_index,
+                    randomness: next_epoch_transition.randomness,
+                })),
                 next_epoch: Arc::new(epoch_transition_target),
             },
 
