@@ -1531,8 +1531,32 @@ where
                 }
 
                 // Other protocol.
-                peers::Event::NotificationsOutClose { .. } => {
-                    // TODO: should try reopen the substream
+                peers::Event::NotificationsOutClose {
+                    peer_id,
+                    notifications_protocol_index,
+                    ..
+                } => {
+                    let chain_index =
+                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+
+                    // The state of notification substreams other than block announces must
+                    // always match the state of the block announces.
+                    // Therefore, if the peer is considered open, try to reopen the substream that
+                    // has just been closed.
+                    // TODO: cloning of peer_id :-/
+                    if guarded
+                        .open_chains
+                        .contains(&(peer_id.clone(), chain_index))
+                    {
+                        self.inner
+                            .set_peer_notifications_out_desired(
+                                peer_id,
+                                *notifications_protocol_index,
+                                peers::DesiredState::DesiredReset,
+                            )
+                            .await;
+                    }
+
                     guarded.to_process_pre_event = None;
                 }
 
