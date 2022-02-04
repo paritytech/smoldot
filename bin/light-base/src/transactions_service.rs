@@ -647,11 +647,6 @@ async fn background_task<TPlat: Platform>(
                     }.boxed());
 
                     // Perform the announce.
-                    log::debug!(
-                        target: &log_target,
-                        "NetworkService <= Announcing(tx={})",
-                        HashDisplay(&blake2_hash(worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap()))
-                    );
                     let peers_sent = worker.network_service
                         .clone()
                         .announce_transaction(
@@ -659,6 +654,12 @@ async fn background_task<TPlat: Platform>(
                             &worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap()
                         )
                         .await;
+                    log::debug!(
+                        target: &log_target,
+                        "NetworkService <= Announced(tx={}, peers={{{}}})",
+                        HashDisplay(&blake2_hash(worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap())),
+                        peers_sent.iter().join(", ")
+                    );
 
                     // TODO: is this correct? and what should we do if announcing the same transaction multiple times? is it cumulative? `Broadcast` isn't super well documented
                     if !peers_sent.is_empty() {
