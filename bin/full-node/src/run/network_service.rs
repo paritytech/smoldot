@@ -310,7 +310,7 @@ impl NetworkService {
                             }
                             service::Event::InboundSlotAssigned { .. } => {
                                 // TODO: log this
-                            },
+                            }
                             service::Event::IdentifyRequestIn { peer_id, request } => {
                                 tracing::debug!(%peer_id, "identify-request");
                                 request.respond("smoldot").await;
