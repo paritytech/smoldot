@@ -243,6 +243,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                     role,
                                     best_number,
                                     best_hash,
+                                    slot_ty: _,
                                 } => {
                                     log::debug!(
                                         target: "network",
@@ -263,6 +264,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                 service::Event::ChainConnectAttemptFailed {
                                     peer_id,
                                     chain_index,
+                                    unassigned_slot_ty,
                                     error,
                                 } => {
                                     log::debug!(
@@ -271,10 +273,21 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                         &network_service.log_chain_names[chain_index],
                                         peer_id, error,
                                     );
+                                    log::debug!(
+                                        target: "connections",
+                                        "{}Slots({}) ∌ {}",
+                                        match unassigned_slot_ty {
+                                            service::SlotTy::Inbound => "In",
+                                            service::SlotTy::Outbound => "Out",
+                                        },
+                                        &network_service.log_chain_names[chain_index],
+                                        peer_id
+                                    );
                                 }
                                 service::Event::ChainDisconnected {
                                     peer_id,
                                     chain_index,
+                                    unassigned_slot_ty,
                                 } => {
                                     log::debug!(
                                         target: "network",
@@ -282,10 +295,31 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                         peer_id,
                                         &network_service.log_chain_names[chain_index],
                                     );
+                                    log::debug!(
+                                        target: "connections",
+                                        "{}Slots({}) ∌ {}",
+                                        match unassigned_slot_ty {
+                                            service::SlotTy::Inbound => "In",
+                                            service::SlotTy::Outbound => "Out",
+                                        },
+                                        &network_service.log_chain_names[chain_index],
+                                        peer_id
+                                    );
                                     break Event::Disconnected {
                                         peer_id,
                                         chain_index,
                                     };
+                                }
+                                service::Event::InboundSlotAssigned {
+                                    peer_id,
+                                    chain_index,
+                                } => {
+                                    log::debug!(
+                                        target: "connections",
+                                        "InSlots({}) ∋ {}",
+                                        &network_service.log_chain_names[chain_index],
+                                        peer_id
+                                    );
                                 }
                                 service::Event::IdentifyRequestIn { peer_id, request } => {
                                     log::debug!(
@@ -557,14 +591,13 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
                         loop {
                             let peer = network_service.network.assign_slots(chain_index).await;
-                            if let Some(_peer_id) = peer {
-                                // TODO: restore and log also the de-assignments
-                                /*log::debug!(
+                            if let Some(peer_id) = peer {
+                                log::debug!(
                                     target: "connections",
-                                    "Slots({}) ∋ {}",
+                                    "OutSlots({}) ∋ {}",
                                     &network_service.log_chain_names[chain_index],
                                     peer_id
-                                );*/
+                                );
                             }
 
                             TPlat::sleep(next_round).await;

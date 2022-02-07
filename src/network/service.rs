@@ -226,6 +226,7 @@ struct EphemeralGuardedChain<TNow> {
     /// See [`ChainConfig`].
     chain_config: ChainConfig,
 
+    // TODO: merge in_peers and out_peers into one hashmap<_, SlotTy>
     /// List of peers with an inbound slot attributed to them. Only includes peers the local node
     /// is connected to and who have opened a block announces substream with the local node.
     in_peers: hashbrown::HashSet<PeerId, SipHasherBuild>,
@@ -944,6 +945,7 @@ where
             let expected_peer_id = expected_peer_id.clone(); // Necessary for borrowck reasons.
 
             for chain_index in 0..lock.chains.len() {
+                // TODO: report as event or something; this is complicated because of futures cancellation issues, and because of concerns shown in `assign_slots`
                 self.unassign_slot(&mut *lock, chain_index, &expected_peer_id)
                     .await;
             }
@@ -1259,7 +1261,7 @@ where
                         )
                         .await;
 
-                    {
+                    let slot_ty = {
                         let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
                         let local_genesis = ephemeral_guarded.chains[chain_index]
                             .chain_config
@@ -1267,14 +1269,17 @@ where
                         let remote_genesis = *remote_handshake.genesis_hash;
 
                         if remote_genesis != local_genesis {
-                            self.unassign_slot(&mut *ephemeral_guarded, chain_index, peer_id)
-                                .await;
+                            let unassigned_slot_ty = self
+                                .unassign_slot(&mut *ephemeral_guarded, chain_index, peer_id)
+                                .await
+                                .unwrap();
 
                             return match guarded.to_process_pre_event.take().unwrap() {
                                 peers::Event::NotificationsOutResult { peer_id, .. } => {
                                     Event::ChainConnectAttemptFailed {
                                         peer_id,
                                         chain_index,
+                                        unassigned_slot_ty,
                                         error: NotificationsOutErr::GenesisMismatch {
                                             local_genesis,
                                             remote_genesis,
@@ -1293,7 +1298,19 @@ where
                         {
                             entry.set_state(&now, kademlia::kbuckets::PeerState::Connected);
                         }
-                    }
+
+                        if ephemeral_guarded.chains[chain_index]
+                            .in_peers
+                            .contains(&peer_id)
+                        {
+                            SlotTy::Inbound
+                        } else {
+                            debug_assert!(ephemeral_guarded.chains[chain_index]
+                                .out_peers
+                                .contains(&peer_id));
+                            SlotTy::Outbound
+                        }
+                    };
 
                     let _was_inserted = guarded.open_chains.insert((peer_id.clone(), chain_index));
                     debug_assert!(_was_inserted);
@@ -1307,6 +1324,7 @@ where
                             Event::ChainConnected {
                                 peer_id,
                                 chain_index,
+                                slot_ty,
                                 best_hash,
                                 best_number,
                                 role,
@@ -1427,12 +1445,14 @@ where
                     let chain_index =
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
-                    self.unassign_slot(
-                        &mut *self.ephemeral_guarded.lock().await,
-                        chain_index,
-                        peer_id,
-                    )
-                    .await;
+                    let unassigned_slot_ty = self
+                        .unassign_slot(
+                            &mut *self.ephemeral_guarded.lock().await,
+                            chain_index,
+                            peer_id,
+                        )
+                        .await
+                        .unwrap();
 
                     // As a slot has been unassigned, wake up the discovery process in order for
                     // it to be filled.
@@ -1449,6 +1469,7 @@ where
                             return Event::ChainConnectAttemptFailed {
                                 peer_id,
                                 chain_index,
+                                unassigned_slot_ty,
                                 error: NotificationsOutErr::Substream(error),
                             };
                         }
@@ -1489,20 +1510,23 @@ where
                         )
                         .await;
 
-                    self.unassign_slot(
-                        &mut *self.ephemeral_guarded.lock().await,
-                        chain_index,
-                        peer_id,
-                    )
-                    .await;
-
                     // The chain is now considered as closed.
                     let was_open = guarded.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
 
                     if was_open {
                         // Update the k-buckets, marking the peer as disconnected.
-                        {
+                        let unassigned_slot_ty = {
                             let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
+
+                            let unassigned_slot_ty = self
+                                .unassign_slot(
+                                    &mut *self.ephemeral_guarded.lock().await,
+                                    chain_index,
+                                    peer_id,
+                                )
+                                .await
+                                .unwrap();
+
                             if let Some(mut entry) = ephemeral_guarded.chains[chain_index]
                                 .kbuckets
                                 .entry(peer_id)
@@ -1510,7 +1534,9 @@ where
                             {
                                 entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
                             }
-                        }
+
+                            unassigned_slot_ty
+                        };
 
                         // As a slot has been unassigned, wake up the discovery process in order for
                         // it to be filled.
@@ -1524,6 +1550,7 @@ where
                                 peers::Event::NotificationsOutClose { peer_id, .. } => peer_id,
                                 _ => unreachable!(),
                             },
+                            unassigned_slot_ty,
                         };
                     } else {
                         guarded.to_process_pre_event = None;
@@ -1781,9 +1808,19 @@ where
                             .in_peers
                             .insert(peer_id.clone());
                         debug_assert!(_was_inserted);
-                    }
 
-                    guarded.to_process_pre_event = None;
+                        return match guarded.to_process_pre_event.take().unwrap() {
+                            peers::Event::DesiredInNotification { peer_id, .. } => {
+                                Event::InboundSlotAssigned {
+                                    chain_index,
+                                    peer_id,
+                                }
+                            }
+                            _ => unreachable!(),
+                        };
+                    } else {
+                        guarded.to_process_pre_event = None;
+                    }
                 }
 
                 // Remote wants to open a transactions substream.
@@ -2054,7 +2091,10 @@ where
     ///
     ///
     /// Returns the [`PeerId`] that now has an outbound slot. This information can be used for
-    /// logging purposes.
+    /// logging purposes. Keep in mind, however, that [`ChainNetwork::next_event`] might unassign
+    /// slots only for them to be immediately assigned again in this function. If you naively
+    /// log the value returned by this function and the value returned by `next_event`, you might
+    /// see the slot assignments and de-assignments in the wrong order.
     // TODO: docs
     // TODO: when to call this?
     pub async fn assign_slots(&self, chain_index: usize) -> Option<PeerId> {
@@ -2077,18 +2117,11 @@ where
             }
 
             // Don't assign slots to peers that already have a slot.
-            if chain.out_peers.contains(peer_id) {
+            if chain.out_peers.contains(peer_id) || chain.in_peers.contains(peer_id) {
                 continue;
             }
 
             // It is now guaranteed that this peer will be assigned an outbound slot.
-
-            // It is possible that this peer already has an inbound slot, in which case we turn
-            // the inbound slot into an outbound slot.
-            if chain.in_peers.remove(peer_id) {
-                chain.out_peers.insert(peer_id.clone());
-                return Some(peer_id.clone());
-            }
 
             // The peer is marked as desired before inserting it in `out_peers`, to handle
             // potential future cancellation issues.
@@ -2114,7 +2147,7 @@ where
         ephemeral_guarded: &mut EphemeralGuarded<TNow>,
         chain_index: usize,
         peer_id: &PeerId,
-    ) {
+    ) -> Option<SlotTy> {
         self.inner
             .set_peer_notifications_out_desired(
                 peer_id,
@@ -2123,13 +2156,21 @@ where
             )
             .await;
 
-        let _was_in_out = ephemeral_guarded.chains[chain_index]
+        let was_in_out = ephemeral_guarded.chains[chain_index]
             .out_peers
             .remove(peer_id);
-        let _was_in_in = ephemeral_guarded.chains[chain_index]
+        let was_in_in = ephemeral_guarded.chains[chain_index]
             .in_peers
             .remove(peer_id);
-        debug_assert!(!_was_in_out || !_was_in_in);
+
+        match (was_in_in, was_in_out) {
+            (true, false) => Some(SlotTy::Inbound),
+            (false, true) => Some(SlotTy::Outbound),
+            (false, false) => None,
+            (true, true) => {
+                unreachable!()
+            }
+        }
     }
 }
 
@@ -2170,6 +2211,8 @@ pub enum Event<'a, TNow> {
     ChainConnected {
         chain_index: usize,
         peer_id: peer_id::PeerId,
+        /// Type of the slot that the peer has.
+        slot_ty: SlotTy,
         /// Role the node reports playing on the network.
         role: protocol::Role,
         /// Height of the best block according to this node.
@@ -2180,6 +2223,8 @@ pub enum Event<'a, TNow> {
     ChainDisconnected {
         peer_id: peer_id::PeerId,
         chain_index: usize,
+        /// Type of the slot that the peer had and no longer has.
+        unassigned_slot_ty: SlotTy,
     },
 
     /// An attempt has been made to open the given chain, but a problem happened.
@@ -2188,6 +2233,18 @@ pub enum Event<'a, TNow> {
         peer_id: peer_id::PeerId,
         /// Problem that happened.
         error: NotificationsOutErr,
+        /// Type of the slot that the peer had and no longer has.
+        unassigned_slot_ty: SlotTy,
+    },
+
+    /// The given peer has opened a block announces substream with the local node, and an inbound
+    /// slot has been assigned locally to this peer.
+    ///
+    /// A [`Event::ChainConnected`] or [`Event::ChainConnectAttemptFailed`] will later be
+    /// generated for this peer.
+    InboundSlotAssigned {
+        chain_index: usize,
+        peer_id: peer_id::PeerId,
     },
 
     /// Received a new block announce from a peer.
@@ -2247,6 +2304,12 @@ pub enum Event<'a, TNow> {
         peer_id: peer_id::PeerId,
         transactions: EncodedTransactions,
     }*/
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SlotTy {
+    Inbound,
+    Outbound,
 }
 
 /// Error that can happen when trying to open an outbound notifications substream.
