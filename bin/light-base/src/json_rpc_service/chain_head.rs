@@ -24,7 +24,7 @@ use crate::{runtime_service, sync_service};
 use futures::prelude::*;
 use smoldot::{
     chain::fork_tree,
-    executor::{self, read_only_runtime_host},
+    executor::{self, read_only_runtime_host, runtime_host},
     header,
     json_rpc::{self, methods, requests_subscriptions},
     network::protocol,
@@ -180,10 +180,13 @@ impl<TPlat: Platform> Background<TPlat> {
 
                 let final_notif = match pre_runtime_call {
                     Some(Ok((runtime_call_lock, virtual_machine))) => {
-                        match read_only_runtime_host::run(read_only_runtime_host::Config {
+                        match runtime_host::run(runtime_host::Config {
                             virtual_machine,
                             function_to_call: &function_to_call,
                             parameter: iter::once(&call_parameters.0),
+                            top_trie_root_calculation_cache: None,
+                            offchain_storage_changes: Default::default(),
+                            storage_top_trie_changes: Default::default(),
                         }) {
                             Err((error, prototype)) => {
                                 runtime_call_lock.unlock(prototype);
@@ -198,9 +201,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             Ok(mut runtime_call) => {
                                 loop {
                                     match runtime_call {
-                                        read_only_runtime_host::RuntimeHostVm::Finished(Ok(
-                                            success,
-                                        )) => {
+                                        runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
                                             let output =
                                                 success.virtual_machine.value().as_ref().to_owned();
                                             runtime_call_lock
@@ -213,9 +214,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                                 }
                                                 .to_json_call_object_parameters(None);
                                         }
-                                        read_only_runtime_host::RuntimeHostVm::Finished(Err(
-                                            error,
-                                        )) => {
+                                        runtime_host::RuntimeHostVm::Finished(Err(error)) => {
                                             runtime_call_lock.unlock(error.prototype);
                                             break methods::ServerToClient::chainHead_unstable_callEvent {
                                                     subscription: &subscription_id,
@@ -225,7 +224,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                                 }
                                                 .to_json_call_object_parameters(None);
                                         }
-                                        read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
+                                        runtime_host::RuntimeHostVm::StorageGet(get) => {
                                             // TODO: what if the remote lied to us?
                                             let storage_value = match runtime_call_lock
                                                 .storage_entry(&get.key_as_vec())
@@ -233,11 +232,11 @@ impl<TPlat: Platform> Background<TPlat> {
                                                 Ok(v) => v,
                                                 Err(error) => {
                                                     runtime_call_lock.unlock(
-                                                            read_only_runtime_host::RuntimeHostVm::StorageGet(
-                                                                get,
-                                                            )
-                                                            .into_prototype(),
-                                                        );
+                                                        runtime_host::RuntimeHostVm::StorageGet(
+                                                            get,
+                                                        )
+                                                        .into_prototype(),
+                                                    );
                                                     break methods::ServerToClient::chainHead_unstable_callEvent {
                                                             subscription: &subscription_id,
                                                             result: methods::ChainHeadCallEvent::Inaccessible {
@@ -250,10 +249,10 @@ impl<TPlat: Platform> Background<TPlat> {
                                             runtime_call =
                                                 get.inject_value(storage_value.map(iter::once));
                                         }
-                                        read_only_runtime_host::RuntimeHostVm::NextKey(nk) => {
+                                        runtime_host::RuntimeHostVm::NextKey(nk) => {
                                             // TODO: implement somehow
                                             runtime_call_lock.unlock(
-                                                read_only_runtime_host::RuntimeHostVm::NextKey(nk)
+                                                runtime_host::RuntimeHostVm::NextKey(nk)
                                                     .into_prototype(),
                                             );
                                             break methods::ServerToClient::chainHead_unstable_callEvent {
@@ -264,11 +263,19 @@ impl<TPlat: Platform> Background<TPlat> {
                                                 }
                                                 .to_json_call_object_parameters(None);
                                         }
-                                        read_only_runtime_host::RuntimeHostVm::StorageRoot(
-                                            storage_root,
-                                        ) => {
-                                            runtime_call = storage_root
-                                                .resume(runtime_call_lock.block_storage_root());
+                                        runtime_host::RuntimeHostVm::PrefixKeys(nk) => {
+                                            // TODO: implement somehow
+                                            runtime_call_lock.unlock(
+                                                runtime_host::RuntimeHostVm::PrefixKeys(nk)
+                                                    .into_prototype(),
+                                            );
+                                            break methods::ServerToClient::chainHead_unstable_callEvent {
+                                                    subscription: &subscription_id,
+                                                    result: methods::ChainHeadCallEvent::Inaccessible {
+                                                        error: &"getting prefix keys not implemented",
+                                                    },
+                                                }
+                                                .to_json_call_object_parameters(None);
                                         }
                                     }
                                 }
