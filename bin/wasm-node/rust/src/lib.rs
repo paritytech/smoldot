@@ -37,8 +37,8 @@ mod platform;
 mod timers;
 
 /// Uses the environment to invoke `closure` after at least `duration` has elapsed.
-fn start_timer_wrap(duration: Duration, closure: impl FnOnce()) {
-    let callback: Box<Box<dyn FnOnce()>> = Box::new(Box::new(closure));
+fn start_timer_wrap(duration: Duration, closure: impl FnOnce() + 'static) {
+    let callback: Box<Box<dyn FnOnce() + 'static>> = Box::new(Box::new(closure));
     let timer_id = u32::try_from(Box::into_raw(callback) as usize).unwrap();
     // Note that ideally `duration` should be rounded up in order to make sure that it is not
     // truncated, but the precision of an `f64` is so high and the precision of the operating
