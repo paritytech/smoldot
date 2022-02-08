@@ -244,6 +244,10 @@ fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static) {
 
     impl task::Wake for Waker {
         fn wake(self: Arc<Self>) {
+            task::Wake::wake_by_ref(&self)
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
             if !self.allow_schedule.swap(false, atomic::Ordering::AcqRel) {
                 return;
             }
@@ -276,5 +280,5 @@ fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static) {
         future: Mutex::new((Box::pin(future), false)),
     });
 
-    task::Wake::wake(waker);
+    task::Wake::wake_by_ref(&waker);
 }
