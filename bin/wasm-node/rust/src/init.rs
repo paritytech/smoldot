@@ -262,6 +262,9 @@ fn spawn_background_task(future: impl Future<Output = ()> + Send + 'static) {
 
                 self.allow_schedule.store(true, atomic::Ordering::Release);
 
+                // Note that we need to do `self.clone()` below no matter what because `self` is
+                // still borrowed. For this reason, implementing `wake()` instead of
+                // `wake_by_ref()` doesn't bring any benefit.
                 match Future::poll(
                     future.0.as_mut(),
                     &mut Context::from_waker(&task::Waker::from(self.clone())),
