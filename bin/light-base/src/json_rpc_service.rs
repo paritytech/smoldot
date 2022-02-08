@@ -19,18 +19,18 @@
 //!
 //! # Usage
 //!
-//! Create a new JSON-RPC service using [`JsonRpcService::new`]. Creating a JSON-RPC service
-//! spawns a background task (through [`Config::tasks_executor`]) dedicated to processing JSON-RPC
-//! requests.
+//! Create a new JSON-RPC service by calling [`service`] then [`ServicePrototype::start`].
+//! Creating a JSON-RPC service spawns a background task (through [`StartConfig::tasks_executor`])
+//! dedicated to processing JSON-RPC requests.
 //!
-//! In order to process a JSON-RPC request, call [`JsonRpcService::queue_rpc_request`]. Later, the
+//! In order to process a JSON-RPC request, call [`Sender::queue_rpc_request`]. Later, the
 //! JSON-RPC service can queue a response or, in the case of subscriptions, a notification on the
-//! channel passed through [`Config::responses_sender`].
+//! channel passed through [`StartConfig::responses_sender`].
 //!
 //! In the situation where an attacker finds a JSON-RPC request that takes a long time to be
 //! processed and continuously submits this same expensive request over and over again, the queue
 //! of pending requests will start growing and use more and more memory. For this reason, if this
-//! queue grows past [`Config::max_pending_requests`] items, [`JsonRpcService::queue_rpc_request`]
+//! queue grows past [`Config::max_pending_requests`] items, [`Sender::queue_rpc_request`]
 //! will instead return an error.
 //!
 
@@ -134,14 +134,14 @@ pub struct Sender {
     /// Shared with the [`Background`].
     requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions>,
 
-    /// Identifier of the unique client within the [`JsonRpcService::requests_subscriptions`].
+    /// Identifier of the unique client within the [`Sender::requests_subscriptions`].
     client_id: requests_subscriptions::ClientId,
 
     /// Target to use when emitting logs.
     log_target: String,
 
     /// Handle to abort the background task that holds and processes the
-    /// [`JsonRpcService::requests_subscriptions`].
+    /// [`Sender::requests_subscriptions`].
     background_abort: future::AbortHandle,
 }
 
@@ -149,9 +149,9 @@ impl Sender {
     /// Queues the given JSON-RPC request to be processed in the background.
     ///
     /// An error is returned if [`Config::max_pending_requests`] is exceeded, which can happen
-    /// if the requests take a long time to process or if the [`Config::responses_sender`] channel
-    /// isn't polled often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
-    /// JSON-RPC response to immediately send back to the user.
+    /// if the requests take a long time to process or if the [`StartConfig::responses_sender`]
+    /// channel isn't polled often enough. Use [`HandleRpcError::into_json_rpc_error`] to build
+    /// the JSON-RPC response to immediately send back to the user.
     pub fn queue_rpc_request(&mut self, json_rpc_request: String) -> Result<(), HandleRpcError> {
         // If the request isn't even a valid JSON-RPC request, we can't even send back a response.
         // We have no choice but to immediately refuse the request.
@@ -208,7 +208,7 @@ pub struct ServicePrototype {
     /// Shared with the [`Background`].
     requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions>,
 
-    /// Identifier of the unique client within the [`JsonRpcService::requests_subscriptions`].
+    /// Identifier of the unique client within the [`ServicePrototype::requests_subscriptions`].
     client_id: requests_subscriptions::ClientId,
 
     /// Target to use when emitting logs.
@@ -258,18 +258,19 @@ pub struct StartConfig<'a, TPlat: Platform> {
     /// Hash of the genesis block of the chain.
     ///
     /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
-    /// >           [`JsonRpcService::new`] function could in theory use the [`Config::chain_spec`]
-    /// >           parameter to derive this value, doing so is quite expensive. We prefer to
-    /// >           require this value from the upper layer instead, as it is most likely needed
-    /// >           anyway.
+    /// >           [`ServicePrototype::start`] function could in theory use the
+    /// >           [`StartConfig::chain_spec`] parameter to derive this value, doing so is quite
+    /// >           expensive. We prefer to require this value from the upper layer instead, as
+    /// >           it is most likely needed anyway.
     pub genesis_block_hash: [u8; 32],
 
     /// Hash of the storage trie root of the genesis block of the chain.
     ///
     /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
-    /// >           [`JsonRpcService::new`] function could in theory use the [`Config::chain_spec`]
-    /// >           parameter to derive this value, doing so is quite expensive. We prefer to
-    /// >           require this value from the upper layer instead.
+    /// >           [`ServicePrototype::start`] function could in theory use the
+    /// >           [`StartConfig::chain_spec`] parameter to derive this value, doing so is quite
+    /// >           expensive. We prefer to require this value from the upper layer instead, as
+    /// >           it is most likely needed anyway.
     pub genesis_block_state_root: [u8; 32],
 
     /// Maximum number of JSON-RPC requests that can be processed simultaneously.
@@ -340,7 +341,7 @@ impl ServicePrototype {
     }
 }
 
-/// Error potentially returned by [`JsonRpcService::queue_rpc_request`].
+/// Error potentially returned by [`Sender::queue_rpc_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum HandleRpcError {
     /// The JSON-RPC service cannot process this request, as it is already too busy.
@@ -348,7 +349,7 @@ pub enum HandleRpcError {
         fmt = "The JSON-RPC service cannot process this request, as it is already too busy."
     )]
     Overloaded {
-        /// Value that was passed as parameter to [`JsonRpcService::queue_rpc_request`].
+        /// Value that was passed as parameter to [`Sender::queue_rpc_request`].
         json_rpc_request: String,
     },
     /// The request isn't a valid JSON-RPC request.
@@ -406,7 +407,7 @@ struct Background<TPlat: Platform> {
     chain_properties_json: String,
     /// Whether the chain is a live network. Found in the chain specification.
     chain_is_live: bool,
-    /// See [`Config::peer_id`]. The only use for this field is to send the base58 encoding of
+    /// See [`StartConfig::peer_id`]. The only use for this field is to send the base58 encoding of
     /// the [`PeerId`]. Consequently, we store the conversion to base58 ahead of time.
     peer_id_base58: String,
     /// Value to return when the `system_name` RPC is called.
@@ -414,13 +415,13 @@ struct Background<TPlat: Platform> {
     /// Value to return when the `system_version` RPC is called.
     system_version: String,
 
-    /// See [`Config::network_service`].
+    /// See [`StartConfig::network_service`].
     network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
-    /// See [`Config::sync_service`].
+    /// See [`StartConfig::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
-    /// See [`Config::runtime_service`].
+    /// See [`StartConfig::runtime_service`].
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
-    /// See [`Config::transactions_service`].
+    /// See [`StartConfig::transactions_service`].
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
     /// Various information caches about blocks, to potentially reduce the number of network
