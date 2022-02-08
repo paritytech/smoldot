@@ -884,15 +884,11 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
         json_rpc_request: String,
         chain_id: ChainId,
     ) -> Result<(), HandleRpcError> {
-        let (mut json_rpc_service, _) = match self.public_api_chains.get_mut(chain_id.0) {
+        let mut json_rpc_service = match self.public_api_chains.get_mut(chain_id.0) {
             Some(PublicApiChain::Ok {
                 json_rpc_service: Some(json_rpc_service),
-                key,
                 ..
-            }) => {
-                let log_name = &self.chains_by_key.get(key).unwrap().log_name;
-                (json_rpc_service, format!("json-rpc-{}", log_name))
-            }
+            }) => json_rpc_service,
             _ => panic!(),
         };
 
