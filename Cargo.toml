@@ -74,7 +74,7 @@ ruzstd = { version = "0.2.4" }  # TODO: doesn't support no_std :-/
 schnorrkel = { version = "0.10.2", default-features = false, features = ["preaudit_deprecated", "u64_backend"] }
 serde = { version = "1.0.136", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.72", default-features = false, features = ["alloc", "raw_value"] }
-sha2 = { version = "0.10.0", default-features = false }
+sha2 = { version = "0.10.1", default-features = false }
 siphasher = { version = "0.3.7", default-features = false }
 slab = { version = "0.4.5", default-features = false }
 smallvec = "1.7.0"

@@ -34,7 +34,7 @@ use std::collections::BinaryHeap;
 
 pub(crate) fn timer_finished(timer_id: u32) {
     let callback = {
-        let ptr = timer_id as *mut Box<dyn FnOnce()>;
+        let ptr = timer_id as *mut Box<dyn FnOnce() + 'static>;
         unsafe { Box::from_raw(ptr) }
     };
 
