@@ -745,7 +745,6 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                 .unwrap();
 
             Some(sender)
-
         } else {
             None
         };
