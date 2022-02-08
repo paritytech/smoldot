@@ -19,18 +19,18 @@
 //!
 //! # Usage
 //!
-//! Create a new JSON-RPC service using [`JsonRpcService::new`]. Creating a JSON-RPC service
-//! spawns a background task (through [`Config::tasks_executor`]) dedicated to processing JSON-RPC
-//! requests.
+//! Create a new JSON-RPC service by calling [`service`] then [`ServicePrototype::start`].
+//! Creating a JSON-RPC service spawns a background task (through [`StartConfig::tasks_executor`])
+//! dedicated to processing JSON-RPC requests.
 //!
-//! In order to process a JSON-RPC request, call [`JsonRpcService::queue_rpc_request`]. Later, the
+//! In order to process a JSON-RPC request, call [`Sender::queue_rpc_request`]. Later, the
 //! JSON-RPC service can queue a response or, in the case of subscriptions, a notification on the
-//! channel passed through [`Config::responses_sender`].
+//! channel passed through [`StartConfig::responses_sender`].
 //!
 //! In the situation where an attacker finds a JSON-RPC request that takes a long time to be
 //! processed and continuously submits this same expensive request over and over again, the queue
 //! of pending requests will start growing and use more and more memory. For this reason, if this
-//! queue grows past [`Config::max_pending_requests`] items, [`JsonRpcService::queue_rpc_request`]
+//! queue grows past [`Config::max_pending_requests`] items, [`Sender::queue_rpc_request`]
 //! will instead return an error.
 //!
 
@@ -57,76 +57,19 @@ use smoldot::{
 use std::{
     collections::HashMap,
     iter,
-    marker::PhantomData,
     num::NonZeroU32,
     str,
     sync::{atomic, Arc},
     time::Duration,
 };
 
-/// Configuration for a JSON-RPC service.
-pub struct Config<'a, TPlat: Platform> {
+/// Configuration for [`service`].
+pub struct Config {
     /// Name of the chain, for logging purposes.
     ///
     /// > **Note**: This name will be directly printed out. Any special character should already
     /// >           have been filtered out from this name.
     pub log_name: String,
-
-    /// Channel to send the responses to.
-    pub responses_sender: mpsc::Sender<String>,
-
-    /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
-
-    /// Access to the network, and index of the chain to sync from the point of view of the
-    /// network service.
-    pub network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
-
-    /// Service responsible for synchronizing the chain.
-    pub sync_service: Arc<sync_service::SyncService<TPlat>>,
-
-    /// Service responsible for emitting transactions and tracking their state.
-    pub transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
-
-    /// Service that provides a ready-to-be-called runtime for the current best block.
-    pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
-
-    /// Specification of the chain.
-    pub chain_spec: &'a chain_spec::ChainSpec,
-
-    /// Network identity of the node.
-    pub peer_id: &'a PeerId,
-
-    /// Value to return when the `system_name` RPC is called. Should be set to the name of the
-    /// final executable.
-    pub system_name: String,
-
-    /// Value to return when the `system_version` RPC is called. Should be set to the version of
-    /// the final executable.
-    pub system_version: String,
-
-    /// Hash of the genesis block of the chain.
-    ///
-    /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
-    /// >           [`JsonRpcService::new`] function could in theory use the [`Config::chain_spec`]
-    /// >           parameter to derive this value, doing so is quite expensive. We prefer to
-    /// >           require this value from the upper layer instead, as it is most likely needed
-    /// >           anyway.
-    pub genesis_block_hash: [u8; 32],
-
-    /// Hash of the storage trie root of the genesis block of the chain.
-    ///
-    /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
-    /// >           [`JsonRpcService::new`] function could in theory use the [`Config::chain_spec`]
-    /// >           parameter to derive this value, doing so is quite expensive. We prefer to
-    /// >           require this value from the upper layer instead.
-    pub genesis_block_state_root: [u8; 32],
-
-    /// Maximum number of JSON-RPC requests that can be processed simultaneously.
-    ///
-    /// This parameter is necessary in order to prevent users from using up too much memory within
-    /// the client.
-    pub max_parallel_requests: NonZeroU32,
 
     /// Maximum number of JSON-RPC requests that can be added to a queue if it is not ready to be
     /// processed immediately. Any additional request will be immediately rejected.
@@ -143,113 +86,72 @@ pub struct Config<'a, TPlat: Platform> {
     pub max_subscriptions: u32,
 }
 
-pub struct JsonRpcService<TPlat: Platform> {
+/// Creates a new JSON-RPC service with the given configuration.
+///
+/// Returns a handler that allows sending requests, and a [`ServicePrototype`] that must later
+/// be initialized using [`ServicePrototype::start`].
+///
+/// Destroying the [`Sender`] automatically shuts down the service.
+pub fn service(config: Config) -> (Sender, ServicePrototype) {
+    let mut requests_subscriptions =
+        requests_subscriptions::RequestsSubscriptions::new(requests_subscriptions::Config {
+            max_clients: 1,
+            max_requests_per_client: config.max_pending_requests,
+            max_subscriptions_per_client: config.max_subscriptions,
+        });
+
+    let client_id = requests_subscriptions.add_client_mut().unwrap(); // Adding a client can fail only if the limit is reached.
+    let requests_subscriptions = Arc::new(requests_subscriptions);
+
+    let log_target = format!("json-rpc-{}", config.log_name);
+
+    let (background_abort, background_abort_registration) = future::AbortHandle::new_pair();
+
+    let sender = Sender {
+        log_target: log_target.clone(),
+        requests_subscriptions: requests_subscriptions.clone(),
+        client_id: client_id.clone(),
+        background_abort,
+    };
+
+    let prototype = ServicePrototype {
+        background_abort_registration,
+        log_target,
+        requests_subscriptions,
+        client_id,
+        max_subscriptions: config.max_subscriptions,
+    };
+
+    (sender, prototype)
+}
+
+/// Handle that allows sending JSON-RPC requests on the service.
+///
+/// Destroying this [`Sender`] automatically shuts down the associated service.
+pub struct Sender {
     /// State machine holding all the clients, requests, and subscriptions.
     ///
     /// Shared with the [`Background`].
     requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions>,
 
-    /// Identifier of the unique client within the [`JsonRpcService::requests_subscriptions`].
+    /// Identifier of the unique client within the [`Sender::requests_subscriptions`].
     client_id: requests_subscriptions::ClientId,
 
     /// Target to use when emitting logs.
     log_target: String,
 
     /// Handle to abort the background task that holds and processes the
-    /// [`JsonRpcService::requests_subscriptions`].
+    /// [`Sender::requests_subscriptions`].
     background_abort: future::AbortHandle,
-
-    /// Pins the `TPlat` generic.
-    platform: PhantomData<fn() -> TPlat>,
 }
 
-impl<TPlat: Platform> JsonRpcService<TPlat> {
-    /// Creates a new JSON-RPC service with the given configuration.
-    pub fn new(mut config: Config<'_, TPlat>) -> JsonRpcService<TPlat> {
-        let mut requests_subscriptions =
-            requests_subscriptions::RequestsSubscriptions::new(requests_subscriptions::Config {
-                max_clients: 1,
-                max_requests_per_client: config.max_pending_requests,
-                max_subscriptions_per_client: config.max_subscriptions,
-            });
-
-        let client_id = requests_subscriptions.add_client_mut().unwrap(); // Adding a client can fail only if the limit is reached.
-        let requests_subscriptions = Arc::new(requests_subscriptions);
-
-        let log_target = format!("json-rpc-{}", config.log_name);
-
-        // Channel used in the background in order to spawn new tasks scoped to the background.
-        let (new_child_tasks_tx, new_child_tasks_rx) = mpsc::unbounded();
-
-        let background = Arc::new(Background {
-            log_target: log_target.clone(),
-            requests_subscriptions: requests_subscriptions.clone(),
-            client_id: client_id.clone(),
-            new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
-            chain_name: config.chain_spec.name().to_owned(),
-            chain_ty: config.chain_spec.chain_type().to_owned(),
-            chain_is_live: config.chain_spec.has_live_network(),
-            chain_properties_json: config.chain_spec.properties().to_owned(),
-            peer_id_base58: config.peer_id.to_base58(),
-            system_name: config.system_name,
-            system_version: config.system_version,
-            network_service: config.network_service,
-            sync_service: config.sync_service,
-            runtime_service: config.runtime_service,
-            transactions_service: config.transactions_service,
-            cache: Mutex::new(Cache {
-                recent_pinned_blocks: lru::LruCache::with_hasher(32, Default::default()),
-                subscription_id: None,
-                block_state_root_hashes_numbers: lru::LruCache::with_hasher(32, Default::default()),
-            }),
-            genesis_block: config.genesis_block_hash,
-            next_subscription_id: atomic::AtomicU64::new(0),
-            subscriptions: Mutex::new(Subscriptions {
-                misc: HashMap::with_capacity_and_hasher(
-                    usize::try_from(config.max_subscriptions).unwrap_or(usize::max_value()),
-                    Default::default(),
-                ),
-                chain_head_follow: HashMap::with_capacity_and_hasher(
-                    usize::try_from(config.max_subscriptions).unwrap_or(usize::max_value()),
-                    Default::default(),
-                ),
-            }),
-        });
-
-        // Spawns the background task that actually runs the logic of that JSON-RPC service.
-        // This background task is abortable through the `background_abort` handle.
-        let (background_abort, background_abort_registration) = future::AbortHandle::new_pair();
-        (config.tasks_executor)(log_target.clone(), {
-            let max_parallel_requests = config.max_parallel_requests;
-            let responses_sender = config.responses_sender;
-
-            future::Abortable::new(
-                async move {
-                    background
-                        .run(new_child_tasks_rx, max_parallel_requests, responses_sender)
-                        .await
-                },
-                background_abort_registration,
-            )
-            .map(|_| ())
-            .boxed()
-        });
-
-        JsonRpcService {
-            log_target,
-            requests_subscriptions,
-            client_id,
-            background_abort,
-            platform: PhantomData,
-        }
-    }
-
+impl Sender {
     /// Queues the given JSON-RPC request to be processed in the background.
     ///
     /// An error is returned if [`Config::max_pending_requests`] is exceeded, which can happen
-    /// if the requests take a long time to process or if the [`Config::responses_sender`] channel
-    /// isn't polled often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
-    /// JSON-RPC response to immediately send back to the user.
+    /// if the requests take a long time to process or if the [`StartConfig::responses_sender`]
+    /// channel isn't polled often enough. Use [`HandleRpcError::into_json_rpc_error`] to build
+    /// the JSON-RPC response to immediately send back to the user.
     pub fn queue_rpc_request(&mut self, json_rpc_request: String) -> Result<(), HandleRpcError> {
         // If the request isn't even a valid JSON-RPC request, we can't even send back a response.
         // We have no choice but to immediately refuse the request.
@@ -293,13 +195,153 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
     }
 }
 
-impl<TPlat: Platform> Drop for JsonRpcService<TPlat> {
+impl Drop for Sender {
     fn drop(&mut self) {
         self.background_abort.abort();
     }
 }
 
-/// Error potentially returned by [`JsonRpcService::queue_rpc_request`].
+/// Prototype for a JSON-RPC service. Must be initialized using [`ServicePrototype::start`].
+pub struct ServicePrototype {
+    /// State machine holding all the clients, requests, and subscriptions.
+    ///
+    /// Shared with the [`Background`].
+    requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions>,
+
+    /// Identifier of the unique client within the [`ServicePrototype::requests_subscriptions`].
+    client_id: requests_subscriptions::ClientId,
+
+    /// Target to use when emitting logs.
+    log_target: String,
+
+    background_abort_registration: future::AbortRegistration,
+
+    /// Same as [`Config::max_subscriptions`].
+    max_subscriptions: u32,
+}
+
+/// Configuration for a JSON-RPC service.
+pub struct StartConfig<'a, TPlat: Platform> {
+    /// Channel to send the responses to.
+    pub responses_sender: mpsc::Sender<String>,
+
+    /// Closure that spawns background tasks.
+    pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
+
+    /// Access to the network, and index of the chain to sync from the point of view of the
+    /// network service.
+    pub network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
+
+    /// Service responsible for synchronizing the chain.
+    pub sync_service: Arc<sync_service::SyncService<TPlat>>,
+
+    /// Service responsible for emitting transactions and tracking their state.
+    pub transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
+
+    /// Service that provides a ready-to-be-called runtime for the current best block.
+    pub runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
+
+    /// Specification of the chain.
+    pub chain_spec: &'a chain_spec::ChainSpec,
+
+    /// Network identity of the node.
+    pub peer_id: &'a PeerId,
+
+    /// Value to return when the `system_name` RPC is called. Should be set to the name of the
+    /// final executable.
+    pub system_name: String,
+
+    /// Value to return when the `system_version` RPC is called. Should be set to the version of
+    /// the final executable.
+    pub system_version: String,
+
+    /// Hash of the genesis block of the chain.
+    ///
+    /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
+    /// >           [`ServicePrototype::start`] function could in theory use the
+    /// >           [`StartConfig::chain_spec`] parameter to derive this value, doing so is quite
+    /// >           expensive. We prefer to require this value from the upper layer instead, as
+    /// >           it is most likely needed anyway.
+    pub genesis_block_hash: [u8; 32],
+
+    /// Hash of the storage trie root of the genesis block of the chain.
+    ///
+    /// > **Note**: This can be derived from a [`chain_spec::ChainSpec`]. While the
+    /// >           [`ServicePrototype::start`] function could in theory use the
+    /// >           [`StartConfig::chain_spec`] parameter to derive this value, doing so is quite
+    /// >           expensive. We prefer to require this value from the upper layer instead, as
+    /// >           it is most likely needed anyway.
+    pub genesis_block_state_root: [u8; 32],
+
+    /// Maximum number of JSON-RPC requests that can be processed simultaneously.
+    ///
+    /// This parameter is necessary in order to prevent users from using up too much memory within
+    /// the client.
+    pub max_parallel_requests: NonZeroU32,
+}
+
+impl ServicePrototype {
+    /// Consumes this prototype and starts the service through [`StartConfig::tasks_executor`].
+    pub fn start<TPlat: Platform>(self, mut config: StartConfig<'_, TPlat>) {
+        // Channel used in the background in order to spawn new tasks scoped to the background.
+        let (new_child_tasks_tx, new_child_tasks_rx) = mpsc::unbounded();
+
+        let background = Arc::new(Background {
+            log_target: self.log_target.clone(),
+            requests_subscriptions: self.requests_subscriptions,
+            client_id: self.client_id,
+            new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
+            chain_name: config.chain_spec.name().to_owned(),
+            chain_ty: config.chain_spec.chain_type().to_owned(),
+            chain_is_live: config.chain_spec.has_live_network(),
+            chain_properties_json: config.chain_spec.properties().to_owned(),
+            peer_id_base58: config.peer_id.to_base58(),
+            system_name: config.system_name,
+            system_version: config.system_version,
+            network_service: config.network_service,
+            sync_service: config.sync_service,
+            runtime_service: config.runtime_service,
+            transactions_service: config.transactions_service,
+            cache: Mutex::new(Cache {
+                recent_pinned_blocks: lru::LruCache::with_hasher(32, Default::default()),
+                subscription_id: None,
+                block_state_root_hashes_numbers: lru::LruCache::with_hasher(32, Default::default()),
+            }),
+            genesis_block: config.genesis_block_hash,
+            next_subscription_id: atomic::AtomicU64::new(0),
+            subscriptions: Mutex::new(Subscriptions {
+                misc: HashMap::with_capacity_and_hasher(
+                    usize::try_from(self.max_subscriptions).unwrap_or(usize::max_value()),
+                    Default::default(),
+                ),
+                chain_head_follow: HashMap::with_capacity_and_hasher(
+                    usize::try_from(self.max_subscriptions).unwrap_or(usize::max_value()),
+                    Default::default(),
+                ),
+            }),
+        });
+
+        // Spawns the background task that actually runs the logic of that JSON-RPC service.
+        // This background task is abortable through the `background_abort` handle.
+        (config.tasks_executor)(self.log_target, {
+            let max_parallel_requests = config.max_parallel_requests;
+            let responses_sender = config.responses_sender;
+
+            future::Abortable::new(
+                async move {
+                    background
+                        .run(new_child_tasks_rx, max_parallel_requests, responses_sender)
+                        .await
+                },
+                self.background_abort_registration,
+            )
+            .map(|_| ())
+            .boxed()
+        });
+    }
+}
+
+/// Error potentially returned by [`Sender::queue_rpc_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum HandleRpcError {
     /// The JSON-RPC service cannot process this request, as it is already too busy.
@@ -307,7 +349,7 @@ pub enum HandleRpcError {
         fmt = "The JSON-RPC service cannot process this request, as it is already too busy."
     )]
     Overloaded {
-        /// Value that was passed as parameter to [`JsonRpcService::queue_rpc_request`].
+        /// Value that was passed as parameter to [`Sender::queue_rpc_request`].
         json_rpc_request: String,
     },
     /// The request isn't a valid JSON-RPC request.
@@ -365,7 +407,7 @@ struct Background<TPlat: Platform> {
     chain_properties_json: String,
     /// Whether the chain is a live network. Found in the chain specification.
     chain_is_live: bool,
-    /// See [`Config::peer_id`]. The only use for this field is to send the base58 encoding of
+    /// See [`StartConfig::peer_id`]. The only use for this field is to send the base58 encoding of
     /// the [`PeerId`]. Consequently, we store the conversion to base58 ahead of time.
     peer_id_base58: String,
     /// Value to return when the `system_name` RPC is called.
@@ -373,13 +415,13 @@ struct Background<TPlat: Platform> {
     /// Value to return when the `system_version` RPC is called.
     system_version: String,
 
-    /// See [`Config::network_service`].
+    /// See [`StartConfig::network_service`].
     network_service: (Arc<network_service::NetworkService<TPlat>>, usize),
-    /// See [`Config::sync_service`].
+    /// See [`StartConfig::sync_service`].
     sync_service: Arc<sync_service::SyncService<TPlat>>,
-    /// See [`Config::runtime_service`].
+    /// See [`StartConfig::runtime_service`].
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
-    /// See [`Config::transactions_service`].
+    /// See [`StartConfig::transactions_service`].
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
 
     /// Various information caches about blocks, to potentially reduce the number of network
