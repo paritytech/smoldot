@@ -13,7 +13,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 event-listener = { version = "2.5.1" }
-futures = "0.3.17"
+futures = "0.3.21"
 lazy_static = "1.4.0"
 log = { version = "0.4.14", features = ["std"] }
 pin-project = "1.0.8"
