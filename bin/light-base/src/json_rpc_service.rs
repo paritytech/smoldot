@@ -57,21 +57,171 @@ use smoldot::{
 use std::{
     collections::HashMap,
     iter,
-    marker::PhantomData,
     num::NonZeroU32,
     str,
     sync::{atomic, Arc},
     time::Duration,
 };
 
-/// Configuration for a JSON-RPC service.
-pub struct Config<'a, TPlat: Platform> {
+/// Configuration for [`service`].
+pub struct Config {
     /// Name of the chain, for logging purposes.
     ///
     /// > **Note**: This name will be directly printed out. Any special character should already
     /// >           have been filtered out from this name.
     pub log_name: String,
 
+    /// Maximum number of JSON-RPC requests that can be added to a queue if it is not ready to be
+    /// processed immediately. Any additional request will be immediately rejected.
+    ///
+    /// This parameter is necessary in order to prevent users from using up too much memory within
+    /// the client.
+    pub max_pending_requests: NonZeroU32,
+
+    /// Maximum number of active subscriptions. Any additional subscription will be immediately
+    /// rejected.
+    ///
+    /// This parameter is necessary in order to prevent users from using up too much memory within
+    /// the client.
+    pub max_subscriptions: u32,
+}
+
+/// Creates a new JSON-RPC service with the given configuration.
+///
+/// Returns a handler that allows sending requests, and a [`ServicePrototype`] that must later
+/// be initialized using [`ServicePrototype::start`].
+///
+/// Destroying the [`Sender`] automatically shuts down the service.
+pub fn service(config: Config) -> (Sender, ServicePrototype) {
+    let mut requests_subscriptions =
+        requests_subscriptions::RequestsSubscriptions::new(requests_subscriptions::Config {
+            max_clients: 1,
+            max_requests_per_client: config.max_pending_requests,
+            max_subscriptions_per_client: config.max_subscriptions,
+        });
+
+    let client_id = requests_subscriptions.add_client_mut().unwrap(); // Adding a client can fail only if the limit is reached.
+    let requests_subscriptions = Arc::new(requests_subscriptions);
+
+    let log_target = format!("json-rpc-{}", config.log_name);
+
+    let (background_abort, background_abort_registration) = future::AbortHandle::new_pair();
+
+    let sender = Sender {
+        log_target: log_target.clone(),
+        requests_subscriptions: requests_subscriptions.clone(),
+        client_id: client_id.clone(),
+        background_abort,
+    };
+
+    let prototype = ServicePrototype {
+        background_abort_registration,
+        log_target,
+        requests_subscriptions,
+        client_id,
+        max_subscriptions: config.max_subscriptions,
+    };
+
+    (sender, prototype)
+}
+
+/// Handle that allows sending JSON-RPC requests on the service.
+///
+/// Destroying this [`Sender`] automatically shuts down the associated service.
+pub struct Sender {
+    /// State machine holding all the clients, requests, and subscriptions.
+    ///
+    /// Shared with the [`Background`].
+    requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions>,
+
+    /// Identifier of the unique client within the [`JsonRpcService::requests_subscriptions`].
+    client_id: requests_subscriptions::ClientId,
+
+    /// Target to use when emitting logs.
+    log_target: String,
+
+    /// Handle to abort the background task that holds and processes the
+    /// [`JsonRpcService::requests_subscriptions`].
+    background_abort: future::AbortHandle,
+}
+
+impl Sender {
+    /// Queues the given JSON-RPC request to be processed in the background.
+    ///
+    /// An error is returned if [`Config::max_pending_requests`] is exceeded, which can happen
+    /// if the requests take a long time to process or if the [`Config::responses_sender`] channel
+    /// isn't polled often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
+    /// JSON-RPC response to immediately send back to the user.
+    pub fn queue_rpc_request(&mut self, json_rpc_request: String) -> Result<(), HandleRpcError> {
+        // If the request isn't even a valid JSON-RPC request, we can't even send back a response.
+        // We have no choice but to immediately refuse the request.
+        if let Err(error) = json_rpc::parse::parse_call(&json_rpc_request) {
+            log::warn!(
+                target: &self.log_target,
+                "Refused malformed JSON-RPC request: {}", error
+            );
+            return Err(HandleRpcError::MalformedJsonRpc(error));
+        }
+
+        // Logging the request before it is queued.
+        if log::log_enabled!(log::Level::Debug) {
+            log::debug!(
+                target: &self.log_target,
+                "JSON-RPC => {}",
+                crate::util::truncate_str_iter(
+                    json_rpc_request.chars().filter(|c| !c.is_control()),
+                    100,
+                ).collect::<String>()
+            );
+        }
+
+        match self
+            .requests_subscriptions
+            .try_queue_client_request(&self.client_id, json_rpc_request)
+        {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                log::warn!(
+                    target: &self.log_target,
+                    "Request denied due to JSON-RPC service being overloaded. This will likely \
+                    cause the JSON-RPC client to malfunction."
+                );
+
+                Err(HandleRpcError::Overloaded {
+                    json_rpc_request: err.request,
+                })
+            }
+        }
+    }
+}
+
+impl Drop for Sender {
+    fn drop(&mut self) {
+        self.background_abort.abort();
+    }
+}
+
+/// Prototype for a JSON-RPC service. Must be initialized using [`ServicePrototype::start`].
+pub struct ServicePrototype {
+    /// State machine holding all the clients, requests, and subscriptions.
+    ///
+    /// Shared with the [`Background`].
+    requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions>,
+
+    /// Identifier of the unique client within the [`JsonRpcService::requests_subscriptions`].
+    client_id: requests_subscriptions::ClientId,
+
+    /// Target to use when emitting logs.
+    log_target: String,
+
+    background_abort_registration: future::AbortRegistration,
+
+    /// Same as [`Config::max_subscriptions`].
+    max_subscriptions: u32,
+}
+
+/// Configuration for a JSON-RPC service.
+pub struct StartConfig<'a, TPlat: Platform> {
     /// Channel to send the responses to.
     pub responses_sender: mpsc::Sender<String>,
 
@@ -127,64 +277,18 @@ pub struct Config<'a, TPlat: Platform> {
     /// This parameter is necessary in order to prevent users from using up too much memory within
     /// the client.
     pub max_parallel_requests: NonZeroU32,
-
-    /// Maximum number of JSON-RPC requests that can be added to a queue if it is not ready to be
-    /// processed immediately. Any additional request will be immediately rejected.
-    ///
-    /// This parameter is necessary in order to prevent users from using up too much memory within
-    /// the client.
-    pub max_pending_requests: NonZeroU32,
-
-    /// Maximum number of active subscriptions. Any additional subscription will be immediately
-    /// rejected.
-    ///
-    /// This parameter is necessary in order to prevent users from using up too much memory within
-    /// the client.
-    pub max_subscriptions: u32,
 }
 
-pub struct JsonRpcService<TPlat: Platform> {
-    /// State machine holding all the clients, requests, and subscriptions.
-    ///
-    /// Shared with the [`Background`].
-    requests_subscriptions: Arc<requests_subscriptions::RequestsSubscriptions>,
-
-    /// Identifier of the unique client within the [`JsonRpcService::requests_subscriptions`].
-    client_id: requests_subscriptions::ClientId,
-
-    /// Target to use when emitting logs.
-    log_target: String,
-
-    /// Handle to abort the background task that holds and processes the
-    /// [`JsonRpcService::requests_subscriptions`].
-    background_abort: future::AbortHandle,
-
-    /// Pins the `TPlat` generic.
-    platform: PhantomData<fn() -> TPlat>,
-}
-
-impl<TPlat: Platform> JsonRpcService<TPlat> {
-    /// Creates a new JSON-RPC service with the given configuration.
-    pub fn new(mut config: Config<'_, TPlat>) -> JsonRpcService<TPlat> {
-        let mut requests_subscriptions =
-            requests_subscriptions::RequestsSubscriptions::new(requests_subscriptions::Config {
-                max_clients: 1,
-                max_requests_per_client: config.max_pending_requests,
-                max_subscriptions_per_client: config.max_subscriptions,
-            });
-
-        let client_id = requests_subscriptions.add_client_mut().unwrap(); // Adding a client can fail only if the limit is reached.
-        let requests_subscriptions = Arc::new(requests_subscriptions);
-
-        let log_target = format!("json-rpc-{}", config.log_name);
-
+impl ServicePrototype {
+    /// Consumes this prototype and starts the service through [`StartConfig::tasks_executor`].
+    pub fn start<TPlat: Platform>(self, mut config: StartConfig<'_, TPlat>) {
         // Channel used in the background in order to spawn new tasks scoped to the background.
         let (new_child_tasks_tx, new_child_tasks_rx) = mpsc::unbounded();
 
         let background = Arc::new(Background {
-            log_target: log_target.clone(),
-            requests_subscriptions: requests_subscriptions.clone(),
-            client_id: client_id.clone(),
+            log_target: self.log_target.clone(),
+            requests_subscriptions: self.requests_subscriptions,
+            client_id: self.client_id,
             new_child_tasks_tx: Mutex::new(new_child_tasks_tx),
             chain_name: config.chain_spec.name().to_owned(),
             chain_ty: config.chain_spec.chain_type().to_owned(),
@@ -206,11 +310,11 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
             next_subscription_id: atomic::AtomicU64::new(0),
             subscriptions: Mutex::new(Subscriptions {
                 misc: HashMap::with_capacity_and_hasher(
-                    usize::try_from(config.max_subscriptions).unwrap_or(usize::max_value()),
+                    usize::try_from(self.max_subscriptions).unwrap_or(usize::max_value()),
                     Default::default(),
                 ),
                 chain_head_follow: HashMap::with_capacity_and_hasher(
-                    usize::try_from(config.max_subscriptions).unwrap_or(usize::max_value()),
+                    usize::try_from(self.max_subscriptions).unwrap_or(usize::max_value()),
                     Default::default(),
                 ),
             }),
@@ -218,8 +322,7 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
 
         // Spawns the background task that actually runs the logic of that JSON-RPC service.
         // This background task is abortable through the `background_abort` handle.
-        let (background_abort, background_abort_registration) = future::AbortHandle::new_pair();
-        (config.tasks_executor)(log_target.clone(), {
+        (config.tasks_executor)(self.log_target, {
             let max_parallel_requests = config.max_parallel_requests;
             let responses_sender = config.responses_sender;
 
@@ -229,73 +332,11 @@ impl<TPlat: Platform> JsonRpcService<TPlat> {
                         .run(new_child_tasks_rx, max_parallel_requests, responses_sender)
                         .await
                 },
-                background_abort_registration,
+                self.background_abort_registration,
             )
             .map(|_| ())
             .boxed()
         });
-
-        JsonRpcService {
-            log_target,
-            requests_subscriptions,
-            client_id,
-            background_abort,
-            platform: PhantomData,
-        }
-    }
-
-    /// Queues the given JSON-RPC request to be processed in the background.
-    ///
-    /// An error is returned if [`Config::max_pending_requests`] is exceeded, which can happen
-    /// if the requests take a long time to process or if the [`Config::responses_sender`] channel
-    /// isn't polled often enough. Use [`HandleRpcError::into_json_rpc_error`] to build the
-    /// JSON-RPC response to immediately send back to the user.
-    pub fn queue_rpc_request(&mut self, json_rpc_request: String) -> Result<(), HandleRpcError> {
-        // If the request isn't even a valid JSON-RPC request, we can't even send back a response.
-        // We have no choice but to immediately refuse the request.
-        if let Err(error) = json_rpc::parse::parse_call(&json_rpc_request) {
-            log::warn!(
-                target: &self.log_target,
-                "Refused malformed JSON-RPC request: {}", error
-            );
-            return Err(HandleRpcError::MalformedJsonRpc(error));
-        }
-
-        // Logging the request before it is queued.
-        if log::log_enabled!(log::Level::Debug) {
-            log::debug!(
-                target: &self.log_target,
-                "JSON-RPC => {}",
-                crate::util::truncate_str_iter(
-                    json_rpc_request.chars().filter(|c| !c.is_control()),
-                    100,
-                ).collect::<String>()
-            );
-        }
-
-        match self
-            .requests_subscriptions
-            .try_queue_client_request(&self.client_id, json_rpc_request)
-        {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                log::warn!(
-                    target: &self.log_target,
-                    "Request denied due to JSON-RPC service being overloaded. This will likely \
-                    cause the JSON-RPC client to malfunction."
-                );
-
-                Err(HandleRpcError::Overloaded {
-                    json_rpc_request: err.request,
-                })
-            }
-        }
-    }
-}
-
-impl<TPlat: Platform> Drop for JsonRpcService<TPlat> {
-    fn drop(&mut self) {
-        self.background_abort.abort();
     }
 }
 
