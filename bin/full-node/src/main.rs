@@ -28,7 +28,7 @@ fn main() {
 }
 
 async fn async_main() {
-    match <cli::CliOptions as structopt::StructOpt>::from_args() {
+    match <cli::CliOptions as clap::Parser>::parse() {
         cli::CliOptions::Run(r) => run::run(r).await,
         cli::CliOptions::NodeInfo(opt) => node_info::run(opt).await,
         cli::CliOptions::Blake264BitsHash(opt) => {
