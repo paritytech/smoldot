@@ -18,7 +18,7 @@
 //! Provides the [`CliOptions`] struct that contains all the CLI options that can be passed to the
 //! binary.
 //!
-//! See the documentation of the [`structopt`] crate in order to learn more.
+//! See the documentation of the [`clap`] crate in order to learn more.
 //!
 //! # Example
 //!
