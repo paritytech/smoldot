@@ -12,7 +12,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-event-listener = { version = "2.5.1" }
+event-listener = { version = "2.5.2" }
 futures = "0.3.21"
 lazy_static = "1.4.0"
 log = { version = "0.4.14", features = ["std"] }
