@@ -34,13 +34,17 @@
 //! - Multiple other miscellaneous information.
 //!
 
-use crate::chain::chain_information::{
-    aura_config, babe_genesis_config, grandpa_genesis_config, BabeEpochInformation,
-    ChainInformation, ChainInformationConsensus, ChainInformationFinality,
+use crate::{
+    chain::chain_information::{
+        aura_config, babe_genesis_config, grandpa_genesis_config, BabeEpochInformation,
+        ChainInformation, ChainInformationConsensus, ChainInformationConsensusRef,
+        ChainInformationFinality, ChainInformationFinalityRef, ChainInformationRef,
+    },
+    header,
 };
 
 use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
-use core::num::NonZeroU64;
+use core::{iter, num::NonZeroU64};
 
 mod light_sync_state;
 mod structs;
@@ -70,6 +74,11 @@ impl ChainSpec {
         }
 
         Ok(ChainSpec { client_spec })
+    }
+
+    /// Turns this chain specification into a JSON file.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(&self.client_spec).unwrap()
     }
 
     /// Builds the [`ChainInformation`] corresponding to the genesis block contained in this chain
@@ -261,6 +270,92 @@ impl ChainSpec {
                 // We made sure at initialization that the decoding succeeds.
                 inner: state.decode().unwrap(),
             })
+    }
+
+    /// Modifies the light sync state of the chain spec to contain the finality information passed
+    /// as parameter.
+    pub fn set_light_sync_state(&mut self, chain_information: ChainInformationRef) {
+        let (babe_epochs, grandpa_set, grandpa_authorities) =
+            match (chain_information.consensus, chain_information.finality) {
+                (
+                    ChainInformationConsensusRef::Babe {
+                        finalized_block_epoch_information: Some(current_epoch),
+                        finalized_next_epoch_transition,
+                        ..
+                    },
+                    ChainInformationFinalityRef::Grandpa {
+                        after_finalized_block_authorities_set_id,
+                        finalized_triggered_authorities,
+                        ..
+                    },
+                ) => {
+                    let babe_epochs = iter::once(current_epoch)
+                        .chain(iter::once(finalized_next_epoch_transition));
+                    (
+                        babe_epochs,
+                        after_finalized_block_authorities_set_id,
+                        finalized_triggered_authorities,
+                    )
+                }
+                _ => todo!(),
+            };
+
+        // Note that the precise format of checkpoint isn't really properly specified. Smoldot is
+        // at the moment the only implementation that can decode checkpoints, so we don't really
+        // care too much about the encoding and just make sure to encode enough things so that
+        // smoldot can later decode it.
+        self.client_spec.light_sync_state = Some(light_sync_state::LightSyncState::encode(
+            light_sync_state::DecodedLightSyncState {
+                babe_epoch_changes: light_sync_state::EpochChanges {
+                    epochs: babe_epochs
+                        .map(|epoch| {
+                            let info = light_sync_state::BabeEpoch {
+                                authorities: epoch
+                                    .authorities
+                                    .map(|authority| light_sync_state::BabeAuthority {
+                                        public_key: *authority.public_key,
+                                        weight: authority.weight,
+                                    })
+                                    .collect(),
+                                config: header::BabeNextConfig {
+                                    c: epoch.c,
+                                    allowed_slots: epoch.allowed_slots,
+                                },
+                                duration: 1, // TODO: value is unused
+                                epoch_index: epoch.epoch_index,
+                                randomness: *epoch.randomness,
+                                // TODO: `start_slot_number` is normally never `None` if the chain info is valid, but what it's not valid?
+                                slot_number: epoch.start_slot_number.unwrap(),
+                            };
+
+                            // TODO: note that this is normally the block hash and number, but as explained we don't really care
+                            (
+                                (
+                                    [0u8; 32],
+                                    u32::try_from(epoch.epoch_index).unwrap_or(u32::max_value()),
+                                ),
+                                light_sync_state::PersistedEpoch::Regular(info),
+                            )
+                        })
+                        .collect(),
+                    inner: Default::default(),
+                },
+                finalized_block_header: chain_information.finalized_block_header.into(),
+                grandpa_authority_set: light_sync_state::AuthoritySet {
+                    authority_set_changes: Default::default(),
+                    set_id: grandpa_set,
+                    pending_forced_changes: Default::default(), // TODO:
+                    pending_standard_changes: Default::default(), // TODO:
+                    current_authorities: grandpa_authorities
+                        .iter()
+                        .map(|authority| light_sync_state::GrandpaAuthority {
+                            public_key: authority.public_key,
+                            weight: authority.weight.get(),
+                        })
+                        .collect(),
+                },
+            },
+        ));
     }
 }
 

@@ -870,6 +870,17 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
         json_rpc_sender.queue_rpc_request(json_rpc_request)
     }
 
+    /// Generates a chain specification of the given chain containing a light sync state of the
+    /// current finalized state of that chain.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`ChainId`] is invalid.
+    ///
+    pub fn chain_spec_with_light_sync_state(&self, chain_id: ChainId) -> String {
+        todo!()
+    }
+
     /// Returns opaque data that can later by passing back through
     /// [`AddChainConfig::database_content`].
     ///

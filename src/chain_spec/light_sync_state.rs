@@ -49,6 +49,19 @@ impl LightSyncState {
 
         Ok(decoded)
     }
+
+    pub(super) fn encode(decoded: DecodedLightSyncState) -> Self {
+        // Note that the precise format of checkpoint isn't really properly specified. Smoldot is
+        // at the moment the only implementation that can decode checkpoints, so we don't really
+        // care too much about the encoding and just make sure to encode enough things so that
+        // smoldot can later decode it.
+        LightSyncState {
+            babe_epoch_changes: HexString(decoded.babe_epoch_changes.encode()),
+            babe_finalized_block_weight: 0, // Unused
+            finalized_block_header: HexString(decoded.finalized_block_header.scale_encoding_vec()),
+            grandpa_authority_set: HexString(decoded.grandpa_authority_set.encode()),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -60,7 +73,7 @@ pub(super) struct DecodedLightSyncState {
 
 #[derive(Debug, Decode, Encode)]
 pub(super) struct EpochChanges {
-    inner: ForkTree<PersistedEpochHeader>,
+    pub(super) inner: ForkTree<PersistedEpochHeader>,
     pub(super) epochs: BTreeMap<([u8; 32], u32), PersistedEpoch>,
 }
 
@@ -68,6 +81,16 @@ pub(super) struct EpochChanges {
 pub(super) enum PersistedEpochHeader {
     Genesis(EpochHeader, EpochHeader),
     Regular(EpochHeader),
+}
+
+// TODO: this trait impl is a hack because we don't care about pending changes at the moment
+impl Default for PersistedEpochHeader {
+    fn default() -> Self {
+        PersistedEpochHeader::Regular(EpochHeader {
+            start_slot: 0,
+            end_slot: 0,
+        })
+    }
 }
 
 #[derive(Debug, Decode, Encode)]
@@ -107,11 +130,11 @@ pub struct BabeAuthority {
 pub(super) struct AuthoritySet {
     pub(super) current_authorities: Vec<GrandpaAuthority>,
     pub(super) set_id: u64,
-    pending_standard_changes: ForkTree<PendingChange>,
-    pending_forced_changes: Vec<PendingChange>,
+    pub(super) pending_standard_changes: ForkTree<PendingChange>,
+    pub(super) pending_forced_changes: Vec<PendingChange>,
     /// Note: this field didn't exist in Substrate before 2021-01-20. Light sync states that are
     /// older than that are missing it.
-    authority_set_changes: Vec<(u64, u32)>,
+    pub(super) authority_set_changes: Vec<(u64, u32)>,
 }
 
 #[derive(Debug, Decode, Encode)]
@@ -121,6 +144,19 @@ pub(super) struct PendingChange {
     canon_height: u32,
     canon_hash: [u8; 32],
     delay_kind: DelayKind,
+}
+
+// TODO: this trait impl is a hack because we don't care about pending changes at the moment
+impl Default for PendingChange {
+    fn default() -> Self {
+        PendingChange {
+            next_authorities: Vec::new(),
+            delay: 0,
+            canon_height: 0,
+            canon_hash: [0; 32],
+            delay_kind: DelayKind::Finalized,
+        }
+    }
 }
 
 #[derive(Debug, Decode, Encode)]
@@ -141,7 +177,7 @@ pub struct GrandpaAuthority {
     pub weight: u64,
 }
 
-#[derive(Debug, Decode, Encode)]
+#[derive(Debug, Default, Decode, Encode)]
 pub(super) struct ForkTree<T> {
     roots: Vec<ForkTreeNode<T>>,
     best_finalized_number: Option<u32>,
