@@ -407,7 +407,7 @@ async fn background_task<TPlat: Platform>(
                     let scale_encoded_header =
                         match worker.pending_transactions.block_user_data(&block_hash) {
                             Some(b) => b.scale_encoded_header.clone(),
-                            None => continue,
+                            None => break,
                         };
 
                     // Make copies of everything in order to move the values into the future.
