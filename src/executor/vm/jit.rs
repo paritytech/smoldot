@@ -363,41 +363,48 @@ impl fmt::Debug for JitPrototype {
 ///
 /// The flow is as follows:
 ///
-/// - `wasmtime` calls a function that has access to a `Arc<Mutex<Shared>>`. The `Shared` is in
+/// - `wasmtime` calls a function that shares access to a `Arc<Mutex<Shared>>`. The `Shared` is in
 /// the [`Shared::OutsideFunctionCall`] state.
-/// - This function stores its information (`function_index` and `parameters`) in the `Shared`
-/// and returns `Poll::Pending`.
+/// - This function switches the state to the [`Shared::EnteredFunctionCall`] state and returns
+/// `Poll::Pending`.
 /// - This `Pending` gets propagated to the body of [`Jit::run`], which was calling `wasmtime`.
-/// [`Jit::run`] reads `function_index` and `parameters` to determine what happened.
-/// - Later, the return value is stored in `return_value`, and execution is resumed.
-/// - The function called by `wasmtime` reads `return_value` and returns `Poll::Ready`.
+/// [`Jit::run`] reads `function_index` and `parameters` to determine what happened, switches the
+/// state of the `Shared` to [`Shared::WithinFunctionCall`] state, and returns `Poll::Pending`.
+/// - Here, the user can access the memory, in which case the `Shared` is read. If the user wants
+/// to grow the memory, the state is switched to [`Shared::MemoryGrowRequired`], then execution
+/// resumed for the function to perform the growth and transition back to
+/// [`Shared::WithinFunctionCall`].
+/// - Later, the state is switched to [`Shared::Return`], and execution is resumed.
+/// - The function called by `wasmtime` reads the return value and returns `Poll::Ready`.
 ///
 enum Shared {
     Poisoned,
     OutsideFunctionCall {
         memory: wasmtime::Memory,
     },
+    /// Function handler switches to this state as soon as it is entered, so that the host can
+    /// pick up this state, extract the function index and parameters, and transition to
+    /// [`Shared::WithinFunctionCall`].
     EnteredFunctionCall {
         /// Index of the function currently being called.
         function_index: usize,
-
-        memory_pointer: usize,
-        memory_size: usize,
-
         /// Parameters of the function currently being called.
         parameters: Vec<WasmValue>,
 
-        /// Waker that `wasmtime` has passed to the future that is waiting for `return_value`.
-        /// This value is most likely not very useful, because [`Jit::run`] always polls the outer
-        /// future whenever the inner future is known to be ready.
-        /// However, it would be completely legal for `wasmtime` to not poll the inner future if the
-        /// waker that it has passed (the one stored here) wasn't waken up.
-        /// This field therefore exists in order to future-proof against this possible optimization
-        /// that `wasmtime` might perform in the future.
+        /// See [`Shared::WithinFunctionCall::memory_pointer`].
+        memory_pointer: usize,
+        /// See [`Shared::WithinFunctionCall::memory_size`].
+        memory_size: usize,
+        /// See [`Shared::WithinFunctionCall::in_interrupted_waker`].
         in_interrupted_waker: Option<Waker>,
     },
     WithinFunctionCall {
+        /// Pointer to the location where the virtual machine memory is located in the host
+        /// memory. This pointer is invalidated if the memory is grown, which can happen between
+        /// function calls.
         memory_pointer: usize,
+        /// Size of the virtual machine memory in bytes. This size is invalidated if the memory
+        /// is grown, which can happen between function calls.
         memory_size: usize,
 
         /// Waker that `wasmtime` has passed to the future that is waiting for `return_value`.
@@ -461,6 +468,8 @@ impl Jit {
         // necessary.
         match self.inner {
             JitInner::Executing(_) => {
+                // Virtual machine was already executing. Update `Shared` to store the return
+                // value, so that the function handler picks it up and returns it to `wasmtime`.
                 let mut shared_lock = self.shared.try_lock().unwrap();
                 match mem::replace(&mut *shared_lock, Shared::Poisoned) {
                     Shared::WithinFunctionCall {
@@ -704,12 +713,25 @@ impl Jit {
 
         match &mut self.inner {
             JitInner::NotStarted { store, .. } | JitInner::Done(store) => {
+                // This is the simple case: we still have access to the `store` and can perform
+                // the growth synchronously.
                 memory.grow(store, additional).unwrap();
             }
+            JitInner::Poisoned => unreachable!(),
             JitInner::Executing(function_call) => {
+                // This is the complicated case: the call is in progress and we don't have access
+                // to the `store`. Switch `Shared` to `MemoryGrowRequired`, then resume execution
+                // so that the function handler performs the grow.
                 let mut shared_lock = self.shared.try_lock().unwrap();
                 match mem::replace(&mut *shared_lock, Shared::Poisoned) {
-                    Shared::WithinFunctionCall { .. } => {
+                    Shared::WithinFunctionCall {
+                        in_interrupted_waker,
+                        ..
+                    } => {
+                        if let Some(waker) = in_interrupted_waker {
+                            waker.wake();
+                        }
+
                         *shared_lock = Shared::MemoryGrowRequired { memory, additional }
                     }
                     _ => unreachable!(),
@@ -733,7 +755,6 @@ impl Jit {
                     }
                 }
             }
-            JitInner::Poisoned => unreachable!(),
         }
 
         Ok(())
@@ -770,14 +791,7 @@ impl Jit {
     }
 }
 
-// The fields related to `wasmtime` do not implement `Send` because they use `std::rc::Rc`. `Rc`
-// does not implement `Send` because incrementing/decrementing the reference counter from
-// multiple threads simultaneously would be racy. It is however perfectly sound to move all the
-// instances of `Rc`s at once between threads, which is what we're doing here.
-//
-// This importantly means that we should never return a `Rc` (even by reference) across the API
-// boundary.
-// TODO: really annoying to have to use unsafe code
+// TODO: figure out and explain why wasmtime isn't Send
 unsafe impl Send for Jit {}
 
 impl fmt::Debug for Jit {
