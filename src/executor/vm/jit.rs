@@ -769,8 +769,8 @@ impl Jit {
         let store = match self.inner {
             JitInner::NotStarted { store, .. } | JitInner::Done(store) => store,
             JitInner::Poisoned => unreachable!(),
-            JitInner::Executing(function_call) => {
-                // The call is still in progress, and not to abort it. Switch `Shared` to
+            JitInner::Executing(mut function_call) => {
+                // The call is still in progress, and we need to abort it. Switch `Shared` to
                 // `AbortRequired`, then resume execution so that the function traps and returns
                 // the store.
                 let mut shared_lock = self.shared.try_lock().unwrap();
