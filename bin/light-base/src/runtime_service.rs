@@ -2202,7 +2202,7 @@ impl SuccessfulRuntime {
         let exec_hint = executor::vm::ExecHint::CompileAheadOfTime;
 
         // We try once with `allow_unresolved_imports: false`. If this fails due to unresolved
-        // imports, we try again but with `allowed_unresolved_imports: true`.
+        // import, we try again but with `allowed_unresolved_imports: true`.
         // Having unresolved imports might cause errors later on, for example when validating
         // transactions or getting the parachain heads, but for now we continue the execution
         // and print a warning.
