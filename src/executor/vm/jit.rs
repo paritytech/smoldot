@@ -310,8 +310,7 @@ impl JitPrototype {
         function_name: &str,
         params: &[WasmValue],
     ) -> Result<Jit, (StartErr, Self)> {
-        // Try to start executing `_start`.
-        let start_function = match self.instance.get_export(&mut self.store, function_name) {
+        let function_to_call = match self.instance.get_export(&mut self.store, function_name) {
             Some(export) => match export.into_func() {
                 Some(f) => f,
                 None => return Err((StartErr::NotAFunction, self)),
@@ -321,46 +320,20 @@ impl JitPrototype {
 
         // Try to convert the signature of the function to call, in order to make sure
         // that the type of parameters and return value are supported.
-        if Signature::try_from(&start_function.ty(&self.store)).is_err() {
+        if Signature::try_from(&function_to_call.ty(&self.store)).is_err() {
             return Err((StartErr::SignatureNotSupported, self));
         }
 
-        // Update `shared` in preparation for the call.
-        *self.shared.try_lock().unwrap() = Shared::BeforeFirstRun {
-            memory_pointer: self.memory.as_ref().unwrap().data_ptr(&self.store) as usize, // TODO: unwrap()?!
-            memory_size: self.memory.as_ref().unwrap().data_size(&self.store), // TODO: unwrap()?!
-        };
-
-        // Now starting the function call.
-        let function_call = {
-            let params = params.iter().map(|v| (*v).into()).collect::<Vec<_>>();
-            let mut store = self.store;
-            Box::pin(async move {
-                let mut result = []; // TODO: correct len
-                let outcome = start_function
-                    .call_async(&mut store, &params, &mut result)
-                    .await;
-
-                // Execution resumes here when the Wasm code has finished, gracefully or not.
-                match outcome {
-                    Ok(()) => {
-                        // The signature of the function has been chedek earlier, and as such it
-                        // is guaranteed that it has only one return value.
-                        assert!(result.len() == 0 || result.len() == 1);
-                        let ret = result.get(0).map(|v| TryFrom::try_from(v).unwrap());
-                        (store, Ok(ret))
-                    }
-                    Err(err) => {
-                        // The type of error is from the `anyhow` library. By using
-                        // `to_string()` we avoid having to deal with it.
-                        (store, Err(err.to_string()))
-                    }
-                }
-            })
-        };
+        // This function only performs all the verifications and preparations, but the call isn't
+        // actually started here because we might still need to potentially access `store`
+        // before being in the context of a function handler.
 
         Ok(Jit {
-            inner: JitInner::Executing(function_call),
+            inner: JitInner::NotStarted {
+                store: self.store,
+                function_to_call,
+                params: params.iter().map(|v| (*v).into()).collect::<Vec<_>>(),
+            },
             instance: self.instance,
             shared: self.shared,
             memory: self.memory,
@@ -401,10 +374,6 @@ impl fmt::Debug for JitPrototype {
 ///
 enum Shared {
     Poisoned,
-    BeforeFirstRun {
-        memory_pointer: usize,
-        memory_size: usize,
-    },
     OutsideFunctionCall {
         memory: wasmtime::Memory,
     },
@@ -469,51 +438,113 @@ pub struct Jit {
 }
 
 enum JitInner {
-    /// `Future` that drives the execution. Contains an invocation of
-    /// `wasmtime::Func::call_async`.
+    Poisoned,
+
+    /// Execution has not started yet.
+    NotStarted {
+        store: wasmtime::Store<()>,
+        function_to_call: wasmtime::Func,
+        params: Vec<wasmtime::Val>,
+    },
+    /// `Future` that drives the execution. Contains an invocation of `wasmtime::Func::call_async`.
     Executing(
         future::LocalBoxFuture<'static, (wasmtime::Store<()>, Result<Option<WasmValue>, String>)>,
     ),
-    /// Execution has finished and future has returned `Poll::Ready` in the past.
+    /// Execution has finished because the future has returned `Poll::Ready` in the past.
     Done(wasmtime::Store<()>),
 }
 
 impl Jit {
     /// See [`super::VirtualMachine::run`].
     pub fn run(&mut self, value: Option<WasmValue>) -> Result<ExecOutcome, RunErr> {
+        // Make sure that `self.inner` is in `JitInner::Executing` start, starting the call if
+        // necessary.
+        match self.inner {
+            JitInner::Executing(_) => {
+                let mut shared_lock = self.shared.try_lock().unwrap();
+                match mem::replace(&mut *shared_lock, Shared::Poisoned) {
+                    Shared::WithinFunctionCall {
+                        in_interrupted_waker,
+                        ..
+                    } => {
+                        *shared_lock = Shared::Return {
+                            return_value: value,
+                            memory: self.memory.as_ref().unwrap().clone(), // TODO: unwrap()?!
+                        };
+
+                        if let Some(waker) = in_interrupted_waker {
+                            waker.wake();
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            JitInner::Done(_) => return Err(RunErr::Poisoned),
+            JitInner::Poisoned => unreachable!(),
+            JitInner::NotStarted { .. } => {
+                let (function_to_call, params, mut store) =
+                    match mem::replace(&mut self.inner, JitInner::Poisoned) {
+                        JitInner::NotStarted {
+                            function_to_call,
+                            params,
+                            store,
+                        } => (function_to_call, params, store),
+                        _ => unreachable!(),
+                    };
+
+                // TODO: check that value is None
+
+                *self.shared.try_lock().unwrap() = Shared::OutsideFunctionCall {
+                    memory: self.memory.as_ref().unwrap().clone(), // TODO: unwrap()?!
+                };
+
+                // Check whether the function to call has a return value.
+                // We made sure when starting that the signature was supported.
+                let has_return_value = Signature::try_from(&function_to_call.ty(&store))
+                    .unwrap()
+                    .return_type()
+                    .is_some();
+
+                // Starting the function call.
+                let function_call = Box::pin(async move {
+                    // Prepare an array of results to pass to `wasmtime`. Note that the type doesn't
+                    // have to match the actual return value, only the length.
+                    let mut result = [wasmtime::Val::I32(0)];
+
+                    let outcome = function_to_call
+                        .call_async(
+                            &mut store,
+                            &params,
+                            &mut result[..(if has_return_value { 1 } else { 0 })],
+                        )
+                        .await;
+
+                    // Execution resumes here when the Wasm code has finished, gracefully or not.
+                    match outcome {
+                        Ok(()) if has_return_value => {
+                            // TODO: could implement TryFrom on wasmtime::Val instead of &wasmtime::Val to avoid borrow here?
+                            (store, Ok(Some((&result[0]).try_into().unwrap())))
+                        }
+                        Ok(()) => (store, Ok(None)),
+                        Err(err) => {
+                            // The type of error is from the `anyhow` library. By using
+                            // `to_string()` we avoid having to deal with it.
+                            (store, Err(err.to_string()))
+                        }
+                    }
+                });
+
+                self.inner = JitInner::Executing(function_call);
+            }
+        };
+
+        // We made sure that the state is in `Executing`. Now grab the future.
         let function_call = match &mut self.inner {
             JitInner::Executing(f) => f,
-            JitInner::Done(_) => return Err(RunErr::Poisoned),
+            _ => unreachable!(),
         };
 
         // TODO: check value type
-
-        // Update `shared`
-        {
-            let mut shared_lock = self.shared.try_lock().unwrap();
-            match mem::replace(&mut *shared_lock, Shared::Poisoned) {
-                Shared::BeforeFirstRun { .. } => {
-                    // TODO: check that value is None
-                    *shared_lock = Shared::OutsideFunctionCall {
-                        memory: self.memory.as_ref().unwrap().clone(), // TODO: unwrap()?!
-                    };
-                }
-                Shared::WithinFunctionCall {
-                    in_interrupted_waker,
-                    ..
-                } => {
-                    *shared_lock = Shared::Return {
-                        return_value: value,
-                        memory: self.memory.as_ref().unwrap().clone(), // TODO: unwrap()?!
-                    };
-
-                    if let Some(waker) = in_interrupted_waker {
-                        waker.wake();
-                    }
-                }
-                _ => unreachable!(),
-            }
-        }
 
         // Resume the coroutine execution.
         // The `Future` is polled with a no-op waker. We are in total control of when the
@@ -566,13 +597,24 @@ impl Jit {
 
     /// See [`super::VirtualMachine::memory_size`].
     pub fn memory_size(&self) -> HeapPages {
-        let shared_lock = self.shared.try_lock().unwrap();
-        match *shared_lock {
-            Shared::BeforeFirstRun { memory_size, .. }
-            | Shared::WithinFunctionCall { memory_size, .. } => {
-                HeapPages::new(u32::try_from(memory_size).unwrap())
+        match &self.inner {
+            JitInner::NotStarted { store, .. } | JitInner::Done(store) => {
+                let heap_pages = self.memory.as_ref().unwrap().size(store);
+                HeapPages::new(u32::try_from(heap_pages).unwrap())
             }
-            _ => unreachable!(),
+            JitInner::Executing(_) => {
+                let size_bytes = match *self.shared.try_lock().unwrap() {
+                    Shared::WithinFunctionCall { memory_size, .. } => memory_size,
+                    _ => unreachable!(),
+                };
+
+                if size_bytes == 0 {
+                    HeapPages::new(0)
+                } else {
+                    HeapPages::new(1 + u32::try_from((size_bytes - 1) / (64 * 1024)).unwrap())
+                }
+            }
+            JitInner::Poisoned => unreachable!(),
         }
     }
 
@@ -582,17 +624,24 @@ impl Jit {
         offset: u32,
         size: u32,
     ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
-        let (memory_pointer, memory_size) = match *self.shared.try_lock().unwrap() {
-            Shared::BeforeFirstRun {
-                memory_pointer,
-                memory_size,
+        let memory_slice = match &self.inner {
+            JitInner::NotStarted { store, .. } | JitInner::Done(store) => {
+                let memory = self.memory.as_ref().unwrap();
+                memory.data(store)
             }
-            | Shared::WithinFunctionCall {
-                memory_pointer,
-                memory_size,
-                ..
-            } => (memory_pointer, memory_size),
-            _ => unreachable!(),
+            JitInner::Executing(_) => {
+                let (memory_pointer, memory_size) = match *self.shared.try_lock().unwrap() {
+                    Shared::WithinFunctionCall {
+                        memory_pointer,
+                        memory_size,
+                        ..
+                    } => (memory_pointer, memory_size),
+                    _ => unreachable!(),
+                };
+
+                unsafe { slice::from_raw_parts(memory_pointer as *mut u8, memory_size) }
+            }
+            JitInner::Poisoned => unreachable!(),
         };
 
         let start = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
@@ -600,45 +649,44 @@ impl Jit {
             .checked_add(usize::try_from(size).map_err(|_| OutOfBoundsError)?)
             .ok_or(OutOfBoundsError)?;
 
-        if end > memory_size {
+        if end > memory_slice.len() {
             return Err(OutOfBoundsError);
         }
 
-        unsafe {
-            let memory_slice = slice::from_raw_parts(memory_pointer as *mut u8, memory_size);
-            Ok(&memory_slice[start..end])
-        }
+        Ok(&memory_slice[start..end])
     }
 
     /// See [`super::VirtualMachine::write_memory`].
     pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), OutOfBoundsError> {
-        let shared_lock = self.shared.try_lock().unwrap();
-        match *shared_lock {
-            Shared::BeforeFirstRun {
-                memory_pointer,
-                memory_size,
+        let memory_slice = match &mut self.inner {
+            JitInner::NotStarted { store, .. } | JitInner::Done(store) => {
+                let memory = self.memory.as_ref().unwrap();
+                memory.data_mut(store)
             }
-            | Shared::WithinFunctionCall {
-                memory_pointer,
-                memory_size,
-                ..
-            } => {
-                let start = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
-                let end = start.checked_add(value.len()).ok_or(OutOfBoundsError)?;
+            JitInner::Executing(_) => {
+                let (memory_pointer, memory_size) = match *self.shared.try_lock().unwrap() {
+                    Shared::WithinFunctionCall {
+                        memory_pointer,
+                        memory_size,
+                        ..
+                    } => (memory_pointer, memory_size),
+                    _ => unreachable!(),
+                };
 
-                if end > memory_size {
-                    return Err(OutOfBoundsError);
-                }
-
-                if !value.is_empty() {
-                    unsafe {
-                        let memory_slice =
-                            slice::from_raw_parts_mut(memory_pointer as *mut u8, memory_size);
-                        memory_slice[start..end].copy_from_slice(value);
-                    }
-                }
+                unsafe { slice::from_raw_parts_mut(memory_pointer as *mut u8, memory_size) }
             }
-            _ => unreachable!(),
+            JitInner::Poisoned => unreachable!(),
+        };
+
+        let start = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
+        let end = start.checked_add(value.len()).ok_or(OutOfBoundsError)?;
+
+        if end > memory_slice.len() {
+            return Err(OutOfBoundsError);
+        }
+
+        if !value.is_empty() {
+            memory_slice[start..end].copy_from_slice(value);
         }
 
         Ok(())
@@ -647,27 +695,46 @@ impl Jit {
     /// See [`super::VirtualMachine::grow_memory`].
     pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
         // TODO: must check whether additional is within bounds
+        let additional = u64::from(u32::from(additional));
 
         let memory = match self.memory.as_ref() {
             Some(m) => m.clone(),
             None => return Err(OutOfBoundsError),
         };
 
-        let mut shared_lock = self.shared.try_lock().unwrap();
-        match mem::replace(&mut *shared_lock, Shared::Poisoned) {
-            Shared::BeforeFirstRun { .. } => {
-                todo!()
+        match &mut self.inner {
+            JitInner::NotStarted { store, .. } | JitInner::Done(store) => {
+                memory.grow(store, additional).unwrap();
             }
-            Shared::WithinFunctionCall { .. } => {
-                *shared_lock = Shared::MemoryGrowRequired {
-                    memory,
-                    additional: u64::from(u32::from(additional)),
+            JitInner::Executing(function_call) => {
+                let mut shared_lock = self.shared.try_lock().unwrap();
+                match mem::replace(&mut *shared_lock, Shared::Poisoned) {
+                    Shared::WithinFunctionCall { .. } => {
+                        *shared_lock = Shared::MemoryGrowRequired { memory, additional }
+                    }
+                    _ => unreachable!(),
+                }
+                drop(shared_lock);
+
+                // Resume the coroutine execution once for the function handler to pick up the
+                // `MemoryGrowRequired`, perform the grow, and switch back to `WithinFunctionCall`.
+                // The `Future` is polled with a no-op waker. We are in total control of when the
+                // execution might be able to progress, hence the lack of need for a waker.
+                match Future::poll(
+                    function_call.as_mut(),
+                    &mut Context::from_waker(task::noop_waker_ref()),
+                ) {
+                    Poll::Ready(_) => unreachable!(),
+                    Poll::Pending => {
+                        debug_assert!(matches!(
+                            *self.shared.try_lock().unwrap(),
+                            Shared::WithinFunctionCall { .. }
+                        ));
+                    }
                 }
             }
-            _ => unreachable!(),
+            JitInner::Poisoned => unreachable!(),
         }
-
-        // TODO: must resume execution for the growth to happen /!\
 
         Ok(())
     }
@@ -675,8 +742,9 @@ impl Jit {
     /// See [`super::VirtualMachine::into_prototype`].
     pub fn into_prototype(self) -> JitPrototype {
         let store = match self.inner {
-            JitInner::Done(store) => store,
+            JitInner::NotStarted { store, .. } | JitInner::Done(store) => store,
             JitInner::Executing(_) => todo!(), // TODO: how do we handle if the coroutine was within a host function?
+            JitInner::Poisoned => unreachable!(),
         };
 
         // TODO: necessary?
