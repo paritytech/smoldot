@@ -203,6 +203,9 @@ impl JitPrototype {
                                             };
                                             Poll::Ready(Ok(()))
                                         }
+                                        Shared::AbortRequired => {
+                                            Poll::Ready(Err(wasmtime::Trap::new("abort required")))
+                                        }
                                         _ => unreachable!(),
                                     }
                                 }))
@@ -420,6 +423,7 @@ enum Shared {
         memory: wasmtime::Memory,
         additional: u64,
     },
+    AbortRequired,
     Return {
         /// Value to return to the Wasm code.
         return_value: Option<WasmValue>,
@@ -764,8 +768,35 @@ impl Jit {
     pub fn into_prototype(self) -> JitPrototype {
         let store = match self.inner {
             JitInner::NotStarted { store, .. } | JitInner::Done(store) => store,
-            JitInner::Executing(_) => todo!(), // TODO: how do we handle if the coroutine was within a host function?
             JitInner::Poisoned => unreachable!(),
+            JitInner::Executing(mut function_call) => {
+                // The call is still in progress, and we need to abort it. Switch `Shared` to
+                // `AbortRequired`, then resume execution so that the function traps and returns
+                // the store.
+                let mut shared_lock = self.shared.try_lock().unwrap();
+                match mem::replace(&mut *shared_lock, Shared::Poisoned) {
+                    Shared::WithinFunctionCall {
+                        in_interrupted_waker,
+                        ..
+                    } => {
+                        if let Some(waker) = in_interrupted_waker {
+                            waker.wake();
+                        }
+
+                        *shared_lock = Shared::AbortRequired
+                    }
+                    _ => unreachable!(),
+                }
+                drop(shared_lock);
+
+                match Future::poll(
+                    function_call.as_mut(),
+                    &mut Context::from_waker(task::noop_waker_ref()),
+                ) {
+                    Poll::Ready((store, Err(_))) => store,
+                    _ => unreachable!(),
+                }
+            }
         };
 
         // TODO: necessary?
