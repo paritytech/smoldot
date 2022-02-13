@@ -1519,11 +1519,7 @@ where
                             let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
 
                             let unassigned_slot_ty = self
-                                .unassign_slot(
-                                    &mut *self.ephemeral_guarded.lock().await,
-                                    chain_index,
-                                    peer_id,
-                                )
+                                .unassign_slot(&mut *ephemeral_guarded, chain_index, peer_id)
                                 .await
                                 .unwrap();
 
