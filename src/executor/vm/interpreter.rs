@@ -163,6 +163,11 @@ impl InterpreterPrototype {
             }
         }
 
+        // Wasmi provides an `Error::Host` variant that contains a ̀`Box<dyn wasmi::HostError>`
+        // that can be downcasted to anything.
+        // Unfortunately the `HostError` trait must be implemented manually, and in order to not
+        // have a leaky abstraction we don't implement it directly on `NewErr` but on a wrapper
+        // type.
         #[derive(Debug, derive_more::Display)]
         struct NewErrWrapper(NewErr);
         impl wasmi::HostError for NewErrWrapper {}
