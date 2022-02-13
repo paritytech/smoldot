@@ -106,25 +106,22 @@ impl JitPrototype {
                             Some(name) => name,
                             None => {
                                 return Err(NewErr::ModuleError(ModuleError(format!(
-                                    "unresolved import: `{}`:`{}`",
-                                    import.module(),
-                                    "<unnamed>"
+                                    "unresolved unnamed import in module `{}`",
+                                    import.module()
                                 ))))
                             }
                         };
 
-                        // TODO: don't panic below
                         let function_index =
                             match symbols(import.module(), name, &TryFrom::try_from(&f).unwrap())
                                 .ok()
                             {
                                 Some(idx) => idx,
                                 None => {
-                                    return Err(NewErr::ModuleError(ModuleError(format!(
-                                        "unresolved import: `{}`:`{}`",
-                                        import.module(),
-                                        name,
-                                    ))));
+                                    return Err(NewErr::UnresolvedFunctionImport {
+                                        module_name: import.module().to_owned(),
+                                        function: name.to_owned(),
+                                    })
                                 }
                             };
 
