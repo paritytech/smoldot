@@ -2201,27 +2201,40 @@ impl SuccessfulRuntime {
             .map_err(RuntimeError::InvalidHeapPages)?;
         let exec_hint = executor::vm::ExecHint::CompileAheadOfTime;
 
-        // We try once with `allow_unresolved_imports: false`. If this fails, try again but with
-        // `allowed_unresolved_imports: true`.
+        // We try once with `allow_unresolved_imports: false`. If this fails due to unresolved
+        // imports, we try again but with `allowed_unresolved_imports: true`.
         // Having unresolved imports might cause errors later on, for example when validating
         // transactions or getting the parachain heads, but for now we continue the execution
         // and print a warning.
-        let error = match executor::host::HostVmPrototype::new(module, heap_pages, exec_hint, false)
-        {
+        match executor::host::HostVmPrototype::new(module, heap_pages, exec_hint, false) {
             Ok(vm) => return Self::from_virtual_machine(vm).await,
-            Err(error) => error,
-        };
+            Err(executor::host::NewErr::VirtualMachine(
+                executor::vm::NewErr::UnresolvedFunctionImport {
+                    function,
+                    module_name,
+                },
+            )) => {
+                match executor::host::HostVmPrototype::new(module, heap_pages, exec_hint, true) {
+                    Ok(vm) => {
+                        log::warn!(
+                            "Unresolved host function in runtime: `{}`:`{}`. Smoldot might \
+                            encounter errors later on. Please report this issue in \
+                            https://github.com/paritytech/smoldot",
+                            module_name,
+                            function
+                        );
 
-        match executor::host::HostVmPrototype::new(module, heap_pages, exec_hint, true) {
-            Ok(vm) => {
-                log::warn!(
-                    "Unresolved host functions in runtime. Smoldot might encounter errors later \
-                    on. Please report this issue in https://github.com/paritytech/smoldot\n\
-                    Detail: {}",
-                    error
-                );
-
-                Self::from_virtual_machine(vm).await
+                        Self::from_virtual_machine(vm).await
+                    }
+                    Err(executor::host::NewErr::VirtualMachine(
+                        executor::vm::NewErr::UnresolvedFunctionImport { .. },
+                    )) => unreachable!(),
+                    Err(error) => {
+                        // It's still possible that errors other than an unresolved host
+                        // function happen.
+                        Err(RuntimeError::Build(error))
+                    }
+                }
             }
             Err(error) => Err(RuntimeError::Build(error)),
         }
