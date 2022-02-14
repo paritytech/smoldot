@@ -221,9 +221,13 @@ impl JitPrototype {
                         )));
                     }
                     wasmtime::ExternType::Memory(m) => {
-                        // TODO: check name and all?
-                        // TODO: proper error instead of asserting?
-                        assert!(imported_memory.is_none());
+                        if import.module() != "env" || import.name() != Some("memory") {
+                            return Err(NewErr::MemoryNotNamedMemory);
+                        }
+
+                        // Considering that the memory can only be "env":"memory", and that each
+                        // import has a unique name, this block can't be reached more than once.
+                        debug_assert!(imported_memory.is_none());
                         imported_memory = Some(
                             wasmtime::Memory::new(&mut store, m)
                                 .map_err(|_| NewErr::CouldntAllocateMemory)?,
