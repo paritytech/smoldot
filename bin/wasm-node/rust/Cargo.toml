@@ -17,7 +17,7 @@ futures = "0.3.21"
 lazy_static = "1.4.0"
 log = { version = "0.4.14", features = ["std"] }
 pin-project = "1.0.8"
-rand = "0.8.4"
+rand = "0.8.5"
 slab = { version = "0.4.5", default-features = false }
 smoldot = { version = "0.2.0", path = "../../..", default-features = false }
 smoldot-light-base = { version = "0.1.0", path = "../../light-base" }
