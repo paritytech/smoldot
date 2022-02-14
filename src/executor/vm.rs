@@ -78,6 +78,8 @@ mod interpreter;
 #[cfg(all(target_arch = "x86_64", feature = "std"))]
 mod jit;
 
+mod tests;
+
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 use smallvec::SmallVec;
@@ -707,17 +709,4 @@ pub enum GlobalValueErr {
     NotFound,
     /// Requested symbol isn't a `u32`.
     Invalid,
-}
-
-#[cfg(test)]
-mod tests {
-    // TODO:
-
-    #[test]
-    fn is_send() {
-        // Makes sure that the virtual machine types implement `Send`.
-        fn test<T: Send>() {}
-        test::<super::VirtualMachine>();
-        test::<super::VirtualMachinePrototype>();
-    }
 }
