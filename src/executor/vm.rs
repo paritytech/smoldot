@@ -78,6 +78,8 @@ mod interpreter;
 #[cfg(all(target_arch = "x86_64", feature = "std"))]
 mod jit;
 
+mod tests;
+
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 use smallvec::SmallVec;
@@ -631,17 +633,28 @@ pub struct Trap(String);
 /// Error that can happen when initializing a [`VirtualMachinePrototype`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum NewErr {
-    /// Error while parsing or compiling the WebAssembly code.
-    #[display(fmt = "{}", _0)]
-    ModuleError(ModuleError),
+    /// Failed to resolve a function imported by the module.
+    #[display(fmt = "Unresolved function `{}`:`{}`", module_name, function)]
+    UnresolvedFunctionImport {
+        /// Name of the function that was unresolved.
+        function: String,
+        /// Name of module associated with the unresolved function.
+        module_name: String,
+    },
     /// If a "memory" symbol is provided, it must be a memory.
     #[display(fmt = "If a \"memory\" symbol is provided, it must be a memory.")]
     MemoryIsntMemory,
+    /// Wasm module imports a memory that isn't named "memory".
+    MemoryNotNamedMemory,
     /// If a "__indirect_function_table" symbol is provided, it must be a table.
     #[display(fmt = "If a \"__indirect_function_table\" symbol is provided, it must be a table.")]
     IndirectTableIsntTable,
     /// Failed to allocate memory for the virtual machine.
     CouldntAllocateMemory,
+    /// Error while parsing or compiling the WebAssembly code.
+    // TODO: remove as too imprecise?
+    #[display(fmt = "{}", _0)]
+    ModuleError(ModuleError),
 }
 
 /// Error that can happen when calling [`VirtualMachinePrototype::start`].
@@ -698,17 +711,4 @@ pub enum GlobalValueErr {
     NotFound,
     /// Requested symbol isn't a `u32`.
     Invalid,
-}
-
-#[cfg(test)]
-mod tests {
-    // TODO:
-
-    #[test]
-    fn is_send() {
-        // Makes sure that the virtual machine types implement `Send`.
-        fn test<T: Send>() {}
-        test::<super::VirtualMachine>();
-        test::<super::VirtualMachinePrototype>();
-    }
 }

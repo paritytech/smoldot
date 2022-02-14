@@ -593,7 +593,6 @@ impl<'a> DigestRef<'a> {
                     aura_predigest_index = Some(item_num);
                 }
                 DigestItem::AuraPreDigest(_) => return Err(Error::MultipleAuraPreRuntimeDigests),
-                DigestItem::ChangesTrieRoot(_) => {}
                 DigestItem::AuraConsensus(_) => {}
                 DigestItem::BabePreDigest(_) if babe_predigest_index.is_none() => {
                     babe_predigest_index = Some(item_num);
@@ -635,9 +634,7 @@ impl<'a> DigestRef<'a> {
                     has_runtime_environment_updated = true;
                 }
                 DigestItem::BabeSeal(_) => return Err(Error::SealIsntLastItem),
-                DigestItem::ChangesTrieSignal(_)
-                | DigestItem::Beefy { .. }
-                | DigestItem::PolkadotParachain { .. } => {}
+                DigestItem::Beefy { .. } | DigestItem::PolkadotParachain { .. } => {}
             }
         }
 
@@ -684,7 +681,6 @@ impl<'a> DigestRef<'a> {
                 DigestItemRef::AuraPreDigest(_) => {
                     return Err(Error::MultipleAuraPreRuntimeDigests)
                 }
-                DigestItemRef::ChangesTrieRoot(_) => {}
                 DigestItemRef::AuraConsensus(_) => {}
                 DigestItemRef::BabePreDigest(_) if babe_predigest_index.is_none() => {
                     babe_predigest_index = Some(item_num);
@@ -728,9 +724,7 @@ impl<'a> DigestRef<'a> {
                     has_runtime_environment_updated = true;
                 }
                 DigestItemRef::BabeSeal(_) => return Err(Error::SealIsntLastItem),
-                DigestItemRef::ChangesTrieSignal(_)
-                | DigestItemRef::Beefy { .. }
-                | DigestItemRef::PolkadotParachain { .. } => {}
+                DigestItemRef::Beefy { .. } | DigestItemRef::PolkadotParachain { .. } => {}
             }
         }
 
@@ -961,9 +955,6 @@ pub enum DigestItemRef<'a> {
 
     GrandpaConsensus(GrandpaConsensusLogRef<'a>),
 
-    ChangesTrieRoot(&'a [u8; 32]),
-    ChangesTrieSignal(ChangesTrieSignal),
-
     /// Item related to the BEEFY algorithm (Mountain Merkle Ranges). Allows proving that a block
     /// is a child of another.
     Beefy {
@@ -1096,27 +1087,6 @@ impl<'a> DigestItemRef<'a> {
                 ret.extend_from_slice(seal);
                 iter::once(ret)
             }
-            DigestItemRef::ChangesTrieSignal(ref changes) => {
-                let mut ret = vec![7];
-                match changes {
-                    ChangesTrieSignal::NewConfiguration(Some(cfg)) => {
-                        ret.extend_from_slice(&[0]);
-                        ret.extend_from_slice(&[1]);
-                        ret.extend_from_slice(&cfg.digest_interval.to_le_bytes());
-                        ret.extend_from_slice(&cfg.digest_levels.to_le_bytes());
-                    }
-                    ChangesTrieSignal::NewConfiguration(None) => {
-                        ret.extend_from_slice(&[0]);
-                        ret.extend_from_slice(&[0]);
-                    }
-                }
-                iter::once(ret)
-            }
-            DigestItemRef::ChangesTrieRoot(data) => {
-                let mut ret = vec![2];
-                ret.extend_from_slice(data);
-                iter::once(ret)
-            }
             DigestItemRef::Beefy { opaque } => {
                 let mut ret = vec![4];
                 ret.extend_from_slice(b"BEEF");
@@ -1146,8 +1116,6 @@ impl<'a> From<&'a DigestItem> for DigestItemRef<'a> {
             DigestItem::BabeConsensus(v) => DigestItemRef::BabeConsensus(v.into()),
             DigestItem::BabeSeal(v) => DigestItemRef::BabeSeal(v),
             DigestItem::GrandpaConsensus(v) => DigestItemRef::GrandpaConsensus(v.into()),
-            DigestItem::ChangesTrieRoot(v) => DigestItemRef::ChangesTrieRoot(v),
-            DigestItem::ChangesTrieSignal(v) => DigestItemRef::ChangesTrieSignal(v.clone()),
             DigestItem::Beefy { opaque } => DigestItemRef::Beefy { opaque: &*opaque },
             DigestItem::PolkadotParachain { opaque } => {
                 DigestItemRef::PolkadotParachain { opaque: &*opaque }
@@ -1171,9 +1139,6 @@ pub enum DigestItem {
     BabeSeal([u8; 64]),
 
     GrandpaConsensus(GrandpaConsensusLog),
-
-    ChangesTrieRoot([u8; 32]),
-    ChangesTrieSignal(ChangesTrieSignal),
 
     /// See [`DigestItemRef::Beefy`].
     Beefy {
@@ -1210,8 +1175,6 @@ impl<'a> From<DigestItemRef<'a>> for DigestItem {
                 DigestItem::BabeSeal(seal)
             }
             DigestItemRef::GrandpaConsensus(v) => DigestItem::GrandpaConsensus(v.into()),
-            DigestItemRef::ChangesTrieRoot(v) => DigestItem::ChangesTrieRoot(*v),
-            DigestItemRef::ChangesTrieSignal(v) => DigestItem::ChangesTrieSignal(v),
             DigestItemRef::Beefy { opaque } => DigestItem::Beefy {
                 opaque: opaque.to_vec(),
             },
@@ -1221,42 +1184,6 @@ impl<'a> From<DigestItemRef<'a>> for DigestItem {
             DigestItemRef::RuntimeEnvironmentUpdated => DigestItem::RuntimeEnvironmentUpdated,
         }
     }
-}
-
-/// Available changes trie signals.
-// TODO: review documentation
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub enum ChangesTrieSignal {
-    /// New changes trie configuration is enacted, starting from **next block**.
-    ///
-    /// The block that emits this signal will contain changes trie (CT) that covers
-    /// blocks range [BEGIN; current block], where BEGIN is (order matters):
-    /// - LAST_TOP_LEVEL_DIGEST_BLOCK+1 if top level digest CT has ever been created
-    ///   using current configuration AND the last top level digest CT has been created
-    ///   at block LAST_TOP_LEVEL_DIGEST_BLOCK;
-    /// - LAST_CONFIGURATION_CHANGE_BLOCK+1 if there has been CT configuration change
-    ///   before and the last configuration change happened at block
-    ///   LAST_CONFIGURATION_CHANGE_BLOCK;
-    /// - 1 otherwise.
-    NewConfiguration(Option<ChangesTrieConfiguration>),
-}
-
-/// Substrate changes trie configuration.
-// TODO: review documentation
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChangesTrieConfiguration {
-    /// Interval (in blocks) at which level1-digests are created. Digests are not
-    /// created when this is less or equal to 1.
-    pub digest_interval: u32,
-
-    /// Maximal number of digest levels in hierarchy. 0 means that digests are not
-    /// created at all (even level1 digests). 1 means only level1-digests are created.
-    /// 2 means that every digest_interval^2 there will be a level2-digest, and so on.
-    /// Please ensure that maximum digest interval (i.e. digest_interval^digest_levels)
-    /// is within `u32` limits. Otherwise you'll never see digests covering such intervals
-    /// && maximal digests interval will be truncated to the last interval that fits
-    /// `u32` limits.
-    pub digest_levels: u32,
 }
 
 /// Decodes a single digest log item. On success, returns the item and the data that remains
@@ -1287,36 +1214,6 @@ fn decode_item(mut slice: &[u8]) -> Result<(DigestItemRef, &[u8]), Error> {
 
             let item = decode_item_from_parts(index, engine_id, content)?;
             Ok((item, slice))
-        }
-        2 => {
-            if slice.len() < 32 {
-                return Err(Error::TooShort);
-            }
-
-            let hash: &[u8; 32] = TryFrom::try_from(&slice[0..32]).unwrap();
-            slice = &slice[32..];
-            Ok((DigestItemRef::ChangesTrieRoot(hash), slice))
-        }
-        7 => {
-            let (slice, item) = nom::combinator::map(
-                nom::sequence::preceded(
-                    nom::bytes::complete::tag(&[0u8]),
-                    crate::util::nom_option_decode(nom::combinator::map(
-                        nom::sequence::tuple((
-                            nom::number::complete::le_u32,
-                            nom::number::complete::le_u32,
-                        )),
-                        |(digest_interval, digest_levels)| ChangesTrieConfiguration {
-                            digest_interval,
-                            digest_levels,
-                        },
-                    )),
-                ),
-                ChangesTrieSignal::NewConfiguration,
-            )(slice)
-            .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::DigestItemDecodeError)?;
-
-            Ok((DigestItemRef::ChangesTrieSignal(item), slice))
         }
         8 => Ok((DigestItemRef::RuntimeEnvironmentUpdated, slice)),
         ty => Err(Error::UnknownDigestLogType(ty)),

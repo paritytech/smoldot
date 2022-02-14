@@ -156,12 +156,7 @@ impl TryFrom<Vec<u8>> for Multiaddr {
 
 impl fmt::Debug for Multiaddr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_list()
-            .entries(&mut nom::combinator::iterator(
-                &self.bytes[..],
-                protocol::<nom::error::Error<&[u8]>>,
-            ))
-            .finish()
+        fmt::Display::fmt(&self, f)
     }
 }
 

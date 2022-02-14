@@ -25,6 +25,7 @@ import spawnWorker from './worker/spawn.js';
 export class AddChainError extends Error {
   constructor(message: string) {
     super(message);
+    this.name = "AddChainError"
   }
 }
 
@@ -32,6 +33,10 @@ export class AddChainError extends Error {
  * Thrown in case the API user tries to use a chain or client that has already been destroyed.
  */
 export class AlreadyDestroyedError extends Error {
+  constructor() {
+    super()
+    this.name = "AlreadyDestroyedError"
+  }
 }
 
 /**
@@ -39,6 +44,10 @@ export class AlreadyDestroyedError extends Error {
  * enabled.
  */
 export class JsonRpcDisabledError extends Error {
+  constructor() {
+    super()
+    this.name = "JsonRpcDisabledError"
+  }
 }
 
 /**

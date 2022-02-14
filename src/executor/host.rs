@@ -446,9 +446,6 @@ pub enum HostVm {
     /// Need to provide the trie root of the storage.
     #[from]
     ExternalStorageRoot(ExternalStorageRoot),
-    /// Need to provide the trie root of the changes trie.
-    #[from]
-    ExternalStorageChangesRoot(ExternalStorageChangesRoot),
     /// Need to provide the storage key that follows a specific one.
     #[from]
     ExternalStorageNextKey(ExternalStorageNextKey),
@@ -500,7 +497,6 @@ impl HostVm {
             HostVm::ExternalStorageAppend(inner) => inner.inner.into_prototype(),
             HostVm::ExternalStorageClearPrefix(inner) => inner.inner.into_prototype(),
             HostVm::ExternalStorageRoot(inner) => inner.inner.into_prototype(),
-            HostVm::ExternalStorageChangesRoot(inner) => inner.inner.into_prototype(),
             HostVm::ExternalStorageNextKey(inner) => inner.inner.into_prototype(),
             HostVm::ExternalOffchainStorageSet(inner) => inner.inner.into_prototype(),
             HostVm::CallRuntimeVersion(inner) => inner.inner.into_prototype(),
@@ -931,8 +927,19 @@ impl ReadyToRun {
                 }
             }
             HostFunction::ext_storage_changes_root_version_1 => {
-                // TODO: there's a parameter
-                HostVm::ExternalStorageChangesRoot(ExternalStorageChangesRoot { inner: self.inner })
+                // The changes trie is an obsolete attempt at having a second trie containing, for
+                // each storage item, the latest block height where this item has been modified.
+                // When this function returns `None`, it indicates that the changes trie is
+                // disabled. While this function used to be called by the runtimes of
+                // Westend/Polkadot/Kusama (and maybe others), it has never returned anything else
+                // but `None`. The entire changes trie mechanism was ultimately removed in
+                // October 2021.
+                // This function is no longer called by recent runtimes, but must be preserved for
+                // backwards compatibility.
+                self.inner.alloc_write_and_return_pointer_size(
+                    HostFunction::ext_storage_changes_root_version_1.name(),
+                    iter::once(&[0][..]),
+                )
             }
             HostFunction::ext_storage_next_key_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
@@ -1993,37 +2000,6 @@ impl ExternalStorageRoot {
 impl fmt::Debug for ExternalStorageRoot {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("ExternalStorageRoot").finish()
-    }
-}
-
-/// Must provide the trie root hash of the changes trie.
-pub struct ExternalStorageChangesRoot {
-    inner: Inner,
-}
-
-impl ExternalStorageChangesRoot {
-    /// Writes the trie root hash to the Wasm VM and prepares it for resume.
-    // TODO: document why it can be `None`
-    pub fn resume(self, hash: Option<&[u8; 32]>) -> HostVm {
-        if let Some(hash) = hash {
-            // Writing the `Some` of the SCALE-encoded `Option`.
-            self.inner.alloc_write_and_return_pointer_size(
-                HostFunction::ext_storage_changes_root_version_1.name(),
-                iter::once(&[1][..]).chain(iter::once(&hash[..])),
-            )
-        } else {
-            // Writing a SCALE-encoded `None`.
-            self.inner.alloc_write_and_return_pointer_size(
-                HostFunction::ext_storage_changes_root_version_1.name(),
-                iter::once(&[0][..]),
-            )
-        }
-    }
-}
-
-impl fmt::Debug for ExternalStorageChangesRoot {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("ExternalStorageChangesRoot").finish()
     }
 }
 

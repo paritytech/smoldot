@@ -98,10 +98,12 @@ impl InterpreterPrototype {
                 let index = match closure(module_name, field_name, &conv_signature) {
                     Ok(i) => i,
                     Err(_) => {
-                        return Err(wasmi::Error::Instantiation(format!(
-                            "Couldn't resolve `{}`:`{}`",
-                            module_name, field_name
-                        )))
+                        return Err(wasmi::Error::Host(Box::new(NewErrWrapper(
+                            NewErr::UnresolvedFunctionImport {
+                                module_name: module_name.to_owned(),
+                                function: field_name.to_owned(),
+                            },
+                        ))))
                     }
                 };
 
@@ -121,32 +123,28 @@ impl InterpreterPrototype {
 
             fn resolve_memory(
                 &self,
-                _module_name: &str,
+                module_name: &str,
                 field_name: &str,
                 memory_type: &wasmi::MemoryDescriptor,
             ) -> Result<wasmi::MemoryRef, wasmi::Error> {
-                if field_name != "memory" {
-                    return Err(wasmi::Error::Instantiation(format!(
-                        "Unknown memory reference with name: {}",
-                        field_name
-                    )));
+                if module_name != "env" || field_name != "memory" {
+                    return Err(wasmi::Error::Host(Box::new(NewErrWrapper(
+                        NewErr::MemoryNotNamedMemory,
+                    ))));
                 }
 
-                match &mut *self.import_memory.borrow_mut() {
-                    Some(_) => Err(wasmi::Error::Instantiation(
-                        "Memory can not be imported twice!".into(),
-                    )),
-                    memory_ref @ None => {
-                        let memory = wasmi::MemoryInstance::alloc(
-                            wasmi::memory_units::Pages(memory_type.initial() as usize),
-                            memory_type
-                                .maximum()
-                                .map(|hp| wasmi::memory_units::Pages(hp as usize)),
-                        )?;
-                        **memory_ref = Some(memory.clone());
-                        Ok(memory)
-                    }
-                }
+                // Considering that the memory can only be "env":"memory", and that each
+                // import has a unique name, this block can't be reached more than once.
+                debug_assert!(self.import_memory.borrow().is_none());
+
+                let memory = wasmi::MemoryInstance::alloc(
+                    wasmi::memory_units::Pages(memory_type.initial() as usize),
+                    memory_type
+                        .maximum()
+                        .map(|hp| wasmi::memory_units::Pages(hp as usize)),
+                )?;
+                **self.import_memory.borrow_mut() = Some(memory.clone());
+                Ok(memory)
             }
 
             fn resolve_table(
@@ -161,15 +159,30 @@ impl InterpreterPrototype {
             }
         }
 
+        // Wasmi provides an `Error::Host` variant that contains a ̀`Box<dyn wasmi::HostError>`
+        // that can be downcasted to anything.
+        // Unfortunately the `HostError` trait must be implemented manually, and in order to not
+        // have a leaky abstraction we don't implement it directly on `NewErr` but on a wrapper
+        // type.
+        #[derive(Debug, derive_more::Display)]
+        struct NewErrWrapper(NewErr);
+        impl wasmi::HostError for NewErrWrapper {}
+
         let mut import_memory = None;
         let not_started = {
             let resolver = ImportResolve {
                 functions: RefCell::new(&mut symbols),
                 import_memory: RefCell::new(&mut import_memory),
             };
-            wasmi::ModuleInstance::new(&module.inner, &resolver)
-                .map_err(|err| ModuleError(err.to_string()))
-                .map_err(NewErr::ModuleError)?
+
+            match wasmi::ModuleInstance::new(&module.inner, &resolver) {
+                Ok(m) => m,
+                Err(wasmi::Error::Host(err)) if err.is::<NewErrWrapper>() => {
+                    let underlying = err.downcast::<NewErrWrapper>().unwrap();
+                    return Err(underlying.0);
+                }
+                Err(err) => return Err(NewErr::ModuleError(ModuleError(err.to_string()))),
+            }
         };
         // TODO: explain `assert_no_start`
         let module = not_started.assert_no_start();

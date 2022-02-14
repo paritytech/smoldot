@@ -194,7 +194,7 @@ pub struct Client<TChain, TPlat: Platform> {
     /// List of chains currently running according to the public API. Indices in this container
     /// are reported through the public API. The values are either an error if the chain has failed
     /// to initialize, or key found in [`Client::chains_by_key`].
-    public_api_chains: slab::Slab<PublicApiChain<TChain, TPlat>>,
+    public_api_chains: slab::Slab<PublicApiChain<TChain>>,
 
     /// De-duplicated list of chains that are *actually* running.
     ///
@@ -214,7 +214,7 @@ pub struct Client<TChain, TPlat: Platform> {
     system_version: String,
 }
 
-enum PublicApiChain<TChain, TPlat: Platform> {
+enum PublicApiChain<TChain> {
     /// Chain initialization was successful.
     Ok {
         /// Opaque user data passed to [`Client::add_chain`].
@@ -227,9 +227,10 @@ enum PublicApiChain<TChain, TPlat: Platform> {
         /// [`chain_spec::ChainSpec::id`]. Used in order to match parachains with relay chains.
         chain_spec_chain_id: String,
 
-        /// JSON-RPC service that answers incoming requests. `None` iff
+        /// Handle that sends requests to the JSON-RPC service that runs in the background.
+        /// Destroying this handle also shuts down the service. `None` iff
         /// [`AddChainConfig::json_rpc_responses`] was `None` when adding the chain.
-        json_rpc_service: Option<MaybeReadyJsonRpcService<TPlat>>,
+        json_rpc_sender: Option<json_rpc_service::Sender>,
     },
 
     /// Chain initialization has failed.
@@ -238,25 +239,6 @@ enum PublicApiChain<TChain, TPlat: Platform> {
         user_data: TChain,
         /// Human-readable error message giving the reason for the failure.
         error: String,
-    },
-}
-
-enum MaybeReadyJsonRpcService<TPlat: Platform> {
-    /// JSON-RPC service has been fully initialized.
-    Ready(json_rpc_service::JsonRpcService<TPlat>),
-
-    /// JSON-RPC service is still in the process of being initialized in the background.
-    NotReady {
-        /// `Future` that will be ready when the JSON-RPC service is ready. Since this is a
-        /// `RemoteHandle`, one can use `now_or_never()` to check whether it is ready.
-        future_service: future::RemoteHandle<json_rpc_service::JsonRpcService<TPlat>>,
-
-        /// Queue of requests to send to the JSON-RPC service once it is ready.
-        ///
-        /// The capacity of this `Vec` is set to the maximum number of elements that the JSON-RPC
-        /// service is able to queue. Once its length has reached its capacity, no new request
-        /// must be pushed.
-        requests_queue: Vec<String>,
     },
 }
 
@@ -716,7 +698,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
 
         // JSON-RPC service initialization. This is done every time `add_chain` is called, even
         // if a similar chain already existed.
-        let json_rpc_service = if let Some(json_rpc_responses) = config.json_rpc_responses {
+        let json_rpc_sender = if let Some(json_rpc_responses) = config.json_rpc_responses {
             // Clone `running_chain_init`.
             let mut running_chain_init = match services_init {
                 future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
@@ -724,52 +706,45 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                 future::MaybeDone::Gone => unreachable!(),
             };
 
-            // Spawn a background task that initializes the JSON-RPC service.
-            let json_rpc_service_init: future::RemoteHandle<
-                json_rpc_service::JsonRpcService<TPlat>,
-            > = {
-                let new_task_tx = self.new_task_tx.clone();
-                let log_name = log_name.clone();
-                let system_name = self.system_name.clone();
-                let system_version = self.system_version.clone();
-                let init_future = async move {
-                    // Wait for the chain to finish initializing before starting the JSON-RPC service.
-                    (&mut running_chain_init).await;
-                    let running_chain = Pin::new(&mut running_chain_init).take_output().unwrap();
+            let (sender, service_starter) = json_rpc_service::service(json_rpc_service::Config {
+                log_name: log_name.clone(), // TODO: add a way to differentiate multiple different json-rpc services under the same chain
+                max_pending_requests: NonZeroU32::new(128).unwrap(),
+                max_subscriptions: 1024, // Note: the PolkadotJS UI is very heavy in terms of subscriptions.
+            });
 
-                    json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
-                        log_name, // TODO: add a way to differentiate multiple different json-rpc services under the same chain
-                        tasks_executor: Box::new({
-                            move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
-                        }),
-                        sync_service: running_chain.sync_service,
-                        network_service: (running_chain.network_service, 0), // TODO: 0?
-                        transactions_service: running_chain.transactions_service,
-                        runtime_service: running_chain.runtime_service,
-                        chain_spec: &chain_spec,
-                        peer_id: &running_chain.network_identity.clone(),
-                        system_name,
-                        system_version,
-                        genesis_block_hash,
-                        genesis_block_state_root,
-                        responses_sender: json_rpc_responses,
-                        max_parallel_requests: NonZeroU32::new(24).unwrap(),
-                        max_pending_requests: NonZeroU32::new(128).unwrap(),
-                        max_subscriptions: 1024, // Note: the PolkadotJS UI is very heavy in terms of subscriptions.
-                    })
-                };
+            let new_task_tx = self.new_task_tx.clone();
+            let system_name = self.system_name.clone();
+            let system_version = self.system_version.clone();
 
-                let (background_run, output_future) = init_future.remote_handle();
-                self.new_task_tx
-                    .unbounded_send(("json-rpc-service-init".to_owned(), background_run.boxed()))
-                    .unwrap();
-                output_future
+            let init_future = async move {
+                // Wait for the chain to finish initializing before starting the JSON-RPC service.
+                (&mut running_chain_init).await;
+                let running_chain = Pin::new(&mut running_chain_init).take_output().unwrap();
+
+                service_starter.start(json_rpc_service::StartConfig {
+                    tasks_executor: Box::new({
+                        move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
+                    }),
+                    sync_service: running_chain.sync_service,
+                    network_service: (running_chain.network_service, 0), // TODO: 0?
+                    transactions_service: running_chain.transactions_service,
+                    runtime_service: running_chain.runtime_service,
+                    chain_spec: &chain_spec,
+                    peer_id: &running_chain.network_identity.clone(),
+                    system_name,
+                    system_version,
+                    genesis_block_hash,
+                    genesis_block_state_root,
+                    responses_sender: json_rpc_responses,
+                    max_parallel_requests: NonZeroU32::new(24).unwrap(),
+                })
             };
 
-            Some(MaybeReadyJsonRpcService::NotReady {
-                future_service: json_rpc_service_init,
-                requests_queue: Vec::with_capacity(32), // TODO: MUST be the same capacity as `max_pending_requests`
-            })
+            self.new_task_tx
+                .unbounded_send(("json-rpc-service-init".to_owned(), init_future.boxed()))
+                .unwrap();
+
+            Some(sender)
         } else {
             None
         };
@@ -779,7 +754,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
             user_data: config.user_data,
             key: new_chain_key,
             chain_spec_chain_id,
-            json_rpc_service,
+            json_rpc_sender,
         });
         new_chain_id
     }
@@ -884,46 +859,15 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
         json_rpc_request: String,
         chain_id: ChainId,
     ) -> Result<(), HandleRpcError> {
-        let (mut json_rpc_service, _) = match self.public_api_chains.get_mut(chain_id.0) {
+        let json_rpc_sender = match self.public_api_chains.get_mut(chain_id.0) {
             Some(PublicApiChain::Ok {
-                json_rpc_service: Some(json_rpc_service),
-                key,
+                json_rpc_sender: Some(json_rpc_sender),
                 ..
-            }) => {
-                let log_name = &self.chains_by_key.get(key).unwrap().log_name;
-                (json_rpc_service, format!("json-rpc-{}", log_name))
-            }
+            }) => json_rpc_sender,
             _ => panic!(),
         };
 
-        loop {
-            match &mut json_rpc_service {
-                MaybeReadyJsonRpcService::Ready(service) => {
-                    return service.queue_rpc_request(json_rpc_request)
-                }
-                MaybeReadyJsonRpcService::NotReady {
-                    future_service,
-                    requests_queue,
-                } => {
-                    if let Some(mut service) = future_service.now_or_never() {
-                        for request in requests_queue.drain(..) {
-                            // We make sure that the length of `requests_queue` never goes above
-                            // the number of requests that can be queued in the JSON-RPC service.
-                            // As such, this can't panic.
-                            service.queue_rpc_request(request).unwrap();
-                        }
-
-                        *json_rpc_service = MaybeReadyJsonRpcService::Ready(service);
-                        continue;
-                    } else if requests_queue.len() < requests_queue.capacity() {
-                        requests_queue.push(json_rpc_request);
-                        return Ok(());
-                    } else {
-                        return Err(HandleRpcError::Overloaded { json_rpc_request });
-                    }
-                }
-            }
-        }
+        json_rpc_sender.queue_rpc_request(json_rpc_request)
     }
 
     /// Returns opaque data that can later by passing back through
