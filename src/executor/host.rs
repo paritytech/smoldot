@@ -191,6 +191,28 @@ pub use zstd::Error as ModuleFormatError;
 
 mod zstd;
 
+/// Configuration for [`HostVmPrototype::new`].
+pub struct Config<TModule> {
+    /// Bytes of the WebAssembly module.
+    ///
+    /// The module can be either directly Wasm bytecode, or zstandard-compressed.
+    pub module: TModule,
+
+    /// Number of pages of heap available to the virtual machine.
+    ///
+    /// See the module-level documentation for an explanation.
+    pub heap_pages: HeapPages,
+
+    /// Hint used by the implementation to decide which kind of virtual machine to use.
+    pub exec_hint: vm::ExecHint,
+
+    /// If `true`, no [`vm::NewErr::UnresolvedFunctionImport`] error will be returned if the
+    /// module trying to import functions that aren't recognized by the implementation. Instead,
+    /// a [`Error::UnresolvedFunctionCalled`] error will be generated if the module tries to call
+    /// an unresolved function.
+    pub allow_unresolved_imports: bool,
+}
+
 /// Prototype for an [`HostVm`].
 ///
 /// > **Note**: This struct implements `Clone`. Cloning a [`HostVmPrototype`] allocates memory
@@ -229,22 +251,12 @@ pub struct HostVmPrototype {
 
 impl HostVmPrototype {
     /// Creates a new [`HostVmPrototype`]. Parses and potentially JITs the module.
-    ///
-    /// See the module-level documentation for an explanation of the value of `heap_pages`.
-    ///
-    /// The module can be either directly Wasm bytecode, or zstandard-compressed.eans exactly
-    // TODO: have a proper Config struct
-    pub fn new(
-        module: impl AsRef<[u8]>,
-        heap_pages: HeapPages,
-        exec_hint: vm::ExecHint,
-        allow_unresolved_imports: bool,
-    ) -> Result<Self, NewErr> {
+    pub fn new(config: Config<impl AsRef<[u8]>>) -> Result<Self, NewErr> {
         // TODO: configurable maximum allowed size? a uniform value is important for consensus
-        let module = zstd::zstd_decode_if_necessary(module.as_ref(), 50 * 1024 * 1024)
+        let module = zstd::zstd_decode_if_necessary(config.module.as_ref(), 50 * 1024 * 1024)
             .map_err(NewErr::BadFormat)?;
-        let module = vm::Module::new(module, exec_hint)?;
-        Self::from_module(module, heap_pages, allow_unresolved_imports)
+        let module = vm::Module::new(module, config.exec_hint)?;
+        Self::from_module(module, config.heap_pages, config.allow_unresolved_imports)
     }
 
     fn from_module(
