@@ -78,6 +78,8 @@ mod interpreter;
 #[cfg(all(target_arch = "x86_64", feature = "std"))]
 mod jit;
 
+mod tests;
+
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 use smallvec::SmallVec;
@@ -642,6 +644,8 @@ pub enum NewErr {
     /// If a "memory" symbol is provided, it must be a memory.
     #[display(fmt = "If a \"memory\" symbol is provided, it must be a memory.")]
     MemoryIsntMemory,
+    /// Wasm module imports a memory that isn't named "memory".
+    MemoryNotNamedMemory,
     /// If a "__indirect_function_table" symbol is provided, it must be a table.
     #[display(fmt = "If a \"__indirect_function_table\" symbol is provided, it must be a table.")]
     IndirectTableIsntTable,
@@ -707,17 +711,4 @@ pub enum GlobalValueErr {
     NotFound,
     /// Requested symbol isn't a `u32`.
     Invalid,
-}
-
-#[cfg(test)]
-mod tests {
-    // TODO:
-
-    #[test]
-    fn is_send() {
-        // Makes sure that the virtual machine types implement `Send`.
-        fn test<T: Send>() {}
-        test::<super::VirtualMachine>();
-        test::<super::VirtualMachinePrototype>();
-    }
 }
