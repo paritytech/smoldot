@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -42,6 +42,7 @@ pub(crate) struct Client<TChain, TPlat: smoldot_light_base::Platform> {
 
 pub(crate) fn init<TChain, TPlat: smoldot_light_base::Platform>(
     max_log_level: u32,
+    enable_current_task: bool,
 ) -> Client<TChain, TPlat> {
     // Try initialize the logging and the panic hook.
     let _ = log::set_boxed_logger(Box::new(Logger)).map(|()| {
@@ -57,6 +58,14 @@ pub(crate) fn init<TChain, TPlat: smoldot_light_base::Platform>(
     panic::set_hook(Box::new(|info| {
         panic(info.to_string());
     }));
+
+    // First things first, print the version in order to make it easier to debug issues by
+    // reading logs provided by third parties.
+    log::info!(
+        target: "smoldot",
+        "Smoldot v{}",
+        env!("CARGO_PKG_VERSION")
+    );
 
     // Simple fool-proof check to make sure that randomness is properly implemented.
     assert_ne!(rand::random::<u64>(), 0);
@@ -78,6 +87,7 @@ pub(crate) fn init<TChain, TPlat: smoldot_light_base::Platform>(
         #[pin_project::pin_project]
         struct FutureAdapter<F> {
             name: String,
+            enable_current_task: bool,
             #[pin]
             future: F,
         }
@@ -86,9 +96,20 @@ pub(crate) fn init<TChain, TPlat: smoldot_light_base::Platform>(
             type Output = F::Output;
             fn poll(self: Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
                 let this = self.project();
-                log::trace!(target: "smoldot", "enter: {}", &this.name);
+                if *this.enable_current_task {
+                    unsafe {
+                        bindings::current_task_entered(
+                            u32::try_from(this.name.as_bytes().as_ptr() as usize).unwrap(),
+                            u32::try_from(this.name.as_bytes().len()).unwrap(),
+                        )
+                    }
+                }
                 let out = this.future.poll(cx);
-                log::trace!(target: "smoldot", "leave");
+                if *this.enable_current_task {
+                    unsafe {
+                        bindings::current_task_exit();
+                    }
+                }
                 out
             }
         }
@@ -98,6 +119,7 @@ pub(crate) fn init<TChain, TPlat: smoldot_light_base::Platform>(
                 (new_task_name, new_task) = new_task_rx.select_next_some() => {
                     all_tasks.push(FutureAdapter {
                         name: new_task_name,
+                        enable_current_task,
                         future: new_task,
                     });
                 },
@@ -131,9 +153,12 @@ pub(crate) fn init<TChain, TPlat: smoldot_light_base::Platform>(
                     let avg_up = u64::try_from(bytes_tx - previous_sent_bytes).unwrap() / interval;
                     previous_sent_bytes = bytes_tx;
 
+                    // Note that we also print the version at every interval, in order to increase
+                    // the chance of being able to know the version in case of truncated logs.
                     log::info!(
                         target: "smoldot",
-                        "Current memory usage: {}. Average download: {}/s. Average upload: {}/s.",
+                        "Smoldot v{}. Current memory usage: {}. Average download: {}/s. Average upload: {}/s.",
+                        env!("CARGO_PKG_VERSION"),
                         BytesDisplay(mem),
                         BytesDisplay(avg_dl),
                         BytesDisplay(avg_up)
@@ -145,8 +170,8 @@ pub(crate) fn init<TChain, TPlat: smoldot_light_base::Platform>(
 
     let client = smoldot_light_base::Client::new(
         new_task_tx.clone(),
-        env!("CARGO_PKG_NAME").to_owned(),
-        env!("CARGO_PKG_VERSION").to_owned(),
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
     );
 
     Client {

@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -29,7 +29,7 @@ use smoldot::{
     network::protocol,
     sync::{all_forks::sources, para},
 };
-use std::{collections::HashMap, iter, sync::Arc, time::Duration};
+use std::{collections::HashMap, iter, num::NonZeroU32, sync::Arc, time::Duration};
 
 /// Starts a sync service background task to synchronize a parachain.
 pub(super) async fn start_parachain<TPlat: Platform>(
@@ -70,10 +70,10 @@ pub(super) async fn start_parachain<TPlat: Platform>(
     // we break out of the inner loop in order to reset everything.
     loop {
         // Stream of blocks of the relay chain this parachain is registered on.
-        let mut relay_chain_subscribe_all = relay_chain_sync.subscribe_all(32).await;
+        let mut relay_chain_subscribe_all = relay_chain_sync.subscribe_all(32, 64).await;
         log::debug!(
             target: &log_target,
-            "Resetting parachain syncing to relay chain block 0x{}",
+            "RelayChain => NewSubscription(finalized_hash={})",
             HashDisplay(&header::hash_from_scale_encoded_header(
                 &relay_chain_subscribe_all.finalized_block_scale_encoded_header
             ))
@@ -88,6 +88,10 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         // Each block in the tree has an associated parahead behind an `Option`. This `Option`
         // always contains `Some`, unless the relay chain finalized block hasn't had its parahead
         // fetched yet.
+        //
+        // The set of blocks in this tree whose parahead hasn't been fetched yet is the same as
+        // the set of blocks that is maintained pinned on the runtime service. Blocks are unpinned
+        // when their parahead fetching succeeds.
         let mut async_tree = {
             let mut async_tree =
                 async_tree::AsyncTree::<TPlat::Instant, [u8; 32], _>::new(async_tree::Config {
@@ -98,6 +102,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                 &relay_chain_subscribe_all.finalized_block_scale_encoded_header,
             );
             let finalized_index = async_tree.input_insert_block(finalized_hash, None, false, true);
+            async_tree.input_finalize(finalized_index, finalized_index);
             for block in relay_chain_subscribe_all.non_finalized_blocks_ancestry_order {
                 let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
                 let parent = async_tree
@@ -114,9 +119,16 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         // Note that this list is created in the inner loop, as to be cleared if the relay chain
         // blocks stream has a gap.
         let mut all_subscriptions = Vec::<mpsc::Sender<_>>::new();
+        log::debug!(target: &log_target, "Subscriptions <= Reset");
 
         // List of in-progress parahead fetching operations.
+        //
+        // The operations require some blocks to be pinned within the relay chain runtime service,
+        // which is guaranteed by the fact that `relay_chain_subscribe_all.new_blocks` stays
+        // alive for longer than this container, and by the fact that we unpin block after a
+        // fetching operation has finished and that we never fetch twice for the same block.
         let mut in_progress_paraheads = stream::FuturesUnordered::new();
+        log::debug!(target: &log_target, "ParaheadFetchOperations <= Clear");
 
         // Future that is ready when we need to wake up the `select!` below.
         let mut wakeup_deadline = future::Either::Right(future::pending());
@@ -136,19 +148,25 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     async_tree::NextNecessaryAsyncOp::Ready(op) => {
                         log::debug!(
                             target: &log_target,
-                            "Fetching parahead for relay chain block 0x{} (operation id: {:?})",
+                            "ParaheadFetchOperations <= StartFetch(relay_block_hash={})",
                             HashDisplay(op.block_user_data),
-                            op.id
                         );
 
                         in_progress_paraheads.push({
                             let relay_chain_sync = relay_chain_sync.clone();
+                            let subscription_id = relay_chain_subscribe_all.new_blocks.id();
                             let block_hash = *op.block_user_data;
                             let async_op_id = op.id;
                             async move {
                                 (
                                     async_op_id,
-                                    parahead(&relay_chain_sync, parachain_id, &block_hash).await,
+                                    parahead(
+                                        &relay_chain_sync,
+                                        subscription_id,
+                                        parachain_id,
+                                        &block_hash,
+                                    )
+                                    .await,
                                 )
                             }
                             .boxed()
@@ -163,6 +181,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     async_tree::OutputUpdate::Finalized {
                         async_op_user_data: new_parahead,
                         former_finalized_async_op_user_data: former_parahead,
+                        pruned_blocks,
                         ..
                     } if *new_parahead != former_parahead => {
                         debug_assert!(new_parahead.is_some());
@@ -176,9 +195,19 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             // TODO: what about an `else`? does sync_sources leak if the block can't be decoded?
                         }
 
+                        // Must unpin the pruned blocks if they haven't already been unpinned.
+                        for (_, hash, pruned_block_parahead) in pruned_blocks {
+                            if pruned_block_parahead.is_none() {
+                                relay_chain_subscribe_all
+                                    .new_blocks
+                                    .unpin_block(&hash)
+                                    .await;
+                            }
+                        }
+
                         log::debug!(
                             target: &log_target,
-                            "Reporting finalized parablock 0x{}",
+                            "Subscriptions <= ParablockFinalized(hash={})",
                             HashDisplay(&hash)
                         );
 
@@ -235,7 +264,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
                         log::debug!(
                             target: &log_target,
-                            "Reporting new parablock 0x{}",
+                            "Subscriptions <= NewParablock(hash={})",
                             HashDisplay(&header::hash_from_scale_encoded_header(
                                 &scale_encoded_header
                             ))
@@ -264,7 +293,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     // Do nothing. This is simply to wake up and loop again.
                 },
 
-                relay_chain_notif = relay_chain_subscribe_all.new_blocks.next() => {
+                relay_chain_notif = relay_chain_subscribe_all.new_blocks.next().fuse() => { // TODO: remove fuse()?
                     let relay_chain_notif = match relay_chain_notif {
                         Some(n) => n,
                         None => break, // Jumps to the outer loop to recreate the channel.
@@ -275,10 +304,10 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     // Update the local tree of blocks to match the update sent by the relay chain
                     // syncing service.
                     match relay_chain_notif {
-                        runtime_service::Notification::Finalized { hash, best_block_hash } => {
+                        runtime_service::Notification::Finalized { hash, best_block_hash, .. } => {
                             log::debug!(
                                 target: &log_target,
-                                "Relay chain has finalized block 0x{}",
+                                "RelayChain => Finalized(hash={})",
                                 HashDisplay(&hash)
                             );
 
@@ -291,8 +320,9 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
                             log::debug!(
                                 target: &log_target,
-                                "New relay chain block 0x{}",
-                                HashDisplay(&hash)
+                                "RelayChain => Block(hash={}, parent_hash={})",
+                                HashDisplay(&hash),
+                                HashDisplay(&block.parent_hash)
                             );
 
                             let parent = async_tree.input_iter_unordered().find(|b| *b.user_data == block.parent_hash).map(|b| b.id); // TODO: check if finalized
@@ -309,26 +339,34 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         Ok(parahead) => {
                             log::debug!(
                                 target: &log_target,
-                                "Successfully fetched parahead of blake2 hash {} for relay chain block(s) {}",
+                                "ParaheadFetchOperations => Parahead(hash={}, relay_blocks={})",
                                 HashDisplay(blake2_rfc::blake2b::blake2b(32, b"", &parahead).as_bytes()),
-                                async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", ")
+                                async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(",")
                             );
 
-                            async_tree.async_op_finished(async_op_id, Some(parahead));
+                            // Unpin the relay blocks whose parahead is now known.
+                            for block in async_tree.async_op_finished(async_op_id, Some(parahead)) {
+                                let hash = async_tree.block_user_data(block);
+                                relay_chain_subscribe_all.new_blocks.unpin_block(hash).await;
+                            }
                         },
                         Err(error) => {
                             // Only a debug line is printed if not near the head of the chain,
                             // to handle chains that have been upgraded later on to support
                             // parachains later.
-                            log::log!(
+                            if is_near_head_of_chain && !error.is_network_problem() { // TODO: is is_near_head_of_chain the correct flag?
+                                log::error!(
+                                    target: &log_target,
+                                    "Failed to fetch the parachain head from relay chain blocks {}: {}",
+                                    async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", "),
+                                    error
+                                );
+                            }
+
+                            log::debug!(
                                 target: &log_target,
-                                if is_near_head_of_chain && !error.is_network_problem() { // TODO: is is_near_head_of_chain the correct flag?
-                                    log::Level::Error
-                                } else {
-                                    log::Level::Debug
-                                },
-                                "Failed to fetch the parachain head from relay chain blocks {}: {}",
-                                async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", "),
+                                "ParaheadFetchOperations => Error(relay_blocks={}, error={})",
+                                async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(","),
                                 error
                             );
 
@@ -450,21 +488,25 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
 async fn parahead<TPlat: Platform>(
     relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
+    subscription_id: runtime_service::SubscriptionId,
     parachain_id: u32,
     block_hash: &[u8; 32],
 ) -> Result<Vec<u8>, ParaheadError> {
     // For each relay chain block, call `ParachainHost_persisted_validation_data` in
     // order to know where the parachains are.
-    let (runtime_call_lock, virtual_machine) = relay_chain_sync
-        .runtime_lock(block_hash)
-        .await
-        .ok_or(ParaheadError::BlockPruned)?
+    let precall = relay_chain_sync
+        .pinned_block_runtime_lock(subscription_id, block_hash)
+        .await;
+    let (runtime_call_lock, virtual_machine) = precall
         .start(
             para::PERSISTED_VALIDATION_FUNCTION_NAME,
             para::persisted_validation_data_parameters(
                 parachain_id,
                 para::OccupiedCoreAssumption::TimedOut,
             ),
+            6,
+            Duration::from_secs(10),
+            NonZeroU32::new(2).unwrap(),
         )
         .await
         .map_err(ParaheadError::Call)?;
@@ -509,8 +551,11 @@ async fn parahead<TPlat: Platform>(
                 };
                 runtime_call = get.inject_value(storage_value.map(iter::once));
             }
-            read_only_runtime_host::RuntimeHostVm::NextKey(_) => {
-                todo!() // TODO:
+            read_only_runtime_host::RuntimeHostVm::NextKey(nk) => {
+                // TODO:
+                runtime_call_lock
+                    .unlock(read_only_runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
+                return Err(ParaheadError::NextKeyForbidden);
             }
             read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
                 runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
@@ -535,7 +580,7 @@ enum ParaheadError {
     ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
     NoCore,
     InvalidRuntimeOutput(para::Error),
-    BlockPruned,
+    NextKeyForbidden,
 }
 
 impl ParaheadError {
@@ -548,7 +593,7 @@ impl ParaheadError {
             ParaheadError::ReadOnlyRuntime(_) => false,
             ParaheadError::NoCore => false,
             ParaheadError::InvalidRuntimeOutput(_) => false,
-            ParaheadError::BlockPruned => false,
+            ParaheadError::NextKeyForbidden => false,
         }
     }
 }

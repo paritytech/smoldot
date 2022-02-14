@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -64,8 +64,9 @@ impl GrandpaGenesisConfiguration {
                 genesis_storage_access(b":heappages").as_deref(),
             )
             .map_err(FromGenesisStorageError::HeapPagesDecode)?;
-            let vm = host::HostVmPrototype::new(&wasm_code, heap_pages, vm::ExecHint::Oneshot)
-                .map_err(FromGenesisStorageError::VmInitialization)?;
+            let vm =
+                host::HostVmPrototype::new(&wasm_code, heap_pages, vm::ExecHint::Oneshot, false)
+                    .map_err(FromGenesisStorageError::VmInitialization)?;
             Self::from_virtual_machine_prototype(vm, genesis_storage_access)
                 .map_err(FromGenesisStorageError::VmError)?
         };

@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -98,10 +98,12 @@ impl InterpreterPrototype {
                 let index = match closure(module_name, field_name, &conv_signature) {
                     Ok(i) => i,
                     Err(_) => {
-                        return Err(wasmi::Error::Instantiation(format!(
-                            "Couldn't resolve `{}`:`{}`",
-                            module_name, field_name
-                        )))
+                        return Err(wasmi::Error::Host(Box::new(NewErrWrapper(
+                            NewErr::UnresolvedFunctionImport {
+                                module_name: module_name.to_owned(),
+                                function: field_name.to_owned(),
+                            },
+                        ))))
                     }
                 };
 
@@ -161,15 +163,30 @@ impl InterpreterPrototype {
             }
         }
 
+        // Wasmi provides an `Error::Host` variant that contains a ̀`Box<dyn wasmi::HostError>`
+        // that can be downcasted to anything.
+        // Unfortunately the `HostError` trait must be implemented manually, and in order to not
+        // have a leaky abstraction we don't implement it directly on `NewErr` but on a wrapper
+        // type.
+        #[derive(Debug, derive_more::Display)]
+        struct NewErrWrapper(NewErr);
+        impl wasmi::HostError for NewErrWrapper {}
+
         let mut import_memory = None;
         let not_started = {
             let resolver = ImportResolve {
                 functions: RefCell::new(&mut symbols),
                 import_memory: RefCell::new(&mut import_memory),
             };
-            wasmi::ModuleInstance::new(&module.inner, &resolver)
-                .map_err(|err| ModuleError(err.to_string()))
-                .map_err(NewErr::ModuleError)?
+
+            match wasmi::ModuleInstance::new(&module.inner, &resolver) {
+                Ok(m) => m,
+                Err(wasmi::Error::Host(err)) if err.is::<NewErrWrapper>() => {
+                    let underlying = err.downcast::<NewErrWrapper>().unwrap();
+                    return Err(underlying.0);
+                }
+                Err(err) => return Err(NewErr::ModuleError(ModuleError(err.to_string()))),
+            }
         };
         // TODO: explain `assert_no_start`
         let module = not_started.assert_no_start();

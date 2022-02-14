@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -156,9 +156,15 @@ pub struct VerifyConfig<'a> {
 
     /// Epoch the parent block belongs to. Must be `None` if and only if the parent block's number
     /// is 0, as block #0 doesn't belong to any epoch.
+    ///
+    /// If `Some`, then the [`chain_information::BabeEpochInformationRef::start_slot_number`]
+    /// must be `Some`.
     pub parent_block_epoch: Option<chain_information::BabeEpochInformationRef<'a>>,
 
     /// Epoch that follows the epoch the parent block belongs to.
+    ///
+    /// The [`chain_information::BabeEpochInformationRef::start_slot_number`] must be `None` if
+    /// and only if the [`chain_information::BabeEpochInformationRef::epoch_index`] is `0`.
     pub parent_block_next_epoch: chain_information::BabeEpochInformationRef<'a>,
 }
 
@@ -267,7 +273,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
             curr.epoch_index.checked_add(1).unwrap(),
             config.parent_block_next_epoch.epoch_index
         );
-        assert_eq!(curr.epoch_index == 0, curr.start_slot_number.is_none());
+        assert!(curr.start_slot_number.is_some());
         assert!(curr.start_slot_number <= parent_slot_number);
     } else {
         assert_eq!(config.parent_block_next_epoch.epoch_index, 0);

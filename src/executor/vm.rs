@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -631,9 +631,14 @@ pub struct Trap(String);
 /// Error that can happen when initializing a [`VirtualMachinePrototype`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum NewErr {
-    /// Error while parsing or compiling the WebAssembly code.
-    #[display(fmt = "{}", _0)]
-    ModuleError(ModuleError),
+    /// Failed to resolve a function imported by the module.
+    #[display(fmt = "Unresolved function `{}`:`{}`", module_name, function)]
+    UnresolvedFunctionImport {
+        /// Name of the function that was unresolved.
+        function: String,
+        /// Name of module associated with the unresolved function.
+        module_name: String,
+    },
     /// If a "memory" symbol is provided, it must be a memory.
     #[display(fmt = "If a \"memory\" symbol is provided, it must be a memory.")]
     MemoryIsntMemory,
@@ -642,6 +647,10 @@ pub enum NewErr {
     IndirectTableIsntTable,
     /// Failed to allocate memory for the virtual machine.
     CouldntAllocateMemory,
+    /// Error while parsing or compiling the WebAssembly code.
+    // TODO: remove as too imprecise?
+    #[display(fmt = "{}", _0)]
+    ModuleError(ModuleError),
 }
 
 /// Error that can happen when calling [`VirtualMachinePrototype::start`].

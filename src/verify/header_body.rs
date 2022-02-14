@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -501,6 +501,7 @@ impl RuntimeCompilation {
             code,
             self.heap_pages,
             vm::ExecHint::CompileAheadOfTime,
+            false,
         ) {
             Ok(vm) => vm,
             Err(err) => {

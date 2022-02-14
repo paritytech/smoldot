@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -205,6 +205,7 @@ pub enum ProtocolRef<'a> {
     Tls,
     Udp(u16),
     Ws,
+    // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
     Wss,
 }
 
@@ -532,6 +533,7 @@ mod tests {
         );
         check_valid("/ip6/::/udp/30333");
         check_valid("/ip6/::1/udp/30333/tls");
+        check_valid("/ip6/::1/udp/30333/tls/ws");
         check_valid("/tcp/65535/udp/65535/ws/tls/wss");
         check_valid("/dns/0.0.0.0");
         check_valid("/dns4/example.com./tcp/55");

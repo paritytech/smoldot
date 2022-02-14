@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -211,6 +211,25 @@ extern "C" {
     /// The connection must currently be in the `Open` state. See the documentation of
     /// [`connection_new`] for details.
     pub fn connection_send(id: u32, ptr: u32, len: u32);
+
+    /// Called when the Wasm execution enters the context of a certain task. This is useful for
+    /// debugging purposes.
+    ///
+    /// Only one task can be currently executing at any time.
+    ///
+    /// The name of the task is a UTF-8 string found in the memory of the WebAssembly virtual
+    /// machine at offset `ptr` and with length `len`.
+    ///
+    /// This function is called only if `enable_current_task` was non-zero when calling [`init`].
+    pub fn current_task_entered(ptr: u32, len: u32);
+
+    /// Called when the Wasm execution leave the context of a certain task. This is useful for
+    /// debugging purposes.
+    ///
+    /// Only one task can be currently executing at any time.
+    ///
+    /// This function is called only if `enable_current_task` was non-zero when calling [`init`].
+    pub fn current_task_exit();
 }
 
 /// Initializes the client.
@@ -221,9 +240,13 @@ extern "C" {
 ///
 /// The client will emit log messages by calling the [`log()`] function, provided the log level is
 /// inferior or equal to the value of `max_log_level` passed here.
+///
+/// If `enbable_current_task` is non-zero, smoldot will call the [`current_task_entered`] and
+/// [`current_task_exit`] functions to report when it enters and leaves tasks. This slightly
+/// slows everything down, but is useful for debugging purposes.
 #[no_mangle]
-pub extern "C" fn init(max_log_level: u32) {
-    crate::init(max_log_level)
+pub extern "C" fn init(max_log_level: u32, enable_current_task: u32) {
+    crate::init(max_log_level, enable_current_task)
 }
 
 /// Allocates a buffer of the given length, with an alignment of 1.
@@ -342,8 +365,8 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 ///
 /// Responses and notifications are sent back using [`json_rpc_respond`].
 ///
-/// It is forbidden to call this function on a chain that was created with `json_rpc_running`
-/// equal to 0.
+/// It is forbidden to call this function on an erroneous chain or a chain that was created with
+/// `json_rpc_running` equal to 0.
 #[no_mangle]
 pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) {
     super::json_rpc_send(text_ptr, text_len, chain_id)
@@ -364,6 +387,8 @@ pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) {
 ///
 /// [`database_content_ready`] will not be called if you remove the chain with [`remove_chain`]
 /// while the operation is in progress.
+///
+/// It is forbidden to call this function on an erroneous chain.
 #[no_mangle]
 pub extern "C" fn database_content(chain_id: u32, max_size: u32) {
     super::database_content(chain_id, max_size)

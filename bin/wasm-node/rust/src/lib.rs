@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -37,8 +37,8 @@ mod platform;
 mod timers;
 
 /// Uses the environment to invoke `closure` after at least `duration` has elapsed.
-fn start_timer_wrap(duration: Duration, closure: impl FnOnce()) {
-    let callback: Box<Box<dyn FnOnce()>> = Box::new(Box::new(closure));
+fn start_timer_wrap(duration: Duration, closure: impl FnOnce() + 'static) {
+    let callback: Box<Box<dyn FnOnce() + 'static>> = Box::new(Box::new(closure));
     let timer_id = u32::try_from(Box::into_raw(callback) as usize).unwrap();
     // Note that ideally `duration` should be rounded up in order to make sure that it is not
     // truncated, but the precision of an `f64` is so high and the precision of the operating
@@ -116,8 +116,8 @@ lazy_static::lazy_static! {
     static ref CLIENT: Mutex<Option<init::Client<Vec<future::AbortHandle>, platform::Platform>>> = Mutex::new(None);
 }
 
-fn init(max_log_level: u32) {
-    let init_out = init::init(max_log_level);
+fn init(max_log_level: u32, enable_current_task: u32) {
+    let init_out = init::init(max_log_level, enable_current_task != 0);
 
     let mut client_lock = crate::CLIENT.lock().unwrap();
     assert!(client_lock.is_none());

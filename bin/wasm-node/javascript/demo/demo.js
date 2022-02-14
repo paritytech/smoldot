@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -17,11 +17,11 @@
 
 // This file launches a WebSocket server that exposes JSON-RPC functions.
 
-import * as smoldot from '../src/index.js';
+import * as smoldot from '../dist/index.js';
 import { default as websocket } from 'websocket';
-import * as http from 'http';
-import * as process from 'process';
-import * as fs from 'fs';
+import * as http from 'node:http';
+import * as process from 'node:process';
+import * as fs from 'node:fs';
 
 // Adjust these chain specs for the chain you want to connect to.
 const westend = fs.readFileSync('../../westend.json', 'utf8');
@@ -71,8 +71,8 @@ let server = http.createServer(function (request, response) {
     response.end();
 });
 server.listen(9944, function () {
-    console.log('Server is listening on port 9944');
-    console.log('Visit one of:');
+    console.log('JSON-RPC server now listening on port 9944');
+    console.log('Please visit one of:');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fwestend');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fwestmint');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fadz');
@@ -80,6 +80,7 @@ server.listen(9944, function () {
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fstatemine');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fpolkadot');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Frococo');
+    console.log('');
 });
 let wsServer = new websocket.server({
     httpServer: server,
@@ -192,11 +193,11 @@ wsServer.on('request', function (request) {
     }
 
     const connection = request.accept(request.requestedProtocols[0], request.origin);
-    console.log((new Date()) + ' Connection accepted.');
+    console.log('(demo) New JSON-RPC client connected: ' + request.remoteAddress + '.');
 
     chain
         .catch((error) => {
-            console.error("Error while adding chain: " + error);
+            console.error("(demo) Error while adding chain: " + error);
             connection.close(400);
         });
 
@@ -211,7 +212,7 @@ wsServer.on('request', function (request) {
                         chain.relay.sendJsonRpc(message.utf8Data);
                 })
                 .catch((error) => {
-                    console.error("Error during JSON-RPC request: " + error);
+                    console.error("(demo) Error during JSON-RPC request: " + error);
                     process.exit(1);
                 });
         } else {
@@ -221,7 +222,7 @@ wsServer.on('request', function (request) {
 
     // When the connection closes, remove the chains that have been added.
     connection.on('close', function (reasonCode, description) {
-        console.log((new Date()) + ' Peer ' + connection.remoteAddress + ' disconnected.');
+        console.log("(demo) JSON-RPC client " + connection.remoteAddress + ' disconnected.');
         chain.then(chain => {
             chain.relay.remove();
             if (chain.para)

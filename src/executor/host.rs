@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -69,14 +69,11 @@
 //! `ext_allocator_malloc_version_1` and `ext_allocator_free_version_1` host functions for this
 //! purpose. Calling `memory.grow` is forbidden.
 //!
-//! Consequently, the runtime code must export a global symbol named `__heap_base` of type `i32`.
-//! Any memory whose offset is below the value of `__heap_base` can be used at will by the
-//! program, while any memory above this value is available for use by the implementation of
-//! `ext_allocator_malloc_version_1`.
-//!
-//! The size of the memory available above `__heap_base` available to the WebAssembly virtual
-//! machine is always fixed, and is equal to the initial size of the memory plus the value of
-//! `heap_pages` that is passed as parameter to [`HostVmPrototype::new`].
+//! The runtime code must export a global symbol named `__heap_base` of type `i32`. Any memory
+//! whose offset is below the value of `__heap_base` can be used at will by the program, while
+//! any memory above `__heap_base` but below `__heap_base + heap_pages` (where `heap_pages` is
+//! the value passed as parameter to [`HostVmPrototype::new`]) is available for use by the
+//! implementation of `ext_allocator_malloc_version_1`.
 //!
 //! ## Entry points
 //!
@@ -142,7 +139,8 @@
 //!     let prototype = HostVmPrototype::new(
 //!         &wasm_binary_code,
 //!         HeapPages::from(2048),
-//!         smoldot::executor::vm::ExecHint::Oneshot
+//!         smoldot::executor::vm::ExecHint::Oneshot,
+//!         false
 //!     ).unwrap();
 //!     prototype.run_no_param("Core_version").unwrap().into()
 //! };
@@ -216,10 +214,13 @@ pub struct HostVmPrototype {
     /// The keys of this `Vec` (i.e. the `usize` indices) have been passed to the virtual machine
     /// executor. Whenever the Wasm code invokes a host function, we obtain its index, and look
     /// within this `Vec` to know what to do.
-    registered_functions: Vec<HostFunction>,
+    registered_functions: Vec<FunctionImport>,
 
     /// Value of `heap_pages` passed to [`HostVmPrototype::new`].
     heap_pages: HeapPages,
+
+    /// Values passed to [`HostVmPrototype::new`].
+    allow_unresolved_imports: bool,
 
     /// Total number of pages of Wasm memory. This is equal to `heap_base / 64k` (rounded up) plus
     /// `heap_pages`.
@@ -229,21 +230,28 @@ pub struct HostVmPrototype {
 impl HostVmPrototype {
     /// Creates a new [`HostVmPrototype`]. Parses and potentially JITs the module.
     ///
-    /// The module can be either directly Wasm bytecode, or zstandard-compressed.
-    // TODO: document `heap_pages`; I know it comes from storage, but it's unclear what it means exactly
+    /// See the module-level documentation for an explanation of the value of `heap_pages`.
+    ///
+    /// The module can be either directly Wasm bytecode, or zstandard-compressed.eans exactly
+    // TODO: have a proper Config struct
     pub fn new(
         module: impl AsRef<[u8]>,
         heap_pages: HeapPages,
         exec_hint: vm::ExecHint,
+        allow_unresolved_imports: bool,
     ) -> Result<Self, NewErr> {
         // TODO: configurable maximum allowed size? a uniform value is important for consensus
         let module = zstd::zstd_decode_if_necessary(module.as_ref(), 50 * 1024 * 1024)
             .map_err(NewErr::BadFormat)?;
         let module = vm::Module::new(module, exec_hint)?;
-        Self::from_module(module, heap_pages)
+        Self::from_module(module, heap_pages, allow_unresolved_imports)
     }
 
-    fn from_module(module: vm::Module, heap_pages: HeapPages) -> Result<Self, NewErr> {
+    fn from_module(
+        module: vm::Module,
+        heap_pages: HeapPages,
+        allow_unresolved_imports: bool,
+    ) -> Result<Self, NewErr> {
         // Initialize the virtual machine.
         // Each symbol requested by the Wasm runtime will be put in `registered_functions`. Later,
         // when a function is invoked, the Wasm virtual machine will pass indices within that
@@ -260,8 +268,12 @@ impl HostVmPrototype {
 
                     let id = registered_functions.len();
                     registered_functions.push(match HostFunction::by_name(f_name) {
-                        Some(f) => f,
-                        None => return Err(()),
+                        Some(f) => FunctionImport::Resolved(f),
+                        None if !allow_unresolved_imports => return Err(()),
+                        None => FunctionImport::Unresolved {
+                            name: f_name.to_owned(),
+                            module: mod_name.to_owned(),
+                        },
                     });
                     Ok(id)
                 },
@@ -295,6 +307,7 @@ impl HostVmPrototype {
             heap_base,
             registered_functions,
             heap_pages,
+            allow_unresolved_imports,
             memory_total_pages,
         })
     }
@@ -371,6 +384,7 @@ impl HostVmPrototype {
                 vm,
                 heap_base: self.heap_base,
                 heap_pages: self.heap_pages,
+                allow_unresolved_imports: self.allow_unresolved_imports,
                 memory_total_pages: self.memory_total_pages,
                 registered_functions: self.registered_functions,
                 within_storage_transaction: false,
@@ -385,7 +399,12 @@ impl Clone for HostVmPrototype {
         // The `from_module` function returns an error if the format of the module is invalid.
         // Since we have successfully called `from_module` with that same `module` earlier, it
         // is assumed that errors cannot happen.
-        Self::from_module(self.module.clone(), self.heap_pages).unwrap()
+        Self::from_module(
+            self.module.clone(),
+            self.heap_pages,
+            self.allow_unresolved_imports,
+        )
+        .unwrap()
     }
 }
 
@@ -427,9 +446,6 @@ pub enum HostVm {
     /// Need to provide the trie root of the storage.
     #[from]
     ExternalStorageRoot(ExternalStorageRoot),
-    /// Need to provide the trie root of the changes trie.
-    #[from]
-    ExternalStorageChangesRoot(ExternalStorageChangesRoot),
     /// Need to provide the storage key that follows a specific one.
     #[from]
     ExternalStorageNextKey(ExternalStorageNextKey),
@@ -481,7 +497,6 @@ impl HostVm {
             HostVm::ExternalStorageAppend(inner) => inner.inner.into_prototype(),
             HostVm::ExternalStorageClearPrefix(inner) => inner.inner.into_prototype(),
             HostVm::ExternalStorageRoot(inner) => inner.inner.into_prototype(),
-            HostVm::ExternalStorageChangesRoot(inner) => inner.inner.into_prototype(),
             HostVm::ExternalStorageNextKey(inner) => inner.inner.into_prototype(),
             HostVm::ExternalOffchainStorageSet(inner) => inner.inner.into_prototype(),
             HostVm::CallRuntimeVersion(inner) => inner.inner.into_prototype(),
@@ -601,7 +616,20 @@ impl ReadyToRun {
 
         // The Wasm code has called an host_fn. The `id` is a value that we passed
         // at initialization, and corresponds to an index in `registered_functions`.
-        let host_fn = *self.inner.registered_functions.get_mut(id).unwrap();
+        let host_fn = match self.inner.registered_functions.get_mut(id) {
+            Some(FunctionImport::Resolved(f)) => *f,
+            Some(FunctionImport::Unresolved { name, module }) => {
+                debug_assert!(self.inner.allow_unresolved_imports);
+                return HostVm::Error {
+                    error: Error::UnresolvedFunctionCalled {
+                        function: name.clone(),
+                        module_name: module.clone(),
+                    },
+                    prototype: self.inner.into_prototype(),
+                };
+            }
+            None => unreachable!(),
+        };
 
         // Check that the actual number of parameters matches the expected number.
         // This is done ahead of time in order to not forget.
@@ -748,6 +776,27 @@ impl ReadyToRun {
             }};
         }
 
+        // TODO: implement properly and use an enum instead;  cc https://github.com/paritytech/smoldot/issues/1967
+        macro_rules! expect_state_version {
+            ($num:expr) => {{
+                match &params[$num] {
+                    vm::WasmValue::I32(0) => 0,
+                    vm::WasmValue::I32(1) => 1,
+                    v => {
+                        return HostVm::Error {
+                            error: Error::WrongParamTy {
+                                function: host_fn.name(),
+                                param_num: $num,
+                                expected: vm::ValueType::I32,
+                                actual: v.ty(),
+                            },
+                            prototype: self.inner.into_prototype(),
+                        }
+                    }
+                }
+            }};
+        }
+
         // TODO: implement all functions and remove this macro
         macro_rules! host_fn_not_implemented {
             () => {{
@@ -869,9 +918,28 @@ impl ReadyToRun {
             HostFunction::ext_storage_root_version_1 => {
                 HostVm::ExternalStorageRoot(ExternalStorageRoot { inner: self.inner })
             }
+            HostFunction::ext_storage_root_version_2 => {
+                let state_version = expect_state_version!(0);
+                match state_version {
+                    0 => HostVm::ExternalStorageRoot(ExternalStorageRoot { inner: self.inner }),
+                    1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
+                    _ => unreachable!(),
+                }
+            }
             HostFunction::ext_storage_changes_root_version_1 => {
-                // TODO: there's a parameter
-                HostVm::ExternalStorageChangesRoot(ExternalStorageChangesRoot { inner: self.inner })
+                // The changes trie is an obsolete attempt at having a second trie containing, for
+                // each storage item, the latest block height where this item has been modified.
+                // When this function returns `None`, it indicates that the changes trie is
+                // disabled. While this function used to be called by the runtimes of
+                // Westend/Polkadot/Kusama (and maybe others), it has never returned anything else
+                // but `None`. The entire changes trie mechanism was ultimately removed in
+                // October 2021.
+                // This function is no longer called by recent runtimes, but must be preserved for
+                // backwards compatibility.
+                self.inner.alloc_write_and_return_pointer_size(
+                    HostFunction::ext_storage_changes_root_version_1.name(),
+                    iter::once(&[0][..]),
+                )
             }
             HostFunction::ext_storage_next_key_version_1 => {
                 let (key_ptr, key_size) = expect_pointer_size_raw!(0);
@@ -964,6 +1032,7 @@ impl ReadyToRun {
                 host_fn_not_implemented!()
             }
             HostFunction::ext_default_child_storage_root_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_default_child_storage_root_version_2 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_public_keys_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_generate_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ed25519_sign_version_1 => host_fn_not_implemented!(),
@@ -1290,7 +1359,16 @@ impl ReadyToRun {
             HostFunction::ext_sandbox_memory_teardown_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_sandbox_instance_teardown_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_sandbox_get_global_val_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_trie_blake2_256_root_version_1 => {
+            HostFunction::ext_trie_blake2_256_root_version_1
+            | HostFunction::ext_trie_blake2_256_root_version_2 => {
+                if matches!(host_fn, HostFunction::ext_trie_blake2_256_root_version_2) {
+                    match expect_state_version!(1) {
+                        0 => {}
+                        1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
+                        _ => unreachable!(),
+                    }
+                }
+
                 let result = {
                     let input = expect_pointer_size!(0);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
@@ -1331,7 +1409,19 @@ impl ReadyToRun {
                     },
                 }
             }
-            HostFunction::ext_trie_blake2_256_ordered_root_version_1 => {
+            HostFunction::ext_trie_blake2_256_ordered_root_version_1
+            | HostFunction::ext_trie_blake2_256_ordered_root_version_2 => {
+                if matches!(
+                    host_fn,
+                    HostFunction::ext_trie_blake2_256_ordered_root_version_2
+                ) {
+                    match expect_state_version!(1) {
+                        0 => {}
+                        1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
+                        _ => unreachable!(),
+                    }
+                }
+
                 let result = {
                     let input = expect_pointer_size!(0);
                     let parsing_result: Result<_, nom::Err<(&[u8], nom::error::ErrorKind)>> =
@@ -1367,6 +1457,7 @@ impl ReadyToRun {
                 }
             }
             HostFunction::ext_trie_keccak_256_ordered_root_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_trie_keccak_256_ordered_root_version_2 => host_fn_not_implemented!(),
             HostFunction::ext_misc_print_num_version_1 => {
                 let num = match params[0] {
                     vm::WasmValue::I64(v) => u64::from_ne_bytes(v.to_ne_bytes()),
@@ -1541,7 +1632,7 @@ pub struct ExternalStorageGet {
     inner: Inner,
 
     /// Function currently being called by the Wasm code. Refers to an index within
-    /// [`Inner::registered_functions`].
+    /// [`Inner::registered_functions`]. Guaranteed to be [`FunctionImport::Resolved`̀].
     calling: usize,
 
     /// Used only for the `ext_storage_read_version_1` function. Stores the pointer where the
@@ -1640,7 +1731,11 @@ impl ExternalStorageGet {
         mut self,
         value: Option<(impl Iterator<Item = impl AsRef<[u8]>> + Clone, usize)>,
     ) -> HostVm {
-        let host_fn = self.inner.registered_functions[self.calling];
+        let host_fn = match self.inner.registered_functions[self.calling] {
+            FunctionImport::Resolved(f) => f,
+            FunctionImport::Unresolved { .. } => unreachable!(),
+        };
+
         match host_fn {
             HostFunction::ext_storage_get_version_1 => {
                 if let Some((value, value_total_len)) = value {
@@ -1908,37 +2003,6 @@ impl fmt::Debug for ExternalStorageRoot {
     }
 }
 
-/// Must provide the trie root hash of the changes trie.
-pub struct ExternalStorageChangesRoot {
-    inner: Inner,
-}
-
-impl ExternalStorageChangesRoot {
-    /// Writes the trie root hash to the Wasm VM and prepares it for resume.
-    // TODO: document why it can be `None`
-    pub fn resume(self, hash: Option<&[u8; 32]>) -> HostVm {
-        if let Some(hash) = hash {
-            // Writing the `Some` of the SCALE-encoded `Option`.
-            self.inner.alloc_write_and_return_pointer_size(
-                HostFunction::ext_storage_changes_root_version_1.name(),
-                iter::once(&[1][..]).chain(iter::once(&hash[..])),
-            )
-        } else {
-            // Writing a SCALE-encoded `None`.
-            self.inner.alloc_write_and_return_pointer_size(
-                HostFunction::ext_storage_changes_root_version_1.name(),
-                iter::once(&[0][..]),
-            )
-        }
-    }
-}
-
-impl fmt::Debug for ExternalStorageChangesRoot {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("ExternalStorageChangesRoot").finish()
-    }
-}
-
 /// Must provide the storage key that follows, in lexicographic order, a specific one.
 pub struct ExternalStorageNextKey {
     inner: Inner,
@@ -2167,6 +2231,11 @@ impl EndStorageTransaction {
     }
 }
 
+enum FunctionImport {
+    Resolved(HostFunction),
+    Unresolved { module: String, name: String },
+}
+
 /// Running virtual machine. Shared between all the variants in [`HostVm`].
 struct Inner {
     /// See [`HostVmPrototype::module`].
@@ -2185,12 +2254,15 @@ struct Inner {
     /// See [`HostVmPrototype::memory_total_pages`].
     memory_total_pages: HeapPages,
 
+    /// Value passed to [`HostVmPrototype::new`].
+    allow_unresolved_imports: bool,
+
     /// If true, a transaction has been started using `ext_storage_start_transaction_version_1`.
     /// No further transaction start is allowed before the current one ends.
     within_storage_transaction: bool,
 
     /// See [`HostVmPrototype::registered_functions`].
-    registered_functions: Vec<HostFunction>,
+    registered_functions: Vec<FunctionImport>,
 
     /// Memory allocator in order to answer the calls to `malloc` and `free`.
     allocator: allocator::FreeingBumpHeapAllocator,
@@ -2356,6 +2428,7 @@ impl Inner {
             heap_base: self.heap_base,
             registered_functions: self.registered_functions,
             heap_pages: self.heap_pages,
+            allow_unresolved_imports: self.allow_unresolved_imports,
             memory_total_pages: self.memory_total_pages,
         }
     }
@@ -2412,6 +2485,16 @@ pub enum Error {
     /// An host_fn wants to returns a certain value, but the Wasm code expects a different one.
     // TODO: indicate function and actual/expected types
     ReturnValueTypeMismatch,
+    /// Called a function that is unknown to the host.
+    ///
+    /// > **Note**: Can only happen if `allow_unresolved_imports` was `true`.
+    #[display(fmt = "Called unresolved function `{}`:`{}`", module_name, function)]
+    UnresolvedFunctionCalled {
+        /// Name of the function that was unresolved.
+        function: String,
+        /// Name of module associated with the unresolved function.
+        module_name: String,
+    },
     /// Mismatch between the number of parameters expected and the actual number.
     #[display(
         fmt = "Mismatch in parameters count: {}, expected = {}, actual = {}",
@@ -2567,6 +2650,7 @@ externalities! {
     ext_storage_clear_prefix_version_1,
     ext_storage_clear_prefix_version_2,
     ext_storage_root_version_1,
+    ext_storage_root_version_2,
     ext_storage_changes_root_version_1,
     ext_storage_next_key_version_1,
     ext_storage_append_version_1,
@@ -2594,6 +2678,7 @@ externalities! {
     ext_default_child_storage_exists_version_1,
     ext_default_child_storage_next_key_version_1,
     ext_default_child_storage_root_version_1,
+    ext_default_child_storage_root_version_2,
     ext_crypto_ed25519_public_keys_version_1,
     ext_crypto_ed25519_generate_version_1,
     ext_crypto_ed25519_sign_version_1,
@@ -2646,8 +2731,11 @@ externalities! {
     ext_sandbox_instance_teardown_version_1,
     ext_sandbox_get_global_val_version_1,
     ext_trie_blake2_256_root_version_1,
+    ext_trie_blake2_256_root_version_2,
     ext_trie_blake2_256_ordered_root_version_1,
+    ext_trie_blake2_256_ordered_root_version_2,
     ext_trie_keccak_256_ordered_root_version_1,
+    ext_trie_keccak_256_ordered_root_version_2,
     ext_misc_print_num_version_1,
     ext_misc_print_utf8_version_1,
     ext_misc_print_hex_version_1,
@@ -2669,6 +2757,7 @@ impl HostFunction {
             HostFunction::ext_storage_clear_prefix_version_1 => 1,
             HostFunction::ext_storage_clear_prefix_version_2 => 2,
             HostFunction::ext_storage_root_version_1 => 0,
+            HostFunction::ext_storage_root_version_2 => 1,
             HostFunction::ext_storage_changes_root_version_1 => 1,
             HostFunction::ext_storage_next_key_version_1 => 1,
             HostFunction::ext_storage_append_version_1 => 2,
@@ -2696,6 +2785,7 @@ impl HostFunction {
             HostFunction::ext_default_child_storage_exists_version_1 => todo!(),
             HostFunction::ext_default_child_storage_next_key_version_1 => todo!(),
             HostFunction::ext_default_child_storage_root_version_1 => todo!(),
+            HostFunction::ext_default_child_storage_root_version_2 => todo!(),
             HostFunction::ext_crypto_ed25519_public_keys_version_1 => todo!(),
             HostFunction::ext_crypto_ed25519_generate_version_1 => todo!(),
             HostFunction::ext_crypto_ed25519_sign_version_1 => todo!(),
@@ -2748,8 +2838,11 @@ impl HostFunction {
             HostFunction::ext_sandbox_instance_teardown_version_1 => todo!(),
             HostFunction::ext_sandbox_get_global_val_version_1 => todo!(),
             HostFunction::ext_trie_blake2_256_root_version_1 => 1,
+            HostFunction::ext_trie_blake2_256_root_version_2 => 2,
             HostFunction::ext_trie_blake2_256_ordered_root_version_1 => 1,
+            HostFunction::ext_trie_blake2_256_ordered_root_version_2 => 2,
             HostFunction::ext_trie_keccak_256_ordered_root_version_1 => todo!(),
+            HostFunction::ext_trie_keccak_256_ordered_root_version_2 => todo!(),
             HostFunction::ext_misc_print_num_version_1 => 1,
             HostFunction::ext_misc_print_utf8_version_1 => 1,
             HostFunction::ext_misc_print_hex_version_1 => 1,

@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -159,19 +159,7 @@ impl<'a> From<ChainInformationRef<'a>> for ChainInformation {
                     finalized_next_epoch_transition: finalized_next_epoch_transition.into(),
                 },
             },
-            finality: match info.finality {
-                ChainInformationFinalityRef::Outsourced => ChainInformationFinality::Outsourced,
-                ChainInformationFinalityRef::Grandpa {
-                    after_finalized_block_authorities_set_id,
-                    finalized_triggered_authorities,
-                    finalized_scheduled_change,
-                } => ChainInformationFinality::Grandpa {
-                    after_finalized_block_authorities_set_id,
-                    finalized_scheduled_change: finalized_scheduled_change
-                        .map(|(n, l)| (n, l.into())),
-                    finalized_triggered_authorities: finalized_triggered_authorities.into(),
-                },
-            },
+            finality: info.finality.into(),
         }
     }
 }
@@ -240,7 +228,9 @@ pub struct BabeEpochInformation {
 
     /// Slot at which the epoch starts.
     ///
-    /// Must be `None` if and only if `epoch_index` is 0.
+    /// Must be `None` if and only if the context is
+    /// [`ChainInformationConsensus::Babe::finalized_next_epoch_transition`] and
+    /// [`BabeEpochInformation::epoch_index`] is 0.
     pub start_slot_number: Option<u64>,
 
     /// List of authorities allowed to author blocks during this epoch.
@@ -325,6 +315,23 @@ pub enum ChainInformationFinality {
     },
 }
 
+impl<'a> From<ChainInformationFinalityRef<'a>> for ChainInformationFinality {
+    fn from(finality: ChainInformationFinalityRef<'a>) -> ChainInformationFinality {
+        match finality {
+            ChainInformationFinalityRef::Outsourced => ChainInformationFinality::Outsourced,
+            ChainInformationFinalityRef::Grandpa {
+                after_finalized_block_authorities_set_id,
+                finalized_triggered_authorities,
+                finalized_scheduled_change,
+            } => ChainInformationFinality::Grandpa {
+                after_finalized_block_authorities_set_id,
+                finalized_scheduled_change: finalized_scheduled_change.map(|(n, l)| (n, l.into())),
+                finalized_triggered_authorities: finalized_triggered_authorities.into(),
+            },
+        }
+    }
+}
+
 /// Equivalent to a [`ChainInformation`] but referencing an existing structure. Cheap to copy.
 #[derive(Debug, Clone)]
 pub struct ChainInformationRef<'a> {
@@ -350,6 +357,18 @@ impl<'a> ChainInformationRef<'a> {
             if let Err(err) = finalized_next_epoch_transition.validate() {
                 return Err(ValidityError::InvalidBabe(err));
             }
+
+            if finalized_next_epoch_transition.start_slot_number.is_some()
+                && (finalized_next_epoch_transition.epoch_index == 0)
+            {
+                return Err(ValidityError::UnexpectedBabeSlotStartNumber);
+            }
+            if finalized_next_epoch_transition.start_slot_number.is_none()
+                && (finalized_next_epoch_transition.epoch_index != 0)
+            {
+                return Err(ValidityError::MissingBabeSlotStartNumber);
+            }
+
             if let Some(finalized_block_epoch_information) = &finalized_block_epoch_information {
                 if let Err(err) = finalized_block_epoch_information.validate() {
                     return Err(ValidityError::InvalidBabe(err));
@@ -362,15 +381,7 @@ impl<'a> ChainInformationRef<'a> {
                 }
                 if finalized_block_epoch_information
                     .start_slot_number
-                    .is_some()
-                    && (finalized_block_epoch_information.epoch_index == 0)
-                {
-                    return Err(ValidityError::UnexpectedBabeSlotStartNumber);
-                }
-                if finalized_block_epoch_information
-                    .start_slot_number
                     .is_none()
-                    && (finalized_block_epoch_information.epoch_index != 0)
                 {
                     return Err(ValidityError::MissingBabeSlotStartNumber);
                 }
@@ -561,10 +572,10 @@ impl<'a> From<&'a ChainInformationFinality> for ChainInformationFinalityRef<'a> 
 /// Error when turning a [`ChainInformation`] into a [`ValidChainInformation`].
 #[derive(Debug, derive_more::Display)]
 pub enum ValidityError {
-    /// Found a Babe slot start number for Babe epoch number 0. Babe epoch 0 never has a starting
-    /// slot.
+    /// Found a Babe slot start number for future Babe epoch number 0. A future Babe epoch 0 has
+    /// no known starting slot.
     UnexpectedBabeSlotStartNumber,
-    /// Missing Babe slot start number for Babe epoch number other than 0.
+    /// Missing Babe slot start number for Babe epoch number other than future epoch 0.
     MissingBabeSlotStartNumber,
     /// Finalized block is block number 0, and a Babe epoch information has been provided. This
     /// would imply the existence of a block -1 and below.

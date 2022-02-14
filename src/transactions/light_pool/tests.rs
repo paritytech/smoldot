@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -42,6 +42,14 @@ fn regular_path() {
         .collect::<Vec<_>>();
     assert_eq!(included_txs, vec![(tx_id, 0)]);
     assert_eq!(pool.missing_block_bodies().count(), 0);
+
+    let mut non_finalized_iter = pool.set_finalized_block(&[1; 32]);
+    assert!(non_finalized_iter.next().is_none());
+
+    let mut iter = pool.prune_finalized_with_body();
+    let pruned = iter.next().unwrap();
+    assert_eq!(pruned.block_hash, [1; 32]);
+    assert_eq!(pruned.included_transactions, vec![(tx_id, 0, ())]);
 }
 
 #[test]

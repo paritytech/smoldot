@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -213,6 +213,13 @@ impl ChainSpec {
     /// default value is returned.
     pub fn protocol_id(&self) -> &str {
         self.client_spec.protocol_id.as_deref().unwrap_or("sup")
+    }
+
+    /// Returns the "fork id" of the chain. This is arbitrary string that can be used in order to
+    /// segregate nodes in case when multiple chains have the same genesis hash. Nodes should only
+    /// synchronize with nodes that have the same "fork id".
+    pub fn fork_id(&self) -> Option<&str> {
+        self.client_spec.fork_id.as_deref()
     }
 
     // TODO: this API is probably unstable, as the meaning of the string is unclear

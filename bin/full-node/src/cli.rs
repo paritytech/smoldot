@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -18,12 +18,12 @@
 //! Provides the [`CliOptions`] struct that contains all the CLI options that can be passed to the
 //! binary.
 //!
-//! See the documentation of the [`structopt`] crate in order to learn more.
+//! See the documentation of the [`clap`] crate in order to learn more.
 //!
 //! # Example
 //!
 //! ```no_run
-//! use structopt::StructOpt as _;
+//! use clap::StructOpt as _;
 //! let cli_options = full_node::CliOptions::from_args();
 //! println!("Quiet: {:?}", cli_options.quiet);
 //! ```
@@ -36,7 +36,8 @@ use std::{net::SocketAddr, path::PathBuf};
 // Note: the doc-comments applied to this struct and its field are visible when the binary is
 // started with `--help`.
 
-#[derive(Debug, structopt::StructOpt)]
+#[derive(Debug, clap::StructOpt)]
+#[clap(about, author, version)]
 pub enum CliOptions {
     /// Connects to the chain and synchronizes the local database with the network.
     Run(CliOptionsRun),
@@ -47,17 +48,17 @@ pub enum CliOptions {
     Blake264BitsHash(CliOptionsBlake264Hash),
 }
 
-#[derive(Debug, structopt::StructOpt)]
+#[derive(Debug, clap::StructOpt)]
 pub struct CliOptionsNodeInfo {
     /// IP address to connect to (format: `<ip>:<port>`).
     // Note: we accept a String rather than a SocketAddr in order to allow for DNS addresses.
     pub address: String,
     /// Ed25519 private key of network identity (as a seed phrase).
-    #[structopt(long, parse(try_from_str = seed_phrase::decode_ed25519_private_key))]
+    #[structopt(long, parse(try_from_str = decode_ed25519_private_key))]
     pub libp2p_key: Option<[u8; 32]>,
 }
 
-#[derive(Debug, structopt::StructOpt)]
+#[derive(Debug, clap::StructOpt)]
 pub struct CliOptionsRun {
     /// Chain to connect to ("polkadot", "kusama", "westend", or a file path).
     #[structopt(long, default_value = "polkadot")]
@@ -72,10 +73,10 @@ pub struct CliOptionsRun {
     #[structopt(long, default_value = "auto")]
     pub color: ColorChoice,
     /// Ed25519 private key of network identity (as a seed phrase).
-    #[structopt(long, parse(try_from_str = seed_phrase::decode_ed25519_private_key))]
+    #[structopt(long, parse(try_from_str = decode_ed25519_private_key))]
     pub libp2p_key: Option<[u8; 32]>,
     /// Multiaddr to listen on.
-    #[structopt(long)]
+    #[structopt(long, parse(try_from_str = decode_multiaddr))]
     pub listen_addr: Vec<Multiaddr>,
     /// Multiaddr of an additional node to try to connect to on startup.
     #[structopt(long)]
@@ -84,7 +85,7 @@ pub struct CliOptionsRun {
     #[structopt(long, default_value = "127.0.0.1:9944", parse(try_from_str = parse_json_rpc_address))]
     pub json_rpc_address: JsonRpcAddress,
     /// List of secret phrases to insert in the keystore of the node. Used to author blocks.
-    #[structopt(long, parse(try_from_str = seed_phrase::decode_sr25519_private_key))]
+    #[structopt(long, parse(try_from_str = decode_sr25519_private_key))]
     // TODO: also automatically add the same keys through ed25519?
     pub keystore_memory: Vec<[u8; 64]>,
     /// Address of a Jaeger agent to send traces to (hint: port is typically 6831).
@@ -95,7 +96,7 @@ pub struct CliOptionsRun {
     pub tmp: bool,
 }
 
-#[derive(Debug, structopt::StructOpt)]
+#[derive(Debug, clap::StructOpt)]
 pub struct CliOptionsBlake264Hash {
     /// Payload whose hash to compute.
     pub payload: String,
@@ -151,7 +152,7 @@ impl core::str::FromStr for ColorChoice {
     }
 }
 
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 #[display(fmt = "Color must be one of: always, auto, never")]
 pub struct ColorChoiceParseError;
 
@@ -184,7 +185,7 @@ impl core::str::FromStr for Output {
     }
 }
 
-#[derive(Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display, derive_more::Error)]
 #[display(fmt = "Output must be one of: auto, none, informant, logs, logs-json")]
 pub struct OutputParseError;
 
@@ -201,4 +202,16 @@ fn parse_json_rpc_address(string: &str) -> Result<JsonRpcAddress, String> {
     }
 
     Err("Failed to parse JSON-RPC server address".into())
+}
+
+// `clap` requires error types to implement the `std::error::Error` trait.
+// For this reason, we locally define some wrappers.
+fn decode_ed25519_private_key(phrase: &str) -> Result<[u8; 32], String> {
+    seed_phrase::decode_ed25519_private_key(phrase).map_err(|err| err.to_string())
+}
+fn decode_sr25519_private_key(phrase: &str) -> Result<[u8; 64], String> {
+    seed_phrase::decode_sr25519_private_key(phrase).map_err(|err| err.to_string())
+}
+fn decode_multiaddr(addr: &str) -> Result<Multiaddr, String> {
+    addr.parse::<Multiaddr>().map_err(|err| err.to_string())
 }

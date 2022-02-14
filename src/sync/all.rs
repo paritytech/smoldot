@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -132,11 +132,24 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     }),
                 }
             } else {
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::warp_sync(warp_sync::Config {
-                        start_chain_information: config.chain_information,
-                        sources_capacity: config.sources_capacity,
-                    }),
+                match warp_sync::warp_sync(warp_sync::Config {
+                    start_chain_information: config.chain_information,
+                    sources_capacity: config.sources_capacity,
+                }) {
+                    Ok(inner) => AllSyncInner::GrandpaWarpSync { inner },
+                    Err((chain_information, warp_sync::WarpSyncInitError::NotGrandpa)) => {
+                        // On error, `warp_sync` returns back the chain information that was
+                        // provided in its configuration.
+                        AllSyncInner::Optimistic {
+                            inner: optimistic::OptimisticSync::new(optimistic::Config {
+                                chain_information,
+                                sources_capacity: config.sources_capacity,
+                                blocks_capacity: config.blocks_capacity,
+                                download_ahead_blocks: config.download_ahead_blocks,
+                                full: None,
+                            }),
+                        }
+                    }
                 }
             },
             shared: Shared {
@@ -1099,7 +1112,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     blocks.map(|iter| {
                         iter.map(|block| all_forks::RequestSuccessBlock {
                             scale_encoded_header: block.scale_encoded_header,
-                            scale_encoded_justification: block.scale_encoded_justification,
+                            scale_encoded_justifications: block
+                                .scale_encoded_justifications
+                                .into_iter(),
                         })
                     }),
                 );
@@ -1130,7 +1145,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         .map(|iter| {
                             iter.map(|block| optimistic::RequestSuccessBlock {
                                 scale_encoded_header: block.scale_encoded_header,
-                                scale_encoded_justification: block.scale_encoded_justification,
+                                scale_encoded_justifications: block.scale_encoded_justifications,
                                 scale_encoded_extrinsics: block.scale_encoded_extrinsics,
                                 user_data: block.user_data,
                             })
@@ -1235,14 +1250,39 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 // the runtime to the API user. The API user might then immediately throw away
                 // this runtime, but we don't care enough about this possibility to optimize
                 // this.
-                let (grandpa_warp_sync, error) =
-                    sync.set_virtual_machine_params(code, heap_pages, ExecHint::CompileAheadOfTime);
+                // TODO: make `allow_unresolved_imports` configurable
+                let outcome = sync.set_virtual_machine_params(
+                    code,
+                    heap_pages,
+                    ExecHint::CompileAheadOfTime,
+                    false,
+                );
 
-                if let Some(_error) = error {
-                    // TODO: error handling
+                match outcome {
+                    (warp_sync::WarpSync::InProgress(inner), None) => {
+                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                        ResponseOutcome::Queued
+                    }
+                    (warp_sync::WarpSync::InProgress(inner), Some(error)) => {
+                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                        ResponseOutcome::WarpSyncError { error }
+                    }
+                    (warp_sync::WarpSync::Finished(success), None) => {
+                        let (
+                            all_forks,
+                            finalized_block_runtime,
+                            finalized_storage_code,
+                            finalized_storage_heap_pages,
+                        ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
+                        self.inner = AllSyncInner::AllForks(all_forks);
+                        ResponseOutcome::WarpSyncFinished {
+                            finalized_block_runtime,
+                            finalized_storage_code,
+                            finalized_storage_heap_pages,
+                        }
+                    }
+                    (warp_sync::WarpSync::Finished(_), Some(_)) => unreachable!(),
                 }
-
-                self.inject_grandpa(grandpa_warp_sync)
             }
             (
                 AllSyncInner::GrandpaWarpSync {
@@ -1255,13 +1295,32 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let value = response.next().unwrap();
                 assert!(response.next().is_none());
 
-                let (grandpa_warp_sync, error) = sync.inject_value(value.map(iter::once));
-
-                if let Some(_error) = error {
-                    // TODO: error handling
+                let outcome = sync.inject_value(value.map(iter::once));
+                match outcome {
+                    (warp_sync::WarpSync::InProgress(inner), None) => {
+                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                        ResponseOutcome::Queued
+                    }
+                    (warp_sync::WarpSync::InProgress(inner), Some(error)) => {
+                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                        ResponseOutcome::WarpSyncError { error }
+                    }
+                    (warp_sync::WarpSync::Finished(success), None) => {
+                        let (
+                            all_forks,
+                            finalized_block_runtime,
+                            finalized_storage_code,
+                            finalized_storage_heap_pages,
+                        ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
+                        self.inner = AllSyncInner::AllForks(all_forks);
+                        ResponseOutcome::WarpSyncFinished {
+                            finalized_block_runtime,
+                            finalized_storage_code,
+                            finalized_storage_heap_pages,
+                        }
+                    }
+                    (warp_sync::WarpSync::Finished(_), Some(_)) => unreachable!(),
                 }
-
-                self.inject_grandpa(grandpa_warp_sync)
             }
             (
                 AllSyncInner::GrandpaWarpSync {
@@ -1269,9 +1328,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 },
                 Err(_),
             ) => {
-                let grandpa_warp_sync = sync.inject_error();
+                let inner = sync.inject_error();
                 // TODO: notify user of the problem
-                self.inject_grandpa(grandpa_warp_sync)
+                self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                ResponseOutcome::Queued
             }
             (
                 AllSyncInner::GrandpaWarpSync {
@@ -1279,9 +1339,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 },
                 Err(_),
             ) => {
-                let grandpa_warp_sync = sync.inject_error();
+                let inner = sync.inject_error();
                 // TODO: notify user of the problem
-                self.inject_grandpa(grandpa_warp_sync)
+                self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                ResponseOutcome::Queued
             }
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
             (other, _) => {
@@ -1291,33 +1352,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         };
 
         (user_data, outcome)
-    }
-
-    // TODO: questionable function
-    fn inject_grandpa(
-        &mut self,
-        grandpa_warp_sync: warp_sync::WarpSync<GrandpaWarpSyncSourceExtra<TSrc>>,
-    ) -> ResponseOutcome {
-        match grandpa_warp_sync {
-            warp_sync::WarpSync::InProgress(inner) => {
-                self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                ResponseOutcome::Queued
-            }
-            warp_sync::WarpSync::Finished(success) => {
-                let (
-                    all_forks,
-                    finalized_block_runtime,
-                    finalized_storage_code,
-                    finalized_storage_heap_pages,
-                ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
-                self.inner = AllSyncInner::AllForks(all_forks);
-                ResponseOutcome::WarpSyncFinished {
-                    finalized_block_runtime,
-                    finalized_storage_code,
-                    finalized_storage_heap_pages,
-                }
-            }
-        }
     }
 }
 
@@ -1449,7 +1483,7 @@ impl RequestDetail {
 
 pub struct BlockRequestSuccessBlock<TBl> {
     pub scale_encoded_header: Vec<u8>,
-    pub scale_encoded_justification: Option<Vec<u8>>,
+    pub scale_encoded_justifications: Vec<([u8; 4], Vec<u8>)>,
     pub scale_encoded_extrinsics: Vec<Vec<u8>>,
     pub user_data: TBl,
 }
@@ -1554,6 +1588,12 @@ pub enum ResponseOutcome {
     /// Content of the response has been queued and will be processed later.
     Queued,
 
+    /// Content of the response is erroneous in the context of warp syncing.
+    WarpSyncError {
+        /// Error that happened.
+        error: warp_sync::Error,
+    },
+
     /// Response has made it possible to finish warp syncing.
     WarpSyncFinished {
         /// Runtime of the newly finalized block.
@@ -1593,8 +1633,8 @@ pub struct Block<TBl> {
     /// Header of the block.
     pub header: header::Header,
 
-    /// SCALE-encoded justification of this block, if any.
-    pub justification: Option<Vec<u8>>,
+    /// SCALE-encoded justifications of this block, if any.
+    pub justifications: Vec<([u8; 4], Vec<u8>)>,
 
     /// User data associated to the block.
     pub user_data: TBl,
@@ -1754,7 +1794,7 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
                             .map(|b| Block {
                                 full: None, // TODO: wrong
                                 header: b.0,
-                                justification: None, // TODO: wrong
+                                justifications: Vec::new(), // TODO: wrong
                                 user_data: b.1,
                             })
                             .collect(),
@@ -1781,7 +1821,7 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
                             .into_iter()
                             .map(|b| Block {
                                 header: b.header,
-                                justification: b.justification,
+                                justifications: b.justifications,
                                 user_data: b.user_data,
                                 full: b.full.map(|b| BlockFull {
                                     body: b.body,

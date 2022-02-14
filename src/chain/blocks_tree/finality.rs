@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -96,12 +96,13 @@ impl<T> NonFinalizedTree<T> {
     // TODO: expand the documentation about how blocks with authorities changes have to be finalized before any further block can be finalized
     pub fn verify_justification(
         &mut self,
+        consensus_engine_id: [u8; 4],
         scale_encoded_justification: &[u8],
     ) -> Result<FinalityApply<T>, JustificationVerifyError> {
         self.inner
             .as_mut()
             .unwrap()
-            .verify_justification(scale_encoded_justification)
+            .verify_justification(consensus_engine_id, scale_encoded_justification)
     }
 
     /// Verifies the given Grandpa commit message.
@@ -305,11 +306,11 @@ impl<T> NonFinalizedTreeInner<T> {
     /// See [`NonFinalizedTree::verify_justification`].
     fn verify_justification(
         &mut self,
+        consensus_engine_id: [u8; 4],
         scale_encoded_justification: &[u8],
     ) -> Result<FinalityApply<T>, JustificationVerifyError> {
-        match &self.finality {
-            Finality::Outsourced => Err(JustificationVerifyError::AlgorithmHasNoJustification),
-            Finality::Grandpa { .. } => {
+        match (&self.finality, &consensus_engine_id) {
+            (Finality::Grandpa { .. }, b"FRNK") => {
                 // Turn justification into a strongly-typed struct.
                 let decoded = justification::decode::decode_grandpa(scale_encoded_justification)
                     .map_err(JustificationVerifyError::InvalidJustification)?;
@@ -332,6 +333,7 @@ impl<T> NonFinalizedTreeInner<T> {
                     to_finalize: block_index,
                 })
             }
+            _ => Err(JustificationVerifyError::JustificationEngineMismatch),
         }
     }
 
@@ -608,8 +610,11 @@ impl<'c, T> fmt::Debug for FinalityApply<'c, T> {
 /// Error that can happen when verifying a justification.
 #[derive(Debug, derive_more::Display)]
 pub enum JustificationVerifyError {
-    /// Finality mechanism used by the chain doesn't use justifications.
-    AlgorithmHasNoJustification,
+    /// Type of the justification doesn't match the finality mechanism used by the chain.
+    ///
+    /// > **Note**: If the chain's finality mechanism doesn't use justifications, this error is
+    /// >           always returned.
+    JustificationEngineMismatch,
     /// Error while decoding the justification.
     InvalidJustification(justification::decode::Error),
     /// The justification verification has failed. The justification is invalid and should be

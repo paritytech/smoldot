@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -452,6 +452,10 @@ where
     /// while the request is in progress, if the request or response doesn't respect the protocol
     /// limits (see [`ConfigRequestResponse`]), or if the remote takes too much time to answer.
     ///
+    /// The timeout is the time between the moment the substream is opened and the moment the
+    /// response is sent back. If the emitter doesn't send the request or if the receiver doesn't
+    /// answer during this time window, the request is considered failed.
+    ///
     /// As the API of this module is inherently subject to race conditions, it is never possible
     /// to guarantee that this function will succeed. [`RequestError::ConnectionClosed`] should
     /// be handled by retrying the same request again.
@@ -466,10 +470,10 @@ where
     ///
     pub async fn request(
         &self,
-        now: TNow,
         target: ConnectionId,
         protocol_index: usize,
         request_data: Vec<u8>,
+        timeout: TNow,
     ) -> Result<Vec<u8>, RequestError> {
         // Obtain the connect to use to send the request.
         let connection_arc: Arc<Mutex<Connection<_, _>>> = {
@@ -497,7 +501,7 @@ where
             .connection
             .as_established()
             .ok_or(RequestError::ConnectionClosed)?
-            .add_request(now, protocol_index, request_data, send_back);
+            .add_request(protocol_index, request_data, timeout, send_back);
 
         // Note that no update of the `Guarded` is necessary. The `Guarded` doesn't track ongoing
         // requests.

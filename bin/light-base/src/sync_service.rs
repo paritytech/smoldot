@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -40,9 +40,7 @@ use smoldot::{
     network::{protocol, service},
     trie::{self, prefix_proof, proof_verify},
 };
-use std::{fmt, num::NonZeroU32, sync::Arc};
-
-pub use crate::lossy_channel::Receiver as NotificationsReceiver;
+use std::{fmt, num::NonZeroU32, sync::Arc, time::Duration};
 
 mod parachain;
 mod standalone;
@@ -111,7 +109,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
 
         if let Some(config_parachain) = config.parachain {
             (config.tasks_executor)(
-                "sync-para".into(),
+                log_target.clone(),
                 Box::pin(parachain::start_parachain(
                     log_target,
                     config.chain_information,
@@ -124,7 +122,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
             );
         } else {
             (config.tasks_executor)(
-                "sync-relay".into(),
+                log_target.clone(),
                 Box::pin(standalone::start_standalone_chain(
                     log_target,
                     config.chain_information,
@@ -269,12 +267,14 @@ impl<TPlat: Platform> SyncService<TPlat> {
     // TODO: doc; explain the guarantees
     pub async fn block_query(
         self: Arc<Self>,
+        block_number: u64,
         hash: [u8; 32],
         fields: protocol::BlocksRequestFields,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        _max_parallel: NonZeroU32,
     ) -> Result<protocol::BlockData, ()> {
         // TODO: better error?
-        const NUM_ATTEMPTS: usize = 3;
-
         let request_config = protocol::BlocksRequestConfig {
             start: protocol::BlocksRequestConfigStart::Hash(hash),
             desired_count: NonZeroU32::new(1).unwrap(),
@@ -282,13 +282,68 @@ impl<TPlat: Platform> SyncService<TPlat> {
             fields: fields.clone(),
         };
 
+        // TODO: handle max_parallel
         // TODO: better peers selection ; don't just take the first 3
-        // TODO: must only ask the peers that know about this block
-        for target in self.network_service.peers_list().await.take(NUM_ATTEMPTS) {
+        for target in self
+            .peers_assumed_know_blocks(block_number, &hash)
+            .await
+            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
+        {
             let mut result = match self
                 .network_service
                 .clone()
-                .blocks_request(target, self.network_chain_index, request_config.clone())
+                .blocks_request(
+                    target,
+                    self.network_chain_index,
+                    request_config.clone(),
+                    timeout_per_request,
+                )
+                .await
+            {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+
+            return Ok(result.remove(0));
+        }
+
+        Err(())
+    }
+
+    // TODO: doc; explain the guarantees
+    pub async fn block_query_unknown_number(
+        self: Arc<Self>,
+        hash: [u8; 32],
+        fields: protocol::BlocksRequestFields,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        _max_parallel: NonZeroU32,
+    ) -> Result<protocol::BlockData, ()> {
+        // TODO: better error?
+        let request_config = protocol::BlocksRequestConfig {
+            start: protocol::BlocksRequestConfigStart::Hash(hash),
+            desired_count: NonZeroU32::new(1).unwrap(),
+            direction: protocol::BlocksRequestDirection::Ascending,
+            fields: fields.clone(),
+        };
+
+        // TODO: handle max_parallel
+        // TODO: better peers selection ; don't just take the first
+        for target in self
+            .network_service
+            .peers_list()
+            .await
+            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
+        {
+            let mut result = match self
+                .network_service
+                .clone()
+                .blocks_request(
+                    target,
+                    self.network_chain_index,
+                    request_config.clone(),
+                    timeout_per_request,
+                )
                 .await
             {
                 Ok(b) => b,
@@ -304,9 +359,10 @@ impl<TPlat: Platform> SyncService<TPlat> {
     /// Performs one or more storage proof requests in order to find the value of the given
     /// `requested_keys`.
     ///
-    /// Must be passed a block hash and the Merkle value of the root node of the storage trie of
-    /// this same block. The value of `storage_trie_root` corresponds to the value in the
-    /// [`smoldot::header::HeaderRef::state_root`] field.
+    /// Must be passed a block hash, a block number, and the Merkle value of the root node of the
+    /// storage trie of this same block. The value of `block_number` corresponds to the value
+    /// in the [`smoldot::header::HeaderRef::number`] field, and the value of `storage_trie_root`
+    /// corresponds to the value in the [`smoldot::header::HeaderRef::state_root`] field.
     ///
     /// Returns the storage values of `requested_keys` in the storage of the block, or an error if
     /// it couldn't be determined. If `Ok`, the `Vec` is guaranteed to have the same number of
@@ -318,17 +374,24 @@ impl<TPlat: Platform> SyncService<TPlat> {
     /// peers is done through reasonable heuristics.
     pub async fn storage_query(
         self: Arc<Self>,
+        block_number: u64,
         block_hash: &[u8; 32],
         storage_trie_root: &[u8; 32],
         requested_keys: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        _max_parallel: NonZeroU32,
     ) -> Result<Vec<Option<Vec<u8>>>, StorageQueryError> {
-        const NUM_ATTEMPTS: usize = 3;
+        let mut outcome_errors =
+            Vec::with_capacity(usize::try_from(total_attempts).unwrap_or(usize::max_value()));
 
-        let mut outcome_errors = Vec::with_capacity(NUM_ATTEMPTS);
-
-        // TODO: better peers selection ; don't just take the first 3
-        // TODO: must only ask the peers that know about this block
-        for target in self.network_service.peers_list().await.take(NUM_ATTEMPTS) {
+        // TODO: better peers selection ; don't just take the first
+        // TODO: handle max_parallel
+        for target in self
+            .peers_assumed_know_blocks(block_number, block_hash)
+            .await
+            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
+        {
             let result = self
                 .network_service
                 .clone()
@@ -339,6 +402,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                         block_hash: *block_hash,
                         keys: requested_keys.clone(),
                     },
+                    timeout_per_request,
                 )
                 .await
                 .map_err(StorageQueryErrorDetail::Network)
@@ -378,6 +442,9 @@ impl<TPlat: Platform> SyncService<TPlat> {
         block_hash: &[u8; 32],
         prefix: &[u8],
         storage_trie_root: &[u8; 32],
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        _max_parallel: NonZeroU32,
     ) -> Result<Vec<Vec<u8>>, StorageQueryError> {
         let mut prefix_scan = prefix_proof::prefix_scan(prefix_proof::Config {
             prefix,
@@ -385,15 +452,15 @@ impl<TPlat: Platform> SyncService<TPlat> {
         });
 
         'main_scan: loop {
-            const NUM_ATTEMPTS: usize = 3;
+            let mut outcome_errors =
+                Vec::with_capacity(usize::try_from(total_attempts).unwrap_or(usize::max_value()));
 
-            let mut outcome_errors = Vec::with_capacity(NUM_ATTEMPTS);
-
-            // TODO: better peers selection ; don't just take the first 3
+            // TODO: better peers selection ; don't just take the first
+            // TODO: handle max_parallel
             for target in self
                 .peers_assumed_know_blocks(block_number, block_hash)
                 .await
-                .take(NUM_ATTEMPTS)
+                .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
             {
                 let result = self
                     .network_service
@@ -407,6 +474,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                                 trie::nibbles_to_bytes_extend(nibbles).collect::<Vec<_>>()
                             }),
                         },
+                        timeout_per_request,
                     )
                     .await
                     .map_err(StorageQueryErrorDetail::Network);
@@ -450,21 +518,29 @@ impl<TPlat: Platform> SyncService<TPlat> {
             'a,
             impl Iterator<Item = impl AsRef<[u8]>> + Clone,
         >,
+        total_attempts: u32,
+        timeout_per_request: Duration,
+        _max_parallel: NonZeroU32,
     ) -> Result<Vec<Vec<u8>>, CallProofQueryError> {
-        const NUM_ATTEMPTS: usize = 3;
+        let mut outcome_errors =
+            Vec::with_capacity(usize::try_from(total_attempts).unwrap_or(usize::max_value()));
 
-        let mut outcome_errors = Vec::with_capacity(NUM_ATTEMPTS);
-
-        // TODO: better peers selection ; don't just take the first 3
+        // TODO: better peers selection ; don't just take the first
+        // TODO: handle max_parallel
         for target in self
             .peers_assumed_know_blocks(block_number, &config.block_hash)
             .await
-            .take(NUM_ATTEMPTS)
+            .take(usize::try_from(total_attempts).unwrap_or(usize::max_value()))
         {
             let result = self
                 .network_service
                 .clone()
-                .call_proof_request(self.network_chain_index, target, config.clone())
+                .call_proof_request(
+                    self.network_chain_index,
+                    target,
+                    config.clone(),
+                    timeout_per_request,
+                )
                 .await;
 
             match result {

@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -15,12 +15,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-// Overrides `compat-nodejs.js` when in a browser.
+import type { CompatWorker } from '../compat/index.js';
 
-export const net = null;
-export const Worker = typeof window != 'undefined' ? window.Worker : null;
-export const workerOnMessage = (worker, callback) => { worker.onmessage = (event) => callback(event.data) };
-export const workerOnError = (worker, callback) => { worker.onerror = callback; };  // TODO: unclear if the parameter of the callback is same as with NodeJS
-export const workerTerminate = (worker) => { worker.terminate(); return Promise.resolve(); };
-export const postMessage = (msg) => self.postMessage(msg);
-export const setOnMessage = (callback) => { self.onmessage = (event) => callback(event.data) };
+export default function (): CompatWorker;

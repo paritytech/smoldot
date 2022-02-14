@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -117,7 +117,7 @@
 //! - Generating the header of newly-created blocks.
 //! - Validating transactions received from third-parties, in order to later be potentially
 //! included in a block.
-//! - Providing the tools necessary to create transactions. See the [`metadata`] module.
+//! - Providing the tools necessary to create transactions.
 //!
 //! In other words, the runtime is responsible for all the actual *logic* behind the chain being
 //! run. For instance, when performing a transfer of tokens between one account and another, it is
@@ -207,7 +207,6 @@ pub mod identity;
 pub mod informant;
 pub mod json_rpc;
 pub mod libp2p;
-pub mod metadata;
 pub mod network;
 pub mod sync;
 pub mod transactions;
@@ -260,4 +259,22 @@ pub fn calculate_genesis_block_header(chain_spec: &chain_spec::ChainSpec) -> hea
         extrinsics_root: trie::empty_trie_merkle_value(),
         digest: header::DigestRef::empty().into(),
     }
+}
+
+/// Removes the length prefix at the beginning of `metadata`. Returns an error if there is no
+/// valid length prefix.
+///
+/// See the module-level documentation for more information.
+// TODO: it is unclear where to put this function; it has to be in the smoldot crate because it uses `crate::util`, so at the moment it is public but hidden
+#[doc(hidden)]
+pub fn remove_metadata_length_prefix(metadata: &[u8]) -> Result<&[u8], ()> {
+    let (after_prefix, length) = crate::util::nom_scale_compact_usize(metadata)
+        .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| ())?;
+
+    // Verify that the length prefix indeed matches the metadata's length.
+    if length != after_prefix.len() {
+        return Err(());
+    }
+
+    Ok(after_prefix)
 }

@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -57,9 +57,9 @@ pub enum Error {
 
 /// Fetches a Babe epoch using `BabeApi_current_epoch` or `BabeApi_next_epoch`.
 pub fn babe_fetch_epoch(config: Config) -> Query {
-    let function_to_call = match config.epoch_to_fetch {
-        BabeEpochToFetch::CurrentEpoch => "BabeApi_current_epoch",
-        BabeEpochToFetch::NextEpoch => "BabeApi_next_epoch",
+    let (function_to_call, is_next_epoch) = match config.epoch_to_fetch {
+        BabeEpochToFetch::CurrentEpoch => ("BabeApi_current_epoch", false),
+        BabeEpochToFetch::NextEpoch => ("BabeApi_next_epoch", true),
     };
 
     let vm = read_only_runtime_host::run(read_only_runtime_host::Config {
@@ -70,7 +70,7 @@ pub fn babe_fetch_epoch(config: Config) -> Query {
     });
 
     match vm {
-        Ok(vm) => Query::from_inner(vm),
+        Ok(vm) => Query::from_inner(vm, is_next_epoch),
         Err((err, virtual_machine)) => Query::Finished {
             result: Err(Error::WasmStart(err)),
             virtual_machine,
@@ -99,10 +99,11 @@ pub enum Query {
 }
 
 impl Query {
-    fn from_inner(inner: read_only_runtime_host::RuntimeHostVm) -> Self {
+    fn from_inner(inner: read_only_runtime_host::RuntimeHostVm, is_next_epoch: bool) -> Self {
         match inner {
             read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                let decoded = decode_babe_info(success.virtual_machine.value().as_ref());
+                let decoded =
+                    decode_babe_info(success.virtual_machine.value().as_ref(), is_next_epoch);
                 let virtual_machine = success.virtual_machine.into_prototype();
                 match decoded {
                     Ok(info) => {
@@ -129,19 +130,21 @@ impl Query {
                 virtual_machine: err.prototype,
             },
             read_only_runtime_host::RuntimeHostVm::StorageGet(inner) => {
-                Query::StorageGet(StorageGet(inner))
+                Query::StorageGet(StorageGet(inner, is_next_epoch))
             }
             read_only_runtime_host::RuntimeHostVm::StorageRoot(inner) => {
-                Query::StorageRoot(StorageRoot(inner))
+                Query::StorageRoot(StorageRoot(inner, is_next_epoch))
             }
-            read_only_runtime_host::RuntimeHostVm::NextKey(inner) => Query::NextKey(NextKey(inner)),
+            read_only_runtime_host::RuntimeHostVm::NextKey(inner) => {
+                Query::NextKey(NextKey(inner, is_next_epoch))
+            }
         }
     }
 }
 
 /// Loading a storage value is required in order to continue.
 #[must_use]
-pub struct StorageGet(read_only_runtime_host::StorageGet);
+pub struct StorageGet(read_only_runtime_host::StorageGet, bool);
 
 impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
@@ -158,13 +161,13 @@ impl StorageGet {
 
     /// Injects the corresponding storage value.
     pub fn inject_value(self, value: Option<impl Iterator<Item = impl AsRef<[u8]>>>) -> Query {
-        Query::from_inner(self.0.inject_value(value))
+        Query::from_inner(self.0.inject_value(value), self.1)
     }
 }
 
 /// Fetching the key that follows a given one is required in order to continue.
 #[must_use]
-pub struct NextKey(read_only_runtime_host::NextKey);
+pub struct NextKey(read_only_runtime_host::NextKey, bool);
 
 impl NextKey {
     /// Returns the key whose next key must be passed back.
@@ -179,22 +182,25 @@ impl NextKey {
     /// Panics if the key passed as parameter isn't strictly superior to the requested key.
     ///
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> Query {
-        Query::from_inner(self.0.inject_key(key))
+        Query::from_inner(self.0.inject_key(key), self.1)
     }
 }
 
 /// Fetching the storage trie root is required in order to continue.
 #[must_use]
-pub struct StorageRoot(read_only_runtime_host::StorageRoot);
+pub struct StorageRoot(read_only_runtime_host::StorageRoot, bool);
 
 impl StorageRoot {
     /// Writes the trie root hash to the Wasm VM and prepares it for resume.
     pub fn resume(self, hash: &[u8; 32]) -> Query {
-        Query::from_inner(self.0.resume(hash))
+        Query::from_inner(self.0.resume(hash), self.1)
     }
 }
 
-fn decode_babe_info(scale_encoded: &'_ [u8]) -> Result<BabeEpochInformation, Error> {
+fn decode_babe_info(
+    scale_encoded: &'_ [u8],
+    is_next_epoch: bool,
+) -> Result<BabeEpochInformation, Error> {
     let mut combinator = nom::combinator::all_consuming(nom::combinator::map(
         nom::sequence::tuple((
             nom::number::complete::le_u64,
@@ -241,7 +247,15 @@ fn decode_babe_info(scale_encoded: &'_ [u8]) -> Result<BabeEpochInformation, Err
         )| {
             BabeEpochInformation {
                 epoch_index,
-                start_slot_number: Some(start_slot_number),
+                // Smoldot requires `start_slot_number` to be `None` in the context of next
+                // epoch #0, because its start slot number can't be known. The runtime function,
+                // however, as it doesn't have a way to represent `None`, instead returns an
+                // unspecified value (typically `0`).
+                start_slot_number: if !is_next_epoch || epoch_index != 0 {
+                    Some(start_slot_number)
+                } else {
+                    None
+                },
                 authorities,
                 randomness,
                 c: (c0, c1),
@@ -277,6 +291,6 @@ mod tests {
             0, 0, 0, 0, 2,
         ];
 
-        super::decode_babe_info(&sample_data).unwrap();
+        super::decode_babe_info(&sample_data, true).unwrap();
     }
 }

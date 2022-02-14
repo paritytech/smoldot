@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -34,7 +34,7 @@ use std::collections::BinaryHeap;
 
 pub(crate) fn timer_finished(timer_id: u32) {
     let callback = {
-        let ptr = timer_id as *mut Box<dyn FnOnce()>;
+        let ptr = timer_id as *mut Box<dyn FnOnce() + 'static>;
         unsafe { Box::from_raw(ptr) }
     };
 
@@ -81,9 +81,11 @@ impl Delay {
             timer_id,
         });
 
-        // If this was the first timer being inserted, then actually start the callback that
-        // will process timers.
-        if lock.timers_queue.len() == 1 {
+        // If the timer that has just been inserted is the one that ends the soonest, then
+        // actually start the callback that will process timers.
+        // Ideally we would instead cancel or update the deadline of the previous call to
+        // `start_timer_wrap`, but this isn't possible.
+        if lock.timers_queue.peek().unwrap().timer_id == timer_id {
             super::start_timer_wrap(when - now, process_timers);
         }
 
@@ -212,8 +214,10 @@ fn process_timers() {
     let mut lock = TIMERS.try_lock().unwrap();
     let now = Instant::now();
 
-    // TODO: this assertion fails; figure out why; this shouldn't have any major consequence but still intriguing
-    //debug_assert!(lock.time_zero + lock.timers_queue.peek().unwrap().when_from_time_zero <= now);
+    // Note that this function can be called spuriously.
+    // For example, `process_timers` can be scheduled twice from two different timers, and the
+    // first call leads to both timers being finished, after which the second call will be
+    // spurious.
 
     // Figure out the next time (relative to `time_zero`) we should call `process_timers`.
     //

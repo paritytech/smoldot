@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -24,44 +24,62 @@
 //! of that object with the Wasm instance.
 
 import { Buffer } from 'buffer';
-import randombytes from 'randombytes';
+import * as compat from '../compat/index.js';
+import type { SmoldotWasmInstance } from './bindings.js';
 
-export default (config) => {
-    // List of environment variables to feed to the Rust program. An array of strings.
-    // Example usage: `let env_vars = ["RUST_BACKTRACE=1", "RUST_LOG=foo"];`
-    const envVars = [];
+export interface Config {
+    instance?: SmoldotWasmInstance,
 
+    /**
+     * List of environment variables to feed to the Rust program. An array of strings.
+     * Example: `["RUST_BACKTRACE=1", "RUST_LOG=foo"];`
+     *
+     * Must never be modified after the bindings have been initialized.
+     */
+    envVars: string[],
+}
+
+export default (config: Config): compat.WasmModuleImports => {
     // Buffers holding temporary data being written by the Rust code to respectively stdout and
     // stderr.
-    let stdoutBuffer = new String();
-    let stderrBuffer = new String();
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
 
     return {
         // Need to fill the buffer described by `ptr` and `len` with random data.
         // This data will be used in order to generate secrets. Do not use a dummy implementation!
-        random_get: (ptr, len) => {
+        random_get: (ptr: number, len: number) => {
+            const instance = config.instance!;
+
             ptr >>>= 0;
             len >>>= 0;
 
-            const bytes = randombytes(len);
-            bytes.copy(Buffer.from(config.instance.exports.memory.buffer), ptr);
+            const baseBuffer = Buffer.from(instance.exports.memory.buffer)
+                .slice(ptr, ptr + len);
+            for (let iter = 0; iter < len; iter += 65536) {
+                // `baseBuffer.slice` automatically saturates at the end of the buffer
+                compat.getRandomValues(baseBuffer.slice(iter, iter + 65536))
+            }
+
             return 0;
         },
 
         // Writing to a file descriptor is used in order to write to stdout/stderr.
-        fd_write: (fd, addr, num, out_ptr) => {
-            out_ptr >>>= 0;
+        fd_write: (fd: number, addr: number, num: number, outPtr: number) => {
+            const instance = config.instance!;
+
+            outPtr >>>= 0;
 
             // Only stdout and stderr are open for writing.
             if (fd != 1 && fd != 2) {
                 return 8;
             }
 
-            const mem = Buffer.from(config.instance.exports.memory.buffer);
+            const mem = Buffer.from(instance.exports.memory.buffer);
 
             // `fd_write` passes a buffer containing itself a list of pointers and lengths to the
             // actual buffers. See writev(2).
-            let toWrite = new String("");
+            let toWrite = "";
             let totalLength = 0;
             for (let i = 0; i < num; i++) {
                 const buf = mem.readUInt32LE(addr + 4 * i * 2);
@@ -70,7 +88,7 @@ export default (config) => {
                 totalLength += bufLen;
             }
 
-            const flushBuffer = (string) => {
+            const flushBuffer = (string: string) => {
                 // As documented in the documentation of `println!`, lines are always split by a
                 // single `\n` in Rust.
                 while (true) {
@@ -101,7 +119,7 @@ export default (config) => {
             }
 
             // Need to write in `out_ptr` how much data was "written".
-            mem.writeUInt32LE(totalLength, out_ptr);
+            mem.writeUInt32LE(totalLength, outPtr);
             return 0;
         },
 
@@ -111,48 +129,52 @@ export default (config) => {
         },
 
         // Used by Rust in catastrophic situations, such as a double panic.
-        proc_exit: (retCode) => {
+        proc_exit: (retCode: number) => {
             throw new Error(`proc_exit called: ${retCode}`);
         },
 
         // Return the number of environment variables and the total size of all environment
         // variables. This is called in order to initialize buffers before `environ_get`.
-        environ_sizes_get: (argcOut, argvBufSizeOut) => {
+        environ_sizes_get: (argcOut: number, argvBufSizeOut: number) => {
+            const instance = config.instance!;
+
             argcOut >>>= 0;
             argvBufSizeOut >>>= 0;
 
             let totalLen = 0;
-            envVars.forEach(e => totalLen += Buffer.byteLength(e, 'utf8') + 1); // +1 for trailing \0
+            config.envVars.forEach(e => totalLen += Buffer.byteLength(e, 'utf8') + 1); // +1 for trailing \0
 
-            const mem = Buffer.from(config.instance.exports.memory.buffer);
-            mem.writeUInt32LE(envVars.length, argcOut);
+            const mem = Buffer.from(instance.exports.memory.buffer);
+            mem.writeUInt32LE(config.envVars.length, argcOut);
             mem.writeUInt32LE(totalLen, argvBufSizeOut);
             return 0;
         },
 
         // Write the environment variables to the given pointers.
         // `argv` is a pointer to a buffer that must be overwritten with a list of pointers to
-        // environment variables, and `argv_buf` is a pointer to a buffer where to actually store
+        // environment variables, and `argvBuf` is a pointer to a buffer where to actually store
         // the environment variables.
         // The sizes of the buffers were determined by calling `environ_sizes_get`.
-        environ_get: (argv, argv_buf) => {
-            argv >>>= 0;
-            argv_buf >>>= 0;
+        environ_get: (argv: number, argvBuf: number) => {
+            const instance = config.instance!;
 
-            const mem = Buffer.from(config.instance.exports.memory.buffer);
+            argv >>>= 0;
+            argvBuf >>>= 0;
+
+            const mem = Buffer.from(instance.exports.memory.buffer);
 
             let argvPos = 0;
             let argvBufPos = 0;
 
-            envVars.forEach(env_var => {
-                let envVarLen = Buffer.byteLength(e, 'utf8');
+            config.envVars.forEach(envVar => {
+                let envVarLen = Buffer.byteLength(envVar, 'utf8');
 
-                mem.writeUInt32LE(argv_buf + argvBufPos, argv + argvPos);
+                mem.writeUInt32LE(argvBuf + argvBufPos, argv + argvPos);
                 argvPos += 4;
 
-                mem.write(env_var, argv_buf + argvBufPos, envVarLen, 'utf8');
+                mem.write(envVar, argvBuf + argvBufPos, envVarLen, 'utf8');
                 argvBufPos += envVarLen;
-                mem.writeUInt8(0, argv_buf + argvBufPos);
+                mem.writeUInt8(0, argvBuf + argvBufPos);
                 argvBufPos += 1;
             });
 

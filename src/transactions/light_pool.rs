@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -369,6 +369,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Panics if no block with that hash has been inserted before.
     ///
     // TODO: is it correct to pass a `Result`, instead of just a `ValidTransaction`?
+    // TODO: can the block be the finalized block? (i.e. tree_root_hash)
     pub fn set_validation_result(
         &mut self,
         id: TransactionId,
@@ -516,6 +517,18 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Returns `true` if the block with the given hash is present in the pool.
     pub fn has_block(&self, hash: &[u8; 32]) -> bool {
         self.blocks_by_id.contains_key(hash)
+    }
+
+    /// Returns the hash of the best block.
+    ///
+    /// Please note that the block with the given hash might not have an associated user data in
+    /// case the best block is equal to the finalized block and all finalized blocks have been
+    /// pruned.
+    pub fn best_block_hash(&self) -> &[u8; 32] {
+        match self.best_block_index {
+            Some(idx) => &self.blocks_tree.get(idx).unwrap().hash,
+            None => &self.blocks_tree_root_hash,
+        }
     }
 
     /// Returns the user data associated with a given block.
@@ -748,6 +761,16 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                         .transaction_validations
                         .remove(&(tx_id, pruned_block.user_data.hash));
                     debug_assert!(_was_removed.is_some());
+
+                    if self
+                        .transaction_validations
+                        .range((tx_id, [0; 32])..=(tx_id, [0xff; 32]))
+                        .next()
+                        .is_none()
+                    {
+                        let _was_inserted = self.not_validated.insert(tx_id);
+                        debug_assert!(_was_inserted);
+                    }
                 }
 
                 out.push((
@@ -818,15 +841,15 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                     (pruned.user_data.hash, TransactionId(usize::min_value()))
                         ..=(pruned.user_data.hash, TransactionId(usize::max_value())),
                 )
-                .map(|((_, tx_id), _)| *tx_id)
+                .map(|((_, tx_id), index)| (*tx_id, *index))
                 .collect::<Vec<_>>();
             let mut included_transactions = Vec::with_capacity(included_transactions_ids.len());
 
-            for tx_id in &included_transactions_ids {
+            for (tx_id, index_in_block) in &included_transactions_ids {
                 // Completely remove this transaction from the pool, similar to what
                 // `remove_transaction` does.
                 let tx = self.transactions.remove(tx_id.0);
-                included_transactions.push((*tx_id, tx.user_data));
+                included_transactions.push((*tx_id, *index_in_block, tx.user_data));
 
                 let blocks_included = self
                     .included_transactions
@@ -886,6 +909,16 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                     .transaction_validations
                     .remove(&(tx_id, pruned.user_data.hash));
                 debug_assert!(_was_removed.is_some());
+
+                if self
+                    .transaction_validations
+                    .range((tx_id, [0; 32])..=(tx_id, [0xff; 32]))
+                    .next()
+                    .is_none()
+                {
+                    let _was_inserted = self.not_validated.insert(tx_id);
+                    debug_assert!(_was_inserted);
+                }
             }
 
             return_value.push(PruneBodyFinalized {
@@ -938,11 +971,11 @@ pub struct PruneBodyFinalized<TTx, TBl> {
     /// User data associated to this block.
     pub user_data: TBl,
 
-    /// List of transactions that were included in this block. These transactions have been removed
-    /// from the pool.
+    /// List of transactions that were included in this block, alongside with their index within
+    /// that block. These transactions have been removed from the pool.
     ///
     /// The user data (`TTx`) is stored in an `Option`.
-    pub included_transactions: Vec<(TransactionId, TTx)>,
+    pub included_transactions: Vec<(TransactionId, usize, TTx)>,
 }
 
 /// See [`LightPool::set_best_block`].

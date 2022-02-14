@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -24,8 +24,10 @@ use alloc::{
     boxed::Box,
     format,
     string::{String, ToString as _},
+    vec,
     vec::Vec,
 };
+use core::fmt;
 use hashbrown::HashMap;
 
 /// Parses a JSON call (usually received from a JSON-RPC server).
@@ -406,19 +408,13 @@ define_methods! {
         hash: HashHexString,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> &'a str,
-    chainHead_unstable_bodyEnd(
-        #[rename = "subscriptionId"] subscription_id: &'a str
-    ) -> (),
     chainHead_unstable_call(
         #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
         hash: HashHexString,
         function: &'a str,
-        #[rename = "callParameters"] call_parameters: Vec<HexString>,
+        #[rename = "callParameters"] call_parameters: HexString,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> &'a str,
-    chainHead_unstable_callEnd(
-        #[rename = "subscriptionId"] subscription_id: &'a str
-    ) -> (),
     chainHead_unstable_follow(
         #[rename = "runtimeUpdates"] runtime_updates: bool
     ) -> &'a str,
@@ -427,6 +423,15 @@ define_methods! {
         #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
         hash: HashHexString
     ) -> Option<HexString>,
+    chainHead_unstable_stopBody(
+        #[rename = "subscriptionId"] subscription_id: &'a str
+    ) -> (),
+    chainHead_unstable_stopCall(
+        #[rename = "subscriptionId"] subscription_id: &'a str
+    ) -> (),
+    chainHead_unstable_stopStorage(
+        #[rename = "subscriptionId"] subscription_id: &'a str
+    ) -> (),
     chainHead_unstable_storage(
         #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
         hash: HashHexString,
@@ -435,9 +440,6 @@ define_methods! {
         r#type: StorageQueryType,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> &'a str,
-    chainHead_unstable_storageEnd(
-        #[rename = "subscriptionId"] subscription_id: &'a str
-    ) -> (),
     chainHead_unstable_unfollow(
         #[rename = "followSubscriptionId"] follow_subscription_id: &'a str
     ) -> (),
@@ -452,6 +454,9 @@ define_methods! {
 
     sudo_unstable_p2pDiscover(multiaddr: &'a str) -> (),
     sudo_unstable_version() -> &'a str,
+
+    transaction_unstable_submitAndWatch(transaction: HexString) -> &'a str,
+    transaction_unstable_unwatch(subscription: &'a str) -> (),
 }
 
 define_methods! {
@@ -464,11 +469,21 @@ define_methods! {
     state_storage(subscription: &'a str, result: StorageChangeSet) -> (),
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
-    chainHead_unstable_followEvent(subscription: &'a str, result: FollowEvent<'a>) -> (),
+    chainHead_unstable_bodyEvent(#[rename = "subscriptionId"] subscription: &'a str, result: ChainHeadBodyEvent) -> (),
+    chainHead_unstable_callEvent(#[rename = "subscriptionId"] subscription: &'a str, result: ChainHeadCallEvent<'a>) -> (),
+    chainHead_unstable_followEvent(#[rename = "subscriptionId"] subscription: &'a str, result: FollowEvent<'a>) -> (),
+    chainHead_unstable_storageEvent(#[rename = "subscriptionId"] subscription: &'a str, result: ChainHeadStorageEvent) -> (),
+    transaction_unstable_watchEvent(#[rename = "subscriptionId"] subscription: &'a str, result: TransactionWatchEvent<'a>) -> (),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HexString(pub Vec<u8>);
+
+impl AsRef<[u8]> for HexString {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 // TODO: not great for type in public API
 impl<'a> serde::Deserialize<'a> for HexString {
@@ -477,6 +492,10 @@ impl<'a> serde::Deserialize<'a> for HexString {
         D: serde::Deserializer<'a>,
     {
         let string = String::deserialize(deserializer)?;
+
+        if string.is_empty() {
+            return Ok(HexString(Vec::new()));
+        }
 
         if !string.starts_with("0x") {
             return Err(serde::de::Error::custom(
@@ -563,7 +582,9 @@ impl<'a> serde::Deserialize<'a> for AccountId {
 pub struct Block {
     pub extrinsics: Vec<HexString>,
     pub header: Header,
-    pub justification: Option<HexString>,
+    /// List of justifications. Each justification is made of a consensus engine id and of the
+    /// actual SCALE-encoded justification.
+    pub justifications: Option<Vec<([u8; 4], Vec<u8>)>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -603,6 +624,103 @@ pub enum FollowEvent<'a> {
     },
     #[serde(rename = "stop")]
     Stop {},
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event")]
+pub enum ChainHeadBodyEvent {
+    #[serde(rename = "done")]
+    Done { value: Vec<HexString> },
+    #[serde(rename = "inaccessible")]
+    Inaccessible {},
+    #[serde(rename = "disjoint")]
+    Disjoint {},
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event")]
+pub enum ChainHeadCallEvent<'a> {
+    #[serde(rename = "done")]
+    Done { output: HexString },
+    #[serde(rename = "inaccessible")]
+    Inaccessible { error: &'a str },
+    #[serde(rename = "error")]
+    Error { error: &'a str },
+    #[serde(rename = "disjoint")]
+    Disjoint {},
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event")]
+pub enum ChainHeadStorageEvent {
+    #[serde(rename = "done")]
+    Done { value: Option<String> },
+    #[serde(rename = "inaccessible")]
+    Inaccessible {},
+    #[serde(rename = "disjoint")]
+    Disjoint {},
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event")]
+pub enum TransactionWatchEvent<'a> {
+    #[serde(rename = "validated")]
+    Validated {},
+    #[serde(rename = "broadcasted")]
+    Broadcasted {
+        #[serde(rename = "numPeers")]
+        num_peers: u32,
+    },
+    #[serde(rename = "bestChainBlockIncluded")]
+    BestChainBlockIncluded {
+        #[serde(rename = "block")]
+        block: Option<TransactionWatchEventBlock>,
+    },
+    #[serde(rename = "finalized")]
+    Finalized {
+        #[serde(rename = "block")]
+        block: TransactionWatchEventBlock,
+    },
+    #[serde(rename = "error")]
+    Error { error: &'a str },
+    #[serde(rename = "invalid")]
+    Invalid { error: &'a str },
+    #[serde(rename = "dropped")]
+    Dropped { broadcasted: bool, error: &'a str },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TransactionWatchEventBlock {
+    pub hash: HashHexString,
+    pub index: NumberAsString,
+}
+
+#[derive(Debug, Clone)]
+pub struct NumberAsString(pub u32);
+
+impl serde::Serialize for NumberAsString {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.to_string().serialize(serializer)
+    }
+}
+
+impl<'a> serde::Deserialize<'a> for NumberAsString {
+    fn deserialize<D>(deserializer: D) -> Result<NumberAsString, D::Error>
+    where
+        D: serde::Deserializer<'a>,
+    {
+        let string = String::deserialize(deserializer)?;
+        match string.parse() {
+            Ok(num) => Ok(NumberAsString(num)),
+            Err(_) => Err(<D::Error as serde::de::Error>::invalid_value(
+                serde::de::Unexpected::Other("invalid number string"),
+                &"a valid number",
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -655,7 +773,7 @@ pub struct NetworkConfig {
     #[serde(rename = "totalAttempts")]
     pub total_attempts: u32,
     #[serde(rename = "maxParallel")]
-    pub max_parallel: u32,
+    pub max_parallel: u32, // TODO: NonZeroU32?
     #[serde(rename = "timeoutMs")]
     pub timeout_ms: u32,
 }
@@ -692,6 +810,7 @@ pub struct RuntimeSpec<'a> {
     pub impl_version: u32,
     #[serde(rename = "transactionVersion", skip_serializing_if = "Option::is_none")]
     pub transaction_version: Option<u32>,
+    // TODO: add `state_version`? would need a JSON-RPC API interface spec change
     pub apis: HashMap<HexString, u32, fnv::FnvBuildHasher>,
 }
 
@@ -709,6 +828,8 @@ pub struct RuntimeVersion<'a> {
     pub impl_version: u64,
     #[serde(rename = "transactionVersion", skip_serializing_if = "Option::is_none")]
     pub transaction_version: Option<u64>,
+    #[serde(rename = "stateVersion", skip_serializing_if = "Option::is_none")]
+    pub state_version: Option<u64>,
     // TODO: optimize?
     pub apis: Vec<(HexString, u32)>,
 }
@@ -794,12 +915,18 @@ impl serde::Serialize for HashHexString {
     }
 }
 
+impl fmt::Display for HexString {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "0x{}", hex::encode(&self.0[..]))
+    }
+}
+
 impl serde::Serialize for HexString {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        format!("0x{}", hex::encode(&self.0[..])).serialize(serializer)
+        self.to_string().serialize(serializer)
     }
 }
 
@@ -836,14 +963,18 @@ impl serde::Serialize for Block {
         struct SerdeBlockInner<'a> {
             extrinsics: &'a [HexString],
             header: &'a Header,
-            justification: Option<&'a HexString>, // TODO: unsure of the type
+            justifications: Option<Vec<Vec<Vec<u8>>>>,
         }
 
         SerdeBlock {
             block: SerdeBlockInner {
                 extrinsics: &self.extrinsics,
                 header: &self.header,
-                justification: self.justification.as_ref(),
+                justifications: self.justifications.as_ref().map(|list| {
+                    list.iter()
+                        .map(|(e, j)| vec![e.to_vec(), j.clone()])
+                        .collect()
+                }),
             },
         }
         .serialize(serializer)

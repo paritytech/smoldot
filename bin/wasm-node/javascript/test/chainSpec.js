@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -16,8 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import test from 'ava';
-import * as fs from 'fs';
-import { start } from "../src/index.js";
+import * as fs from 'node:fs';
+import { start } from "../dist/index.js";
 
 const westendSpec = fs.readFileSync('./test/westend.json', 'utf8');
 

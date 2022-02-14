@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -57,8 +57,8 @@
 use crate::{
     chain::chain_information::{
         self, babe_fetch_epoch, BabeEpochInformation, ChainInformation, ChainInformationConsensus,
-        ChainInformationConsensusRef, ChainInformationFinality, ValidChainInformation,
-        ValidChainInformationRef,
+        ChainInformationConsensusRef, ChainInformationFinality, ChainInformationFinalityRef,
+        ValidChainInformation, ValidChainInformationRef,
     },
     executor::{
         self,
@@ -100,15 +100,35 @@ pub struct Config {
 }
 
 /// Initializes the warp sync state machine.
-pub fn warp_sync<TSrc>(config: Config) -> InProgressWarpSync<TSrc> {
-    // TODO: detect if chain.start_chain_information is not using Grandpa
-    InProgressWarpSync::WaitingForSources(WaitingForSources {
+///
+/// On error, returns the [`ValidChainInformation`] that was provided in the configuration.
+pub fn warp_sync<TSrc>(
+    config: Config,
+) -> Result<InProgressWarpSync<TSrc>, (ValidChainInformation, WarpSyncInitError)> {
+    match config.start_chain_information.as_ref().finality {
+        ChainInformationFinalityRef::Grandpa { .. } => {}
+        _ => {
+            return Err((
+                config.start_chain_information,
+                WarpSyncInitError::NotGrandpa,
+            ))
+        }
+    }
+
+    Ok(InProgressWarpSync::WaitingForSources(WaitingForSources {
         state: PreVerificationState {
             start_chain_information: config.start_chain_information,
         },
         sources: slab::Slab::with_capacity(config.sources_capacity),
         previous_verifier_values: None,
-    })
+    }))
+}
+
+/// Error potentially returned by [`warp_sync()`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum WarpSyncInitError {
+    /// Chain doesn't use the Grandpa finality algorithm.
+    NotGrandpa,
 }
 
 /// Identifier for a source in the [`WarpSync`].
@@ -526,14 +546,14 @@ impl<TSrc> StorageGet<TSrc> {
     }
 
     /// Injects a failure to retrieve the storage value.
-    pub fn inject_error(self) -> WarpSync<TSrc> {
-        WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
+    pub fn inject_error(self) -> InProgressWarpSync<TSrc> {
+        InProgressWarpSync::warp_sync_request_from_next_source(
             self.state.sources,
             PreVerificationState {
                 start_chain_information: self.state.start_chain_information,
             },
             None,
-        ))
+        )
     }
 }
 
@@ -655,6 +675,29 @@ impl<TSrc> Verifier<TSrc> {
                     warp_sync_source_id: self.warp_sync_source_id,
                     final_set_of_fragments: self.final_set_of_fragments,
                     previous_verifier_values: self.previous_verifier_values,
+                }),
+                Ok(()),
+            ),
+            Ok(warp_sync::Next::EmptyProof) => (
+                // TODO: should return success immediately; unfortunately the AllSync is quite complicated to update if we do this
+                InProgressWarpSync::VirtualMachineParamsGet(VirtualMachineParamsGet {
+                    state: PostVerificationState {
+                        header: self
+                            .state
+                            .start_chain_information
+                            .as_ref()
+                            .finalized_block_header
+                            .into(),
+                        chain_information_finality: self
+                            .state
+                            .start_chain_information
+                            .as_ref()
+                            .finality
+                            .into(),
+                        start_chain_information: self.state.start_chain_information,
+                        sources: self.sources,
+                        warp_sync_source_id: self.warp_sync_source_id,
+                    },
                 }),
                 Ok(()),
             ),
@@ -885,14 +928,14 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
     }
 
     /// Injects a failure to retrieve the parameters.
-    pub fn inject_error(self) -> WarpSync<TSrc> {
-        WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
+    pub fn inject_error(self) -> InProgressWarpSync<TSrc> {
+        InProgressWarpSync::warp_sync_request_from_next_source(
             self.state.sources,
             PreVerificationState {
                 start_chain_information: self.state.start_chain_information,
             },
             None,
-        ))
+        )
     }
 
     /// Set the code and heappages from storage using the keys `:code` and `:heappages`
@@ -902,6 +945,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
         code: Option<impl AsRef<[u8]>>,
         heap_pages: Option<impl AsRef<[u8]>>,
         exec_hint: ExecHint,
+        allow_unresolved_imports: bool,
     ) -> (WarpSync<TSrc>, Option<Error>) {
         let code = match code {
             Some(code) => code.as_ref().to_vec(),
@@ -938,7 +982,12 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                 }
             };
 
-        match HostVmPrototype::new(&code, decoded_heap_pages, exec_hint) {
+        match HostVmPrototype::new(
+            &code,
+            decoded_heap_pages,
+            exec_hint,
+            allow_unresolved_imports,
+        ) {
             Ok(runtime) => {
                 let babe_current_epoch_query =
                     babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
