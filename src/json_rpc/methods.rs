@@ -404,12 +404,12 @@ define_methods! {
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_unstable_body(
-        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
+        #[rename = "followSubscription"] follow_subscription: &'a str,
         hash: HashHexString,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> &'a str,
     chainHead_unstable_call(
-        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
+        #[rename = "followSubscription"] follow_subscription: &'a str,
         hash: HashHexString,
         function: &'a str,
         #[rename = "callParameters"] call_parameters: HexString,
@@ -420,20 +420,20 @@ define_methods! {
     ) -> &'a str,
     chainHead_unstable_genesisHash() -> HashHexString,
     chainHead_unstable_header(
-        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
+        #[rename = "followSubscription"] follow_subscription: &'a str,
         hash: HashHexString
     ) -> Option<HexString>,
     chainHead_unstable_stopBody(
-        #[rename = "subscriptionId"] subscription_id: &'a str
+        subscription: &'a str
     ) -> (),
     chainHead_unstable_stopCall(
-        #[rename = "subscriptionId"] subscription_id: &'a str
+        subscription: &'a str
     ) -> (),
     chainHead_unstable_stopStorage(
-        #[rename = "subscriptionId"] subscription_id: &'a str
+        subscription: &'a str
     ) -> (),
     chainHead_unstable_storage(
-        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
+        #[rename = "followSubscription"] follow_subscription: &'a str,
         hash: HashHexString,
         key: HexString,
         #[rename = "childKey"] child_key: Option<HexString>,
@@ -441,10 +441,10 @@ define_methods! {
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> &'a str,
     chainHead_unstable_unfollow(
-        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str
+        #[rename = "followSubscription"] follow_subscription: &'a str
     ) -> (),
     chainHead_unstable_unpin(
-        #[rename = "followSubscriptionId"] follow_subscription_id: &'a str,
+        #[rename = "followSubscription"] follow_subscription: &'a str,
         hash: HashHexString
     ) -> (),
 
@@ -469,11 +469,11 @@ define_methods! {
     state_storage(subscription: &'a str, result: StorageChangeSet) -> (),
 
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
-    chainHead_unstable_bodyEvent(#[rename = "subscriptionId"] subscription: &'a str, result: ChainHeadBodyEvent) -> (),
-    chainHead_unstable_callEvent(#[rename = "subscriptionId"] subscription: &'a str, result: ChainHeadCallEvent<'a>) -> (),
-    chainHead_unstable_followEvent(#[rename = "subscriptionId"] subscription: &'a str, result: FollowEvent<'a>) -> (),
-    chainHead_unstable_storageEvent(#[rename = "subscriptionId"] subscription: &'a str, result: ChainHeadStorageEvent) -> (),
-    transaction_unstable_watchEvent(#[rename = "subscriptionId"] subscription: &'a str, result: TransactionWatchEvent<'a>) -> (),
+    chainHead_unstable_bodyEvent(subscription: &'a str, result: ChainHeadBodyEvent) -> (),
+    chainHead_unstable_callEvent(subscription: &'a str, result: ChainHeadCallEvent<'a>) -> (),
+    chainHead_unstable_followEvent(subscription: &'a str, result: FollowEvent<'a>) -> (),
+    chainHead_unstable_storageEvent(subscription: &'a str, result: ChainHeadStorageEvent) -> (),
+    transaction_unstable_watchEvent(subscription: &'a str, result: TransactionWatchEvent<'a>) -> (),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

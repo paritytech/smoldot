@@ -26,7 +26,7 @@ test('chainHead_unstable_follow works', async t => {
   let promiseReject;
   const promise = new Promise((resolve, reject) => { promiseResolve = resolve; promiseReject = reject; });
 
-  let subscriptionId = null;
+  let subscription = null;
 
   const client = start({ logCallback: () => { } });
   await client
@@ -36,8 +36,8 @@ test('chainHead_unstable_follow works', async t => {
         const parsed = JSON.parse(resp);
 
         if (parsed.id == 1) {
-          subscriptionId = parsed.result;
-        } else if (parsed.method == "chainHead_unstable_followEvent" && parsed.params.subscriptionId == subscriptionId) {
+          subscription = parsed.result;
+        } else if (parsed.method == "chainHead_unstable_followEvent" && parsed.params.subscription == subscription) {
           if (parsed.params.result.event == "initialized") {
             if (parsed.params.result.finalizedBlockHash.toLowerCase() == "0x9d34c5a7a8ad8d73c7690a41f7a9d1a7c46e21dc8fb1638aee6ef07f45b65158" && !parsed.params.result.finalizedBlockRuntime)
               promiseResolve();
@@ -94,7 +94,7 @@ test('chainHead_unstable_body works', async t => {
   let promiseReject;
   const promise = new Promise((resolve, reject) => { promiseResolve = resolve; promiseReject = reject; });
 
-  let followSubscriptionId = null;
+  let followSubscription = null;
   let chain;
 
   const client = start({ logCallback: () => { } });
@@ -105,12 +105,12 @@ test('chainHead_unstable_body works', async t => {
         const parsed = JSON.parse(resp);
 
         if (parsed.id == 1) {
-          followSubscriptionId = parsed.result;
-        } else if (parsed.method == "chainHead_unstable_followEvent" && parsed.params.subscriptionId == followSubscriptionId) {
+          followSubscription = parsed.result;
+        } else if (parsed.method == "chainHead_unstable_followEvent" && parsed.params.subscription == followSubscription) {
           if (parsed.params.result.event == "initialized") {
             if (parsed.params.result.finalizedBlockHash.toLowerCase() != "0x9d34c5a7a8ad8d73c7690a41f7a9d1a7c46e21dc8fb1638aee6ef07f45b65158")
               promiseReject(resp);
-            chain.sendJsonRpc(JSON.stringify({ "jsonrpc": "2.0", "id": 1, "method": "chainHead_unstable_body", "params": [followSubscriptionId, parsed.params.result.finalizedBlockHash] }), 0, 0);
+            chain.sendJsonRpc(JSON.stringify({ "jsonrpc": "2.0", "id": 1, "method": "chainHead_unstable_body", "params": [followSubscription, parsed.params.result.finalizedBlockHash] }), 0, 0);
           }
         } else if (parsed.method == "chainHead_unstable_bodyEvent") {
           if (parsed.params.result.event == "inaccessible")

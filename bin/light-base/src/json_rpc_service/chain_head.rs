@@ -45,7 +45,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
-        follow_subscription_id: &str,
+        follow_subscription: &str,
         hash: methods::HashHexString,
         function_to_call: &str,
         call_parameters: methods::HexString,
@@ -62,13 +62,12 @@ impl<TPlat: Platform> Background<TPlat> {
             let request_id = request_id.to_owned();
             let function_to_call = function_to_call.to_owned();
             let state_machine_request_id = state_machine_request_id.clone();
-            let follow_subscription_id = follow_subscription_id.to_owned();
+            let follow_subscription = follow_subscription.to_owned();
             async move {
                 // Determine whether the requested block hash is valid and start the call.
                 let pre_runtime_call = {
                     let lock = me.subscriptions.lock().await;
-                    if let Some(subscription) = lock.chain_head_follow.get(&follow_subscription_id)
-                    {
+                    if let Some(subscription) = lock.chain_head_follow.get(&follow_subscription) {
                         let runtime_service_subscribe_all = match subscription.runtime_subscribe_all
                         {
                             Some(sa) => sa,
@@ -837,7 +836,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
-        follow_subscription_id: &str,
+        follow_subscription: &str,
         hash: methods::HashHexString,
         key: methods::HexString,
         child_key: Option<methods::HexString>,
@@ -876,7 +875,7 @@ impl<TPlat: Platform> Background<TPlat> {
         // and number.
         let block_storage_root_number = {
             let lock = self.subscriptions.lock().await;
-            if let Some(subscription) = lock.chain_head_follow.get(follow_subscription_id) {
+            if let Some(subscription) = lock.chain_head_follow.get(follow_subscription) {
                 if let Some(header) = subscription.pinned_blocks_headers.get(&hash.0) {
                     if let Ok(decoded) = header::decode(&header) {
                         Some((*decoded.state_root, decoded.number))
@@ -1044,7 +1043,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
-        follow_subscription_id: &str,
+        follow_subscription: &str,
         hash: methods::HashHexString,
         network_config: Option<methods::NetworkConfig>,
     ) {
@@ -1057,7 +1056,7 @@ impl<TPlat: Platform> Background<TPlat> {
         // Determine whether the requested block hash is valid, and if yes its number.
         let block_number = {
             let lock = self.subscriptions.lock().await;
-            if let Some(subscription) = lock.chain_head_follow.get(follow_subscription_id) {
+            if let Some(subscription) = lock.chain_head_follow.get(follow_subscription) {
                 if let Some(header) = subscription.pinned_blocks_headers.get(&hash.0) {
                     let decoded = header::decode(&header).unwrap(); // TODO: unwrap?
                     Some(decoded.number)
@@ -1207,12 +1206,12 @@ impl<TPlat: Platform> Background<TPlat> {
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
-        follow_subscription_id: &str,
+        follow_subscription: &str,
         hash: methods::HashHexString,
     ) {
         let response = {
             let lock = self.subscriptions.lock().await;
-            if let Some(subscription) = lock.chain_head_follow.get(follow_subscription_id) {
+            if let Some(subscription) = lock.chain_head_follow.get(follow_subscription) {
                 subscription
                     .pinned_blocks_headers
                     .get(&hash.0)
@@ -1354,14 +1353,14 @@ impl<TPlat: Platform> Background<TPlat> {
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
-        follow_subscription_id: &str,
+        follow_subscription: &str,
     ) {
         if let Some(subscription) = self
             .subscriptions
             .lock()
             .await
             .chain_head_follow
-            .remove(follow_subscription_id)
+            .remove(follow_subscription)
         {
             subscription.abort_handle.abort();
         }
@@ -1379,12 +1378,12 @@ impl<TPlat: Platform> Background<TPlat> {
         self: &Arc<Self>,
         request_id: &str,
         state_machine_request_id: &requests_subscriptions::RequestId,
-        follow_subscription_id: &str,
+        follow_subscription: &str,
         hash: methods::HashHexString,
     ) {
         let valid = {
             let mut lock = self.subscriptions.lock().await;
-            if let Some(subscription) = lock.chain_head_follow.get_mut(follow_subscription_id) {
+            if let Some(subscription) = lock.chain_head_follow.get_mut(follow_subscription) {
                 if subscription.pinned_blocks_headers.remove(&hash.0).is_some() {
                     if let Some(runtime_subscribe_all) = subscription.runtime_subscribe_all {
                         self.runtime_service

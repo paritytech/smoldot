@@ -880,30 +880,30 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
 
-            methods::MethodCall::chainHead_unstable_stopBody { subscription_id } => {
+            methods::MethodCall::chainHead_unstable_stopBody { subscription } => {
                 self.chain_head_unstable_stop_body(
                     request_id,
                     &state_machine_request_id,
-                    subscription_id,
+                    subscription,
                 )
                 .await;
             }
             methods::MethodCall::chainHead_unstable_body {
-                follow_subscription_id,
+                follow_subscription,
                 hash,
                 network_config,
             } => {
                 self.chain_head_unstable_body(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription_id,
+                    follow_subscription,
                     hash,
                     network_config,
                 )
                 .await;
             }
             methods::MethodCall::chainHead_unstable_call {
-                follow_subscription_id,
+                follow_subscription,
                 hash,
                 function,
                 call_parameters,
@@ -912,7 +912,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_call(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription_id,
+                    follow_subscription,
                     hash,
                     function,
                     call_parameters,
@@ -920,24 +920,24 @@ impl<TPlat: Platform> Background<TPlat> {
                 )
                 .await;
             }
-            methods::MethodCall::chainHead_unstable_stopCall { subscription_id } => {
+            methods::MethodCall::chainHead_unstable_stopCall { subscription } => {
                 self.chain_head_unstable_stop_call(
                     request_id,
                     &state_machine_request_id,
-                    subscription_id,
+                    subscription,
                 )
                 .await;
             }
-            methods::MethodCall::chainHead_unstable_stopStorage { subscription_id } => {
+            methods::MethodCall::chainHead_unstable_stopStorage { subscription } => {
                 self.chain_head_unstable_stop_storage(
                     request_id,
                     &state_machine_request_id,
-                    subscription_id,
+                    subscription,
                 )
                 .await;
             }
             methods::MethodCall::chainHead_unstable_storage {
-                follow_subscription_id,
+                follow_subscription,
                 hash,
                 key,
                 child_key,
@@ -947,7 +947,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_storage(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription_id,
+                    follow_subscription,
                     hash,
                     key,
                     child_key,
@@ -965,36 +965,36 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::chainHead_unstable_header {
-                follow_subscription_id,
+                follow_subscription,
                 hash,
             } => {
                 self.chain_head_unstable_header(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription_id,
+                    follow_subscription,
                     hash,
                 )
                 .await;
             }
             methods::MethodCall::chainHead_unstable_unpin {
-                follow_subscription_id,
+                follow_subscription,
                 hash,
             } => {
                 self.chain_head_unstable_unpin(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription_id,
+                    follow_subscription,
                     hash,
                 )
                 .await;
             }
             methods::MethodCall::chainHead_unstable_unfollow {
-                follow_subscription_id,
+                follow_subscription,
             } => {
                 self.chain_head_unstable_unfollow(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription_id,
+                    follow_subscription,
                 )
                 .await;
             }
