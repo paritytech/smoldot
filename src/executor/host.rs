@@ -929,9 +929,13 @@ impl ReadyToRun {
             HostFunction::ext_storage_changes_root_version_1 => {
                 // The changes trie is an obsolete attempt at having a second trie containing, for
                 // each storage item, the latest block height where this item has been modified.
-                // This mechanism has never been enabled in production and the only remaining
-                // trace of its existence is this host function.
-                // Writing a SCALE-encoded `None`.
+                // When this function returns `None`, it indicates that the changes trie is
+                // disabled. While this function used to be called by the runtimes of
+                // Westend/Polkadot/Kusama (and maybe others), it has never returned anything else
+                // but `None`. The entire changes trie mechanism was ultimately removed in
+                // October 2021.
+                // This function is no longer called by recent runtimes, but must be preserved for
+                // backwards compatibility.
                 self.inner.alloc_write_and_return_pointer_size(
                     HostFunction::ext_storage_changes_root_version_1.name(),
                     iter::once(&[0][..]),
