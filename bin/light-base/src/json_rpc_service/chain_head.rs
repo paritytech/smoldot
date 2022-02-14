@@ -24,7 +24,7 @@ use crate::{runtime_service, sync_service};
 use futures::prelude::*;
 use smoldot::{
     chain::fork_tree,
-    executor::{self, read_only_runtime_host, runtime_host},
+    executor::{self, runtime_host},
     header,
     json_rpc::{self, methods, requests_subscriptions},
     network::protocol,
