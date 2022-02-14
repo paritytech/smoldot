@@ -46,8 +46,13 @@ impl BabeGenesisConfiguration {
         let heap_pages =
             executor::storage_heap_pages_to_value(genesis_storage_access(b":heappages").as_deref())
                 .map_err(FromGenesisStorageError::HeapPagesDecode)?;
-        let vm = host::HostVmPrototype::new(&wasm_code, heap_pages, vm::ExecHint::Oneshot, false)
-            .map_err(FromGenesisStorageError::VmInitialization)?;
+        let vm = host::HostVmPrototype::new(host::Config {
+            module: &wasm_code,
+            heap_pages,
+            exec_hint: vm::ExecHint::Oneshot,
+            allow_unresolved_imports: false,
+        })
+        .map_err(FromGenesisStorageError::VmInitialization)?;
         let (cfg, _) = Self::from_virtual_machine_prototype(vm, genesis_storage_access)
             .map_err(FromGenesisStorageError::VmError)?;
         Ok(cfg)

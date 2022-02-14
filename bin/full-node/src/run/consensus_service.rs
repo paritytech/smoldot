@@ -196,12 +196,12 @@ impl ConsensusService {
                                 .map(|v| &v[..]),
                         )
                         .unwrap();
-                        executor::host::HostVmPrototype::new(
+                        executor::host::HostVmPrototype::new(executor::host::Config {
                             module,
                             heap_pages,
-                            executor::vm::ExecHint::CompileAheadOfTime, // TODO: probably should be decided by the optimisticsync
-                            false,
-                        )
+                            exec_hint: executor::vm::ExecHint::CompileAheadOfTime, // TODO: probably should be decided by the optimisticsync
+                            allow_unresolved_imports: false,
+                        })
                         .unwrap()
                     },
                 }),

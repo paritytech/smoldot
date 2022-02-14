@@ -62,7 +62,7 @@ use crate::{
     },
     executor::{
         self,
-        host::{HostVmPrototype, NewErr},
+        host::{self, HostVmPrototype, NewErr},
         vm::ExecHint,
     },
     finality::grandpa::warp_sync,
@@ -982,12 +982,12 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                 }
             };
 
-        match HostVmPrototype::new(
-            &code,
-            decoded_heap_pages,
+        match HostVmPrototype::new(host::Config {
+            module: &code,
+            heap_pages: decoded_heap_pages,
             exec_hint,
             allow_unresolved_imports,
-        ) {
+        }) {
             Ok(runtime) => {
                 let babe_current_epoch_query =
                     babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {

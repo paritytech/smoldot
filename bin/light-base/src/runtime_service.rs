@@ -2206,7 +2206,12 @@ impl SuccessfulRuntime {
         // Having unresolved imports might cause errors later on, for example when validating
         // transactions or getting the parachain heads, but for now we continue the execution
         // and print a warning.
-        match executor::host::HostVmPrototype::new(module, heap_pages, exec_hint, false) {
+        match executor::host::HostVmPrototype::new(executor::host::Config {
+            module,
+            heap_pages,
+            exec_hint,
+            allow_unresolved_imports: false,
+        }) {
             Ok(vm) => return Self::from_virtual_machine(vm).await,
             Err(executor::host::NewErr::VirtualMachine(
                 executor::vm::NewErr::UnresolvedFunctionImport {
@@ -2214,7 +2219,12 @@ impl SuccessfulRuntime {
                     module_name,
                 },
             )) => {
-                match executor::host::HostVmPrototype::new(module, heap_pages, exec_hint, true) {
+                match executor::host::HostVmPrototype::new(executor::host::Config {
+                    module,
+                    heap_pages,
+                    exec_hint,
+                    allow_unresolved_imports: true,
+                }) {
                     Ok(vm) => {
                         log::warn!(
                             "Unresolved host function in runtime: `{}`:`{}`. Smoldot might \

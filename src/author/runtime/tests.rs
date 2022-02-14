@@ -34,12 +34,12 @@ fn block_building_works() {
             .next()
             .unwrap()
             .1;
-        crate::executor::host::HostVmPrototype::new(
-            code,
-            crate::executor::DEFAULT_HEAP_PAGES,
-            crate::executor::vm::ExecHint::Oneshot,
-            false,
-        )
+        crate::executor::host::HostVmPrototype::new(crate::executor::host::Config {
+            module: code,
+            heap_pages: crate::executor::DEFAULT_HEAP_PAGES,
+            exec_hint: crate::executor::vm::ExecHint::Oneshot,
+            allow_unresolved_imports: false,
+        })
         .unwrap()
     };
 
