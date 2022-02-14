@@ -67,8 +67,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 // Determine whether the requested block hash is valid and start the call.
                 let pre_runtime_call = {
                     let lock = me.subscriptions.lock().await;
-                    if let Some(subscription) = lock.chain_head_follow.get(&follow_subscription)
-                    {
+                    if let Some(subscription) = lock.chain_head_follow.get(&follow_subscription) {
                         let runtime_service_subscribe_all = match subscription.runtime_subscribe_all
                         {
                             Some(sa) => sa,
