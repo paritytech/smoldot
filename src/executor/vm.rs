@@ -644,6 +644,8 @@ pub enum NewErr {
     /// If a "memory" symbol is provided, it must be a memory.
     #[display(fmt = "If a \"memory\" symbol is provided, it must be a memory.")]
     MemoryIsntMemory,
+    /// Wasm module imports a memory that isn't named "memory".
+    MemoryNotNamedMemory,
     /// If a "__indirect_function_table" symbol is provided, it must be a table.
     #[display(fmt = "If a \"__indirect_function_table\" symbol is provided, it must be a table.")]
     IndirectTableIsntTable,

@@ -123,32 +123,28 @@ impl InterpreterPrototype {
 
             fn resolve_memory(
                 &self,
-                _module_name: &str,
+                module_name: &str,
                 field_name: &str,
                 memory_type: &wasmi::MemoryDescriptor,
             ) -> Result<wasmi::MemoryRef, wasmi::Error> {
-                if field_name != "memory" {
-                    return Err(wasmi::Error::Instantiation(format!(
-                        "Unknown memory reference with name: {}",
-                        field_name
-                    )));
+                if module_name != "env" || field_name != "memory" {
+                    return Err(wasmi::Error::Host(Box::new(NewErrWrapper(
+                        NewErr::MemoryNotNamedMemory,
+                    ))));
                 }
 
-                match &mut *self.import_memory.borrow_mut() {
-                    Some(_) => Err(wasmi::Error::Instantiation(
-                        "Memory can not be imported twice!".into(),
-                    )),
-                    memory_ref @ None => {
-                        let memory = wasmi::MemoryInstance::alloc(
-                            wasmi::memory_units::Pages(memory_type.initial() as usize),
-                            memory_type
-                                .maximum()
-                                .map(|hp| wasmi::memory_units::Pages(hp as usize)),
-                        )?;
-                        **memory_ref = Some(memory.clone());
-                        Ok(memory)
-                    }
-                }
+                // Considering that the memory can only be "env":"memory", and that each
+                // import has a unique name, this block can't be reached more than once.
+                debug_assert!(self.import_memory.borrow().is_none());
+
+                let memory = wasmi::MemoryInstance::alloc(
+                    wasmi::memory_units::Pages(memory_type.initial() as usize),
+                    memory_type
+                        .maximum()
+                        .map(|hp| wasmi::memory_units::Pages(hp as usize)),
+                )?;
+                **self.import_memory.borrow_mut() = Some(memory.clone());
+                Ok(memory)
             }
 
             fn resolve_table(
