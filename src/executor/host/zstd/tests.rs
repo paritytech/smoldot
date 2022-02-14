@@ -19,13 +19,22 @@
 
 #[test]
 fn basic_works() {
-    super::zstd_decode(&include_bytes!("./example-runtime")[..], 10 * 1024 * 1024).unwrap();
+    // Note that this example file doesn't have the zstd header.
+    super::zstd_decode(
+        &include_bytes!("./example-runtime.wasm.zstd")[..],
+        10 * 1024 * 1024,
+    )
+    .unwrap();
 }
 
 #[test]
 fn limit_reached() {
+    // Note that this example file doesn't have the zstd header.
     assert!(matches!(
-        super::zstd_decode(&include_bytes!("./example-runtime")[..], 16 * 1024),
+        super::zstd_decode(
+            &include_bytes!("./example-runtime.wasm.zstd")[..],
+            16 * 1024
+        ),
         Err(super::Error::TooLarge)
     ));
 }
@@ -36,4 +45,13 @@ fn invalid_data() {
         super::zstd_decode(&(0..2048).map(|_| 0xff).collect::<Vec<_>>(), 1024 * 1024),
         Err(super::Error::InvalidZstd)
     ));
+}
+
+#[test]
+fn basic_works_with_header() {
+    super::zstd_decode_if_necessary(
+        &include_bytes!("./polkadot-runtime-v9160.wasm.zstd")[..],
+        10 * 1024 * 1024,
+    )
+    .unwrap();
 }
