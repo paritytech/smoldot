@@ -154,7 +154,6 @@ pub fn verify(config: Config) -> Result<Success, Error> {
         return Err(Error::NonSequentialBlockNumber);
     }
 
-    // TODO: need to verify the changes trie stuff maybe?
     // TODO: need to verify that there's no grandpa scheduled change header if there's already an active grandpa scheduled change
     // TODO: verify that there's no grandpa header items if the chain doesn't use grandpa
 
