@@ -224,10 +224,9 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                 } => {
                                     log::debug!(
                                         target: "network",
-                                        "Connection({}, {}) => BlockAnnounce({}, {}, is_best={})",
+                                        "Connection({}, {}) => BlockAnnounce(best_hash={}, is_best={})",
                                         peer_id,
                                         &network_service.log_chain_names[chain_index],
-                                        chain_index,
                                         HashDisplay(&announce.decode().header.hash()),
                                         announce.decode().is_best
                                     );
@@ -247,7 +246,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                 } => {
                                     log::debug!(
                                         target: "network",
-                                        "Connection({}, {}) => ChainConnected({}, {})",
+                                        "Connection({}, {}) => ChainConnected(best_height={}, best_hash={})",
                                         peer_id,
                                         &network_service.log_chain_names[chain_index],
                                         best_number,
@@ -269,7 +268,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                 } => {
                                     log::debug!(
                                         target: "network",
-                                        "Connection({}, {}) => ChainConnectAttemptFailed: {}",
+                                        "Connection({}, {}) => ChainConnectAttemptFailed(error={})",
                                         &network_service.log_chain_names[chain_index],
                                         peer_id, error,
                                     );
@@ -336,7 +335,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                 } => {
                                     log::debug!(
                                         target: "network",
-                                        "Connection(?, {}) => GrandpaCommitMessage({})",
+                                        "Connection(?, {}) => GrandpaCommitMessage(target_block_hash={})",
                                         &network_service.log_chain_names[chain_index],
                                         HashDisplay(message.decode().message.target_hash),
                                     );
@@ -349,7 +348,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                     // TODO: handle properly?
                                     log::warn!(
                                         target: "network",
-                                        "Connection({}) => ProtocolError({})",
+                                        "Connection({}) => ProtocolError(error={})",
                                         peer_id,
                                         error,
                                     );
@@ -647,8 +646,9 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             protocol::BlocksRequestConfigStart::Hash(hash) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) <= BlocksRequest(start: {}, num: {}, descending: {:?}, header: {:?}, body: {:?}, justifications: {:?})",
-                    target, HashDisplay(hash), config.desired_count.get(),
+                    "Connection({}) <= BlocksRequest(chain={}, start={}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
+                    target, self.inner.log_chain_names[chain_index], HashDisplay(hash),
+                    config.desired_count.get(),
                     matches!(config.direction, protocol::BlocksRequestDirection::Descending),
                     config.fields.header, config.fields.body, config.fields.justifications
                 );
@@ -656,8 +656,9 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             protocol::BlocksRequestConfigStart::Number(number) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) <= BlocksRequest(start: #{}, num: {}, descending: {:?}, header: {:?}, body: {:?}, justifications: {:?})",
-                    target, number, config.desired_count.get(),
+                    "Connection({}) <= BlocksRequest(chain={}, start=#{}, num={}, descending={:?}, header={:?}, body={:?}, justifications={:?})",
+                    target, self.inner.log_chain_names[chain_index], number,
+                    config.desired_count.get(),
                     matches!(config.direction, protocol::BlocksRequestDirection::Descending),
                     config.fields.header, config.fields.body, config.fields.justifications
                 );
@@ -674,8 +675,9 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             Ok(blocks) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) => BlocksRequest(num_blocks: {}, block_data_total_size: {})",
+                    "Connection({}) => BlocksRequest(chain={}, num_blocks={}, block_data_total_size={})",
                     target,
+                    self.inner.log_chain_names[chain_index],
                     blocks.len(),
                     BytesDisplay(blocks.iter().fold(0, |sum, block| {
                         let block_size = block.header.as_ref().map_or(0, |h| h.len()) +
@@ -688,8 +690,9 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             Err(err) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) => BlocksRequest({})",
+                    "Connection({}) => BlocksRequest(chain={}, error={})",
                     target,
+                    self.inner.log_chain_names[chain_index],
                     err
                 );
             }
@@ -722,8 +725,8 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         timeout: Duration,
     ) -> Result<protocol::GrandpaWarpSyncResponse, service::GrandpaWarpSyncRequestError> {
         log::debug!(
-            target: "network", "Connection({}) <= GrandpaWarpSyncRequest({})",
-            target, HashDisplay(&begin_hash)
+            target: "network", "Connection({}) <= GrandpaWarpSyncRequest(chain={}, start={})",
+            target, self.inner.log_chain_names[chain_index], HashDisplay(&begin_hash)
         );
 
         let result = self
@@ -737,8 +740,9 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                 // TODO: print total bytes size
                 log::debug!(
                     target: "network",
-                    "Connection({}) => GrandpaWarpSyncRequest(num_fragments: {}, finished: {:?})",
+                    "Connection({}) => GrandpaWarpSyncRequest(chain={}, num_fragments={}, finished={:?})",
                     target,
+                    self.inner.log_chain_names[chain_index],
                     response.fragments.len(),
                     response.is_finished,
                 );
@@ -746,8 +750,9 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             Err(err) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) => GrandpaWarpSyncRequest({})",
+                    "Connection({}) => GrandpaWarpSyncRequest(chain={}, error={})",
                     target,
+                    self.inner.log_chain_names[chain_index],
                     err,
                 );
             }
@@ -776,7 +781,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         log::debug!(
             target: "network",
             "Chain({}) <= SetLocalGrandpaState(set_id: {}, commit_finalized_height: {})",
-            chain_index,
+            self.inner.log_chain_names[chain_index],
             grandpa_state.set_id,
             grandpa_state.commit_finalized_height,
         );
@@ -800,8 +805,9 @@ impl<TPlat: Platform> NetworkService<TPlat> {
     ) -> Result<Vec<Vec<u8>>, service::StorageProofRequestError> {
         log::debug!(
             target: "network",
-            "Connection({}) <= StorageProofRequest(block: {})",
+            "Connection({}) <= StorageProofRequest(chain={}, block={})",
             target,
+            self.inner.log_chain_names[chain_index],
             HashDisplay(&config.block_hash)
         );
 
@@ -815,8 +821,9 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             Ok(items) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) => StorageProofRequest(num_elems: {}, total_size: {})",
+                    "Connection({}) => StorageProofRequest(chain={}, num_elems={}, total_size={})",
                     target,
+                    self.inner.log_chain_names[chain_index],
                     items.len(),
                     BytesDisplay(items.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
                 );
@@ -824,8 +831,9 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             Err(err) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) => StorageProofRequest({})",
+                    "Connection({}) => StorageProofRequest(chain={}, error={})",
                     target,
+                    self.inner.log_chain_names[chain_index],
                     err
                 );
             }
@@ -847,8 +855,9 @@ impl<TPlat: Platform> NetworkService<TPlat> {
     ) -> Result<Vec<Vec<u8>>, service::CallProofRequestError> {
         log::debug!(
             target: "network",
-            "Connection({}) <= CallProofRequest({}, {})",
+            "Connection({}) <= CallProofRequest({}, {}, {})",
             target,
+            self.inner.log_chain_names[chain_index],
             HashDisplay(&config.block_hash),
             config.method
         );
@@ -863,8 +872,9 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             Ok(items) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) => CallProofRequest(num_elems: {}, total_size: {})",
+                    "Connection({}) => CallProofRequest({}, num_elems: {}, total_size: {})",
                     target,
+                    self.inner.log_chain_names[chain_index],
                     items.len(),
                     BytesDisplay(items.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
                 );
@@ -872,8 +882,9 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             Err(err) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) => CallProofRequest({})",
+                    "Connection({}) => CallProofRequest({}, {})",
                     target,
+                    self.inner.log_chain_names[chain_index],
                     err
                 );
             }
