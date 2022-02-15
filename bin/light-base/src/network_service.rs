@@ -224,10 +224,9 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                 } => {
                                     log::debug!(
                                         target: "network",
-                                        "Connection({}, {}) => BlockAnnounce({}, {}, is_best={})",
+                                        "Connection({}, {}) => BlockAnnounce(best_hash={}, is_best={})",
                                         peer_id,
                                         &network_service.log_chain_names[chain_index],
-                                        chain_index,
                                         HashDisplay(&announce.decode().header.hash()),
                                         announce.decode().is_best
                                     );
@@ -247,7 +246,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                 } => {
                                     log::debug!(
                                         target: "network",
-                                        "Connection({}, {}) => ChainConnected({}, {})",
+                                        "Connection({}, {}) => ChainConnected(best_height={}, best_hash={})",
                                         peer_id,
                                         &network_service.log_chain_names[chain_index],
                                         best_number,
@@ -269,7 +268,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                 } => {
                                     log::debug!(
                                         target: "network",
-                                        "Connection({}, {}) => ChainConnectAttemptFailed: {}",
+                                        "Connection({}, {}) => ChainConnectAttemptFailed(error={})",
                                         &network_service.log_chain_names[chain_index],
                                         peer_id, error,
                                     );
@@ -336,7 +335,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                 } => {
                                     log::debug!(
                                         target: "network",
-                                        "Connection(?, {}) => GrandpaCommitMessage({})",
+                                        "Connection(?, {}) => GrandpaCommitMessage(target_block_hash={})",
                                         &network_service.log_chain_names[chain_index],
                                         HashDisplay(message.decode().message.target_hash),
                                     );
@@ -349,7 +348,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                     // TODO: handle properly?
                                     log::warn!(
                                         target: "network",
-                                        "Connection({}) => ProtocolError({})",
+                                        "Connection({}) => ProtocolError(error={})",
                                         peer_id,
                                         error,
                                     );
