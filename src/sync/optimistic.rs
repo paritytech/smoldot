@@ -47,7 +47,7 @@
 
 use crate::{
     chain::{blocks_tree, chain_information},
-    executor::{host, storage_overlay},
+    executor::{host, storage_diff},
     header,
     trie::calculate_root,
 };
@@ -140,7 +140,7 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     /// Changes in the storage of the best block compared to the finalized block.
     /// The `BTreeMap`'s keys are storage keys, and its values are new values or `None` if the
     /// value has been erased from the storage.
-    best_to_finalized_storage_diff: storage_overlay::StorageChanges,
+    best_to_finalized_storage_diff: storage_diff::StorageDiff,
 
     /// Compiled runtime code of the best block. `None` if it is the same as
     /// [`OptimisticSyncInner::finalized_runtime`].
@@ -236,10 +236,10 @@ pub struct BlockFull {
     pub body: Vec<Vec<u8>>,
 
     /// Changes to the storage made by this block compared to its parent.
-    pub storage_top_trie_changes: storage_overlay::StorageChanges,
+    pub storage_top_trie_changes: storage_diff::StorageDiff,
 
     /// List of changes to the offchain storage that this block performs.
-    pub offchain_storage_changes: storage_overlay::StorageChanges,
+    pub offchain_storage_changes: storage_diff::StorageDiff,
 }
 
 impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
@@ -258,7 +258,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             inner: Box::new(OptimisticSyncInner {
                 finalized_chain_information: blocks_tree_config,
                 finalized_runtime: config.full.map(|f| f.finalized_runtime),
-                best_to_finalized_storage_diff: storage_overlay::StorageChanges::empty(),
+                best_to_finalized_storage_diff: storage_diff::StorageDiff::empty(),
                 best_runtime: None,
                 top_trie_root_calculation_cache: None,
                 sources: HashMap::with_capacity_and_hasher(
@@ -1389,11 +1389,11 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
             .best_to_finalized_storage_diff
             .storage_next_key(requested_key, key.map(|k| k.as_ref()))
         {
-            storage_overlay::StorageNextKey::Found(k) => {
+            storage_diff::StorageNextKey::Found(k) => {
                 let inner = self.inner.inject_key(k);
                 BlockVerification::from(Inner::Step2(inner), self.shared)
             }
-            storage_overlay::StorageNextKey::NextOf(next) => {
+            storage_diff::StorageNextKey::NextOf(next) => {
                 return BlockVerification::FinalizedStorageNextKey(StorageNextKey {
                     inner: self.inner,
                     shared: self.shared,

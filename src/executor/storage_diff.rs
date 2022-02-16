@@ -29,27 +29,15 @@
 
 // TODO: more docs
 
-use crate::{
-    executor::{self, host, vm},
-    trie::calculate_root,
-    util,
-};
-
-use alloc::{
-    borrow::ToOwned as _,
-    collections::BTreeMap,
-    string::{String, ToString as _},
-    vec::Vec,
-};
+use alloc::{borrow::ToOwned as _, collections::BTreeMap, vec::Vec};
 use core::{fmt, iter, ops};
-use hashbrown::{hash_map::Entry, HashMap, HashSet};
 
 #[derive(Clone, PartialEq, Eq)]
-pub struct StorageChanges {
+pub struct StorageDiff {
     inner: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
-impl StorageChanges {
+impl StorageDiff {
     /// Builds a new empty diff.
     pub fn empty() -> Self {
         Self {
@@ -63,6 +51,8 @@ impl StorageChanges {
     }
 
     /// Inserts the given key-value combination in the diff.
+    ///
+    /// Returns the value associated to this `key` that was previously in the diff, if any.
     pub fn diff_insert(
         &mut self,
         key: impl Into<Vec<u8>>,
@@ -73,8 +63,17 @@ impl StorageChanges {
 
     /// Inserts in the diff an entry at the given key that delete the value that is located in
     /// the base storage.
+    ///
+    /// Returns the value associated to this `key` that was previously in the diff, if any.
     pub fn diff_insert_erase(&mut self, key: impl Into<Vec<u8>>) -> Option<Option<Vec<u8>>> {
         self.inner.insert(key.into(), None)
+    }
+
+    /// Removes from the diff the entry corresponding to the given `key`.
+    ///
+    /// Returns the value associated to this `key` that was previously in the diff, if any.
+    pub fn diff_remove(&mut self, key: impl AsRef<u8>) -> Option<Option<Vec<u8>>> {
+        self.inner.remove(key.as_ref())
     }
 
     /// Returns the diff entry at the given key.
@@ -214,7 +213,7 @@ impl StorageChanges {
     }
 
     /// Applies the given diff on top of the current one.
-    pub fn merge(&mut self, other: &StorageChanges) {
+    pub fn merge(&mut self, other: &StorageDiff) {
         // TODO: provide an alternative method that consumes `other` as well?
         for (key, value) in &other.inner {
             self.inner.insert(key.clone(), value.clone());
@@ -222,20 +221,20 @@ impl StorageChanges {
     }
 }
 
-impl fmt::Debug for StorageChanges {
+impl fmt::Debug for StorageDiff {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Delegate to `self.inner`
         fmt::Debug::fmt(&self.inner, f)
     }
 }
 
-impl Default for StorageChanges {
+impl Default for StorageDiff {
     fn default() -> Self {
-        StorageChanges::empty()
+        StorageDiff::empty()
     }
 }
 
-impl FromIterator<(Vec<u8>, Option<Vec<u8>>)> for StorageChanges {
+impl FromIterator<(Vec<u8>, Option<Vec<u8>>)> for StorageDiff {
     fn from_iter<T>(iter: T) -> Self
     where
         T: IntoIterator<Item = (Vec<u8>, Option<Vec<u8>>)>,
@@ -247,15 +246,15 @@ impl FromIterator<(Vec<u8>, Option<Vec<u8>>)> for StorageChanges {
 }
 
 // TODO: consider removing this trait impl; this is required only for API reasons at the moment
-impl From<BTreeMap<Vec<u8>, Option<Vec<u8>>>> for StorageChanges {
+impl From<BTreeMap<Vec<u8>, Option<Vec<u8>>>> for StorageDiff {
     fn from(inner: BTreeMap<Vec<u8>, Option<Vec<u8>>>) -> Self {
         Self { inner }
     }
 }
 
 // TODO: consider removing this trait impl; this is required only for API reasons at the moment
-impl From<StorageChanges> for BTreeMap<Vec<u8>, Option<Vec<u8>>> {
-    fn from(c: StorageChanges) -> Self {
+impl From<StorageDiff> for BTreeMap<Vec<u8>, Option<Vec<u8>>> {
+    fn from(c: StorageDiff) -> Self {
         c.inner
     }
 }

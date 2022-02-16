@@ -32,7 +32,7 @@
 
 use crate::{
     chain::{blocks_tree, chain_information},
-    executor::{host, storage_overlay, vm::ExecHint},
+    executor::{host, storage_diff, vm::ExecHint},
     header,
     sync::{all_forks, optimistic, warp_sync},
     verify,
@@ -1649,10 +1649,10 @@ pub struct BlockFull {
     pub body: Vec<Vec<u8>>,
 
     /// Changes to the storage made by this block compared to its parent.
-    pub storage_top_trie_changes: storage_overlay::StorageChanges,
+    pub storage_top_trie_changes: storage_diff::StorageDiff,
 
     /// List of changes to the offchain storage that this block performs.
-    pub offchain_storage_changes: storage_overlay::StorageChanges,
+    pub offchain_storage_changes: storage_diff::StorageDiff,
 }
 
 pub struct HeaderVerify<TRq, TSrc, TBl> {

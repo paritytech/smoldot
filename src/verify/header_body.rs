@@ -18,7 +18,7 @@
 use super::execute_block;
 use crate::{
     chain::chain_information,
-    executor::{self, host, storage_overlay, vm},
+    executor::{self, host, storage_diff, vm},
     header,
     trie::calculate_root,
     verify::{aura, babe},
@@ -115,10 +115,10 @@ pub struct Success {
     pub consensus: SuccessConsensus,
 
     /// List of changes to the storage top trie that the block performs.
-    pub storage_top_trie_changes: storage_overlay::StorageChanges,
+    pub storage_top_trie_changes: storage_diff::StorageDiff,
 
     /// List of changes to the offchain storage that this block performs.
-    pub offchain_storage_changes: storage_overlay::StorageChanges,
+    pub offchain_storage_changes: storage_diff::StorageDiff,
 
     /// Cache used for calculating the top trie root.
     pub top_trie_root_calculation_cache: calculate_root::CalculationCache,

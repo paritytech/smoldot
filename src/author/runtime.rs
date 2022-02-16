@@ -48,7 +48,7 @@
 mod tests;
 
 use crate::{
-    executor::{host, runtime_host, storage_overlay},
+    executor::{host, runtime_host, storage_diff},
     header,
     trie::calculate_root,
     util,
@@ -106,9 +106,9 @@ pub struct Success {
     /// Runtime that was passed by [`Config`].
     pub parent_runtime: host::HostVmPrototype,
     /// List of changes to the storage top trie that the block performs.
-    pub storage_top_trie_changes: storage_overlay::StorageChanges,
+    pub storage_top_trie_changes: storage_diff::StorageDiff,
     /// List of changes to the offchain storage that this block performs.
-    pub offchain_storage_changes: storage_overlay::StorageChanges,
+    pub offchain_storage_changes: storage_diff::StorageDiff,
     /// Cache used for calculating the top trie root of the new block.
     pub top_trie_root_calculation_cache: calculate_root::CalculationCache,
     /// Concatenation of all the log messages printed by the runtime.
@@ -467,8 +467,8 @@ enum Stage {
 pub struct InherentExtrinsics {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
-    storage_top_trie_changes: storage_overlay::StorageChanges,
-    offchain_storage_changes: storage_overlay::StorageChanges,
+    storage_top_trie_changes: storage_diff::StorageDiff,
+    offchain_storage_changes: storage_diff::StorageDiff,
     top_trie_root_calculation_cache: calculate_root::CalculationCache,
 }
 
@@ -602,8 +602,8 @@ pub enum InherentDataConsensus {
 pub struct ApplyExtrinsic {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
-    storage_top_trie_changes: storage_overlay::StorageChanges,
-    offchain_storage_changes: storage_overlay::StorageChanges,
+    storage_top_trie_changes: storage_diff::StorageDiff,
+    offchain_storage_changes: storage_diff::StorageDiff,
     top_trie_root_calculation_cache: calculate_root::CalculationCache,
 }
 
