@@ -38,14 +38,13 @@
 // TODO: more docs
 
 use crate::{
-    executor::{self, host, vm},
+    executor::{self, host, storage_diff, vm},
     trie::calculate_root,
     util,
 };
 
 use alloc::{
     borrow::ToOwned as _,
-    collections::BTreeMap,
     string::{String, ToString as _},
     vec::Vec,
 };
@@ -70,11 +69,11 @@ pub struct Config<'a, TParams> {
 
     /// Initial state of [`Success::storage_top_trie_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
-    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    pub storage_top_trie_changes: storage_diff::StorageDiff,
 
     /// Initial state of [`Success::offchain_storage_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
-    pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub offchain_storage_changes: storage_diff::StorageDiff,
 }
 
 /// Start running the WebAssembly virtual machine.
@@ -86,7 +85,7 @@ pub fn run(
             .virtual_machine
             .run_vectored(config.function_to_call, config.parameter)?
             .into(),
-        top_trie_changes: config.storage_top_trie_changes,
+        top_trie_changes: config.storage_top_trie_changes.into(),
         top_trie_transaction_revert: None,
         offchain_storage_changes: config.offchain_storage_changes,
         top_trie_root_calculation_cache: Some(
@@ -105,9 +104,9 @@ pub struct Success {
     /// initialization.
     pub virtual_machine: SuccessVirtualMachine,
     /// List of changes to the storage top trie that the block performs.
-    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    pub storage_top_trie_changes: storage_diff::StorageDiff,
     /// List of changes to the offchain storage that this block performs.
-    pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub offchain_storage_changes: storage_diff::StorageDiff,
     /// Cache used for calculating the top trie root.
     pub top_trie_root_calculation_cache: calculate_root::CalculationCache,
     /// Concatenation of all the log messages printed by the runtime.
@@ -253,7 +252,7 @@ impl StorageGet {
                 append_to_storage_value(&mut value, req.value().as_ref());
                 self.inner
                     .top_trie_changes
-                    .insert(req.key().as_ref().to_vec(), Some(value));
+                    .diff_insert(req.key().as_ref().to_vec(), value);
                 self.inner.vm = req.resume();
             }
             host::HostVm::ExternalStorageRoot(_) => {
@@ -308,45 +307,37 @@ impl PrefixKeys {
                 let max_keys_to_remove = req.max_keys_to_remove();
                 let mut keys_removed_so_far = 0u32;
 
-                let mut outside_keys = keys
-                    .filter(|k| !self.inner.top_trie_changes.contains_key(k.as_ref()))
-                    .peekable();
-                let mut inside_keys = self
+                let prefix = req.prefix().as_ref().to_owned();
+                let mut after_overlay = self
                     .inner
                     .top_trie_changes
-                    .range((req.prefix().as_ref().to_owned())..)
-                    .take_while(|(k, _)| k.starts_with(req.prefix().as_ref()))
-                    .filter(|(_, v)| v.is_some())
-                    .map(|(k, _)| k)
+                    .storage_prefix_keys_ordered(&prefix, keys)
                     .peekable();
 
                 let mut keys_to_remove = Vec::new(); // TODO: capacity?
-                let some_keys_remain = loop {
-                    let key: Vec<u8> = match (outside_keys.peek(), inside_keys.peek()) {
-                        (Some(_), None) => outside_keys.next().unwrap().as_ref().to_owned(),
-                        (None, Some(_)) => inside_keys.next().unwrap().clone(),
-                        (Some(a), Some(b)) if a.as_ref() < &b[..] => {
-                            outside_keys.next().unwrap().as_ref().to_owned()
-                        }
-                        (Some(a), Some(b)) => {
-                            debug_assert_ne!(a.as_ref(), &b[..]);
-                            inside_keys.next().unwrap().clone()
-                        }
-                        (None, None) => break false,
-                    };
 
+                let some_keys_remain = loop {
                     // Enforce the maximum number of keys to remove.
                     if max_keys_to_remove.map_or(false, |max| keys_removed_so_far >= max) {
-                        break true;
+                        break after_overlay.peek().is_some();
                     }
 
-                    keys_to_remove.push(key);
+                    match after_overlay.next() {
+                        Some(k) => {
+                            keys_to_remove.push(k.as_ref().to_owned());
 
-                    // `wrapping_add` is used because the only way `keys_removed_so_far` can be
-                    // equal to `u32::max_value()` at this point is when `max_keys_to_remove`
-                    // is `None`.
-                    keys_removed_so_far = keys_removed_so_far.wrapping_add(1);
+                            // `wrapping_add` is used because the only way `keys_removed_so_far` can be
+                            // equal to `u32::max_value()` at this point is when `max_keys_to_remove`
+                            // is `None`.
+                            keys_removed_so_far = keys_removed_so_far.wrapping_add(1);
+                        }
+                        None => {
+                            break false;
+                        }
+                    }
                 };
+
+                drop(after_overlay);
 
                 for key in keys_to_remove {
                     self.inner
@@ -355,7 +346,7 @@ impl PrefixKeys {
                         .unwrap()
                         .storage_value_update(&key, false);
 
-                    let previous_value = self.inner.top_trie_changes.insert(key.clone(), None);
+                    let previous_value = self.inner.top_trie_changes.diff_insert_erase(key.clone());
 
                     if let Some(top_trie_transaction_revert) =
                         self.inner.top_trie_transaction_revert.as_mut()
@@ -378,17 +369,17 @@ impl PrefixKeys {
                         .filter(|v| {
                             self.inner
                                 .top_trie_changes
-                                .get(v.as_ref())
+                                .diff_get(v.as_ref())
                                 .map_or(true, |v| v.is_some())
                         })
                         .map(|v| v.as_ref().to_vec())
                         .collect::<HashSet<_, fnv::FnvBuildHasher>>();
                     // TODO: slow to iterate over everything?
-                    for (key, value) in self.inner.top_trie_changes.iter() {
+                    for (key, value) in self.inner.top_trie_changes.diff_iter() {
                         if value.is_none() {
                             continue;
                         }
-                        list.insert(key.clone());
+                        list.insert(key.to_owned());
                     }
                     self.inner.root_calculation =
                         Some(all_keys.inject(list.into_iter().map(|k| k.into_iter())));
@@ -440,59 +431,31 @@ impl NextKey {
 
         match self.inner.vm {
             host::HostVm::ExternalStorageNextKey(req) => {
-                let req_key = req.key();
-                let requested_key = if let Some(key_overwrite) = &self.key_overwrite {
-                    &key_overwrite[..]
-                } else {
-                    req_key.as_ref()
+                let search = {
+                    let req_key = req.key();
+                    let requested_key = if let Some(key_overwrite) = &self.key_overwrite {
+                        &key_overwrite[..]
+                    } else {
+                        req_key.as_ref()
+                    };
+                    self.inner
+                        .top_trie_changes
+                        .storage_next_key(requested_key, key.map(|k| k.as_ref()))
                 };
 
-                if let Some(key) = key {
-                    assert!(key > requested_key);
-                }
-
-                // The next key can be either the one passed by the user or one key in the current
-                // pending storage changes that has been inserted during the execution.
-                // As such, find the "next key" in the list of overlay changes.
-                let in_overlay = self
-                    .inner
-                    .top_trie_changes
-                    .range(requested_key.to_vec()..) // TODO: to_vec() :-/
-                    .find(|(k, _)| &***k > requested_key)
-                    .map(|(k, v)| (k, v.is_some()));
-
-                let outcome = match (key, in_overlay) {
-                    (Some(a), Some((b, true))) if a <= &b[..] => Some(a),
-                    (Some(a), Some((b, false))) if a < &b[..] => Some(a),
-                    (Some(a), Some((b, false))) => {
-                        debug_assert!(a >= &b[..]);
-                        debug_assert_ne!(&b[..], requested_key);
-
-                        // The next key according to the parent storage has been erased earlier in
-                        // the block execution. It is necessary to ask the user again, this time
-                        // for the key after the one that has been erased.
-                        // This `clone()` is necessary, as `b` borrows from
-                        // `self.inner.top_trie_changes`.
-                        let key_overwrite = Some(b.clone());
-                        drop(req_key); // Solves borrowing errors.
+                match search {
+                    storage_diff::StorageNextKey::Found(k) => {
+                        self.inner.vm = req.resume(k);
+                    }
+                    storage_diff::StorageNextKey::NextOf(next) => {
+                        let key_overwrite = Some(next.to_owned());
                         self.inner.vm = host::HostVm::ExternalStorageNextKey(req);
                         return RuntimeHostVm::NextKey(NextKey {
                             inner: self.inner,
                             key_overwrite,
                         });
                     }
-                    (Some(a), Some((b, true))) => {
-                        debug_assert!(a >= &b[..]);
-                        Some(&b[..])
-                    }
-
-                    (Some(a), None) => Some(a),
-                    (None, Some((b, _))) => Some(&b[..]),
-                    (None, None) => None,
-                };
-
-                drop(req_key); // Solves borrowing errors.
-                self.inner.vm = req.resume(outcome.as_ref().map(|v| &v[..]));
+                }
             }
 
             // We only create a `NextKey` if the state is one of the above.
@@ -510,7 +473,7 @@ struct Inner {
     vm: host::HostVm,
 
     /// Pending changes to the top storage trie that this execution performs.
-    top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    top_trie_changes: storage_diff::StorageDiff,
 
     /// `Some` if and only if we're within a storage transaction. When changes are applied to
     /// [`Inner::top_trie_changes`], the reverse operation is added here.
@@ -521,7 +484,7 @@ struct Inner {
         Option<HashMap<Vec<u8>, Option<Option<Vec<u8>>>, fnv::FnvBuildHasher>>,
 
     /// Pending changes to the offchain storage that this execution performs.
-    offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    offchain_storage_changes: storage_diff::StorageDiff,
 
     /// Cache passed by the user. Always `Some` except when we are currently calculating the trie
     /// state root.
@@ -554,7 +517,7 @@ impl Inner {
                 host::HostVm::Finished(finished) => {
                     return RuntimeHostVm::Finished(Ok(Success {
                         virtual_machine: SuccessVirtualMachine(finished),
-                        storage_top_trie_changes: self.top_trie_changes,
+                        storage_top_trie_changes: self.top_trie_changes.into(),
                         offchain_storage_changes: self.offchain_storage_changes,
                         top_trie_root_calculation_cache: self
                             .top_trie_root_calculation_cache
@@ -564,9 +527,9 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageGet(req) => {
-                    let change = self.top_trie_changes.get(req.key().as_ref());
-                    if let Some(overlay) = change {
-                        self.vm = req.resume_full_value(overlay.as_ref().map(|v| &v[..]));
+                    let search = self.top_trie_changes.diff_get(req.key().as_ref());
+                    if let Some(overlay) = search {
+                        self.vm = req.resume_full_value(overlay);
                     } else {
                         self.vm = req.into();
                         return RuntimeHostVm::StorageGet(StorageGet { inner: self });
@@ -579,10 +542,12 @@ impl Inner {
                         .unwrap()
                         .storage_value_update(req.key().as_ref(), req.value().is_some());
 
-                    let previous_value = self.top_trie_changes.insert(
-                        req.key().as_ref().to_vec(),
-                        req.value().map(|v| v.as_ref().to_vec()),
-                    );
+                    let previous_value = if let Some(value) = req.value() {
+                        self.top_trie_changes
+                            .diff_insert(req.key().as_ref(), value.as_ref())
+                    } else {
+                        self.top_trie_changes.diff_insert_erase(req.key().as_ref())
+                    };
 
                     if let Some(top_trie_transaction_revert) =
                         self.top_trie_transaction_revert.as_mut()
@@ -603,13 +568,13 @@ impl Inner {
                         .unwrap()
                         .storage_value_update(req.key().as_ref(), true);
 
-                    let current_value = self.top_trie_changes.get(req.key().as_ref());
+                    let current_value = self.top_trie_changes.diff_get(req.key().as_ref());
                     if let Some(current_value) = current_value {
-                        let mut current_value = current_value.clone().unwrap_or_default();
+                        let mut current_value = current_value.unwrap_or_default().to_vec();
                         append_to_storage_value(&mut current_value, req.value().as_ref());
                         let previous_value = self
                             .top_trie_changes
-                            .insert(req.key().as_ref().to_vec(), Some(current_value));
+                            .diff_insert(req.key().as_ref().to_vec(), current_value);
                         if let Some(top_trie_transaction_revert) =
                             self.top_trie_transaction_revert.as_mut()
                         {
@@ -654,10 +619,9 @@ impl Inner {
                             // TODO: allocating a Vec, meh
                             if let Some(overlay) = self
                                 .top_trie_changes
-                                .get(&value_request.key().collect::<Vec<_>>())
+                                .diff_get(&value_request.key().collect::<Vec<_>>())
                             {
-                                self.root_calculation =
-                                    Some(value_request.inject(overlay.as_ref()));
+                                self.root_calculation = Some(value_request.inject(overlay));
                             } else {
                                 self.root_calculation =
                                     Some(calculate_root::RootMerkleValueCalculation::StorageValue(
@@ -678,10 +642,14 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalOffchainStorageSet(req) => {
-                    self.offchain_storage_changes.insert(
-                        req.key().as_ref().to_vec(),
-                        req.value().map(|v| v.as_ref().to_vec()),
-                    );
+                    if let Some(value) = req.value() {
+                        self.offchain_storage_changes
+                            .diff_insert(req.key().as_ref().to_vec(), value.as_ref().to_vec());
+                    } else {
+                        self.offchain_storage_changes
+                            .diff_insert_erase(req.key().as_ref().to_vec());
+                    }
+
                     self.vm = req.resume();
                 }
 
@@ -730,9 +698,13 @@ impl Inner {
                     if rollback {
                         for (key, value) in self.top_trie_transaction_revert.take().unwrap() {
                             if let Some(value) = value {
-                                let _ = self.top_trie_changes.insert(key, value);
+                                if let Some(value) = value {
+                                    let _ = self.top_trie_changes.diff_insert(key, value);
+                                } else {
+                                    let _ = self.top_trie_changes.diff_insert_erase(key);
+                                }
                             } else {
-                                let _ = self.top_trie_changes.remove(&key);
+                                let _ = self.top_trie_changes.diff_remove(&key);
                             }
                         }
 

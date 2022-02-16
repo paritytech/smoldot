@@ -47,7 +47,7 @@
 
 use crate::{
     chain::{blocks_tree, chain_information},
-    executor::host,
+    executor::{host, storage_diff},
     header,
     trie::calculate_root,
 };
@@ -55,7 +55,6 @@ use crate::{
 use alloc::{
     borrow::ToOwned as _,
     boxed::Box,
-    collections::BTreeMap,
     vec::{self, Vec},
 };
 use core::{
@@ -64,7 +63,7 @@ use core::{
     ops,
     time::Duration,
 };
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 
 mod verification_queue;
 
@@ -141,7 +140,7 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     /// Changes in the storage of the best block compared to the finalized block.
     /// The `BTreeMap`'s keys are storage keys, and its values are new values or `None` if the
     /// value has been erased from the storage.
-    best_to_finalized_storage_diff: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    best_to_finalized_storage_diff: storage_diff::StorageDiff,
 
     /// Compiled runtime code of the best block. `None` if it is the same as
     /// [`OptimisticSyncInner::finalized_runtime`].
@@ -237,10 +236,10 @@ pub struct BlockFull {
     pub body: Vec<Vec<u8>>,
 
     /// Changes to the storage made by this block compared to its parent.
-    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    pub storage_top_trie_changes: storage_diff::StorageDiff,
 
     /// List of changes to the offchain storage that this block performs.
-    pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub offchain_storage_changes: storage_diff::StorageDiff,
 }
 
 impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
@@ -259,7 +258,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             inner: Box::new(OptimisticSyncInner {
                 finalized_chain_information: blocks_tree_config,
                 finalized_runtime: config.full.map(|f| f.finalized_runtime),
-                best_to_finalized_storage_diff: BTreeMap::new(),
+                best_to_finalized_storage_diff: storage_diff::StorageDiff::empty(),
                 best_runtime: None,
                 top_trie_root_calculation_cache: None,
                 sources: HashMap::with_capacity_and_hasher(
@@ -699,48 +698,18 @@ impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
         self.inner
             .inner
             .best_to_finalized_storage_diff
-            .get(key)
-            .map(|opt| opt.as_ref().map(|v| &v[..]))
-            .unwrap_or_else(or_finalized)
+            .storage_get(key, or_finalized)
     }
 
     pub fn prefix_keys_ordered<'k: 'a>(
         &'k self, // TODO: unclear lifetime
         prefix: &'k [u8],
-        in_finalized_ordered: impl Iterator<Item = &'k [u8]> + 'k,
-    ) -> impl Iterator<Item = &'k [u8]> + 'k {
-        let mut in_finalized_filtered = in_finalized_ordered
-            .filter(|k| {
-                !self
-                    .inner
-                    .inner
-                    .best_to_finalized_storage_diff
-                    .contains_key(*k)
-            })
-            .peekable();
-
-        let mut diff_inserted = self
-            .inner
+        in_finalized_ordered: impl Iterator<Item = impl AsRef<[u8]> + 'k> + 'k,
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + 'k> + 'k {
+        self.inner
             .inner
             .best_to_finalized_storage_diff
-            .range(prefix.to_owned()..)
-            .take_while(|(k, _)| k.starts_with(prefix))
-            .filter(|(_, v)| v.is_some())
-            .map(|(k, _)| &k[..])
-            .peekable();
-
-        iter::from_fn(
-            move || match (in_finalized_filtered.peek(), diff_inserted.peek()) {
-                (Some(_), None) => in_finalized_filtered.next(),
-                (Some(a), Some(b)) if a < b => in_finalized_filtered.next(),
-                (Some(a), Some(b)) => {
-                    debug_assert_ne!(a, b);
-                    diff_inserted.next()
-                }
-                (None, Some(_)) => diff_inserted.next(),
-                (None, None) => None,
-            },
-        )
+            .storage_prefix_keys_ordered(prefix, in_finalized_ordered)
     }
 }
 
@@ -980,8 +949,10 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
 
                     debug_assert_eq!(
                         new_runtime.is_some(),
-                        storage_top_trie_changes.contains_key(&b":code"[..])
-                            || storage_top_trie_changes.contains_key(&b":heappages"[..])
+                        storage_top_trie_changes.diff_get(&b":code"[..]).is_some()
+                            || storage_top_trie_changes
+                                .diff_get(&b":heappages"[..])
+                                .is_some()
                     );
 
                     // Before the verification, we extracted the runtime either from
@@ -1005,12 +976,10 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
 
                     shared.inner.top_trie_root_calculation_cache =
                         Some(top_trie_root_calculation_cache);
-                    for (key, value) in &storage_top_trie_changes {
-                        shared
-                            .inner
-                            .best_to_finalized_storage_diff
-                            .insert(key.clone(), value.clone());
-                    }
+                    shared
+                        .inner
+                        .best_to_finalized_storage_diff
+                        .merge(&storage_top_trie_changes);
 
                     let chain = {
                         let header = insert.header().into();
@@ -1050,7 +1019,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     if let Some(value) = shared
                         .inner
                         .best_to_finalized_storage_diff
-                        .get(&req.key_as_vec())
+                        .diff_get(&req.key_as_vec())
                     {
                         inner = Inner::Step2(
                             req.inject_value(value.as_ref().map(|v| iter::once(&v[..]))),
@@ -1360,28 +1329,15 @@ impl<TRq, TSrc, TBl> StoragePrefixKeys<TRq, TSrc, TBl> {
         self,
         keys: impl Iterator<Item = impl AsRef<[u8]>>,
     ) -> BlockVerification<TRq, TSrc, TBl> {
-        let mut keys = keys
-            .map(|k| k.as_ref().to_owned())
-            .collect::<HashSet<_, fnv::FnvBuildHasher>>();
-
-        {
-            let prefix = self.inner.prefix();
-            for (k, v) in self
-                .shared
-                .inner
-                .best_to_finalized_storage_diff
-                .range(prefix.as_ref().to_owned()..)
-                .take_while(|(k, _)| k.starts_with(prefix.as_ref()))
-            {
-                if v.is_some() {
-                    keys.insert(k.clone());
-                } else {
-                    keys.remove(k);
-                }
-            }
-        }
-
-        let inner = self.inner.inject_keys_ordered(keys.iter());
+        // We need to turn the prefix into a Vec, as otherwise the iterator would borrow
+        // self.inner.
+        let owned_prefix = self.inner.prefix().as_ref().to_owned();
+        let list_after_diff = self
+            .shared
+            .inner
+            .best_to_finalized_storage_diff
+            .storage_prefix_keys_ordered(&owned_prefix, keys);
+        let inner = self.inner.inject_keys_ordered(list_after_diff);
         BlockVerification::from(Inner::Step2(inner), self.shared)
     }
 }
@@ -1420,68 +1376,35 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
         // `best_to_finalized_storage_diff` needs to be taken into account in order to provide
         // the next key in the best block instead.
 
-        let inner_key = self.inner.key();
-        let requested_key = if let Some(key_overwrite) = &self.key_overwrite {
-            key_overwrite
-        } else {
-            inner_key.as_ref()
+        let search = {
+            let inner_key = self.inner.key();
+            self.shared
+                .inner
+                .best_to_finalized_storage_diff
+                .storage_next_key(
+                    if let Some(key_overwrite) = &self.key_overwrite {
+                        key_overwrite
+                    } else {
+                        inner_key.as_ref()
+                    },
+                    key.map(|k| k.as_ref()),
+                )
         };
 
-        if let Some(key) = key {
-            assert!(key > requested_key);
-        }
-
-        let in_diff = self
-            .shared
-            .inner
-            .best_to_finalized_storage_diff
-            .range(requested_key.to_vec()..) // TODO: don't use to_vec()
-            .map(|(k, v)| (k, v.is_some()))
-            .find(|(k, _)| &***k > requested_key);
-
-        let outcome = match (key, in_diff) {
-            (Some(a), Some((b, true))) if a <= &b[..] => Some(a),
-            (Some(a), Some((b, false))) if a < &b[..] => Some(a),
-            (Some(a), Some((b, false))) => {
-                debug_assert!(a >= &b[..]);
-                debug_assert_ne!(&b[..], requested_key);
-
-                // The next key according to the finalized block storage has been erased since
-                // then. It is necessary to ask the user again, this time for the key after the
-                // one that has been erased.
-                // This `clone()` is necessary, as `b` borrows from
-                // `self.shared.best_to_finalized_storage_diff`.
-                let key_overwrite = Some(b.clone());
-                drop(inner_key); // Solves borrowing errors.
-                return BlockVerification::FinalizedStorageNextKey(StorageNextKey {
+        match search {
+            storage_diff::StorageNextKey::Found(k) => {
+                let inner = self.inner.inject_key(k);
+                BlockVerification::from(Inner::Step2(inner), self.shared)
+            }
+            storage_diff::StorageNextKey::NextOf(next) => {
+                let key_overwrite = Some(next.to_owned());
+                BlockVerification::FinalizedStorageNextKey(StorageNextKey {
                     inner: self.inner,
                     shared: self.shared,
                     key_overwrite,
-                });
+                })
             }
-            (Some(a), Some((b, true))) => {
-                debug_assert!(a >= &b[..]);
-                Some(&b[..])
-            }
-
-            (Some(a), None) => Some(a),
-            (None, Some((b, true))) => Some(&b[..]),
-            (None, Some((b, false))) => {
-                debug_assert!(&b[..] > requested_key);
-                self.shared
-                    .inner
-                    .best_to_finalized_storage_diff
-                    .range(b.clone()..) // TODO: don't clone?
-                    .filter(|(_, value)| value.is_some())
-                    .map(|(k, _)| &k[..])
-                    .next()
-            }
-            (None, None) => None,
-        };
-
-        drop(inner_key); // Solves borrowing errors.
-        let inner = self.inner.inject_key(outcome);
-        BlockVerification::from(Inner::Step2(inner), self.shared)
+        }
     }
 }
 

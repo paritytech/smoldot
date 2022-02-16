@@ -48,15 +48,14 @@
 mod tests;
 
 use crate::{
-    executor::{host, runtime_host},
+    executor::{host, runtime_host, storage_diff},
     header,
     trie::calculate_root,
     util,
 };
 
-use alloc::{borrow::ToOwned as _, collections::BTreeMap, string::String, vec::Vec};
+use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
 use core::{iter, mem};
-use hashbrown::HashMap;
 
 /// Configuration for a block generation.
 pub struct Config<'a> {
@@ -106,9 +105,9 @@ pub struct Success {
     /// Runtime that was passed by [`Config`].
     pub parent_runtime: host::HostVmPrototype,
     /// List of changes to the storage top trie that the block performs.
-    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    pub storage_top_trie_changes: storage_diff::StorageDiff,
     /// List of changes to the offchain storage that this block performs.
-    pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub offchain_storage_changes: storage_diff::StorageDiff,
     /// Cache used for calculating the top trie root of the new block.
     pub top_trie_root_calculation_cache: calculate_root::CalculationCache,
     /// Concatenation of all the log messages printed by the runtime.
@@ -467,8 +466,8 @@ enum Stage {
 pub struct InherentExtrinsics {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
-    storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
-    offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    storage_top_trie_changes: storage_diff::StorageDiff,
+    offchain_storage_changes: storage_diff::StorageDiff,
     top_trie_root_calculation_cache: calculate_root::CalculationCache,
 }
 
@@ -602,8 +601,8 @@ pub enum InherentDataConsensus {
 pub struct ApplyExtrinsic {
     shared: Shared,
     parent_runtime: host::HostVmPrototype,
-    storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
-    offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    storage_top_trie_changes: storage_diff::StorageDiff,
+    offchain_storage_changes: storage_diff::StorageDiff,
     top_trie_root_calculation_cache: calculate_root::CalculationCache,
 }
 

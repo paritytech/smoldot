@@ -18,15 +18,14 @@
 use super::execute_block;
 use crate::{
     chain::chain_information,
-    executor::{self, host, vm},
+    executor::{self, host, storage_diff, vm},
     header,
     trie::calculate_root,
     verify::{aura, babe},
 };
 
-use alloc::{collections::BTreeMap, string::String, vec::Vec};
+use alloc::{string::String, vec::Vec};
 use core::{num::NonZeroU64, time::Duration};
-use hashbrown::HashMap;
 
 /// Configuration for a block verification.
 pub struct Config<'a, TBody> {
@@ -116,10 +115,10 @@ pub struct Success {
     pub consensus: SuccessConsensus,
 
     /// List of changes to the storage top trie that the block performs.
-    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    pub storage_top_trie_changes: storage_diff::StorageDiff,
 
     /// List of changes to the offchain storage that this block performs.
-    pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub offchain_storage_changes: storage_diff::StorageDiff,
 
     /// Cache used for calculating the top trie root.
     pub top_trie_root_calculation_cache: calculate_root::CalculationCache,
@@ -324,8 +323,10 @@ impl VerifyInner {
             }
             execute_block::Verify::Finished(Ok(success)) => {
                 match (
-                    success.storage_top_trie_changes.get(&b":code"[..]),
-                    success.storage_top_trie_changes.get(&b":heappages"[..]),
+                    success.storage_top_trie_changes.diff_get(&b":code"[..]),
+                    success
+                        .storage_top_trie_changes
+                        .diff_get(&b":heappages"[..]),
                 ) {
                     (None, None) => {}
                     (Some(None), _) => {
@@ -492,9 +493,8 @@ impl RuntimeCompilation {
         let code = self
             .success
             .storage_top_trie_changes
-            .get(&b":code"[..])
+            .diff_get(&b":code"[..])
             .unwrap()
-            .as_ref()
             .unwrap();
 
         let new_runtime = match host::HostVmPrototype::new(host::Config {

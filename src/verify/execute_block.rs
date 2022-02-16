@@ -40,15 +40,14 @@
 //!
 
 use crate::{
-    executor::{host, runtime_host},
+    executor::{host, runtime_host, storage_diff},
     header,
     trie::calculate_root,
     util,
 };
 
-use alloc::{collections::BTreeMap, string::String, vec::Vec};
+use alloc::{string::String, vec::Vec};
 use core::iter;
-use hashbrown::HashMap;
 
 /// Configuration for an unsealed block verification.
 pub struct Config<'a, TBody> {
@@ -79,9 +78,9 @@ pub struct Success {
     /// Runtime that was passed by [`Config`].
     pub parent_runtime: host::HostVmPrototype,
     /// List of changes to the storage top trie that the block performs.
-    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    pub storage_top_trie_changes: storage_diff::StorageDiff,
     /// List of changes to the offchain storage that this block performs.
-    pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub offchain_storage_changes: storage_diff::StorageDiff,
     /// Cache used for calculating the top trie root.
     pub top_trie_root_calculation_cache: calculate_root::CalculationCache,
     /// Concatenation of all the log messages printed by the runtime.

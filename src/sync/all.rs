@@ -32,20 +32,19 @@
 
 use crate::{
     chain::{blocks_tree, chain_information},
-    executor::{host, vm::ExecHint},
+    executor::{host, storage_diff, vm::ExecHint},
     header,
     sync::{all_forks, optimistic, warp_sync},
     verify,
 };
 
-use alloc::{collections::BTreeMap, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 use core::{
     cmp, iter, mem,
     num::{NonZeroU32, NonZeroU64},
     ops,
     time::Duration,
 };
-use hashbrown::HashMap;
 
 /// Configuration for the [`AllSync`].
 // TODO: review these fields
@@ -1552,8 +1551,8 @@ impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
     pub fn prefix_keys_ordered<'k: 'a>(
         &'k self, // TODO: unclear lifetime
         prefix: &'k [u8],
-        in_finalized_ordered: impl Iterator<Item = &'k [u8]> + 'k,
-    ) -> impl Iterator<Item = &'k [u8]> + 'k {
+        in_finalized_ordered: impl Iterator<Item = impl AsRef<[u8]> + 'k> + 'k,
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + 'k> + 'k {
         match &self.inner {
             BlockStorageInner::Optimistic(inner) => {
                 inner.prefix_keys_ordered(prefix, in_finalized_ordered)
@@ -1650,10 +1649,10 @@ pub struct BlockFull {
     pub body: Vec<Vec<u8>>,
 
     /// Changes to the storage made by this block compared to its parent.
-    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    pub storage_top_trie_changes: storage_diff::StorageDiff,
 
     /// List of changes to the offchain storage that this block performs.
-    pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub offchain_storage_changes: storage_diff::StorageDiff,
 }
 
 pub struct HeaderVerify<TRq, TSrc, TBl> {

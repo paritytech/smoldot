@@ -35,6 +35,7 @@ mod allocator; // TODO: make public after refactoring
 pub mod host;
 pub mod read_only_runtime_host;
 pub mod runtime_host;
+pub mod storage_diff;
 pub mod vm;
 
 /// Default number of heap pages if the storage doesn't specify otherwise.

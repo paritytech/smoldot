@@ -703,7 +703,7 @@ impl SyncBackground {
                                     })
                                     .map(|(k, _)| &k[..]),
                             )
-                            .map(|k| k.to_vec()) // TODO: overhead
+                            .map(|k| k.as_ref().to_vec()) // TODO: overhead
                             .collect::<Vec<_>>();
 
                         block_authoring = prefix_key.inject_keys_ordered(keys.into_iter());
@@ -1072,12 +1072,16 @@ impl SyncBackground {
 
                             // TODO: maybe write in a separate task? but then we can't access the finalized storage immediately after?
                             for block in &finalized_blocks {
-                                for (key, value) in
-                                    &block.full.as_ref().unwrap().storage_top_trie_changes
+                                for (key, value) in block
+                                    .full
+                                    .as_ref()
+                                    .unwrap()
+                                    .storage_top_trie_changes
+                                    .diff_iter()
                                 {
                                     if let Some(value) = value {
                                         self.finalized_block_storage
-                                            .insert(key.clone(), value.clone());
+                                            .insert(key.to_owned(), value.to_owned());
                                     } else {
                                         let _was_there = self.finalized_block_storage.remove(key);
                                         // TODO: if a block inserts a new value, then removes it in the next block, the key will remain in `finalized_block_storage`; either solve this or document this
@@ -1158,8 +1162,7 @@ async fn database_blocks(database: &database_thread::DatabaseThread, blocks: Vec
                         .as_ref()
                         .unwrap()
                         .storage_top_trie_changes
-                        .iter()
-                        .map(|(k, v)| (k, v.as_ref())),
+                        .diff_iter(),
                 );
 
                 match result {
