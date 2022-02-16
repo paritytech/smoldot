@@ -45,7 +45,6 @@ use crate::{
 
 use alloc::{
     borrow::ToOwned as _,
-    collections::BTreeMap,
     string::{String, ToString as _},
     vec::Vec,
 };
@@ -70,11 +69,11 @@ pub struct Config<'a, TParams> {
 
     /// Initial state of [`Success::storage_top_trie_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
-    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    pub storage_top_trie_changes: storage_overlay::StorageChanges,
 
     /// Initial state of [`Success::offchain_storage_changes`]. The changes made during this
     /// execution will be pushed over the value in this field.
-    pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub offchain_storage_changes: storage_overlay::StorageChanges,
 }
 
 /// Start running the WebAssembly virtual machine.
@@ -105,9 +104,9 @@ pub struct Success {
     /// initialization.
     pub virtual_machine: SuccessVirtualMachine,
     /// List of changes to the storage top trie that the block performs.
-    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    pub storage_top_trie_changes: storage_overlay::StorageChanges,
     /// List of changes to the offchain storage that this block performs.
-    pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    pub offchain_storage_changes: storage_overlay::StorageChanges,
     /// Cache used for calculating the top trie root.
     pub top_trie_root_calculation_cache: calculate_root::CalculationCache,
     /// Concatenation of all the log messages printed by the runtime.
@@ -384,11 +383,11 @@ impl PrefixKeys {
                         .map(|v| v.as_ref().to_vec())
                         .collect::<HashSet<_, fnv::FnvBuildHasher>>();
                     // TODO: slow to iterate over everything?
-                    for (key, value) in self.inner.top_trie_changes.iter() {
+                    for (key, value) in self.inner.top_trie_changes.diff_iter() {
                         if value.is_none() {
                             continue;
                         }
-                        list.insert(key.clone());
+                        list.insert(key.to_owned());
                     }
                     self.inner.root_calculation =
                         Some(all_keys.inject(list.into_iter().map(|k| k.into_iter())));
@@ -521,7 +520,7 @@ struct Inner {
         Option<HashMap<Vec<u8>, Option<Option<Vec<u8>>>, fnv::FnvBuildHasher>>,
 
     /// Pending changes to the offchain storage that this execution performs.
-    offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    offchain_storage_changes: storage_overlay::StorageChanges,
 
     /// Cache passed by the user. Always `Some` except when we are currently calculating the trie
     /// state root.
@@ -676,10 +675,17 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalOffchainStorageSet(req) => {
-                    self.offchain_storage_changes.insert(
-                        req.key().as_ref().to_vec(),
-                        req.value().map(|v| v.as_ref().to_vec()),
-                    );
+                    if let Some(value) = req.value() {
+                        self.offchain_storage_changes.diff_insert(
+                            req.key().as_ref().to_vec(),
+                            value.as_ref().to_vec(),
+                        );
+                    } else {
+                        self.offchain_storage_changes.diff_insert_erase(
+                            req.key().as_ref().to_vec()
+                        );
+                    }
+
                     self.vm = req.resume();
                 }
 

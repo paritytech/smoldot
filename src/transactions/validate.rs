@@ -18,11 +18,11 @@
 //! Runtime call to obtain the transactions validity status.
 
 use crate::{
-    executor::{self, host, runtime_host},
+    executor::{self, host, runtime_host, storage_overlay},
     header, util,
 };
 
-use alloc::{borrow::ToOwned as _, collections::BTreeMap, vec::Vec};
+use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{iter, num::NonZeroU64};
 
 /// Configuration for a transaction validation process.
@@ -324,8 +324,8 @@ pub fn validate_transaction(
                 }
                 .scale_encoding(),
                 top_trie_root_calculation_cache: None,
-                storage_top_trie_changes: BTreeMap::new(),
-                offchain_storage_changes: hashbrown::HashMap::default(),
+                storage_top_trie_changes: storage_overlay::StorageChanges::empty(),
+                offchain_storage_changes: storage_overlay::StorageChanges::empty(),
             });
 
             // Information used later, after `Core_initialize_block` is done.
@@ -360,8 +360,8 @@ pub fn validate_transaction(
                     &header::hash_from_scale_encoded_header(config.scale_encoded_header),
                 ),
                 top_trie_root_calculation_cache: None,
-                storage_top_trie_changes: BTreeMap::default(),
-                offchain_storage_changes: hashbrown::HashMap::default(),
+                storage_top_trie_changes: storage_overlay::StorageChanges::empty(),
+                offchain_storage_changes: storage_overlay::StorageChanges::empty(),
             });
 
             match vm {

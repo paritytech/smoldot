@@ -22,7 +22,7 @@
 
 use crate::{
     chain::{chain_information, fork_tree},
-    executor::host,
+    executor::{host, storage_overlay},
     header,
     trie::calculate_root,
     verify,
@@ -740,9 +740,9 @@ pub enum BodyVerifyStep2<T> {
         /// been modified. Contains the new runtime.
         new_runtime: Option<host::HostVmPrototype>,
         /// List of changes to the storage top trie that the block performs.
-        storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+        storage_top_trie_changes: storage_overlay::StorageChanges,
         /// List of changes to the offchain storage that this block performs.
-        offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+        offchain_storage_changes: storage_overlay::StorageChanges,
         /// Cache of calculation for the storage trie of the best block.
         /// Pass this value to [`BodyVerifyRuntimeRequired::resume`] when verifying a children of
         /// this block in order to considerably speed up the verification.
