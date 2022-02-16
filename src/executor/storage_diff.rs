@@ -39,10 +39,10 @@
 // TODO: more docs
 
 use alloc::{borrow::ToOwned as _, collections::BTreeMap, vec::Vec};
-use core::{fmt, iter, ops};
+use core::{cmp, fmt, iter, ops};
 use hashbrown::HashMap;
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct StorageDiff {
     /// Contains the same entries as [`StorageDiff::hashmap`], except that values are booleans
     /// indicating whether the value updates (`true`) or deletes (`false`) the underlying
@@ -275,9 +275,19 @@ impl StorageDiff {
 impl fmt::Debug for StorageDiff {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Delegate to `self.inner`
-        fmt::Debug::fmt(&self.btree, f)
+        fmt::Debug::fmt(&self.hash_map, f)
     }
 }
+
+// We implement `PartialEq` manually, because deriving it would mean that both the hash map and
+// the tree are compared.
+impl cmp::PartialEq for StorageDiff {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash_map == other.hash_map
+    }
+}
+
+impl cmp::Eq for StorageDiff {}
 
 impl Default for StorageDiff {
     fn default() -> Self {
