@@ -275,7 +275,7 @@ impl StorageDiff {
 impl fmt::Debug for StorageDiff {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Delegate to `self.inner`
-        fmt::Debug::fmt(&self.hash_map, f)
+        fmt::Debug::fmt(&self.hashmap, f)
     }
 }
 
@@ -283,7 +283,7 @@ impl fmt::Debug for StorageDiff {
 // the tree are compared.
 impl cmp::PartialEq for StorageDiff {
     fn eq(&self, other: &Self) -> bool {
-        self.hash_map == other.hash_map
+        self.hashmap == other.hashmap
     }
 }
 
