@@ -72,7 +72,7 @@ impl StorageDiff {
     /// Removes from the diff the entry corresponding to the given `key`.
     ///
     /// Returns the value associated to this `key` that was previously in the diff, if any.
-    pub fn diff_remove(&mut self, key: impl AsRef<u8>) -> Option<Option<Vec<u8>>> {
+    pub fn diff_remove(&mut self, key: impl AsRef<[u8]>) -> Option<Option<Vec<u8>>> {
         self.inner.remove(key.as_ref())
     }
 
@@ -88,16 +88,16 @@ impl StorageDiff {
     ///
     /// Each value is either `Some` if the diff overwrites this diff, or `None` if it erases the
     /// underlying value.
-    pub fn diff_iter(&self) -> impl ExactSizeIterator<Item = (&[u8], Option<&[u8]>)> {
+    pub fn diff_iter(&self) -> impl ExactSizeIterator<Item = (&[u8], Option<&[u8]>)> + Clone {
         self.inner
             .iter()
             .map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])))
     }
 
     /// Returns the storage value at the given key. `None` if this key doesn't have any value.
-    pub fn storage_get<'a>(
-        &'a self, // TODO: unclear lifetime
-        key: &[u8],
+    pub fn storage_get<'a, 'b>(
+        &'a self,
+        key: &'b [u8],
         or_parent: impl FnOnce() -> Option<&'a [u8]>,
     ) -> Option<&'a [u8]> {
         self.inner
@@ -119,9 +119,9 @@ impl StorageDiff {
     ///
     /// Panics if `in_parent_next_key` is provided and is inferior or equal to `key`.
     ///
-    pub fn storage_next_key<'a>(
+    pub fn storage_next_key<'a, 'b>(
         &'a self,
-        key: &'_ [u8],
+        key: &'b [u8],
         in_parent_next_key: Option<&'a [u8]>,
     ) -> StorageNextKey<'a> {
         if let Some(in_parent_next_key) = in_parent_next_key {
@@ -163,8 +163,8 @@ impl StorageDiff {
                 let found = self
                     .inner
                     .range(ExcludedBound(&b[..]))
-                    .find(|(k, v)| v.is_some())
-                    .map(|(k, _)| &k[..]);
+                    .find(|(_, value)| value.is_some())
+                    .map(|(key, _)| &key[..]);
                 StorageNextKey::Found(found)
             }
             (None, None) => StorageNextKey::Found(None),

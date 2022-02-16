@@ -30,7 +30,7 @@ use crate::{
 
 use super::*;
 
-use alloc::{boxed::Box, collections::BTreeMap};
+use alloc::boxed::Box;
 use core::cmp::Ordering;
 
 impl<T> NonFinalizedTree<T> {

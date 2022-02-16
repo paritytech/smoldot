@@ -307,10 +307,11 @@ impl PrefixKeys {
                 let max_keys_to_remove = req.max_keys_to_remove();
                 let mut keys_removed_so_far = 0u32;
 
-                let after_overlay = self
+                let prefix = req.prefix().as_ref().to_owned();
+                let mut after_overlay = self
                     .inner
                     .top_trie_changes
-                    .storage_prefix_keys_ordered(req.prefix().as_ref(), keys)
+                    .storage_prefix_keys_ordered(&prefix, keys)
                     .peekable();
 
                 let mut keys_to_remove = Vec::new(); // TODO: capacity?
@@ -335,6 +336,8 @@ impl PrefixKeys {
                         }
                     }
                 };
+
+                drop(after_overlay);
 
                 for key in keys_to_remove {
                     self.inner
@@ -428,18 +431,19 @@ impl NextKey {
 
         match self.inner.vm {
             host::HostVm::ExternalStorageNextKey(req) => {
-                let req_key = req.key();
-                let requested_key = if let Some(key_overwrite) = &self.key_overwrite {
-                    &key_overwrite[..]
-                } else {
-                    req_key.as_ref()
+                let search = {
+                    let req_key = req.key();
+                    let requested_key = if let Some(key_overwrite) = &self.key_overwrite {
+                        &key_overwrite[..]
+                    } else {
+                        req_key.as_ref()
+                    };
+                    self.inner
+                        .top_trie_changes
+                        .storage_next_key(requested_key, key.map(|k| k.as_ref()))
                 };
 
-                match self
-                    .inner
-                    .top_trie_changes
-                    .storage_next_key(requested_key, key.map(|k| k.as_ref()))
-                {
+                match search {
                     storage_diff::StorageNextKey::Found(k) => {
                         self.inner.vm = req.resume(k);
                     }
@@ -523,7 +527,8 @@ impl Inner {
                 }
 
                 host::HostVm::ExternalStorageGet(req) => {
-                    if let Some(overlay) = self.top_trie_changes.diff_get(req.key().as_ref()) {
+                    let search = self.top_trie_changes.diff_get(req.key().as_ref());
+                    if let Some(overlay) = search {
                         self.vm = req.resume_full_value(overlay);
                     } else {
                         self.vm = req.into();

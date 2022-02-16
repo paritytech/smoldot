@@ -54,9 +54,8 @@ use crate::{
     util,
 };
 
-use alloc::{borrow::ToOwned as _, collections::BTreeMap, string::String, vec::Vec};
+use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
 use core::{iter, mem};
-use hashbrown::HashMap;
 
 /// Configuration for a block generation.
 pub struct Config<'a> {

@@ -1376,29 +1376,33 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
         // `best_to_finalized_storage_diff` needs to be taken into account in order to provide
         // the next key in the best block instead.
 
-        let inner_key = self.inner.key();
-        let requested_key = if let Some(key_overwrite) = &self.key_overwrite {
-            key_overwrite
-        } else {
-            inner_key.as_ref()
+        let search = {
+            let inner_key = self.inner.key();
+            self.shared
+                .inner
+                .best_to_finalized_storage_diff
+                .storage_next_key(
+                    if let Some(key_overwrite) = &self.key_overwrite {
+                        key_overwrite
+                    } else {
+                        inner_key.as_ref()
+                    },
+                    key.map(|k| k.as_ref()),
+                )
         };
 
-        match self
-            .shared
-            .inner
-            .best_to_finalized_storage_diff
-            .storage_next_key(requested_key, key.map(|k| k.as_ref()))
-        {
+        match search {
             storage_diff::StorageNextKey::Found(k) => {
                 let inner = self.inner.inject_key(k);
                 BlockVerification::from(Inner::Step2(inner), self.shared)
             }
             storage_diff::StorageNextKey::NextOf(next) => {
-                return BlockVerification::FinalizedStorageNextKey(StorageNextKey {
+                let key_overwrite = Some(next.to_owned());
+                BlockVerification::FinalizedStorageNextKey(StorageNextKey {
                     inner: self.inner,
                     shared: self.shared,
-                    key_overwrite: Some(next.to_owned()),
-                });
+                    key_overwrite,
+                })
             }
         }
     }

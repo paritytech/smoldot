@@ -495,7 +495,6 @@ impl RuntimeCompilation {
             .storage_top_trie_changes
             .diff_get(&b":code"[..])
             .unwrap()
-            .as_ref()
             .unwrap();
 
         let new_runtime = match host::HostVmPrototype::new(host::Config {
