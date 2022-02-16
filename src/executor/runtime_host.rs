@@ -375,7 +375,7 @@ impl PrefixKeys {
                         .map(|v| v.as_ref().to_vec())
                         .collect::<HashSet<_, fnv::FnvBuildHasher>>();
                     // TODO: slow to iterate over everything?
-                    for (key, value) in self.inner.top_trie_changes.diff_iter() {
+                    for (key, value) in self.inner.top_trie_changes.diff_iter_unordered() {
                         if value.is_none() {
                             continue;
                         }

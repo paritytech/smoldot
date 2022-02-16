@@ -31,23 +31,32 @@
 
 use alloc::{borrow::ToOwned as _, collections::BTreeMap, vec::Vec};
 use core::{fmt, iter, ops};
+use hashbrown::HashMap;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct StorageDiff {
-    inner: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    /// Contains the same entries as [`StorageDiff::hashmap`], except that values are booleans
+    /// indicating whether the value updates (`true`) or deletes (`false`) the underlying
+    /// storage item.
+    btree: BTreeMap<Vec<u8>, bool>,
+
+    hashmap: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 }
 
 impl StorageDiff {
     /// Builds a new empty diff.
     pub fn empty() -> Self {
         Self {
-            inner: BTreeMap::default(),
+            btree: BTreeMap::default(),
+            // TODO: with_capacity?
+            hashmap: HashMap::with_capacity_and_hasher(0, Default::default()),
         }
     }
 
     /// Removes all the entries within this diff.
     pub fn clear(&mut self) {
-        self.inner.clear();
+        self.hashmap.clear();
+        self.btree.clear();
     }
 
     /// Inserts the given key-value combination in the diff.
@@ -58,7 +67,19 @@ impl StorageDiff {
         key: impl Into<Vec<u8>>,
         value: impl Into<Vec<u8>>,
     ) -> Option<Option<Vec<u8>>> {
-        self.inner.insert(key.into(), Some(value.into()))
+        let key = key.into();
+        // Note that we clone the key here. This is considered as a tolerable overhead.
+        let previous = self.hashmap.insert(key.clone(), Some(value.into()));
+        match &previous {
+            Some(Some(_)) => {
+                // No need to update `btree`.
+                debug_assert_eq!(self.btree.get(&key), Some(&true));
+            }
+            None | Some(None) => {
+                self.btree.insert(key, true);
+            }
+        }
+        previous
     }
 
     /// Inserts in the diff an entry at the given key that delete the value that is located in
@@ -66,14 +87,31 @@ impl StorageDiff {
     ///
     /// Returns the value associated to this `key` that was previously in the diff, if any.
     pub fn diff_insert_erase(&mut self, key: impl Into<Vec<u8>>) -> Option<Option<Vec<u8>>> {
-        self.inner.insert(key.into(), None)
+        let key = key.into();
+        // Note that we clone the key here. This is considered as a tolerable overhead.
+        let previous = self.hashmap.insert(key.clone(), None);
+        match &previous {
+            Some(None) => {
+                // No need to update `btree`.
+                debug_assert_eq!(self.btree.get(&key), Some(&false));
+            }
+            None | Some(Some(_)) => {
+                self.btree.insert(key, false);
+            }
+        }
+        previous
     }
 
     /// Removes from the diff the entry corresponding to the given `key`.
     ///
     /// Returns the value associated to this `key` that was previously in the diff, if any.
     pub fn diff_remove(&mut self, key: impl AsRef<[u8]>) -> Option<Option<Vec<u8>>> {
-        self.inner.remove(key.as_ref())
+        let previous = self.hashmap.remove(key.as_ref());
+        if let Some(_previous) = &previous {
+            let _in_btree = self.btree.remove(key.as_ref());
+            debug_assert_eq!(_in_btree, Some(_previous.is_some()));
+        }
+        previous
     }
 
     /// Returns the diff entry at the given key.
@@ -81,15 +119,17 @@ impl StorageDiff {
     /// Returns `None` if the diff doesn't have any entry for this key, and `Some(None)` if the
     /// diff has an entry that deletes the storage item.
     pub fn diff_get(&self, key: &[u8]) -> Option<Option<&[u8]>> {
-        self.inner.get(key).map(|v| v.as_ref().map(|v| &v[..]))
+        self.hashmap.get(key).map(|v| v.as_ref().map(|v| &v[..]))
     }
 
     /// Returns an iterator to all the entries in the diff.
     ///
     /// Each value is either `Some` if the diff overwrites this diff, or `None` if it erases the
     /// underlying value.
-    pub fn diff_iter(&self) -> impl ExactSizeIterator<Item = (&[u8], Option<&[u8]>)> + Clone {
-        self.inner
+    pub fn diff_iter_unordered(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&[u8], Option<&[u8]>)> + Clone {
+        self.hashmap
             .iter()
             .map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])))
     }
@@ -100,7 +140,7 @@ impl StorageDiff {
         key: &'b [u8],
         or_parent: impl FnOnce() -> Option<&'a [u8]>,
     ) -> Option<&'a [u8]> {
-        self.inner
+        self.hashmap
             .get(key)
             .map(|opt| opt.as_ref().map(|v| &v[..]))
             .unwrap_or_else(or_parent)
@@ -129,11 +169,7 @@ impl StorageDiff {
         }
 
         // Find the diff entry that immediately follows `key`.
-        let in_diff = self
-            .inner
-            .range(ExcludedBound(key))
-            .map(|(k, v)| (k, v.is_some()))
-            .next();
+        let in_diff = self.btree.range(ExcludedBound(key)).next();
 
         match (in_parent_next_key, in_diff) {
             (Some(a), Some((b, true))) if a <= &b[..] => StorageNextKey::Found(Some(a)),
@@ -161,9 +197,9 @@ impl StorageDiff {
             (None, Some((b, false))) => {
                 debug_assert!(&b[..] > key);
                 let found = self
-                    .inner
+                    .btree
                     .range(ExcludedBound(&b[..]))
-                    .find(|(_, value)| value.is_some())
+                    .find(|(_, value)| **value)
                     .map(|(key, _)| &key[..]);
                 StorageNextKey::Found(found)
             }
@@ -185,14 +221,14 @@ impl StorageDiff {
         in_parent_ordered: impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
         let mut in_finalized_filtered = in_parent_ordered
-            .filter(|k| !self.inner.contains_key(k.as_ref()))
+            .filter(|k| !self.btree.contains_key(k.as_ref()))
             .peekable();
 
         let mut diff_inserted = self
-            .inner
+            .btree
             .range(prefix.to_owned()..) // TODO: this to_owned() is a bit stupid
             .take_while(|(k, _)| k.starts_with(prefix))
-            .filter(|(_, v)| v.is_some())
+            .filter(|(_, v)| **v)
             .map(|(k, _)| &k[..])
             .peekable();
 
@@ -215,8 +251,9 @@ impl StorageDiff {
     /// Applies the given diff on top of the current one.
     pub fn merge(&mut self, other: &StorageDiff) {
         // TODO: provide an alternative method that consumes `other` as well?
-        for (key, value) in &other.inner {
-            self.inner.insert(key.clone(), value.clone());
+        for (key, value) in &other.hashmap {
+            self.hashmap.insert(key.clone(), value.clone());
+            self.btree.insert(key.clone(), value.is_some());
         }
     }
 }
@@ -224,7 +261,7 @@ impl StorageDiff {
 impl fmt::Debug for StorageDiff {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Delegate to `self.inner`
-        fmt::Debug::fmt(&self.inner, f)
+        fmt::Debug::fmt(&self.btree, f)
     }
 }
 
@@ -239,23 +276,15 @@ impl FromIterator<(Vec<u8>, Option<Vec<u8>>)> for StorageDiff {
     where
         T: IntoIterator<Item = (Vec<u8>, Option<Vec<u8>>)>,
     {
-        Self {
-            inner: iter.into_iter().collect(),
-        }
-    }
-}
+        let hashmap = iter
+            .into_iter()
+            .collect::<HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>>();
+        let btree = hashmap
+            .iter()
+            .map(|(k, v)| (k.clone(), v.is_some()))
+            .collect();
 
-// TODO: consider removing this trait impl; this is required only for API reasons at the moment
-impl From<BTreeMap<Vec<u8>, Option<Vec<u8>>>> for StorageDiff {
-    fn from(inner: BTreeMap<Vec<u8>, Option<Vec<u8>>>) -> Self {
-        Self { inner }
-    }
-}
-
-// TODO: consider removing this trait impl; this is required only for API reasons at the moment
-impl From<StorageDiff> for BTreeMap<Vec<u8>, Option<Vec<u8>>> {
-    fn from(c: StorageDiff) -> Self {
-        c.inner
+        Self { hashmap, btree }
     }
 }
 

@@ -1077,7 +1077,7 @@ impl SyncBackground {
                                     .as_ref()
                                     .unwrap()
                                     .storage_top_trie_changes
-                                    .diff_iter()
+                                    .diff_iter_unordered()
                                 {
                                     if let Some(value) = value {
                                         self.finalized_block_storage
@@ -1162,7 +1162,7 @@ async fn database_blocks(database: &database_thread::DatabaseThread, blocks: Vec
                         .as_ref()
                         .unwrap()
                         .storage_top_trie_changes
-                        .diff_iter(),
+                        .diff_iter_unordered(),
                 );
 
                 match result {
