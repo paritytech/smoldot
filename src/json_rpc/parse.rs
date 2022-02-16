@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -106,29 +106,6 @@ pub fn build_success_response(id_json: &str, result_json: &str) -> String {
     .unwrap()
 }
 
-/// Builds a JSON event to a subscription.
-///
-/// `method` must be the name of the method to use for the notification. `id` must be the
-/// identifier of the subscription, as previously attributed by the server and returned to the
-/// client. `result_json` must be the JSON-formatted event.
-///
-/// # Panic
-///
-/// Panics if `result_json` isn't valid JSON.
-///
-// TODO: consider removing this function and use `build_notification` instead
-pub fn build_subscription_event(method: &str, id: &str, result_json: &str) -> String {
-    build_call(Call {
-        id_json: None,
-        method,
-        params_json: &serde_json::to_string(&SerdeSubscriptionEventParams {
-            subscription: id,
-            result: serde_json::from_str(result_json).expect("invalid result_json"),
-        })
-        .unwrap(),
-    })
-}
-
 /// Builds a JSON response.
 ///
 /// `id_json` must be the JSON-formatted identifier of the request, found in [`Call::id_json`].
@@ -223,7 +200,7 @@ pub enum ErrorResponse<'a> {
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct SerdeCall<'a> {
     jsonrpc: SerdeVersion,
-    #[serde(borrow)]
+    #[serde(borrow, skip_serializing_if = "Option::is_none")]
     id: Option<&'a serde_json::value::RawValue>,
     #[serde(borrow)]
     method: &'a str,
@@ -345,21 +322,6 @@ impl serde::Serialize for SerdeErrorCode {
 
         serializer.serialize_i64(code)
     }
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct SerdeSubscriptionEvent<'a> {
-    jsonrpc: SerdeVersion,
-    method: &'a str,
-    params: SerdeSubscriptionEventParams<'a>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct SerdeSubscriptionEventParams<'a> {
-    subscription: &'a str,
-    result: &'a serde_json::value::RawValue,
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -35,17 +35,15 @@
 // TODO: more documentation
 
 use async_std::net::UdpSocket;
+use futures::prelude::*;
 use smoldot::libp2p::PeerId;
-use std::{
-    convert::TryFrom as _, future::Future, io, net::SocketAddr, num::NonZeroU128, pin::Pin,
-    sync::Arc,
-};
+use std::{convert::TryFrom as _, io, net::SocketAddr, num::NonZeroU128, sync::Arc};
 use tracing::Instrument as _;
 
 /// Configuration for a [`JaegerService`].
-pub struct Config {
+pub struct Config<'a> {
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+    pub tasks_executor: &'a mut dyn FnMut(future::BoxFuture<'static, ()>),
 
     /// Service name to report to the Jaeger agent.
     pub service_name: String,
@@ -61,7 +59,7 @@ pub struct JaegerService {
 }
 
 impl JaegerService {
-    pub async fn new(mut config: Config) -> Result<Arc<Self>, io::Error> {
+    pub async fn new(config: Config<'_>) -> Result<Arc<Self>, io::Error> {
         let (traces_in, mut traces_out) = mick_jaeger::init(mick_jaeger::Config {
             service_name: config.service_name,
         });
@@ -87,8 +85,102 @@ impl JaegerService {
         Ok(Arc::new(JaegerService { traces_in }))
     }
 
+    pub fn block_announce_receive_span(
+        &self,
+        local_peer_id: &PeerId,
+        remote_peer_id: &PeerId,
+        block_number: u64,
+        block_hash: &[u8; 32],
+    ) -> mick_jaeger::Span {
+        let mut span =
+            self.net_connection_span(local_peer_id, remote_peer_id, "block-announce-received");
+        if let Ok(block_number) = i64::try_from(block_number) {
+            span.add_int_tag("number", block_number);
+        }
+        span.add_string_tag("hash", &hex::encode(block_hash));
+        span
+    }
+
+    pub fn block_announce_process_span(&self, block_hash: &[u8; 32]) -> mick_jaeger::Span {
+        self.block_span(block_hash, "block-announce-process")
+    }
+
+    pub fn block_authorship_span(
+        &self,
+        block_hash: &[u8; 32],
+        start_time: mick_jaeger::StartTime,
+    ) -> mick_jaeger::Span {
+        self.block_span(block_hash, "author")
+            .with_start_time_override(start_time)
+    }
+
+    pub fn block_body_verify_span(&self, block_hash: &[u8; 32]) -> mick_jaeger::Span {
+        self.block_span(block_hash, "body-verify")
+    }
+
+    pub fn block_header_verify_span(&self, block_hash: &[u8; 32]) -> mick_jaeger::Span {
+        self.block_span(block_hash, "header-verify")
+    }
+
+    pub fn block_import_queue_span(&self, block_hash: &[u8; 32]) -> mick_jaeger::Span {
+        self.block_span(block_hash, "block-import-queue")
+    }
+
+    // TODO: better return type
+    pub fn incoming_block_request_span(
+        &self,
+        local_peer_id: &PeerId,
+        remote_peer_id: &PeerId,
+        num_requested_blocks: u32,
+        block_hash: Option<&[u8; 32]>,
+    ) -> [Option<mick_jaeger::Span>; 2] {
+        let mut span1 =
+            self.net_connection_span(local_peer_id, remote_peer_id, "incoming-blocks-request");
+        span1.add_int_tag("num-blocks", num_requested_blocks.into());
+
+        let span2 = if let Some(block_hash) = block_hash {
+            let mut span = self.block_span(block_hash, "incoming-blocks-request");
+            let hex = hex::encode(block_hash);
+            span.add_string_tag("hash", &hex);
+            span1.add_string_tag("hash", &hex);
+            Some(span)
+        } else {
+            None
+        };
+
+        [Some(span1), span2]
+    }
+
+    pub fn outgoing_block_request_span(
+        &self,
+        local_peer_id: &PeerId,
+        remote_peer_id: &PeerId,
+        num_requested_blocks: u32,
+        block_hash: Option<&[u8; 32]>,
+    ) -> [Option<mick_jaeger::Span>; 2] {
+        let mut span1 =
+            self.net_connection_span(local_peer_id, remote_peer_id, "outgoing-blocks-request");
+        span1.add_int_tag("num-blocks", num_requested_blocks.into());
+
+        let span2 = if let Some(block_hash) = block_hash {
+            let mut span = self.block_span(block_hash, "outgoing-blocks-request");
+            let hex = hex::encode(block_hash);
+            span.add_string_tag("hash", &hex);
+            span1.add_string_tag("hash", &hex);
+            Some(span)
+        } else {
+            None
+        };
+
+        [Some(span1), span2]
+    }
+
     /// Creates a new `Span` that refers to an event about a given block.
-    pub fn block_span(
+    ///
+    /// This function is private so that only the code in the `jaeger_service` module decides
+    /// which names and labels to apply to spans. This makes it possible to easily ensure some
+    /// consistency in these names and labels.
+    fn block_span(
         &self,
         block_hash: &[u8; 32],
         operation_name: impl Into<String>,
@@ -101,7 +193,11 @@ impl JaegerService {
     }
 
     /// Creates a new `Span` that refers to a specific network connection between two nodes.
-    pub fn net_connection_span(
+    ///
+    /// This function is private so that only the code in the `jaeger_service` module decides
+    /// which names and labels to apply to spans. This makes it possible to easily ensure some
+    /// consistency in these names and labels.
+    fn net_connection_span(
         &self,
         local_peer_id: &PeerId,
         remote_peer_id: &PeerId,

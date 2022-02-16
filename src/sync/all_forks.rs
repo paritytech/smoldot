@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -87,8 +87,11 @@ use crate::{
     header, verify,
 };
 
-use alloc::vec::Vec;
-use core::{num::NonZeroU32, time::Duration};
+use alloc::{
+    borrow::ToOwned as _,
+    vec::{self, Vec},
+};
+use core::{iter, num::NonZeroU32, ops, time::Duration};
 
 mod disjoint;
 mod pending_blocks;
@@ -163,17 +166,17 @@ pub struct AllForksSync<TBl, TRq, TSrc> {
 struct Inner<TRq, TSrc> {
     blocks: pending_blocks::PendingBlocks<PendingBlock, TRq, TSrc>,
 
-    /// Justification waiting to be verified.
+    /// Justifications waiting to be verified.
     ///
-    /// This justification came with a block header that has been successfully verified in the
+    /// These justifications came with a block header that has been successfully verified in the
     /// past.
-    pending_justification_verify: Option<Vec<u8>>,
+    pending_justifications_verify: vec::IntoIter<([u8; 4], Vec<u8>)>,
 }
 
 struct PendingBlock {
     header: Option<header::Header>,
     body: Option<Vec<Vec<u8>>>,
-    justification: Option<Vec<u8>>,
+    justifications: Vec<([u8; 4], Vec<u8>)>,
 }
 
 struct Block<TBl> {
@@ -206,7 +209,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     verify_bodies: config.full,
                     banned_blocks: Vec::new(), // TODO:
                 }),
-                pending_justification_verify: None,
+                pending_justifications_verify: Vec::new().into_iter(),
             },
         }
     }
@@ -270,7 +273,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Inform the [`AllForksSync`] of a new potential source of blocks.
     ///
     /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
-    /// retrieved using [`AllForksSync::source_user_data`].
+    /// retrieved using the `Index` trait implementation of this container.
     ///
     /// Returns the newly-created source entry, plus optionally a request that should be started
     /// towards this source.
@@ -304,7 +307,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 PendingBlock {
                     header: None,
                     body: None,
-                    justification: None,
+                    justifications: Vec::new(),
                 },
             );
         }
@@ -395,28 +398,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         self.inner.blocks.source_best_block(source_id)
     }
 
-    /// Returns the user data associated to the source. This is the value originally passed
-    /// through [`AllForksSync::add_source`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is out of range.
-    ///
-    pub fn source_user_data(&self, source_id: SourceId) -> &TSrc {
-        self.inner.blocks.source_user_data(source_id)
-    }
-
-    /// Returns the user data associated to the source. This is the value originally passed
-    /// through [`AllForksSync::add_source`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is out of range.
-    ///
-    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        self.inner.blocks.source_user_data_mut(source_id)
-    }
-
     /// Returns the number of ongoing requests that concern this source.
     ///
     /// # Panic
@@ -447,7 +428,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             .map(move |rq| {
                 (
                     rq.source_id,
-                    self.inner.blocks.source_user_data(rq.source_id),
+                    &self.inner.blocks[rq.source_id],
                     rq.request_params,
                 )
             })
@@ -501,7 +482,12 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         &mut self,
         request_id: RequestId,
         received_blocks: Result<
-            impl Iterator<Item = RequestSuccessBlock<impl AsRef<[u8]>, impl AsRef<[u8]>>>,
+            impl Iterator<
+                Item = RequestSuccessBlock<
+                    impl AsRef<[u8]>,
+                    impl Iterator<Item = ([u8; 4], impl AsRef<[u8]>)>,
+                >,
+            >,
             (),
         >,
     ) -> (TRq, AncestrySearchResponseOutcome) {
@@ -560,10 +546,9 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 &expected_next_hash,
                 decoded_header.clone(),
                 None,
-                received_block
-                    .scale_encoded_justification
-                    .as_ref()
-                    .map(|j| j.as_ref()),
+                &mut received_block
+                    .scale_encoded_justifications
+                    .map(|(e, j)| (e, j.as_ref().to_owned())),
                 false,
             ) {
                 HeaderFromSourceOutcome::HeaderVerify => {
@@ -659,7 +644,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             &announced_header_hash,
             announced_header,
             None,
-            None,
+            &mut iter::empty(),
             is_best,
         ) {
             HeaderFromSourceOutcome::HeaderVerify => BlockAnnounceOutcome::HeaderVerify,
@@ -710,7 +695,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// This method takes ownership of the [`AllForksSync`] and starts a verification
     /// process. The [`AllForksSync`] is yielded back at the end of this process.
     pub fn process_one(mut self) -> ProcessOne<TBl, TRq, TSrc> {
-        if let Some(justification_to_verify) = self.inner.pending_justification_verify.take() {
+        if let Some(justification_to_verify) = self.inner.pending_justifications_verify.next() {
             return ProcessOne::JustificationVerify(JustificationVerify {
                 parent: self,
                 justification_to_verify,
@@ -750,7 +735,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         header_hash: &[u8; 32],
         header: header::HeaderRef,
         body: Option<Vec<Vec<u8>>>,
-        justification: Option<&[u8]>,
+        justifications: &mut dyn Iterator<Item = ([u8; 4], Vec<u8>)>,
         known_to_be_source_best: bool,
     ) -> HeaderFromSourceOutcome {
         debug_assert_eq!(header.hash(), *header_hash);
@@ -816,7 +801,9 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 PendingBlock {
                     body,
                     header: Some(header.clone().into()),
-                    justification: justification.map(|j| j.to_vec()),
+                    justifications: justifications
+                        .map(|(e, j)| (e, j.to_vec()))
+                        .collect::<Vec<_>>(),
                 },
             );
         } else {
@@ -930,13 +917,29 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     }*/
 }
 
+impl<TBl, TRq, TSrc> ops::Index<SourceId> for AllForksSync<TBl, TRq, TSrc> {
+    type Output = TSrc;
+
+    #[track_caller]
+    fn index(&self, id: SourceId) -> &TSrc {
+        &self.inner.blocks[id]
+    }
+}
+
+impl<TBl, TRq, TSrc> ops::IndexMut<SourceId> for AllForksSync<TBl, TRq, TSrc> {
+    #[track_caller]
+    fn index_mut(&mut self, id: SourceId) -> &mut TSrc {
+        &mut self.inner.blocks[id]
+    }
+}
+
 /// Struct to pass back when a block request has succeeded.
 #[derive(Debug)]
 pub struct RequestSuccessBlock<THdr, TJs> {
     /// SCALE-encoded header returned by the remote.
     pub scale_encoded_header: THdr,
     /// SCALE-encoded justification returned by the remote.
-    pub scale_encoded_justification: Option<TJs>,
+    pub scale_encoded_justifications: TJs,
 }
 
 /// Outcome of calling [`AllForksSync::block_from_source`].
@@ -1092,25 +1095,30 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
         };
 
         // Remove the verified block from `pending_blocks`.
-        let justification = if result.is_ok() {
+        let justifications = if result.is_ok() {
             let outcome = self.parent.inner.blocks.remove(
                 self.block_to_verify.block_number,
                 &self.block_to_verify.block_hash,
             );
-            outcome.justification
+            outcome.justifications
         } else {
             self.parent.inner.blocks.set_block_bad(
                 self.block_to_verify.block_number,
                 &self.block_to_verify.block_hash,
             );
-            None
+            Vec::new()
         };
 
         // Store the justification in `pending_justification_verify`.
         // A `HeaderVerify` can only exist if `pending_justification_verify` is `None`, meaning
         // that there's no risk of accidental overwrite.
-        debug_assert!(self.parent.inner.pending_justification_verify.is_none());
-        self.parent.inner.pending_justification_verify = justification;
+        debug_assert!(self
+            .parent
+            .inner
+            .pending_justifications_verify
+            .as_slice()
+            .is_empty());
+        self.parent.inner.pending_justifications_verify = justifications.into_iter();
 
         match result {
             Ok(is_new_best) => HeaderVerifyOutcome::Success {
@@ -1136,8 +1144,8 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
 /// Internally holds the [`AllForksSync`].
 pub struct JustificationVerify<TBl, TRq, TSrc> {
     parent: AllForksSync<TBl, TRq, TSrc>,
-    /// Justification that can be verified.
-    justification_to_verify: Vec<u8>,
+    /// Justification that can be verified and its consensus engine id.
+    justification_to_verify: ([u8; 4], Vec<u8>),
 }
 
 impl<TBl, TRq, TSrc> JustificationVerify<TBl, TRq, TSrc> {
@@ -1148,11 +1156,10 @@ impl<TBl, TRq, TSrc> JustificationVerify<TBl, TRq, TSrc> {
         AllForksSync<TBl, TRq, TSrc>,
         JustificationVerifyOutcome<TBl>,
     ) {
-        let outcome = match self
-            .parent
-            .chain
-            .verify_justification(&self.justification_to_verify)
-        {
+        let outcome = match self.parent.chain.verify_justification(
+            self.justification_to_verify.0,
+            &self.justification_to_verify.1,
+        ) {
             Ok(success) => {
                 let finalized_blocks_iter = success.apply();
                 let updates_best_block = finalized_blocks_iter.updates_best_block();

@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -212,10 +212,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         peer_id::PublicKey::Ed25519(*noise_key.libp2p_public_ed25519_key()).into_peer_id();
 
     let jaeger_service = jaeger_service::JaegerService::new(jaeger_service::Config {
-        tasks_executor: {
-            let threads_pool = threads_pool.clone();
-            Box::new(move |task| threads_pool.spawn_ok(task))
-        },
+        tasks_executor: &mut |task| threads_pool.spawn_ok(task),
         service_name: local_peer_id.to_string(),
         jaeger_agent: cli_options.jaeger,
     })
@@ -250,8 +247,9 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                         .chain(cli_options.additional_bootnode.iter())
                     {
                         let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
-                        if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
-                            let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
+                        if let Some(multiaddr::ProtocolRef::P2p(peer_id)) = address.iter().last() {
+                            let peer_id = PeerId::from_bytes(peer_id.to_vec()).unwrap(); // TODO: don't unwrap
+                            address.pop();
                             list.push((peer_id, address));
                         } else {
                             panic!() // TODO:
@@ -289,8 +287,11 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                                 Vec::with_capacity(relay_chains_specs.boot_nodes().len());
                             for node in relay_chains_specs.boot_nodes().iter() {
                                 let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
-                                if let Some(multiaddr::Protocol::P2p(peer_id)) = address.pop() {
-                                    let peer_id = PeerId::from_multihash(peer_id).unwrap(); // TODO: don't unwrap
+                                if let Some(multiaddr::ProtocolRef::P2p(peer_id)) =
+                                    address.iter().last()
+                                {
+                                    let peer_id = PeerId::from_bytes(peer_id.to_vec()).unwrap(); // TODO: don't unwrap
+                                    address.pop();
                                     list.push((peer_id, address));
                                 } else {
                                     panic!() // TODO:
@@ -306,10 +307,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             )
             .collect(),
             noise_key,
-            tasks_executor: {
-                let threads_pool = threads_pool.clone();
-                Box::new(move |task| threads_pool.spawn_ok(task))
-            },
+            tasks_executor: &mut |task| threads_pool.spawn_ok(task),
             jaeger_service: jaeger_service.clone(),
         })
         .instrument(tracing::debug_span!("network-service-init"))
@@ -327,15 +325,13 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     });
 
     let consensus_service = consensus_service::ConsensusService::new(consensus_service::Config {
-        tasks_executor: {
-            let threads_pool = threads_pool.clone();
-            Box::new(move |task| threads_pool.spawn_ok(task))
-        },
+        tasks_executor: &mut |task| threads_pool.spawn_ok(task),
         network_events_receiver: network_events_receivers.next().unwrap(),
         network_service: (network_service.clone(), 0),
         database,
         keystore,
         jaeger_service: jaeger_service.clone(),
+        slot_duration_author_ratio: 43691_u16,
     })
     .instrument(tracing::debug_span!("consensus-service-init"))
     .await;
@@ -343,15 +339,13 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     let relay_chain_consensus_service = if let Some(relay_chain_database) = relay_chain_database {
         Some(
             consensus_service::ConsensusService::new(consensus_service::Config {
-                tasks_executor: {
-                    let threads_pool = threads_pool.clone();
-                    Box::new(move |task| threads_pool.spawn_ok(task))
-                },
+                tasks_executor: &mut |task| threads_pool.spawn_ok(task),
                 network_events_receiver: network_events_receivers.next().unwrap(),
                 network_service: (network_service.clone(), 1),
                 database: relay_chain_database,
                 keystore: Arc::new(keystore::Keystore::new(rand::random())),
                 jaeger_service, // TODO: consider passing a different jaeger service with a different service name
+                slot_duration_author_ratio: 43691_u16,
             })
             .instrument(tracing::debug_span!("relay-chain-consensus-service-init"))
             .await,
@@ -370,10 +364,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     let _json_rpc_service = if let Some(bind_address) = cli_options.json_rpc_address.0 {
         Some(
             json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
-                tasks_executor: {
-                    let threads_pool = threads_pool.clone();
-                    Box::new(move |task| threads_pool.spawn_ok(task))
-                },
+                tasks_executor: { &mut move |task| threads_pool.spawn_ok(task) },
                 bind_address,
             })
             .await

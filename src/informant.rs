@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -236,27 +236,39 @@ impl fmt::Display for BytesDisplay {
         }
         value /= 1024.0;
 
-        if value < 1000.0 {
+        if value < 100.0 {
             return write!(f, "{:.1} kiB", value);
         }
+        if value < 1000.0 {
+            return write!(f, "{:.0} kiB", value);
+        }
         value /= 1024.0;
 
-        if value < 1000.0 {
+        if value < 100.0 {
             return write!(f, "{:.1} MiB", value);
         }
+        if value < 1000.0 {
+            return write!(f, "{:.0} MiB", value);
+        }
         value /= 1024.0;
 
-        if value < 1000.0 {
+        if value < 100.0 {
             return write!(f, "{:.1} GiB", value);
         }
-        value /= 1024.0;
-
         if value < 1000.0 {
-            return write!(f, "{:.1} TiB", value);
+            return write!(f, "{:.0} GiB", value);
         }
         value /= 1024.0;
 
-        write!(f, "{:.1}PiB", value)
+        if value < 100.0 {
+            return write!(f, "{:.1} TiB", value);
+        }
+        if value < 1000.0 {
+            return write!(f, "{:.0} TiB", value);
+        }
+        value /= 1024.0;
+
+        write!(f, "{:.1} PiB", value)
 
         // Hopefully we never have to go above petabytes.
     }

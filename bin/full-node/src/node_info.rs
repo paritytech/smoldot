@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -116,11 +116,10 @@ pub async fn run(cli_options: cli::CliOptionsNodeInfo) {
             inbound_config: established::ConfigRequestResponseIn::Empty,
             max_response_size: 4096,
             inbound_allowed: false,
-            timeout: Duration::from_secs(20),
         }],
     });
 
-    let _ = established.add_request(Instant::now(), 0, Vec::new(), ());
+    let _ = established.add_request(0, Vec::new(), Instant::now() + Duration::from_secs(20), ());
 
     let identify = 'outer: loop {
         match tcp_socket {

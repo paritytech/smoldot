@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -46,6 +46,7 @@
 //!
 
 use crate::libp2p::{self, collection, PeerId};
+use crate::util::SipHasherBuild;
 
 use alloc::{
     collections::{btree_map, BTreeMap, BTreeSet, VecDeque},
@@ -108,12 +109,6 @@ pub struct Config {
     /// This value is important if [`Peers::next_event`] is called at a slower than the calls to
     /// [`Peers::read_write`] generate events.
     pub pending_api_events_buffer_size: NonZeroUsize,
-
-    // TODO: don't use BTreeSet
-    pub initial_desired_peers: BTreeSet<PeerId>,
-
-    // TODO: don't use BTreeSet
-    pub initial_desired_substreams: BTreeSet<(PeerId, usize)>,
 }
 
 pub use collection::ConnectionId;
@@ -133,56 +128,6 @@ where
     pub fn new(config: Config) -> Self {
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
 
-        let mut peer_indices = {
-            hashbrown::HashMap::with_capacity_and_hasher(
-                config.peers_capacity,
-                ahash::RandomState::with_seeds(
-                    randomness.sample(rand::distributions::Standard),
-                    randomness.sample(rand::distributions::Standard),
-                    randomness.sample(rand::distributions::Standard),
-                    randomness.sample(rand::distributions::Standard),
-                ),
-            )
-        };
-
-        let mut peers = slab::Slab::with_capacity(config.peers_capacity);
-
-        let mut peers_notifications_out = BTreeMap::new();
-
-        for peer_id in config.initial_desired_peers {
-            if let hashbrown::hash_map::Entry::Vacant(entry) = peer_indices.entry(peer_id) {
-                let peer_index = peers.insert(Peer {
-                    desired: true,
-                    peer_id: entry.key().clone(),
-                });
-
-                entry.insert(peer_index);
-            }
-        }
-
-        for (peer_id, notification_protocol) in config.initial_desired_substreams {
-            let peer_index = match peer_indices.entry(peer_id) {
-                hashbrown::hash_map::Entry::Occupied(entry) => *entry.into_mut(),
-                hashbrown::hash_map::Entry::Vacant(entry) => {
-                    let peer_index = peers.insert(Peer {
-                        desired: true,
-                        peer_id: entry.key().clone(),
-                    });
-
-                    *entry.insert(peer_index)
-                }
-            };
-
-            peers_notifications_out
-                .entry((peer_index, notification_protocol))
-                .or_insert(NotificationsOutState {
-                    desired: true,
-                    open: NotificationsOutOpenState::Closed,
-                });
-        }
-
-        let connections_peer_index = slab::Slab::with_capacity(config.connections_capacity);
-
         Peers {
             inner: collection::Network::new(collection::Config {
                 capacity: config.connections_capacity,
@@ -197,11 +142,14 @@ where
             guarded: Mutex::new(Guarded {
                 pending_desired_out_notifs: VecDeque::with_capacity(0), // TODO: capacity?
                 pending_inner_event: None,
-                connections: connections_peer_index,
+                connections: slab::Slab::with_capacity(config.connections_capacity),
                 connections_by_peer: BTreeMap::new(),
-                peer_indices,
-                peers,
-                peers_notifications_out,
+                peer_indices: hashbrown::HashMap::with_capacity_and_hasher(
+                    config.peers_capacity,
+                    SipHasherBuild::new(randomness.sample(rand::distributions::Standard)),
+                ),
+                peers: slab::Slab::with_capacity(config.peers_capacity),
+                peers_notifications_out: BTreeMap::new(),
                 peers_notifications_in: BTreeSet::new(),
                 requests_in: slab::Slab::new(), // TODO: capacity?
                 desired_in_notifications: slab::Slab::new(), // TODO: capacity?
@@ -1202,10 +1150,10 @@ where
     ///
     pub async fn request(
         &self,
-        now: TNow,
         target: &PeerId,
         protocol_index: usize,
         request_data: Vec<u8>,
+        timeout: TNow,
     ) -> Result<Vec<u8>, RequestError> {
         let target = {
             let mut guarded = self.guarded.lock().await;
@@ -1217,7 +1165,7 @@ where
 
         let result = self
             .inner
-            .request(now, target, protocol_index, request_data)
+            .request(target, protocol_index, request_data, timeout)
             .await;
 
         match result {
@@ -1655,7 +1603,7 @@ struct Guarded<TConn> {
     peers: slab::Slab<Peer>,
 
     /// For each known peer, the corresponding index within [`Guarded::peers`].
-    peer_indices: hashbrown::HashMap<PeerId, usize, ahash::RandomState>,
+    peer_indices: hashbrown::HashMap<PeerId, usize, SipHasherBuild>,
 
     /// Each connection (handshaking or established) stored in [`Peers::inner`] has a `usize` user
     /// data that is an index within this slab.

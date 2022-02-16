@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -38,7 +38,6 @@ impl LightSyncState {
         let babe_epoch_changes_slice = &self.babe_epoch_changes.0[..];
 
         let decoded = DecodedLightSyncState {
-            babe_finalized_block_weight: self.babe_finalized_block_weight,
             finalized_block_header: crate::header::decode(&self.finalized_block_header.0[..])
                 .map_err(|_| ParseError(ParseErrorInner::Other))?
                 .into(),
@@ -55,7 +54,6 @@ impl LightSyncState {
 #[derive(Debug)]
 pub(super) struct DecodedLightSyncState {
     pub(super) babe_epoch_changes: EpochChanges,
-    babe_finalized_block_weight: u32,
     pub(super) finalized_block_header: crate::header::Header,
     pub(super) grandpa_authority_set: AuthoritySet,
 }

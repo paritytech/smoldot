@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -224,13 +224,12 @@ pub fn trie_root(entries: &[(impl AsRef<[u8]>, impl AsRef<[u8]>)]) -> [u8; 32] {
                 return hash;
             }
             calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
-                calculation =
-                    keys.inject(entries.iter().map(|(k, _)| k.as_ref().into_iter().copied()));
+                calculation = keys.inject(entries.iter().map(|(k, _)| k.as_ref().iter().copied()));
             }
             calculate_root::RootMerkleValueCalculation::StorageValue(value) => {
                 let result = entries
                     .iter()
-                    .find(|(k, _)| k.as_ref().into_iter().copied().eq(value.key()))
+                    .find(|(k, _)| k.as_ref().iter().copied().eq(value.key()))
                     .map(|(_, v)| v);
                 calculation = value.inject(result);
             }

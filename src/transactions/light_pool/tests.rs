@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -40,8 +40,16 @@ fn regular_path() {
     let included_txs = pool
         .set_block_body(&[1; 32], vec![vec![0]].into_iter())
         .collect::<Vec<_>>();
-    assert_eq!(included_txs, vec![tx_id]);
+    assert_eq!(included_txs, vec![(tx_id, 0)]);
     assert_eq!(pool.missing_block_bodies().count(), 0);
+
+    let mut non_finalized_iter = pool.set_finalized_block(&[1; 32]);
+    assert!(non_finalized_iter.next().is_none());
+
+    let mut iter = pool.prune_finalized_with_body();
+    let pruned = iter.next().unwrap();
+    assert_eq!(pruned.block_hash, [1; 32]);
+    assert_eq!(pruned.included_transactions, vec![(tx_id, 0, ())]);
 }
 
 #[test]
@@ -63,7 +71,10 @@ fn included_after_set_best() {
     assert!(included_txs.is_empty());
 
     let set_best_block = pool.set_best_block(&[1; 32]);
-    assert_eq!(set_best_block.included_transactions, vec![(tx_id, [1; 32])]);
+    assert_eq!(
+        set_best_block.included_transactions,
+        vec![(tx_id, [1; 32], 0)]
+    );
     assert!(set_best_block.retracted_transactions.is_empty());
 }
 
@@ -95,7 +106,10 @@ fn transaction_retracted_after_reorg() {
 
     // Set block 1 as the best block. Transaction must be included.
     let set_best_block = pool.set_best_block(&[1; 32]);
-    assert_eq!(set_best_block.included_transactions, vec![(tx_id, [1; 32])]);
+    assert_eq!(
+        set_best_block.included_transactions,
+        vec![(tx_id, [1; 32], 0)]
+    );
     assert!(set_best_block.retracted_transactions.is_empty());
 
     // Set block 2 as the best block. Transaction must be retracted.
@@ -103,12 +117,15 @@ fn transaction_retracted_after_reorg() {
     assert!(set_best_block.included_transactions.is_empty());
     assert_eq!(
         set_best_block.retracted_transactions,
-        vec![(tx_id, [1; 32])]
+        vec![(tx_id, [1; 32], 0)]
     );
 
     // Set block 1 as the best block again. Transaction must be included.
     let set_best_block = pool.set_best_block(&[1; 32]);
-    assert_eq!(set_best_block.included_transactions, vec![(tx_id, [1; 32])]);
+    assert_eq!(
+        set_best_block.included_transactions,
+        vec![(tx_id, [1; 32], 0)]
+    );
     assert!(set_best_block.retracted_transactions.is_empty());
 }
 

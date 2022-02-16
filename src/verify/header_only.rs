@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -154,7 +154,6 @@ pub fn verify(config: Config) -> Result<Success, Error> {
         return Err(Error::NonSequentialBlockNumber);
     }
 
-    // TODO: need to verify the changes trie stuff maybe?
     // TODO: need to verify that there's no grandpa scheduled change header if there's already an active grandpa scheduled change
     // TODO: verify that there's no grandpa header items if the chain doesn't use grandpa
 

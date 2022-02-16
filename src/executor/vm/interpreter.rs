@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -24,7 +24,6 @@ use super::{
 
 use alloc::{borrow::ToOwned as _, boxed::Box, format, string::ToString as _, sync::Arc, vec::Vec};
 use core::{cell::RefCell, fmt};
-use wasmi::memory_units::ByteSize as _;
 
 /// See [`super::Module`].
 #[derive(Clone)]
@@ -58,6 +57,7 @@ pub struct InterpreterPrototype {
     /// Right now we only support one unique `Memory` object per process. This is it.
     /// Contains `None` if the process doesn't export any memory object, which means it doesn't
     /// use any memory.
+    // TODO: should just return an error instead of None
     memory: Option<wasmi::MemoryRef>,
 
     /// Table of the indirect function calls.
@@ -71,13 +71,11 @@ impl InterpreterPrototype {
     /// See [`super::VirtualMachinePrototype::new`].
     pub fn new(
         module: &Module,
-        heap_pages: HeapPages,
         mut symbols: impl FnMut(&str, &str, &Signature) -> Result<usize, ()>,
     ) -> Result<Self, NewErr> {
         struct ImportResolve<'a> {
             functions: RefCell<&'a mut dyn FnMut(&str, &str, &Signature) -> Result<usize, ()>>,
             import_memory: RefCell<&'a mut Option<wasmi::MemoryRef>>,
-            heap_pages: usize,
         }
 
         impl<'a> wasmi::ImportResolver for ImportResolve<'a> {
@@ -100,10 +98,12 @@ impl InterpreterPrototype {
                 let index = match closure(module_name, field_name, &conv_signature) {
                     Ok(i) => i,
                     Err(_) => {
-                        return Err(wasmi::Error::Instantiation(format!(
-                            "Couldn't resolve `{}`:`{}`",
-                            module_name, field_name
-                        )))
+                        return Err(wasmi::Error::Host(Box::new(NewErrWrapper(
+                            NewErr::UnresolvedFunctionImport {
+                                module_name: module_name.to_owned(),
+                                function: field_name.to_owned(),
+                            },
+                        ))))
                     }
                 };
 
@@ -123,50 +123,28 @@ impl InterpreterPrototype {
 
             fn resolve_memory(
                 &self,
-                _module_name: &str,
+                module_name: &str,
                 field_name: &str,
                 memory_type: &wasmi::MemoryDescriptor,
             ) -> Result<wasmi::MemoryRef, wasmi::Error> {
-                if field_name != "memory" {
-                    return Err(wasmi::Error::Instantiation(format!(
-                        "Unknown memory reference with name: {}",
-                        field_name
-                    )));
+                if module_name != "env" || field_name != "memory" {
+                    return Err(wasmi::Error::Host(Box::new(NewErrWrapper(
+                        NewErr::MemoryNotNamedMemory,
+                    ))));
                 }
 
-                match &mut *self.import_memory.borrow_mut() {
-                    Some(_) => Err(wasmi::Error::Instantiation(
-                        "Memory can not be imported twice!".into(),
-                    )),
-                    memory_ref @ None => {
-                        if memory_type
-                            .maximum()
-                            .map(|m| m.saturating_sub(memory_type.initial()))
-                            .map(|m| self.heap_pages > m as usize)
-                            .unwrap_or(false)
-                        {
-                            Err(wasmi::Error::Instantiation(format!(
-                                "Heap pages ({}) is greater than imported memory maximum ({}).",
-                                self.heap_pages,
-                                memory_type
-                                    .maximum()
-                                    .map(|m| m.saturating_sub(memory_type.initial()))
-                                    .unwrap(),
-                            )))
-                        } else {
-                            let memory = wasmi::MemoryInstance::alloc(
-                                wasmi::memory_units::Pages(
-                                    memory_type.initial() as usize + self.heap_pages,
-                                ),
-                                Some(wasmi::memory_units::Pages(
-                                    memory_type.initial() as usize + self.heap_pages,
-                                )),
-                            )?;
-                            **memory_ref = Some(memory.clone());
-                            Ok(memory)
-                        }
-                    }
-                }
+                // Considering that the memory can only be "env":"memory", and that each
+                // import has a unique name, this block can't be reached more than once.
+                debug_assert!(self.import_memory.borrow().is_none());
+
+                let memory = wasmi::MemoryInstance::alloc(
+                    wasmi::memory_units::Pages(memory_type.initial() as usize),
+                    memory_type
+                        .maximum()
+                        .map(|hp| wasmi::memory_units::Pages(hp as usize)),
+                )?;
+                **self.import_memory.borrow_mut() = Some(memory.clone());
+                Ok(memory)
             }
 
             fn resolve_table(
@@ -181,18 +159,30 @@ impl InterpreterPrototype {
             }
         }
 
-        let heap_pages = usize::try_from(u32::from(heap_pages)).unwrap_or(usize::max_value());
+        // Wasmi provides an `Error::Host` variant that contains a ̀`Box<dyn wasmi::HostError>`
+        // that can be downcasted to anything.
+        // Unfortunately the `HostError` trait must be implemented manually, and in order to not
+        // have a leaky abstraction we don't implement it directly on `NewErr` but on a wrapper
+        // type.
+        #[derive(Debug, derive_more::Display)]
+        struct NewErrWrapper(NewErr);
+        impl wasmi::HostError for NewErrWrapper {}
 
         let mut import_memory = None;
         let not_started = {
             let resolver = ImportResolve {
                 functions: RefCell::new(&mut symbols),
                 import_memory: RefCell::new(&mut import_memory),
-                heap_pages,
             };
-            wasmi::ModuleInstance::new(&module.inner, &resolver)
-                .map_err(|err| ModuleError(err.to_string()))
-                .map_err(NewErr::ModuleError)?
+
+            match wasmi::ModuleInstance::new(&module.inner, &resolver) {
+                Ok(m) => m,
+                Err(wasmi::Error::Host(err)) if err.is::<NewErrWrapper>() => {
+                    let underlying = err.downcast::<NewErrWrapper>().unwrap();
+                    return Err(underlying.0);
+                }
+                Err(err) => return Err(NewErr::ModuleError(ModuleError(err.to_string()))),
+            }
         };
         // TODO: explain `assert_no_start`
         let module = not_started.assert_no_start();
@@ -201,8 +191,6 @@ impl InterpreterPrototype {
             Some(import_memory)
         } else if let Some(mem) = module.export_by_name("memory") {
             if let Some(mem) = mem.as_memory() {
-                // TODO: don't unwrap /!\ need to figure out how heap_pages really works
-                mem.grow(wasmi::memory_units::Pages(heap_pages)).unwrap();
                 Some(mem.clone())
             } else {
                 return Err(NewErr::MemoryIsntMemory);
@@ -230,7 +218,7 @@ impl InterpreterPrototype {
 
     /// See [`super::VirtualMachinePrototype::global_value`].
     pub fn global_value(&self, name: &str) -> Result<u32, GlobalValueErr> {
-        let heap_base_val = self
+        let value = self
             .module
             .export_by_name(name)
             .ok_or(GlobalValueErr::NotFound)?
@@ -238,7 +226,7 @@ impl InterpreterPrototype {
             .ok_or(GlobalValueErr::Invalid)?
             .get();
 
-        match heap_base_val {
+        match value {
             wasmi::RuntimeValue::I32(v) => match u32::try_from(v) {
                 Ok(v) => Ok(v),
                 Err(_) => Err(GlobalValueErr::Invalid),
@@ -247,12 +235,37 @@ impl InterpreterPrototype {
         }
     }
 
+    /// See [`super::VirtualMachinePrototype::memory_max_pages`].
+    pub fn memory_max_pages(&self) -> Option<HeapPages> {
+        match &self.memory {
+            Some(memory) => memory
+                .maximum()
+                .and_then(|hp| u32::try_from(hp.0).ok()) // An overflow in the maximum leads to returning `None`
+                .map(|hp| HeapPages(hp)),
+            None => None,
+        }
+    }
+
     /// See [`super::VirtualMachinePrototype::start`].
     pub fn start(
         self,
+        min_memory_pages: HeapPages,
         function_name: &str,
         params: &[WasmValue],
     ) -> Result<Interpreter, (StartErr, Self)> {
+        if let Some(memory) = &self.memory {
+            let min_memory_pages = match usize::try_from(min_memory_pages.0) {
+                Ok(hp) => hp,
+                Err(_) => return Err((StartErr::RequiredMemoryTooLarge, self)),
+            };
+
+            if let Some(to_grow) = min_memory_pages.checked_sub(memory.current_size().0) {
+                if memory.grow(wasmi::memory_units::Pages(to_grow)).is_err() {
+                    return Err((StartErr::RequiredMemoryTooLarge, self));
+                }
+            }
+        }
+
         let execution = match self.module.export_by_name(function_name) {
             Some(wasmi::ExternVal::Func(f)) => {
                 // Try to convert the signature of the function to call, in order to make sure
@@ -441,13 +454,15 @@ impl Interpreter {
     }
 
     /// See [`super::VirtualMachine::memory_size`].
-    pub fn memory_size(&self) -> u32 {
+    pub fn memory_size(&self) -> HeapPages {
         let mem = match self.memory.as_ref() {
             Some(m) => m,
-            None => return 0,
+            None => return HeapPages(0), // TODO: correct? we promise things in the API of new() regarding this, and it seems incoherent
         };
 
-        u32::try_from(mem.current_size().0 * wasmi::memory_units::Pages::byte_size().0).unwrap()
+        // Being a 32bits platform, it's impossible that the vm has a number of currently
+        // allocated pages that can't fit in 32bits, so this unwrap can't fail.
+        HeapPages(u32::try_from(mem.current_size().0).unwrap())
     }
 
     /// See [`super::VirtualMachine::read_memory`].
@@ -523,6 +538,18 @@ impl Interpreter {
         };
 
         mem.set(offset, value).map_err(|_| OutOfBoundsError)
+    }
+
+    /// See [`super::VirtualMachine::write_memory`].
+    pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
+        if let Some(mem) = &self.memory {
+            mem.grow(wasmi::memory_units::Pages(
+                usize::try_from(additional.0).unwrap(),
+            ))
+            .map_err(|_| OutOfBoundsError)?;
+        }
+
+        Ok(())
     }
 
     /// See [`super::VirtualMachine::into_prototype`].

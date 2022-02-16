@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -84,7 +84,7 @@ enum NegotiationState {
     },
     Multiplexing {
         peer_id: PeerId,
-        encryption: noise::Noise,
+        encryption: Box<noise::Noise>,
         negotiation: multistream_select::InProgress<iter::Once<&'static str>, &'static str>,
     },
 }
@@ -184,7 +184,7 @@ impl HealthyHandshake {
 
                             self.state = NegotiationState::Multiplexing {
                                 peer_id: remote_peer_id,
-                                encryption: cipher,
+                                encryption: Box::new(cipher),
                                 negotiation,
                             };
 
@@ -287,7 +287,7 @@ impl HealthyHandshake {
                             }))
                         }
                         multistream_select::Negotiation::Success(_) => Ok(Handshake::Success {
-                            connection: ConnectionPrototype::from_noise_yamux(encryption),
+                            connection: ConnectionPrototype::from_noise_yamux(*encryption),
                             remote_peer_id: peer_id,
                         }),
                         multistream_select::Negotiation::NotAvailable => {

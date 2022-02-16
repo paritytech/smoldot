@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -136,7 +136,7 @@ impl<T> NonFinalizedTreeInner<T> {
         let hash = header::hash_from_scale_encoded_header(&scale_encoded_header);
 
         // Check for duplicates.
-        if self.blocks.find(|b| b.hash == hash).is_some() {
+        if self.blocks_by_hash.contains_key(&hash) {
             return if full {
                 VerifyOut::Body(BodyVerifyStep1::Duplicate(NonFinalizedTree {
                     inner: Some(self),
@@ -150,16 +150,13 @@ impl<T> NonFinalizedTreeInner<T> {
         // `Some` with an index of the parent within the tree of unfinalized blocks.
         // `None` means that the parent is the finalized block.
         let parent_tree_index = {
-            let parent_hash = *decoded_header.parent_hash;
-            match self.current_best {
-                // The parent hash is first checked against `self.current_best`, as it is most
-                // likely that new blocks are built on top of the current best.
-                Some(best) if parent_hash == self.blocks.get(best).unwrap().hash => Some(best),
-                _ if parent_hash == self.finalized_block_hash => None,
-                // O(n) search for the parent.
-                _ => match self.blocks.find(|b| b.hash == parent_hash) {
-                    Some(parent) => Some(parent),
+            if *decoded_header.parent_hash == self.finalized_block_hash {
+                None
+            } else {
+                match self.blocks_by_hash.get(decoded_header.parent_hash) {
+                    Some(parent) => Some(*parent),
                     None => {
+                        let parent_hash = *decoded_header.parent_hash;
                         return if full {
                             VerifyOut::Body(BodyVerifyStep1::BadParent {
                                 chain: NonFinalizedTree { inner: Some(self) },
@@ -167,9 +164,9 @@ impl<T> NonFinalizedTreeInner<T> {
                             })
                         } else {
                             VerifyOut::HeaderErr(self, HeaderVerifyError::BadParent { parent_hash })
-                        }
+                        };
                     }
-                },
+                }
             }
         };
 
@@ -375,8 +372,29 @@ impl<T> VerifyContext<T> {
                 VerifyConsensusSpecific::Babe { .. },
                 FinalizedConsensus::Babe { .. },
                 Some(BlockConsensus::Babe { next_epoch, .. }),
-            ) => BlockConsensus::Babe {
+            ) if next_epoch.start_slot_number.is_some() => BlockConsensus::Babe {
                 current_epoch: Some(next_epoch),
+                next_epoch: Arc::new(epoch_transition_target),
+            },
+
+            (
+                verify::header_body::SuccessConsensus::Babe {
+                    epoch_transition_target: Some(epoch_transition_target),
+                    slot_number,
+                    ..
+                },
+                VerifyConsensusSpecific::Babe { .. },
+                FinalizedConsensus::Babe { .. },
+                Some(BlockConsensus::Babe { next_epoch, .. }),
+            ) => BlockConsensus::Babe {
+                current_epoch: Some(Arc::new(chain_information::BabeEpochInformation {
+                    start_slot_number: Some(slot_number),
+                    allowed_slots: next_epoch.allowed_slots,
+                    epoch_index: next_epoch.epoch_index,
+                    authorities: next_epoch.authorities.clone(),
+                    c: next_epoch.c,
+                    randomness: next_epoch.randomness,
+                })),
                 next_epoch: Arc::new(epoch_transition_target),
             },
 
@@ -407,8 +425,32 @@ impl<T> VerifyContext<T> {
                     ..
                 },
                 None,
-            ) => BlockConsensus::Babe {
+            ) if next_epoch_transition.start_slot_number.is_some() => BlockConsensus::Babe {
                 current_epoch: Some(next_epoch_transition),
+                next_epoch: Arc::new(epoch_transition_target),
+            },
+
+            (
+                verify::header_body::SuccessConsensus::Babe {
+                    epoch_transition_target: Some(epoch_transition_target),
+                    slot_number,
+                    ..
+                },
+                VerifyConsensusSpecific::Babe { .. },
+                FinalizedConsensus::Babe {
+                    next_epoch_transition,
+                    ..
+                },
+                None,
+            ) => BlockConsensus::Babe {
+                current_epoch: Some(Arc::new(chain_information::BabeEpochInformation {
+                    start_slot_number: Some(slot_number),
+                    allowed_slots: next_epoch_transition.allowed_slots,
+                    authorities: next_epoch_transition.authorities.clone(),
+                    c: next_epoch_transition.c,
+                    epoch_index: next_epoch_transition.epoch_index,
+                    randomness: next_epoch_transition.randomness,
+                })),
                 next_epoch: Arc::new(epoch_transition_target),
             },
 
@@ -975,6 +1017,11 @@ impl<'c, T> HeaderInsert<'c, T> {
     pub fn insert(mut self, user_data: T) {
         let mut context = self.context.take().unwrap();
 
+        debug_assert_eq!(
+            context.chain.blocks.len(),
+            context.chain.blocks_by_hash.len()
+        );
+
         let new_node_index = context.chain.blocks.insert(
             context.parent_tree_index,
             Block {
@@ -984,6 +1031,13 @@ impl<'c, T> HeaderInsert<'c, T> {
                 user_data,
             },
         );
+
+        let _prev_value = context
+            .chain
+            .blocks_by_hash
+            .insert(self.hash, new_node_index);
+        // A bug here would be serious enough that it is worth being an `assert!`
+        assert!(_prev_value.is_none());
 
         if self.is_new_best {
             context.chain.current_best = Some(new_node_index);
@@ -1057,6 +1111,11 @@ impl<T> BodyInsert<T> {
 
     /// Inserts the block with the given user data.
     pub fn insert(mut self, user_data: T) -> NonFinalizedTree<T> {
+        debug_assert_eq!(
+            self.context.chain.blocks.len(),
+            self.context.chain.blocks_by_hash.len()
+        );
+
         let new_node_index = self.context.chain.blocks.insert(
             self.context.parent_tree_index,
             Block {
@@ -1066,6 +1125,14 @@ impl<T> BodyInsert<T> {
                 user_data,
             },
         );
+
+        let _prev_value = self
+            .context
+            .chain
+            .blocks_by_hash
+            .insert(self.hash, new_node_index);
+        // A bug here would be serious enough that it is worth being an `assert!`
+        assert!(_prev_value.is_none());
 
         if self.is_new_best {
             self.context.chain.current_best = Some(new_node_index);

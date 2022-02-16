@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -34,12 +34,9 @@
 //! - Multiple other miscellaneous information.
 //!
 
-use crate::{
-    chain::chain_information::{
-        aura_config, babe_config, BabeEpochInformation, ChainInformation,
-        ChainInformationConsensus, ChainInformationFinality,
-    },
-    finality::grandpa,
+use crate::chain::chain_information::{
+    aura_config, babe_genesis_config, grandpa_genesis_config, BabeEpochInformation,
+    ChainInformation, ChainInformationConsensus, ChainInformationFinality,
 };
 
 use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
@@ -86,13 +83,12 @@ impl ChainSpec {
         };
 
         let consensus = {
-            let aura_genesis_config =
-                aura_config::AuraGenesisConfiguration::from_genesis_storage(|k| {
-                    genesis_storage.value(k).map(|v| v.to_owned())
-                });
+            let aura_genesis_config = aura_config::AuraConfiguration::from_storage(|k| {
+                genesis_storage.value(k).map(|v| v.to_owned())
+            });
 
             let babe_genesis_config =
-                babe_config::BabeGenesisConfiguration::from_genesis_storage(|k| {
+                babe_genesis_config::BabeGenesisConfiguration::from_genesis_storage(|k| {
                     genesis_storage.value(k).map(|v| v.to_owned())
                 });
 
@@ -139,7 +135,7 @@ impl ChainSpec {
 
         let finality = {
             let grandpa_genesis_config =
-                grandpa::chain_config::GrandpaGenesisConfiguration::from_genesis_storage(|k| {
+                grandpa_genesis_config::GrandpaGenesisConfiguration::from_genesis_storage(|k| {
                     genesis_storage.value(k).map(|v| v.to_owned())
                 });
 
@@ -217,6 +213,13 @@ impl ChainSpec {
     /// default value is returned.
     pub fn protocol_id(&self) -> &str {
         self.client_spec.protocol_id.as_deref().unwrap_or("sup")
+    }
+
+    /// Returns the "fork id" of the chain. This is arbitrary string that can be used in order to
+    /// segregate nodes in case when multiple chains have the same genesis hash. Nodes should only
+    /// synchronize with nodes that have the same "fork id".
+    pub fn fork_id(&self) -> Option<&str> {
+        self.client_spec.fork_id.as_deref()
     }
 
     // TODO: this API is probably unstable, as the meaning of the string is unclear
@@ -389,11 +392,11 @@ enum ParseErrorInner {
 #[derive(Debug, derive_more::Display)]
 pub enum FromGenesisStorageError {
     /// Error when retrieving the GrandPa configuration.
-    GrandpaConfigLoad(grandpa::chain_config::FromGenesisStorageError),
+    GrandpaConfigLoad(grandpa_genesis_config::FromGenesisStorageError),
     /// Error when retrieving the Aura algorithm configuration.
-    AuraConfigLoad(aura_config::FromGenesisStorageError),
+    AuraConfigLoad(aura_config::FromStorageError),
     /// Error when retrieving the Babe algorithm configuration.
-    BabeConfigLoad(babe_config::FromGenesisStorageError),
+    BabeConfigLoad(babe_genesis_config::FromGenesisStorageError),
     /// Multiple consensus algorithms have been detected.
     MultipleConsensusAlgorithms,
     /// Chain specification doesn't contain the list of storage items.

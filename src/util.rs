@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -21,6 +21,26 @@
 use core::str;
 
 pub(crate) mod leb128;
+
+/// Implementation of the `BuildHasher` trait for the sip hasher.
+///
+/// Contrary to the one in the standard library, a seed is explicitly passed here, making the
+/// hashing predictable. This is a good thing for tests and no-std compatibility.
+pub struct SipHasherBuild([u8; 16]);
+
+impl SipHasherBuild {
+    pub fn new(seed: [u8; 16]) -> SipHasherBuild {
+        SipHasherBuild(seed)
+    }
+}
+
+impl core::hash::BuildHasher for SipHasherBuild {
+    type Hasher = siphasher::sip::SipHasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        siphasher::sip::SipHasher::new_with_key(&self.0)
+    }
+}
 
 /// Returns a parser that decodes a SCALE-encoded `Option`.
 ///

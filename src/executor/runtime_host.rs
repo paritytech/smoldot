@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -196,12 +196,12 @@ impl StorageGet {
     /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
     pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
         match &self.inner.vm {
-            host::HostVm::ExternalStorageGet(req) => either::Left(iter::once(either::Left(
-                either::Left(either::Left(req.key())),
-            ))),
-            host::HostVm::ExternalStorageAppend(req) => either::Left(iter::once(either::Left(
-                either::Left(either::Right(req.key())),
-            ))),
+            host::HostVm::ExternalStorageGet(req) => {
+                either::Left(iter::once(either::Left(either::Left(req.key()))))
+            }
+            host::HostVm::ExternalStorageAppend(req) => {
+                either::Left(iter::once(either::Left(either::Right(req.key()))))
+            }
 
             host::HostVm::ExternalStorageRoot(_) => {
                 if let calculate_root::RootMerkleValueCalculation::StorageValue(value_request) =
@@ -213,10 +213,6 @@ impl StorageGet {
                     panic!()
                 }
             }
-
-            host::HostVm::ExternalStorageChangesRoot(_) => either::Left(iter::once(either::Left(
-                either::Right(&b":changes_trie"[..]),
-            ))),
 
             // We only create a `StorageGet` if the state is one of the above.
             _ => unreachable!(),
@@ -268,14 +264,6 @@ impl StorageGet {
                 } else {
                     // We only create a `StorageGet` if the state is `StorageValue`.
                     panic!()
-                }
-            }
-            host::HostVm::ExternalStorageChangesRoot(req) => {
-                if value.is_none() {
-                    self.inner.vm = req.resume(None);
-                } else {
-                    // TODO: this is probably one of the most complicated things to implement
-                    todo!()
                 }
             }
 
@@ -679,11 +667,6 @@ impl Inner {
                     }
                 }
 
-                host::HostVm::ExternalStorageChangesRoot(req) => {
-                    self.vm = req.into();
-                    return RuntimeHostVm::StorageGet(StorageGet { inner: self });
-                }
-
                 host::HostVm::ExternalStorageNextKey(req) => {
                     self.vm = req.into();
                     return RuntimeHostVm::NextKey(NextKey {
@@ -709,11 +692,12 @@ impl Inner {
                     // upgrades are quite uncommon and that a caching system is rather non-trivial
                     // to set up, the approach of recompiling every single time is preferred here.
                     // TODO: number of heap pages?! we use the default here, but not sure whether that's correct or if we have to take the current heap pages
-                    let vm_prototype = match host::HostVmPrototype::new(
-                        req.wasm_code(),
-                        executor::DEFAULT_HEAP_PAGES,
-                        vm::ExecHint::Oneshot,
-                    ) {
+                    let vm_prototype = match host::HostVmPrototype::new(host::Config {
+                        module: req.wasm_code(),
+                        heap_pages: executor::DEFAULT_HEAP_PAGES,
+                        exec_hint: vm::ExecHint::Oneshot,
+                        allow_unresolved_imports: false, // TODO: what is a correct value here?
+                    }) {
                         Ok(w) => w,
                         Err(_) => {
                             self.vm = req.resume(Err(()));
@@ -756,6 +740,11 @@ impl Inner {
 
                     self.top_trie_transaction_revert = None;
                     self.vm = resume.resume();
+                }
+
+                host::HostVm::GetMaxLogLevel(resume) => {
+                    // TODO: make configurable?
+                    self.vm = resume.resume(0); // Off
                 }
 
                 host::HostVm::LogEmit(req) => {

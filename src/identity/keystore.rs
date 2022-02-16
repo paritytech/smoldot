@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -19,6 +19,8 @@
 
 #![cfg(all(feature = "std"))]
 #![cfg_attr(docsrs, doc(cfg(all(feature = "std"))))]
+
+use crate::util::SipHasherBuild;
 
 use futures::lock::Mutex;
 use rand::{Rng as _, SeedableRng as _};
@@ -77,12 +79,7 @@ impl Keystore {
         let mut gen_rng = rand_chacha::ChaCha20Rng::from_seed(randomness_seed);
 
         let keys = hashbrown::HashMap::with_capacity_and_hasher(32, {
-            ahash::RandomState::with_seeds(
-                gen_rng.sample(rand::distributions::Standard),
-                gen_rng.sample(rand::distributions::Standard),
-                gen_rng.sample(rand::distributions::Standard),
-                gen_rng.sample(rand::distributions::Standard),
-            )
+            SipHasherBuild::new(gen_rng.sample(rand::distributions::Standard))
         });
 
         Keystore {
@@ -242,7 +239,7 @@ impl Keystore {
 
 struct Guarded {
     gen_rng: rand_chacha::ChaCha20Rng,
-    keys: hashbrown::HashMap<(KeyNamespace, [u8; 32]), PrivateKey, ahash::RandomState>,
+    keys: hashbrown::HashMap<(KeyNamespace, [u8; 32]), PrivateKey, SipHasherBuild>,
 }
 
 pub struct VrfSignature {

@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -605,11 +605,15 @@ where
     ///
     /// After the remote has sent back a response, an [`Event::Response`] event will be generated
     /// locally. The `user_data` parameter will be passed back.
+    ///
+    /// The timeout is the time between the moment the substream is opened and the moment the
+    /// response is sent back. If the emitter doesn't send the request or if the receiver doesn't
+    /// answer during this time window, the request is considered failed.
     pub fn add_request(
         &mut self,
-        now: TNow,
         protocol_index: usize,
         request: Vec<u8>,
+        timeout: TNow,
         user_data: TRqUd,
     ) -> SubstreamId {
         let has_length_prefix = match self.inner.request_protocols[protocol_index].inbound_config {
@@ -624,8 +628,6 @@ where
                 false
             }
         };
-
-        let timeout = now + self.inner.request_protocols[protocol_index].timeout;
 
         let substream = self
             .inner
@@ -1094,7 +1096,7 @@ pub struct Config<TNow> {
     /// Time after which an outgoing ping is considered failed.
     pub ping_timeout: Duration,
     /// Entropy used for the randomness specific to this connection.
-    pub randomness_seed: [u8; 32],
+    pub randomness_seed: [u8; 16],
 }
 
 /// Configuration for a request-response protocol.
@@ -1113,11 +1115,6 @@ pub struct ConfigRequestResponse {
 
     /// If true, incoming substreams are allowed to negotiate this protocol.
     pub inbound_allowed: bool,
-
-    /// Timeout between the moment the substream is opened and the moment the response is sent
-    /// back. If the emitter doesn't send the request or if the receiver doesn't answer during
-    /// this time window, the request is considered failed.
-    pub timeout: Duration,
 }
 
 /// See [`ConfigRequestResponse::inbound_config`].

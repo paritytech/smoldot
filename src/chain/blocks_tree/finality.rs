@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -96,12 +96,13 @@ impl<T> NonFinalizedTree<T> {
     // TODO: expand the documentation about how blocks with authorities changes have to be finalized before any further block can be finalized
     pub fn verify_justification(
         &mut self,
+        consensus_engine_id: [u8; 4],
         scale_encoded_justification: &[u8],
     ) -> Result<FinalityApply<T>, JustificationVerifyError> {
         self.inner
             .as_mut()
             .unwrap()
-            .verify_justification(scale_encoded_justification)
+            .verify_justification(consensus_engine_id, scale_encoded_justification)
     }
 
     /// Verifies the given Grandpa commit message.
@@ -147,8 +148,8 @@ impl<T> NonFinalizedTree<T> {
     ) -> Result<SetFinalizedBlockIter<T>, SetFinalizedError> {
         let inner = self.inner.as_mut().unwrap();
 
-        let block_index = match inner.blocks.find(|b| b.hash == *block_hash) {
-            Some(idx) => idx,
+        let block_index = match inner.blocks_by_hash.get(block_hash) {
+            Some(idx) => *idx,
             None => return Err(SetFinalizedError::UnknownBlock),
         };
 
@@ -196,8 +197,8 @@ impl<T> NonFinalizedTreeInner<T> {
                 }
 
                 // Find in the list of non-finalized blocks the one targeted by the justification.
-                let block_index = match self.blocks.find(|b| b.hash == *target_hash) {
-                    Some(idx) => idx,
+                let block_index = match self.blocks_by_hash.get(target_hash) {
+                    Some(idx) => *idx,
                     None => {
                         return Err(FinalityVerifyError::UnknownTargetBlock {
                             block_number: target_number,
@@ -305,11 +306,11 @@ impl<T> NonFinalizedTreeInner<T> {
     /// See [`NonFinalizedTree::verify_justification`].
     fn verify_justification(
         &mut self,
+        consensus_engine_id: [u8; 4],
         scale_encoded_justification: &[u8],
     ) -> Result<FinalityApply<T>, JustificationVerifyError> {
-        match &self.finality {
-            Finality::Outsourced => Err(JustificationVerifyError::AlgorithmHasNoJustification),
-            Finality::Grandpa { .. } => {
+        match (&self.finality, &consensus_engine_id) {
+            (Finality::Grandpa { .. }, b"FRNK") => {
                 // Turn justification into a strongly-typed struct.
                 let decoded = justification::decode::decode_grandpa(scale_encoded_justification)
                     .map_err(JustificationVerifyError::InvalidJustification)?;
@@ -332,6 +333,7 @@ impl<T> NonFinalizedTreeInner<T> {
                     to_finalize: block_index,
                 })
             }
+            _ => Err(JustificationVerifyError::JustificationEngineMismatch),
         }
     }
 
@@ -384,9 +386,9 @@ impl<T> NonFinalizedTreeInner<T> {
                 }
                 grandpa::commit::verify::InProgress::IsParent(is_parent) => {
                     // Find in the list of non-finalized blocks the target of the check.
-                    match self.blocks.find(|b| b.hash == *is_parent.block_hash()) {
+                    match self.blocks_by_hash.get(is_parent.block_hash()) {
                         Some(idx) => {
-                            let result = self.blocks.is_ancestor(block_index, idx);
+                            let result = self.blocks.is_ancestor(block_index, *idx);
                             verification = is_parent.resume(Some(result));
                         }
                         None => {
@@ -554,8 +556,10 @@ impl<T> NonFinalizedTreeInner<T> {
         );
         self.finalized_block_hash = self.finalized_block_header.hash();
 
+        debug_assert_eq!(self.blocks.len(), self.blocks_by_hash.len());
         SetFinalizedBlockIter {
             iter: self.blocks.prune_ancestors(block_index_to_finalize),
+            blocks_by_hash: &mut self.blocks_by_hash,
             updates_best_block,
         }
     }
@@ -606,8 +610,11 @@ impl<'c, T> fmt::Debug for FinalityApply<'c, T> {
 /// Error that can happen when verifying a justification.
 #[derive(Debug, derive_more::Display)]
 pub enum JustificationVerifyError {
-    /// Finality mechanism used by the chain doesn't use justifications.
-    AlgorithmHasNoJustification,
+    /// Type of the justification doesn't match the finality mechanism used by the chain.
+    ///
+    /// > **Note**: If the chain's finality mechanism doesn't use justifications, this error is
+    /// >           always returned.
+    JustificationEngineMismatch,
     /// Error while decoding the justification.
     InvalidJustification(justification::decode::Error),
     /// The justification verification has failed. The justification is invalid and should be
@@ -679,6 +686,7 @@ pub enum FinalityVerifyError {
 /// is updated.
 pub struct SetFinalizedBlockIter<'a, T> {
     iter: fork_tree::PruneAncestorsIter<'a, Block<T>>,
+    blocks_by_hash: &'a mut HashMap<[u8; 32], fork_tree::NodeIndex, fnv::FnvBuildHasher>,
     updates_best_block: bool,
 }
 
@@ -695,6 +703,8 @@ impl<'a, T> Iterator for SetFinalizedBlockIter<'a, T> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let pruned = self.iter.next()?;
+            let _removed = self.blocks_by_hash.remove(&pruned.user_data.hash);
+            debug_assert_eq!(_removed, Some(pruned.index));
             if !pruned.is_prune_target_ancestor {
                 continue;
             }

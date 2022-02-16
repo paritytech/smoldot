@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -136,17 +136,24 @@ impl<T> ForkTree<T> {
     }
 
     fn ancestry_order_next(&self, node_index: NodeIndex) -> Option<NodeIndex> {
+        debug_assert!(!self.nodes[node_index.0].is_prune_target_ancestor);
+
         if let Some(idx) = self.nodes[node_index.0].first_child {
+            debug_assert_eq!(self.nodes[idx].parent, Some(node_index.0));
             return Some(NodeIndex(idx));
         }
 
         if let Some(idx) = self.nodes[node_index.0].next_sibling {
+            debug_assert_eq!(self.nodes[idx].previous_sibling, Some(node_index.0));
+            debug_assert_eq!(self.nodes[idx].parent, self.nodes[node_index.0].parent);
             return Some(NodeIndex(idx));
         }
 
         let mut return_value = self.nodes[node_index.0].parent;
         while let Some(idx) = return_value {
             if let Some(next_sibling) = self.nodes[idx].next_sibling {
+                debug_assert_eq!(self.nodes[next_sibling].previous_sibling, Some(idx));
+                debug_assert_eq!(self.nodes[next_sibling].parent, self.nodes[idx].parent);
                 return Some(NodeIndex(next_sibling));
             }
             return_value = self.nodes[idx].parent;
@@ -598,6 +605,10 @@ impl<'a, T> Iterator for PruneAncestorsIter<'a, T> {
             }
 
             // Actually remove the node.
+            debug_assert!(self
+                .tree
+                .first_root
+                .map_or(true, |n| n != maybe_removed_node_index.0));
             let iter_node = self.tree.nodes.remove(maybe_removed_node_index.0);
 
             break Some(PrunedNode {
@@ -616,13 +627,26 @@ impl<'a, T> Iterator for PruneAncestorsIter<'a, T> {
 impl<'a, T> Drop for PruneAncestorsIter<'a, T> {
     fn drop(&mut self) {
         // Make sure that all elements are removed.
-        while let Some(_) = self.next() {}
+        loop {
+            if self.next().is_none() {
+                break;
+            }
+        }
 
         if self.uncles_only {
             debug_assert!(self.tree.first_root.is_some());
-            debug_assert!(self.tree.nodes.get(self.tree.first_root.unwrap()).is_some());
         }
+
+        debug_assert!(self
+            .tree
+            .first_root
+            .map_or(true, |fr| self.tree.nodes.contains(fr)));
+
         debug_assert_eq!(self.uncles_only, self.tree.get(self.new_final).is_some());
+
+        // Do a full pass on the tree. This triggers a lot of debug assertions.
+        #[cfg(debug_assertions)]
+        for _ in self.tree.iter_ancestry_order() {}
     }
 }
 

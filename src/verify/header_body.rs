@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -497,11 +497,12 @@ impl RuntimeCompilation {
             .as_ref()
             .unwrap();
 
-        let new_runtime = match host::HostVmPrototype::new(
-            code,
-            self.heap_pages,
-            vm::ExecHint::CompileAheadOfTime,
-        ) {
+        let new_runtime = match host::HostVmPrototype::new(host::Config {
+            module: code,
+            heap_pages: self.heap_pages,
+            exec_hint: vm::ExecHint::CompileAheadOfTime,
+            allow_unresolved_imports: false,
+        }) {
             Ok(vm) => vm,
             Err(err) => {
                 return Verify::Finished(Err((

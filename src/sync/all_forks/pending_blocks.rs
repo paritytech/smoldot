@@ -1,5 +1,5 @@
 // Substrate-lite
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -91,6 +91,7 @@ use alloc::{collections::BTreeSet, vec::Vec};
 use core::{
     iter,
     num::{NonZeroU32, NonZeroU64},
+    ops,
 };
 
 pub use disjoint::TreeRoot;
@@ -253,7 +254,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Add a new source to the container.
     ///
     /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
-    /// retrieved using [`PendingBlocks::source_user_data`].
+    /// retrieved using the `Index` trait implementation of this container.
     ///
     /// Returns the newly-created source entry.
     pub fn add_source(
@@ -439,28 +440,6 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ) -> bool {
         self.sources
             .source_knows_non_finalized_block(source_id, height, hash)
-    }
-
-    /// Returns the user data associated to the source. This is the value originally passed
-    /// through [`PendingBlocks::add_source`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is out of range.
-    ///
-    pub fn source_user_data(&self, source_id: SourceId) -> &TSrc {
-        &self.sources.user_data(source_id).user_data
-    }
-
-    /// Returns the user data associated to the source. This is the value originally passed
-    /// through [`PendingBlocks::add_source`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SourceId`] is out of range.
-    ///
-    pub fn source_user_data_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        &mut self.sources.user_data_mut(source_id).user_data
     }
 
     /// Updates the height of the finalized block.
@@ -953,6 +932,22 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                         }
                     })
             })
+    }
+}
+
+impl<TBl, TRq, TSrc> ops::Index<SourceId> for PendingBlocks<TBl, TRq, TSrc> {
+    type Output = TSrc;
+
+    #[track_caller]
+    fn index(&self, id: SourceId) -> &TSrc {
+        &self.sources[id].user_data
+    }
+}
+
+impl<TBl, TRq, TSrc> ops::IndexMut<SourceId> for PendingBlocks<TBl, TRq, TSrc> {
+    #[track_caller]
+    fn index_mut(&mut self, id: SourceId) -> &mut TSrc {
+        &mut self.sources[id].user_data
     }
 }
 

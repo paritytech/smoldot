@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -62,7 +62,9 @@ impl Role {
 /// Decoded block announcement notification.
 #[derive(Debug)]
 pub struct BlockAnnounceRef<'a> {
-    /// Header of the announced block.
+    /// SCALE-encoded header in the announce. Same as [`BlockAnnounceRef::header`].
+    pub scale_encoded_header: &'a [u8],
+    /// Header of the announced block. Same as [`BlockAnnounceRef::scale_encoded_header`].
     pub header: header::HeaderRef<'a>,
     /// True if the block is the new best block of the announcer.
     pub is_best: bool,
@@ -89,10 +91,12 @@ pub fn decode_block_announce(bytes: &[u8]) -> Result<BlockAnnounceRef, DecodeBlo
     let result: Result<_, nom::error::Error<_>> =
         nom::combinator::all_consuming(nom::combinator::map(
             nom::sequence::tuple((
-                |s| {
-                    header::decode_partial(s).map(|(a, b)| (b, a)).map_err(|_| {
-                        nom::Err::Failure(nom::error::make_error(s, nom::error::ErrorKind::Verify))
-                    })
+                |enc_hdr| match header::decode_partial(enc_hdr) {
+                    Ok((hdr, rest)) => Ok((rest, (hdr, &enc_hdr[..(enc_hdr.len() - rest.len())]))),
+                    Err(_) => Err(nom::Err::Failure(nom::error::make_error(
+                        enc_hdr,
+                        nom::error::ErrorKind::Verify,
+                    ))),
                 },
                 nom::branch::alt((
                     nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| false),
@@ -100,7 +104,11 @@ pub fn decode_block_announce(bytes: &[u8]) -> Result<BlockAnnounceRef, DecodeBlo
                 )),
                 crate::util::nom_bytes_decode,
             )),
-            |(header, is_best, _)| BlockAnnounceRef { header, is_best },
+            |((header, scale_encoded_header), is_best, _)| BlockAnnounceRef {
+                scale_encoded_header,
+                header,
+                is_best,
+            },
         ))(bytes)
         .finish();
 

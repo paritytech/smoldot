@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -22,11 +22,10 @@ use crate::libp2p::{
     PeerId,
 };
 use crate::network::{kademlia, protocol};
-use crate::util;
+use crate::util::{self, SipHasherBuild};
 
 use alloc::{
     borrow::Cow,
-    collections::BTreeSet,
     format,
     string::{String, ToString as _},
     vec::Vec,
@@ -41,7 +40,7 @@ use futures::{
     lock::{Mutex, MutexGuard},
     prelude::*,
 };
-use rand::{Rng as _, RngCore as _, SeedableRng as _};
+use rand::{seq::SliceRandom as _, Rng as _, SeedableRng as _};
 
 pub use crate::libp2p::{
     collection::ReadWrite,
@@ -77,9 +76,6 @@ pub struct Config<TNow> {
     /// The order in which the chains are list is important. The index of each entry needs to be
     /// used later in order to refer to a specific chain.
     pub chains: Vec<ChainConfig>,
-
-    // TODO: what about letting API users insert nodes later?
-    pub known_nodes: Vec<(peer_id::PeerId, multiaddr::Multiaddr)>,
 
     /// Key used for the encryption layer.
     /// This is a Noise static key, according to the Noise specification.
@@ -122,10 +118,6 @@ pub struct ChainConfig {
     /// > **Note**: This value is typically found in the specification of the chain (the
     /// >           "chain spec").
     pub protocol_id: String,
-
-    /// List of node identities that are known to belong to this overlay network. The node
-    /// identities are indices in [`Config::known_nodes`].
-    pub bootstrap_nodes: Vec<usize>,
 
     /// If `Some`, the chain uses the GrandPa networking protocol.
     pub grandpa_protocol_config: Option<GrandpaState>,
@@ -203,13 +195,17 @@ struct NextEventGuarded {
     to_process_pre_event: Option<peers::Event<multiaddr::Multiaddr>>,
 
     /// Tuples of `(peer_id, chain_index)` that have been reported as open to the API user.
-    open_chains: hashbrown::HashSet<(PeerId, usize), ahash::RandomState>,
+    ///
+    /// This is a subset of the block announce notification protocol substreams that are open.
+    /// Some substreams might have been opened and have been left out of this map if their
+    /// handshake was invalid, or had a different genesis hash, or similar problem.
+    open_chains: hashbrown::HashSet<(PeerId, usize), SipHasherBuild>,
 }
 
 /// See [`ChainNetwork::ephemeral_guarded`].
 struct EphemeralGuarded<TNow> {
     /// For each peer, the number of pending attempts.
-    num_pending_per_peer: hashbrown::HashMap<PeerId, NonZeroUsize, ahash::RandomState>,
+    num_pending_per_peer: hashbrown::HashMap<PeerId, NonZeroUsize, SipHasherBuild>,
 
     /// Keys of this slab are [`PendingId`]s. Values are the parameters associated to that
     /// [`PendingId`].
@@ -218,7 +214,7 @@ struct EphemeralGuarded<TNow> {
     pending_ids: slab::Slab<(PeerId, multiaddr::Multiaddr, TNow)>,
 
     /// List of all open connections.
-    connections: hashbrown::HashSet<PeerId, ahash::RandomState>,
+    connections: hashbrown::HashSet<PeerId, SipHasherBuild>,
 
     /// For each item in [`Config::chains`], the corresponding chain state.
     ///
@@ -230,14 +226,15 @@ struct EphemeralGuardedChain<TNow> {
     /// See [`ChainConfig`].
     chain_config: ChainConfig,
 
+    // TODO: merge in_peers and out_peers into one hashmap<_, SlotTy>
     /// List of peers with an inbound slot attributed to them. Only includes peers the local node
     /// is connected to and who have opened a block announces substream with the local node.
-    in_peers: hashbrown::HashSet<PeerId, ahash::RandomState>,
+    in_peers: hashbrown::HashSet<PeerId, SipHasherBuild>,
 
     /// List of peers with an outbound slot attributed to them. Can include peers not connected to
     /// the local node yet. The peers in this list are always marked as desired in the underlying
     /// state machine.
-    out_peers: hashbrown::HashSet<PeerId, ahash::RandomState>,
+    out_peers: hashbrown::HashSet<PeerId, SipHasherBuild>,
 
     /// Kademlia k-buckets of this chain.
     ///
@@ -247,7 +244,7 @@ struct EphemeralGuardedChain<TNow> {
     /// and disconnected when it is closed.
     ///
     /// For each peer, a list of addresses is hold. This list must never become empty.
-    kbuckets: kademlia::kbuckets::KBuckets<PeerId, addresses::Addresses, TNow>,
+    kbuckets: kademlia::kbuckets::KBuckets<PeerId, addresses::Addresses, TNow, 20>,
 }
 
 // Update this when a new request response protocol is added.
@@ -301,7 +298,6 @@ where
             inbound_config: peers::ConfigRequestResponseIn::Empty,
             max_response_size: 4096,
             inbound_allowed: true,
-            timeout: Duration::from_secs(20),
         })
         .chain(config.chains.iter().flat_map(|chain| {
             // TODO: limits are arbitrary
@@ -310,10 +306,6 @@ where
                 inbound_config: peers::ConfigRequestResponseIn::Payload { max_size: 1024 },
                 max_response_size: 16 * 1024 * 1024,
                 inbound_allowed: chain.allow_inbound_block_requests,
-                // The timeout needs to be long enough to potentially download the maximum
-                // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
-                // TODO: 128 seconds is way too long, so we put 16 seconds instead for now
-                timeout: Duration::from_secs(16),
             })
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/light/2", chain.protocol_id),
@@ -323,10 +315,6 @@ where
                 max_response_size: 10 * 1024 * 1024,
                 // TODO: make this configurable
                 inbound_allowed: false,
-                // The timeout needs to be long enough to potentially download the maximum
-                // response size of 10 MiB. Assuming a 128 kiB/sec connection, that's 80 seconds.
-                // TODO: 80 seconds is too much, reduce these 10 MiB to less?
-                timeout: Duration::from_secs(80),
             }))
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/kad", chain.protocol_id),
@@ -334,9 +322,6 @@ where
                 max_response_size: 1024 * 1024,
                 // TODO: `false` here means we don't insert ourselves in the DHT, which is the polite thing to do for as long as Kad isn't implemented
                 inbound_allowed: false,
-                // The timeout needs to be long enough to potentially download the maximum
-                // response size of 1 MiB. Assuming a 128 kiB/sec connection, that's 8 seconds.
-                timeout: Duration::from_secs(8),
             }))
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/sync/warp", chain.protocol_id),
@@ -344,10 +329,6 @@ where
                 max_response_size: 16 * 1024 * 1024,
                 // We don't support inbound warp sync requests (yet).
                 inbound_allowed: false,
-                // The timeout needs to be long enough to potentially download the maximum
-                // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
-                // TODO: 128 seconds is way too much so we temporarily put less, we need to reduce these 16 MiB to less
-                timeout: Duration::from_secs(32),
             }))
             .chain(iter::once(peers::ConfigRequestResponse {
                 name: format!("/{}/state/2", chain.protocol_id),
@@ -355,116 +336,37 @@ where
                 max_response_size: 16 * 1024 * 1024,
                 // We don't support inbound state requests (yet).
                 inbound_allowed: false,
-                // The timeout needs to be long enough to potentially download the maximum
-                // response size of 16 MiB. Assuming a 128 kiB/sec connection, that's 128 seconds.
-                // TODO: 128 seconds is way too much so we temporarily put less, we need to reduce these 16 MiB to less
-                timeout: Duration::from_secs(32),
             }))
         }))
         .collect();
 
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
-        let inner_randomness_seed = randomness.sample(rand::distributions::Standard);
-
-        let connections = {
-            let k0 = randomness.next_u64();
-            let k1 = randomness.next_u64();
-            let k2 = randomness.next_u64();
-            let k3 = randomness.next_u64();
-            hashbrown::HashSet::with_capacity_and_hasher(
-                config.peers_capacity,
-                ahash::RandomState::with_seeds(k0, k1, k2, k3),
-            )
-        };
-
-        let peers = {
-            let k0 = randomness.next_u64();
-            let k1 = randomness.next_u64();
-            let k2 = randomness.next_u64();
-            let k3 = randomness.next_u64();
-            hashbrown::HashMap::with_capacity_and_hasher(
-                config.peers_capacity,
-                ahash::RandomState::with_seeds(k0, k1, k2, k3),
-            )
-        };
-
-        let open_chains = {
-            let k0 = randomness.next_u64();
-            let k1 = randomness.next_u64();
-            let k2 = randomness.next_u64();
-            let k3 = randomness.next_u64();
-            hashbrown::HashSet::with_capacity_and_hasher(
-                config.peers_capacity * config.chains.len(),
-                ahash::RandomState::with_seeds(k0, k1, k2, k3),
-            )
-        };
-
-        let mut initial_desired_substreams = BTreeSet::new();
 
         let local_peer_id = PeerId::from_public_key(&peer_id::PublicKey::Ed25519(
             *config.noise_key.libp2p_public_ed25519_key(),
         ));
 
-        // TODO: this block below is a bit messy
-        let num_chains = config.chains.len();
-        let known_nodes = &config.known_nodes;
         let chains = config
             .chains
             .into_iter()
-            .enumerate()
-            .map(|(chain_index, chain)| {
-                let mut kbuckets = kademlia::kbuckets::KBuckets::new(
-                    local_peer_id.clone(),
-                    Duration::from_secs(20), // TODO: hardcoded
-                );
-
-                for node in chain.bootstrap_nodes.iter() {
-                    let (peer_id, addr) = &known_nodes[*node];
-                    // The insertion can fail if we have more bootnodes than the k-buckets have
-                    // entries.
-                    if let Ok(mut entry) = kbuckets.entry(peer_id).or_insert(
-                        addresses::Addresses::with_capacity(config.max_addresses_per_peer.get()),
-                        &config.now,
-                        kademlia::kbuckets::PeerState::Disconnected,
-                    ) {
-                        entry.get_mut().insert_discovered(addr.clone());
-                    }
-
-                    // TODO: remove this section once peer slots attribution is fleshed out
-                    for notifications_protocol in (0..NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
-                        .map(|n| n + NOTIFICATIONS_PROTOCOLS_PER_CHAIN * chain_index)
-                    {
-                        initial_desired_substreams
-                            .insert((peer_id.clone(), notifications_protocol));
-                    }
-                }
-
+            .map(|chain| {
                 EphemeralGuardedChain {
-                    in_peers: {
-                        let k0 = randomness.next_u64();
-                        let k1 = randomness.next_u64();
-                        let k2 = randomness.next_u64();
-                        let k3 = randomness.next_u64();
-                        hashbrown::HashSet::with_capacity_and_hasher(
-                            usize::try_from(chain.in_slots).unwrap_or(0),
-                            ahash::RandomState::with_seeds(k0, k1, k2, k3),
-                        )
-                    },
-                    out_peers: {
-                        let k0 = randomness.next_u64();
-                        let k1 = randomness.next_u64();
-                        let k2 = randomness.next_u64();
-                        let k3 = randomness.next_u64();
-                        hashbrown::HashSet::with_capacity_and_hasher(
-                            usize::try_from(chain.out_slots).unwrap_or(0),
-                            ahash::RandomState::with_seeds(k0, k1, k2, k3),
-                        )
-                    },
+                    in_peers: hashbrown::HashSet::with_capacity_and_hasher(
+                        usize::try_from(chain.in_slots).unwrap_or(0),
+                        SipHasherBuild::new(randomness.gen()),
+                    ),
+                    out_peers: hashbrown::HashSet::with_capacity_and_hasher(
+                        usize::try_from(chain.out_slots).unwrap_or(0),
+                        SipHasherBuild::new(randomness.gen()),
+                    ),
                     chain_config: chain,
-                    kbuckets,
+                    kbuckets: kademlia::kbuckets::KBuckets::new(
+                        local_peer_id.clone(),
+                        Duration::from_secs(20), // TODO: hardcoded
+                    ),
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
 
         ChainNetwork {
             inner: peers::Peers::new(peers::Config {
@@ -472,27 +374,34 @@ where
                 peers_capacity: config.peers_capacity,
                 request_response_protocols,
                 noise_key: config.noise_key,
-                randomness_seed: inner_randomness_seed,
+                randomness_seed: randomness.sample(rand::distributions::Standard),
                 pending_api_events_buffer_size: config.pending_api_events_buffer_size,
                 notification_protocols,
                 ping_protocol: "/ipfs/ping/1.0.0".into(),
                 handshake_timeout: config.handshake_timeout,
-                initial_desired_peers: Default::default(), // Empty
-                initial_desired_substreams,
             }),
+            num_chains: chains.len(),
             next_event_guarded: Mutex::new(NextEventGuarded {
                 to_process_pre_event: None,
-                open_chains,
+                open_chains: hashbrown::HashSet::with_capacity_and_hasher(
+                    config.peers_capacity * chains.len(),
+                    SipHasherBuild::new(randomness.gen()),
+                ),
             }),
             ephemeral_guarded: Mutex::new(EphemeralGuarded {
-                num_pending_per_peer: peers,
+                num_pending_per_peer: hashbrown::HashMap::with_capacity_and_hasher(
+                    config.peers_capacity,
+                    SipHasherBuild::new(randomness.gen()),
+                ),
                 pending_ids: slab::Slab::with_capacity(config.peers_capacity),
-                connections,
+                connections: hashbrown::HashSet::with_capacity_and_hasher(
+                    config.peers_capacity,
+                    SipHasherBuild::new(randomness.gen()),
+                ),
                 chains,
             }),
             handshake_timeout: config.handshake_timeout,
             max_addresses_per_peer: config.max_addresses_per_peer,
-            num_chains,
             randomness: Mutex::new(randomness),
             start_connect_needed: event_listener::Event::new(),
         }
@@ -626,6 +535,7 @@ where
         target: &peer_id::PeerId,
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
+        timeout: Duration,
     ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
         if !config.fields.header {
             return Err(BlocksRequestError::NotVerifiable);
@@ -635,7 +545,7 @@ where
         let requested_fields = config.fields.clone();
 
         let mut result = self
-            .blocks_request_unchecked(now, target, chain_index, config)
+            .blocks_request_unchecked(now, target, chain_index, config, timeout)
             .await?;
 
         if result.is_empty() {
@@ -728,6 +638,7 @@ where
         target: &peer_id::PeerId,
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
+        timeout: Duration,
     ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
         let request_data = protocol::build_block_request(config).fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
@@ -737,10 +648,10 @@ where
         let response = self
             .inner
             .request(
-                now,
                 target,
                 self.protocol_index(chain_index, 0),
                 request_data,
+                now + timeout,
             )
             .map_err(BlocksRequestError::Request)
             .await?;
@@ -754,16 +665,17 @@ where
         target: &peer_id::PeerId,
         chain_index: usize,
         begin_hash: [u8; 32],
+        timeout: Duration,
     ) -> Result<protocol::GrandpaWarpSyncResponse, GrandpaWarpSyncRequestError> {
         let request_data = begin_hash.to_vec();
 
         let response = self
             .inner
             .request(
-                now,
                 target,
                 self.protocol_index(chain_index, 3),
                 request_data,
+                now + timeout,
             )
             .map_err(GrandpaWarpSyncRequestError::Request)
             .await?;
@@ -791,6 +703,7 @@ where
         chain_index: usize,
         block_hash: [u8; 32],
         start_key: &[u8],
+        timeout: Duration,
     ) -> Result<Vec<protocol::StateResponseEntry>, StateRequestError> {
         let request_data = protocol::build_state_request(protocol::StateRequestConfig {
             block_hash,
@@ -804,10 +717,10 @@ where
         let response = self
             .inner
             .request(
-                now,
                 target,
                 self.protocol_index(chain_index, 4),
                 request_data,
+                now + timeout,
             )
             .map_err(StateRequestError::Request)
             .await?;
@@ -823,6 +736,7 @@ where
         target: &peer_id::PeerId,
         chain_index: usize,
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
+        timeout: Duration,
     ) -> Result<Vec<Vec<u8>>, StorageProofRequestError> {
         let request_data =
             protocol::build_storage_proof_request(config).fold(Vec::new(), |mut a, b| {
@@ -833,10 +747,10 @@ where
         let response = self
             .inner
             .request(
-                now,
                 target,
                 self.protocol_index(chain_index, 1),
                 request_data,
+                now + timeout,
             )
             .map_err(StorageProofRequestError::Request)
             .await?;
@@ -860,6 +774,7 @@ where
         target: &peer_id::PeerId,
         chain_index: usize,
         config: protocol::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
+        timeout: Duration,
     ) -> Result<Vec<Vec<u8>>, CallProofRequestError> {
         let request_data =
             protocol::build_call_proof_request(config).fold(Vec::new(), |mut a, b| {
@@ -870,10 +785,10 @@ where
         let response = self
             .inner
             .request(
-                now,
                 target,
                 self.protocol_index(chain_index, 1),
                 request_data,
+                now + timeout,
             )
             .map_err(CallProofRequestError::Request)
             .await?;
@@ -901,6 +816,54 @@ where
                 val,
             )
             .await
+    }
+
+    /// Inserts the given list of nodes into the list of known nodes held within the state machine.
+    ///
+    /// The service might, but without guarantee, try to connect to these nodes in the future.
+    pub async fn discover(
+        &self,
+        now: &TNow,
+        chain_index: usize,
+        list: impl IntoIterator<
+            Item = (
+                peer_id::PeerId,
+                impl IntoIterator<Item = multiaddr::Multiaddr>,
+            ),
+        >,
+    ) {
+        let mut lock = self.ephemeral_guarded.lock().await;
+        let lock = &mut *lock; // Avoids borrow checker issues.
+
+        let kbuckets = &mut lock.chains[chain_index].kbuckets;
+
+        for (peer_id, discovered_addrs) in list {
+            let mut discovered_addrs = discovered_addrs.into_iter().peekable();
+
+            // Check whether there is any address in the iterator at all before inserting the
+            // node in the buckets.
+            if discovered_addrs.peek().is_none() {
+                continue;
+            }
+
+            // TODO: also insert addresses in kbuckets of other chains? a bit unclear
+            if let Ok(mut kbuckets_addrs) = kbuckets.entry(&peer_id).or_insert(
+                addresses::Addresses::with_capacity(self.max_addresses_per_peer.get()),
+                now,
+                kademlia::kbuckets::PeerState::Disconnected,
+            ) {
+                for to_insert in discovered_addrs {
+                    if kbuckets_addrs.get_mut().len() >= self.max_addresses_per_peer.get() {
+                        continue;
+                    }
+
+                    kbuckets_addrs.get_mut().insert_discovered(to_insert);
+                }
+
+                // List of addresses must never be empty.
+                debug_assert!(!kbuckets_addrs.get_mut().is_empty());
+            }
+        }
     }
 
     /// After calling [`ChainNetwork::next_start_connect`], notifies the [`ChainNetwork`] of the
@@ -982,6 +945,7 @@ where
             let expected_peer_id = expected_peer_id.clone(); // Necessary for borrowck reasons.
 
             for chain_index in 0..lock.chains.len() {
+                // TODO: report as event or something; this is complicated because of futures cancellation issues, and because of concerns shown in `assign_slots`
                 self.unassign_slot(&mut *lock, chain_index, &expected_peer_id)
                     .await;
             }
@@ -1117,7 +1081,7 @@ where
                     // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
                     for chain in &mut ephemeral_guarded.chains {
                         if let Some(mut entry) = chain.kbuckets.entry(peer_id).into_occupied() {
-                            entry.set_state(kademlia::kbuckets::PeerState::Disconnected);
+                            entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
                             entry.get_mut().set_disconnected(address);
                         }
                     }
@@ -1145,7 +1109,7 @@ where
                     // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
                     for chain in &mut ephemeral_guarded.chains {
                         if let Some(mut entry) = chain.kbuckets.entry(peer_id).into_occupied() {
-                            entry.set_state(kademlia::kbuckets::PeerState::Disconnected);
+                            entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
                             entry.get_mut().set_disconnected(address);
                         }
                     }
@@ -1297,7 +1261,7 @@ where
                         )
                         .await;
 
-                    {
+                    let slot_ty = {
                         let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
                         let local_genesis = ephemeral_guarded.chains[chain_index]
                             .chain_config
@@ -1305,14 +1269,17 @@ where
                         let remote_genesis = *remote_handshake.genesis_hash;
 
                         if remote_genesis != local_genesis {
-                            self.unassign_slot(&mut *ephemeral_guarded, chain_index, peer_id)
-                                .await;
+                            let unassigned_slot_ty = self
+                                .unassign_slot(&mut *ephemeral_guarded, chain_index, peer_id)
+                                .await
+                                .unwrap();
 
                             return match guarded.to_process_pre_event.take().unwrap() {
                                 peers::Event::NotificationsOutResult { peer_id, .. } => {
                                     Event::ChainConnectAttemptFailed {
                                         peer_id,
                                         chain_index,
+                                        unassigned_slot_ty,
                                         error: NotificationsOutErr::GenesisMismatch {
                                             local_genesis,
                                             remote_genesis,
@@ -1329,9 +1296,21 @@ where
                             .entry(peer_id)
                             .into_occupied()
                         {
-                            entry.set_state(kademlia::kbuckets::PeerState::Connected);
+                            entry.set_state(&now, kademlia::kbuckets::PeerState::Connected);
                         }
-                    }
+
+                        if ephemeral_guarded.chains[chain_index]
+                            .in_peers
+                            .contains(&peer_id)
+                        {
+                            SlotTy::Inbound
+                        } else {
+                            debug_assert!(ephemeral_guarded.chains[chain_index]
+                                .out_peers
+                                .contains(&peer_id));
+                            SlotTy::Outbound
+                        }
+                    };
 
                     let _was_inserted = guarded.open_chains.insert((peer_id.clone(), chain_index));
                     debug_assert!(_was_inserted);
@@ -1345,6 +1324,7 @@ where
                             Event::ChainConnected {
                                 peer_id,
                                 chain_index,
+                                slot_ty,
                                 best_hash,
                                 best_number,
                                 role,
@@ -1465,12 +1445,14 @@ where
                     let chain_index =
                         *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
-                    self.unassign_slot(
-                        &mut *self.ephemeral_guarded.lock().await,
-                        chain_index,
-                        peer_id,
-                    )
-                    .await;
+                    let unassigned_slot_ty = self
+                        .unassign_slot(
+                            &mut *self.ephemeral_guarded.lock().await,
+                            chain_index,
+                            peer_id,
+                        )
+                        .await
+                        .unwrap();
 
                     // As a slot has been unassigned, wake up the discovery process in order for
                     // it to be filled.
@@ -1487,6 +1469,7 @@ where
                             return Event::ChainConnectAttemptFailed {
                                 peer_id,
                                 chain_index,
+                                unassigned_slot_ty,
                                 error: NotificationsOutErr::Substream(error),
                             };
                         }
@@ -1527,47 +1510,76 @@ where
                         )
                         .await;
 
-                    self.unassign_slot(
-                        &mut *self.ephemeral_guarded.lock().await,
-                        chain_index,
-                        peer_id,
-                    )
-                    .await;
-
-                    // Update the k-buckets, marking the peer as disconnected.
-                    {
-                        let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                        if let Some(mut entry) = ephemeral_guarded.chains[chain_index]
-                            .kbuckets
-                            .entry(peer_id)
-                            .into_occupied()
-                        {
-                            entry.set_state(kademlia::kbuckets::PeerState::Disconnected);
-                        }
-                    }
-
                     // The chain is now considered as closed.
-                    let _was_removed = guarded.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
-                    debug_assert!(_was_removed);
+                    let was_open = guarded.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
 
-                    // As a slot has been unassigned, wake up the discovery process in order for
-                    // it to be filled.
-                    // TODO: correct?
-                    // TODO: if necessary, mark another peer+substream tuple as desired to fill a slot
-                    self.start_connect_needed.notify_additional(1);
+                    if was_open {
+                        // Update the k-buckets, marking the peer as disconnected.
+                        let unassigned_slot_ty = {
+                            let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
 
-                    return Event::ChainDisconnected {
-                        chain_index,
-                        peer_id: match guarded.to_process_pre_event.take().unwrap() {
-                            peers::Event::NotificationsOutClose { peer_id, .. } => peer_id,
-                            _ => unreachable!(),
-                        },
-                    };
+                            let unassigned_slot_ty = self
+                                .unassign_slot(&mut *ephemeral_guarded, chain_index, peer_id)
+                                .await
+                                .unwrap();
+
+                            if let Some(mut entry) = ephemeral_guarded.chains[chain_index]
+                                .kbuckets
+                                .entry(peer_id)
+                                .into_occupied()
+                            {
+                                entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
+                            }
+
+                            unassigned_slot_ty
+                        };
+
+                        // As a slot has been unassigned, wake up the discovery process in order for
+                        // it to be filled.
+                        // TODO: correct?
+                        // TODO: if necessary, mark another peer+substream tuple as desired to fill a slot
+                        self.start_connect_needed.notify_additional(1);
+
+                        return Event::ChainDisconnected {
+                            chain_index,
+                            peer_id: match guarded.to_process_pre_event.take().unwrap() {
+                                peers::Event::NotificationsOutClose { peer_id, .. } => peer_id,
+                                _ => unreachable!(),
+                            },
+                            unassigned_slot_ty,
+                        };
+                    } else {
+                        guarded.to_process_pre_event = None;
+                    }
                 }
 
                 // Other protocol.
-                peers::Event::NotificationsOutClose { .. } => {
-                    // TODO: should try reopen the substream
+                peers::Event::NotificationsOutClose {
+                    peer_id,
+                    notifications_protocol_index,
+                    ..
+                } => {
+                    let chain_index =
+                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+
+                    // The state of notification substreams other than block announces must
+                    // always match the state of the block announces.
+                    // Therefore, if the peer is considered open, try to reopen the substream that
+                    // has just been closed.
+                    // TODO: cloning of peer_id :-/
+                    if guarded
+                        .open_chains
+                        .contains(&(peer_id.clone(), chain_index))
+                    {
+                        self.inner
+                            .set_peer_notifications_out_desired(
+                                peer_id,
+                                *notifications_protocol_index,
+                                peers::DesiredState::DesiredReset,
+                            )
+                            .await;
+                    }
+
                     guarded.to_process_pre_event = None;
                 }
 
@@ -1792,9 +1804,19 @@ where
                             .in_peers
                             .insert(peer_id.clone());
                         debug_assert!(_was_inserted);
-                    }
 
-                    guarded.to_process_pre_event = None;
+                        return match guarded.to_process_pre_event.take().unwrap() {
+                            peers::Event::DesiredInNotification { peer_id, .. } => {
+                                Event::InboundSlotAssigned {
+                                    chain_index,
+                                    peer_id,
+                                }
+                            }
+                            _ => unreachable!(),
+                        };
+                    } else {
+                        guarded.to_process_pre_event = None;
+                    }
                 }
 
                 // Remote wants to open a transactions substream.
@@ -1934,13 +1956,16 @@ where
         close_to_key: &[u8],
     ) -> Result<Vec<(peer_id::PeerId, Vec<multiaddr::Multiaddr>)>, KademliaFindNodeError> {
         let request_data = kademlia::build_find_node_request(close_to_key);
+        // The timeout needs to be long enough to potentially download the maximum
+        // response size of 1 MiB. Assuming a 128 kiB/sec connection, that's 8 seconds.
+        let timeout = now + Duration::from_secs(8);
         let response = self
             .inner
             .request(
-                now,
                 target,
                 self.protocol_index(chain_index, 2),
                 request_data,
+                timeout,
             )
             .await
             .map_err(KademliaFindNodeError::RequestFailed)?;
@@ -1961,7 +1986,8 @@ where
     ///
     /// If no outgoing connection is desired, the method waits until there is one.
     // TODO: give more control, with number of slots and node choice
-    pub async fn next_start_connect<'a>(&self, now: TNow) -> StartConnect<TNow> {
+    // TODO: this API with now is a bit hacky?
+    pub async fn next_start_connect<'a>(&self, now: impl FnOnce() -> TNow) -> StartConnect<TNow> {
         loop {
             let mut pending_lock = self.ephemeral_guarded.lock().await;
             let pending = &mut *pending_lock; // Prevents borrow checker issues.
@@ -2001,6 +2027,7 @@ where
                     }
                 }
 
+                let now = now();
                 let pending_id = PendingId(pending.pending_ids.insert((
                     entry.key().clone(),
                     multiaddr.clone(),
@@ -2060,14 +2087,24 @@ where
     ///
     ///
     /// Returns the [`PeerId`] that now has an outbound slot. This information can be used for
-    /// logging purposes.
+    /// logging purposes. Keep in mind, however, that [`ChainNetwork::next_event`] might unassign
+    /// slots only for them to be immediately assigned again in this function. If you naively
+    /// log the value returned by this function and the value returned by `next_event`, you might
+    /// see the slot assignments and de-assignments in the wrong order.
     // TODO: docs
     // TODO: when to call this?
     pub async fn assign_slots(&self, chain_index: usize) -> Option<PeerId> {
         let mut lock = self.ephemeral_guarded.lock().await;
         let chain = &mut lock.chains[chain_index];
 
-        for (peer_id, _) in chain.kbuckets.iter() {
+        let list = {
+            let mut list = chain.kbuckets.iter().collect::<Vec<_>>();
+            let mut randomness = self.randomness.lock().await;
+            list.shuffle(&mut *randomness);
+            list
+        };
+
+        for (peer_id, _) in list {
             // Check if maximum number of slots is reached.
             if chain.out_peers.len()
                 >= usize::try_from(chain.chain_config.out_slots).unwrap_or(usize::max_value())
@@ -2076,18 +2113,11 @@ where
             }
 
             // Don't assign slots to peers that already have a slot.
-            if chain.out_peers.contains(peer_id) {
+            if chain.out_peers.contains(peer_id) || chain.in_peers.contains(peer_id) {
                 continue;
             }
 
             // It is now guaranteed that this peer will be assigned an outbound slot.
-
-            // It is possible that this peer already has an inbound slot, in which case we turn
-            // the inbound slot into an outbound slot.
-            if chain.in_peers.remove(peer_id) {
-                chain.out_peers.insert(peer_id.clone());
-                return Some(peer_id.clone());
-            }
 
             // The peer is marked as desired before inserting it in `out_peers`, to handle
             // potential future cancellation issues.
@@ -2113,7 +2143,7 @@ where
         ephemeral_guarded: &mut EphemeralGuarded<TNow>,
         chain_index: usize,
         peer_id: &PeerId,
-    ) {
+    ) -> Option<SlotTy> {
         self.inner
             .set_peer_notifications_out_desired(
                 peer_id,
@@ -2122,13 +2152,21 @@ where
             )
             .await;
 
-        let _was_in_out = ephemeral_guarded.chains[chain_index]
+        let was_in_out = ephemeral_guarded.chains[chain_index]
             .out_peers
             .remove(peer_id);
-        let _was_in_in = ephemeral_guarded.chains[chain_index]
+        let was_in_in = ephemeral_guarded.chains[chain_index]
             .in_peers
             .remove(peer_id);
-        debug_assert!(!_was_in_out || !_was_in_in);
+
+        match (was_in_in, was_in_out) {
+            (true, false) => Some(SlotTy::Inbound),
+            (false, true) => Some(SlotTy::Outbound),
+            (false, false) => None,
+            (true, true) => {
+                unreachable!()
+            }
+        }
     }
 }
 
@@ -2169,6 +2207,8 @@ pub enum Event<'a, TNow> {
     ChainConnected {
         chain_index: usize,
         peer_id: peer_id::PeerId,
+        /// Type of the slot that the peer has.
+        slot_ty: SlotTy,
         /// Role the node reports playing on the network.
         role: protocol::Role,
         /// Height of the best block according to this node.
@@ -2179,6 +2219,8 @@ pub enum Event<'a, TNow> {
     ChainDisconnected {
         peer_id: peer_id::PeerId,
         chain_index: usize,
+        /// Type of the slot that the peer had and no longer has.
+        unassigned_slot_ty: SlotTy,
     },
 
     /// An attempt has been made to open the given chain, but a problem happened.
@@ -2187,6 +2229,18 @@ pub enum Event<'a, TNow> {
         peer_id: peer_id::PeerId,
         /// Problem that happened.
         error: NotificationsOutErr,
+        /// Type of the slot that the peer had and no longer has.
+        unassigned_slot_ty: SlotTy,
+    },
+
+    /// The given peer has opened a block announces substream with the local node, and an inbound
+    /// slot has been assigned locally to this peer.
+    ///
+    /// A [`Event::ChainConnected`] or [`Event::ChainConnectAttemptFailed`] will later be
+    /// generated for this peer.
+    InboundSlotAssigned {
+        chain_index: usize,
+        peer_id: peer_id::PeerId,
     },
 
     /// Received a new block announce from a peer.
@@ -2246,6 +2300,12 @@ pub enum Event<'a, TNow> {
         peer_id: peer_id::PeerId,
         transactions: EncodedTransactions,
     }*/
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SlotTy {
+    Inbound,
+    Outbound,
 }
 
 /// Error that can happen when trying to open an outbound notifications substream.
@@ -2336,41 +2396,25 @@ impl<'a, TNow> DiscoveryInsert<'a, TNow>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
-    /// Returns the list of [`peer_id::PeerId`]s that will be inserted.
-    pub fn peer_ids(&self) -> impl Iterator<Item = &peer_id::PeerId> {
-        self.outcome.iter().map(|(peer_id, _)| peer_id)
+    /// Returns the list of [`peer_id::PeerId`]s that will be inserted and their addresses.
+    pub fn discovered(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &peer_id::PeerId,
+            impl Iterator<Item = &multiaddr::Multiaddr>,
+        ),
+    > {
+        self.outcome
+            .iter()
+            .map(|(peer_id, addrs)| (peer_id, addrs.iter()))
     }
 
     /// Insert the results in the [`ChainNetwork`].
     pub async fn insert(self, now: &TNow) {
-        let mut lock = self.service.ephemeral_guarded.lock().await;
-        let lock = &mut *lock; // Avoids borrow checker issues.
-
-        let kbuckets = &mut lock.chains[self.chain_index].kbuckets;
-
-        for (peer_id, discovered_addrs) in self.outcome {
-            if discovered_addrs.is_empty() {
-                continue;
-            }
-
-            // TODO: also insert addresses in kbuckets of other chains? a bit unclear
-            if let Ok(mut kbuckets_addrs) = kbuckets.entry(&peer_id).or_insert(
-                addresses::Addresses::with_capacity(self.service.max_addresses_per_peer.get()),
-                now,
-                kademlia::kbuckets::PeerState::Disconnected,
-            ) {
-                for to_insert in discovered_addrs {
-                    if kbuckets_addrs.get_mut().len() >= self.service.max_addresses_per_peer.get() {
-                        continue;
-                    }
-
-                    kbuckets_addrs.get_mut().insert_discovered(to_insert);
-                }
-
-                // List of addresses must never be empty.
-                debug_assert!(!kbuckets_addrs.get_mut().is_empty());
-            }
-        }
+        self.service
+            .discover(now, self.chain_index, self.outcome)
+            .await
     }
 }
 

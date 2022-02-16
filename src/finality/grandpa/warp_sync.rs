@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -14,6 +14,8 @@
 
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+// TODO: really needs documentation
 
 use crate::chain::chain_information::{ChainInformationFinality, ChainInformationFinalityRef};
 use crate::finality;
@@ -39,6 +41,7 @@ pub enum Error {
     EmptyProof,
     InvalidHeader(header::Error),
     InvalidJustification(finality::justification::decode::Error),
+    WrongChainAlgorithm,
 }
 
 impl fmt::Display for Error {
@@ -65,12 +68,18 @@ impl fmt::Display for Error {
             Error::EmptyProof => write!(f, "Warp sync proof is empty"),
             Error::InvalidHeader(_) => write!(f, "Failed to decode header"),
             Error::InvalidJustification(_) => write!(f, "Failed to decode justification"),
+            Error::WrongChainAlgorithm => {
+                write!(f, "Chain information doesn't use the Grandpa algorithm")
+            }
         }
     }
 }
 
 #[derive(Debug)]
 pub struct Verifier {
+    /// If `true`, the verification should instantly fail with an error.
+    wrong_chain_algorithm: bool,
+
     index: usize,
     authorities_set_id: u64,
     authorities_list: Vec<GrandpaAuthority>,
@@ -84,20 +93,25 @@ impl Verifier {
         warp_sync_response_fragments: Vec<GrandpaWarpSyncResponseFragment>,
         is_proof_complete: bool,
     ) -> Self {
-        let (authorities_list, authorities_set_id) = match start_chain_information_finality {
-            ChainInformationFinalityRef::Grandpa {
-                finalized_triggered_authorities,
-                after_finalized_block_authorities_set_id,
-                ..
-            } => {
-                let authorities_list = finalized_triggered_authorities.to_vec();
-                (authorities_list, after_finalized_block_authorities_set_id)
-            }
-            // TODO:
-            _ => unimplemented!(),
-        };
+        let (wrong_chain_algorithm, authorities_list, authorities_set_id) =
+            match start_chain_information_finality {
+                ChainInformationFinalityRef::Grandpa {
+                    finalized_triggered_authorities,
+                    after_finalized_block_authorities_set_id,
+                    ..
+                } => {
+                    let authorities_list = finalized_triggered_authorities.to_vec();
+                    (
+                        false,
+                        authorities_list,
+                        after_finalized_block_authorities_set_id,
+                    )
+                }
+                _ => (true, Vec::new(), 0),
+            };
 
         Self {
+            wrong_chain_algorithm,
             index: 0,
             authorities_set_id,
             authorities_list,
@@ -107,8 +121,16 @@ impl Verifier {
     }
 
     pub fn next(mut self) -> Result<Next, Error> {
+        if self.wrong_chain_algorithm {
+            return Err(Error::WrongChainAlgorithm);
+        }
+
         if self.fragments.is_empty() {
-            return Err(Error::EmptyProof);
+            if self.is_proof_complete {
+                return Ok(Next::EmptyProof);
+            } else {
+                return Err(Error::EmptyProof);
+            }
         }
 
         debug_assert!(self.fragments.len() > self.index);
@@ -180,6 +202,7 @@ impl Verifier {
 
 pub enum Next {
     NotFinished(Verifier),
+    EmptyProof,
     Success {
         scale_encoded_header: Vec<u8>,
         chain_information_finality: ChainInformationFinality,

@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -50,6 +50,8 @@
 
 // TODO: the code of this module is rather complicated; either simplify it or write a lot of tests, including fuzzing tests
 
+use crate::util::SipHasherBuild;
+
 use alloc::vec::Vec;
 use core::{cmp, fmt, mem, num::NonZeroU32};
 use hashbrown::hash_map::{Entry, OccupiedEntry};
@@ -61,7 +63,7 @@ pub struct Yamux<T> {
     /// List of substreams currently open in the yamux state machine.
     ///
     /// A SipHasher is used in order to avoid hash collision attacks on substream IDs.
-    substreams: hashbrown::HashMap<NonZeroU32, Substream<T>, ahash::RandomState>,
+    substreams: hashbrown::HashMap<NonZeroU32, Substream<T>, SipHasherBuild>,
 
     /// What kind of data is expected on the socket next.
     incoming: Incoming,
@@ -146,18 +148,7 @@ impl<T> Yamux<T> {
         Yamux {
             substreams: hashbrown::HashMap::with_capacity_and_hasher(
                 config.capacity,
-                ahash::RandomState::with_seeds(
-                    u64::from_ne_bytes(<[u8; 8]>::try_from(&config.randomness_seed[0..8]).unwrap()),
-                    u64::from_ne_bytes(
-                        <[u8; 8]>::try_from(&config.randomness_seed[8..16]).unwrap(),
-                    ),
-                    u64::from_ne_bytes(
-                        <[u8; 8]>::try_from(&config.randomness_seed[16..24]).unwrap(),
-                    ),
-                    u64::from_ne_bytes(
-                        <[u8; 8]>::try_from(&config.randomness_seed[24..32]).unwrap(),
-                    ),
-                ),
+                SipHasherBuild::new(config.randomness_seed),
             ),
             incoming: Incoming::Header(arrayvec::ArrayVec::new()),
             next_outbound_substream: if config.is_initiator {
@@ -906,13 +897,13 @@ pub struct Config {
     pub capacity: usize,
     /// Seed used for the randomness. Used to avoid HashDos attack and determines the order in
     /// which the data on substreams is sent out.
-    pub randomness_seed: [u8; 32],
+    pub randomness_seed: [u8; 16],
 }
 
 /// Reference to a substream within the [`Yamux`].
 // TODO: Debug
 pub struct SubstreamMut<'a, T> {
-    substream: OccupiedEntry<'a, NonZeroU32, Substream<T>, ahash::RandomState>,
+    substream: OccupiedEntry<'a, NonZeroU32, Substream<T>, SipHasherBuild>,
 }
 
 impl<'a, T> SubstreamMut<'a, T> {

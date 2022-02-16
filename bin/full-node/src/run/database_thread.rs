@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -45,6 +45,20 @@ impl DatabaseThread {
             .await
             .unwrap();
         rx.await.unwrap()
+    }
+
+    pub async fn with_database_detached(
+        &self,
+        closure: impl FnOnce(&SqliteFullDatabase) + Send + 'static,
+    ) {
+        self.sender
+            .lock()
+            .await
+            .send(Box::new(move |db| {
+                closure(db);
+            }))
+            .await
+            .unwrap();
     }
 }
 

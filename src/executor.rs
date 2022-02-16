@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -29,7 +29,7 @@
 //! sub-module is [`runtime_host`].
 
 use alloc::vec::Vec;
-use core::{fmt, str};
+use core::{fmt, ops, str};
 
 mod allocator; // TODO: make public after refactoring
 pub mod host;
@@ -99,6 +99,9 @@ pub fn core_version(
             }
 
             // Emitted log lines are ignored.
+            host::HostVm::GetMaxLogLevel(resume) => {
+                vm = resume.resume(0); // Off
+            }
             host::HostVm::LogEmit(log) => vm = log.resume(),
 
             host::HostVm::Error { prototype, error } => {
@@ -180,12 +183,46 @@ pub struct CoreVersionRef<'a> {
     ///
     /// Older versions of Substrate didn't provide this field. `None` if the field is missing.
     pub transaction_version: Option<u32>,
+
+    /// Version number of the state trie encoding version.
+    ///
+    /// Version 0 corresponds to a different trie encoding than version 1.
+    ///
+    /// This field has been added to Substrate on 24th December 2021. Older versions of Substrate
+    /// didn't provide this field, in which case it will contain `None`.
+    ///
+    /// `None` should be interpreted the same way as `Some(0)`.
+    pub state_version: Option<u8>,
 }
 
 /// Iterator to a list of APIs. See [`CoreVersionRef::apis`].
 #[derive(Clone)]
 pub struct CoreVersionApisRefIter<'a> {
     inner: &'a [u8],
+}
+
+impl<'a> CoreVersionApisRefIter<'a> {
+    /// Returns `true` if this iterator contains the API with the given name and its version is in
+    /// the provided range.
+    ///
+    /// > **Note**: If you start iterating (for example by calling `next()`) then call this
+    /// >           function, the search will only be performed on the rest of the iterator,
+    /// >           which is typically not what you want. Preferably always call this function
+    /// >           on a fresh iterator.
+    pub fn contains(&self, api_name: &str, version_number: impl ops::RangeBounds<u32>) -> bool {
+        self.contains_hashed(&hash_api_name(api_name), version_number)
+    }
+
+    /// Similar to [`CoreVersionApisRefIter::contains`], but allows passing the hash of the
+    /// API name instead of its unhashed version.
+    pub fn contains_hashed(
+        &self,
+        api_name_hash: &[u8; 8],
+        version_number: impl ops::RangeBounds<u32>,
+    ) -> bool {
+        self.clone()
+            .any(|api| api.name_hash == *api_name_hash && version_number.contains(&api.version))
+    }
 }
 
 impl<'a> Iterator for CoreVersionApisRefIter<'a> {
@@ -233,6 +270,12 @@ impl<'a> fmt::Debug for CoreVersionApisRefIter<'a> {
     }
 }
 
+/// Hashes the name of an API in order to be able to compare it to [`CoreVersionApi::name_hash`].
+pub fn hash_api_name(api_name: &str) -> [u8; 8] {
+    let result = blake2_rfc::blake2b::blake2b(8, &[], api_name.as_bytes());
+    result.as_bytes().try_into().unwrap()
+}
+
 /// One API that the runtime supports.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CoreVersionApi {
@@ -271,6 +314,10 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
                 nom::combinator::map(nom::number::complete::le_u32, Some),
                 nom::combinator::map(nom::combinator::eof, |_| None),
             )),
+            nom::branch::alt((
+                nom::combinator::map(nom::number::complete::u8, Some),
+                nom::combinator::map(nom::combinator::eof, |_| None),
+            )),
         )),
         |(
             spec_name,
@@ -280,6 +327,7 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
             impl_version,
             apis,
             transaction_version,
+            state_version,
         )| CoreVersionRef {
             spec_name,
             impl_name,
@@ -288,6 +336,7 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
             impl_version,
             apis,
             transaction_version,
+            state_version,
         },
     ))(scale_encoded);
 

@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -29,7 +29,7 @@
 
 use crate::run::{database_thread, jaeger_service};
 
-use core::{cmp, pin::Pin, task::Poll, time::Duration};
+use core::{cmp, task::Poll, time::Duration};
 use futures::{channel::mpsc, prelude::*};
 use futures_timer::Delay;
 use smoldot::{
@@ -38,18 +38,24 @@ use smoldot::{
     informant::HashDisplay,
     libp2p::{
         async_std_connection, connection,
-        multiaddr::{Multiaddr, Protocol},
+        multiaddr::{Multiaddr, ProtocolRef},
         peer_id::{self, PeerId},
     },
     network::{protocol, service},
 };
-use std::{io, net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Instant};
+use std::{
+    io, iter,
+    net::{IpAddr, SocketAddr},
+    num::NonZeroUsize,
+    sync::Arc,
+    time::Instant,
+};
 use tracing::Instrument as _;
 
 /// Configuration for a [`NetworkService`].
-pub struct Config {
+pub struct Config<'a> {
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+    pub tasks_executor: &'a mut dyn FnMut(future::BoxFuture<'static, ()>),
 
     /// Number of event receivers returned by [`NetworkService::new`].
     pub num_events_receivers: usize,
@@ -141,29 +147,19 @@ struct Inner {
 impl NetworkService {
     /// Initializes the network service with the given configuration.
     pub async fn new(
-        mut config: Config,
+        config: Config<'_>,
     ) -> Result<(Arc<Self>, Vec<stream::BoxStream<'static, Event>>), InitError> {
         let (mut senders, receivers): (Vec<_>, Vec<_>) = (0..config.num_events_receivers)
             .map(|_| mpsc::channel(16))
             .unzip();
 
-        // TODO: code is messy
-        let mut known_nodes =
-            Vec::with_capacity(config.chains.iter().map(|c| c.bootstrap_nodes.len()).sum());
         let mut chains = Vec::with_capacity(config.chains.len());
         let mut databases = Vec::with_capacity(config.chains.len());
-        for chain in config.chains {
-            let mut bootstrap_nodes = Vec::with_capacity(chain.bootstrap_nodes.len());
-            for (peer_id, addr) in chain.bootstrap_nodes {
-                bootstrap_nodes.push(known_nodes.len());
-                known_nodes.push((peer_id, addr));
-            }
-
+        for chain in &config.chains {
             chains.push(service::ChainConfig {
-                bootstrap_nodes,
                 in_slots: 25,
                 out_slots: 25,
-                protocol_id: chain.protocol_id,
+                protocol_id: chain.protocol_id.clone(),
                 best_hash: chain.best_block.1,
                 best_number: chain.best_block.0,
                 genesis_hash: chain.genesis_block_hash,
@@ -181,7 +177,7 @@ impl NetworkService {
                 allow_inbound_block_requests: true,
             });
 
-            databases.push(chain.database);
+            databases.push(chain.database.clone());
         }
 
         // Initialize the inner network service.
@@ -194,7 +190,6 @@ impl NetworkService {
             network: service::ChainNetwork::new(service::Config {
                 now: Instant::now(),
                 chains,
-                known_nodes,
                 connections_capacity: 100, // TODO: ?
                 peers_capacity: 100,       // TODO: ?
                 noise_key: config.noise_key,
@@ -205,6 +200,20 @@ impl NetworkService {
             }),
             jaeger_service: config.jaeger_service,
         });
+
+        // Add the bootnodes to the inner state machine.
+        for (chain_index, chain) in config.chains.into_iter().enumerate() {
+            for (peer_id, addr) in chain.bootstrap_nodes {
+                inner
+                    .network
+                    .discover(
+                        &Instant::now(),
+                        chain_index,
+                        iter::once((peer_id, iter::once(addr))),
+                    )
+                    .await;
+            }
+        }
 
         let mut abort_handles = Vec::new();
 
@@ -238,17 +247,13 @@ impl NetworkService {
                             } => {
                                 let decoded = announce.decode();
 
-                                let mut _jaeger_span = inner.jaeger_service.net_connection_span(
-                                    &inner.local_peer_id,
-                                    &peer_id,
-                                    "block-announce-received",
-                                );
-                                _jaeger_span.add_int_tag(
-                                    "number",
-                                    i64::try_from(decoded.header.number).unwrap(),
-                                );
-                                _jaeger_span
-                                    .add_string_tag("hash", &hex::encode(&decoded.header.hash()));
+                                let mut _jaeger_span =
+                                    inner.jaeger_service.block_announce_receive_span(
+                                        &inner.local_peer_id,
+                                        &peer_id,
+                                        decoded.header.number,
+                                        &decoded.header.hash(),
+                                    );
 
                                 tracing::debug!(
                                     %chain_index, %peer_id,
@@ -287,6 +292,7 @@ impl NetworkService {
                             service::Event::ChainDisconnected {
                                 peer_id,
                                 chain_index,
+                                ..
                             } => {
                                 tracing::debug!(%peer_id, "chain-disconnected");
                                 break Event::Disconnected {
@@ -302,6 +308,9 @@ impl NetworkService {
                                     "chain-connect-attempt-failed"
                                 );
                             }
+                            service::Event::InboundSlotAssigned { .. } => {
+                                // TODO: log this
+                            }
                             service::Event::IdentifyRequestIn { peer_id, request } => {
                                 tracing::debug!(%peer_id, "identify-request");
                                 request.respond("smoldot").await;
@@ -313,29 +322,21 @@ impl NetworkService {
                                 request,
                             } => {
                                 tracing::debug!(%peer_id, "incoming-blocks-request");
-                                let mut _jaeger_span1 = inner.jaeger_service.net_connection_span(
-                                    &inner.local_peer_id,
-                                    &peer_id,
-                                    "incoming-blocks-request",
-                                );
-                                _jaeger_span1
-                                    .add_int_tag("num-blocks", config.desired_count.get().into());
-                                let _jaeger_span2 = if let (
-                                    1,
-                                    protocol::BlocksRequestConfigStart::Hash(block_hash),
-                                ) =
-                                    (config.desired_count.get(), &config.start)
-                                {
-                                    let mut span = inner
-                                        .jaeger_service
-                                        .block_span(block_hash, "incoming-blocks-request");
-                                    let hex = hex::encode(block_hash);
-                                    span.add_string_tag("hash", &hex);
-                                    _jaeger_span1.add_string_tag("hash", &hex);
-                                    Some(span)
-                                } else {
-                                    None
-                                };
+                                let mut _jaeger_span =
+                                    inner.jaeger_service.incoming_block_request_span(
+                                        &inner.local_peer_id,
+                                        &peer_id,
+                                        config.desired_count.get(),
+                                        if let (
+                                            1,
+                                            protocol::BlocksRequestConfigStart::Hash(block_hash),
+                                        ) = (config.desired_count.get(), &config.start)
+                                        {
+                                            Some(block_hash)
+                                        } else {
+                                            None
+                                        },
+                                    );
 
                                 let response =
                                     blocks_request_response(&inner.databases[chain_index], config)
@@ -404,9 +405,17 @@ impl NetworkService {
                         match inner
                             .network
                             .kademlia_discovery_round(Instant::now(), chain_index)
+                            .instrument(tracing::trace_span!("discovery"))
                             .await
                         {
                             Ok(insert) => {
+                                tracing::debug!(
+                                    discovered = ?insert.discovered().map(|(peer_id, addrs)| {
+                                        (peer_id, addrs.collect::<Vec<_>>())
+                                    }).collect::<Vec<_>>(),
+                                    "discovered"
+                                );
+
                                 insert
                                     .insert(&Instant::now())
                                     .instrument(tracing::trace_span!("insert"))
@@ -432,7 +441,11 @@ impl NetworkService {
                     let mut next_round = Duration::from_millis(500);
 
                     loop {
-                        inner.network.assign_slots(chain_index).await;
+                        let assigned_peer = inner.network.assign_slots(chain_index).await;
+                        if let Some(assigned_peer) = assigned_peer {
+                            // TODO: log slot de-assignments
+                            tracing::debug!(peer_id = %assigned_peer, %chain_index, "slot-assigned");
+                        }
 
                         futures_timer::Delay::new(next_round).await;
                         next_round = cmp::min(next_round * 2, Duration::from_secs(5));
@@ -455,31 +468,31 @@ impl NetworkService {
         for listen_address in config.listen_addresses {
             // Try to parse the requested address and create the corresponding listening socket.
             let tcp_listener: async_std::net::TcpListener = {
-                let mut iter = listen_address.iter();
-                let proto1 = match iter.next() {
-                    Some(p) => p,
-                    None => return Err(InitError::BadListenMultiaddr(listen_address)),
-                };
-                let proto2 = match iter.next() {
-                    Some(p) => p,
-                    None => return Err(InitError::BadListenMultiaddr(listen_address)),
-                };
-
-                if iter.next().is_some() {
-                    return Err(InitError::BadListenMultiaddr(listen_address));
-                }
-
-                let addr = match (proto1, proto2) {
-                    (Protocol::Ip4(ip), Protocol::Tcp(port)) => SocketAddr::from((ip, port)),
-                    (Protocol::Ip6(ip), Protocol::Tcp(port)) => SocketAddr::from((ip, port)),
-                    _ => return Err(InitError::BadListenMultiaddr(listen_address)),
-                };
-
-                match async_std::net::TcpListener::bind(addr).await {
-                    Ok(l) => l,
-                    Err(err) => {
-                        return Err(InitError::ListenerIo(listen_address, err));
+                let addr = {
+                    let mut iter = listen_address.iter();
+                    let proto1 = iter.next();
+                    let proto2 = iter.next();
+                    let proto3 = iter.next();
+                    match (proto1, proto2, proto3) {
+                        (Some(ProtocolRef::Ip4(ip)), Some(ProtocolRef::Tcp(port)), None) => {
+                            Some(SocketAddr::from((ip, port)))
+                        }
+                        (Some(ProtocolRef::Ip6(ip)), Some(ProtocolRef::Tcp(port)), None) => {
+                            Some(SocketAddr::from((ip, port)))
+                        }
+                        _ => None,
                     }
+                };
+
+                if let Some(addr) = addr {
+                    match async_std::net::TcpListener::bind(addr).await {
+                        Ok(l) => l,
+                        Err(err) => {
+                            return Err(InitError::ListenerIo(listen_address, err));
+                        }
+                    }
+                } else {
+                    return Err(InitError::BadListenMultiaddr(listen_address));
                 }
             };
 
@@ -501,7 +514,15 @@ impl NetworkService {
                             }
                         };
 
-                        let multiaddr = Multiaddr::from(addr.ip()).with(Protocol::Tcp(addr.port()));
+                        let multiaddr = [
+                            match addr.ip() {
+                                IpAddr::V4(ip) => ProtocolRef::Ip4(ip.octets()),
+                                IpAddr::V6(ip) => ProtocolRef::Ip6(ip.octets()),
+                            },
+                            ProtocolRef::Tcp(addr.port()),
+                        ]
+                        .into_iter()
+                        .collect::<Multiaddr>();
 
                         tracing::debug!(%multiaddr, "incoming-connection");
 
@@ -538,7 +559,7 @@ impl NetworkService {
                 let mut connec_tx = connec_tx.clone();
                 let future = async move {
                     loop {
-                        let start_connect = inner.network.next_start_connect(Instant::now()).await;
+                        let start_connect = inner.network.next_start_connect(Instant::now).await;
 
                         let span = tracing::debug_span!("start-connect", ?start_connect.id, %start_connect.multiaddr);
                         let _enter = span.enter();
@@ -689,16 +710,28 @@ impl NetworkService {
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, service::BlocksRequestError> {
-        let mut _jaeger_span = self.inner.jaeger_service.net_connection_span(
+        let mut _jaeger_span = self.inner.jaeger_service.outgoing_block_request_span(
             &self.inner.local_peer_id,
             &target,
-            "outgoing-blocks-request",
+            config.desired_count.get(),
+            if let (1, protocol::BlocksRequestConfigStart::Hash(block_hash)) =
+                (config.desired_count.get(), &config.start)
+            {
+                Some(block_hash)
+            } else {
+                None
+            },
         );
-        _jaeger_span.add_int_tag("num-blocks", config.desired_count.get().into());
 
         self.inner
             .network
-            .blocks_request(Instant::now(), &target, chain_index, config)
+            .blocks_request(
+                Instant::now(),
+                &target,
+                chain_index,
+                config,
+                Duration::from_secs(12),
+            )
             .await
     }
 }
@@ -800,34 +833,32 @@ fn multiaddr_to_socket(
     }
 
     // Ensure ahead of time that the multiaddress is supported.
-    match (&proto1, &proto2) {
-        (Protocol::Ip4(_), Protocol::Tcp(_))
-        | (Protocol::Ip6(_), Protocol::Tcp(_))
-        | (Protocol::Dns(_), Protocol::Tcp(_))
-        | (Protocol::Dns4(_), Protocol::Tcp(_))
-        | (Protocol::Dns6(_), Protocol::Tcp(_)) => {}
+    let addr = match (&proto1, &proto2) {
+        (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port)) => {
+            either::Left(SocketAddr::new(IpAddr::V4((*ip).into()), *port))
+        }
+        (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port)) => {
+            either::Left(SocketAddr::new(IpAddr::V6((*ip).into()), *port))
+        }
+        // TODO: we don't care about the differences between Dns, Dns4, and Dns6
+        (ProtocolRef::Dns(addr), ProtocolRef::Tcp(port)) => {
+            either::Right((addr.to_string(), *port))
+        }
+        (ProtocolRef::Dns4(addr), ProtocolRef::Tcp(port)) => {
+            either::Right((addr.to_string(), *port))
+        }
+        (ProtocolRef::Dns6(addr), ProtocolRef::Tcp(port)) => {
+            either::Right((addr.to_string(), *port))
+        }
         _ => return Err(()),
-    }
-
-    let proto1 = proto1.acquire();
-    let proto2 = proto2.acquire();
+    };
 
     Ok(async move {
-        match (proto1, proto2) {
-            (Protocol::Ip4(ip), Protocol::Tcp(port)) => {
-                async_std::net::TcpStream::connect(SocketAddr::new(ip.into(), port)).await
+        match addr {
+            either::Left(socket_addr) => async_std::net::TcpStream::connect(socket_addr).await,
+            either::Right((dns, port)) => {
+                async_std::net::TcpStream::connect((&dns[..], port)).await
             }
-            (Protocol::Ip6(ip), Protocol::Tcp(port)) => {
-                async_std::net::TcpStream::connect(SocketAddr::new(ip.into(), port)).await
-            }
-            // TODO: for DNS, do things a bit more explicitly? with for example a library that does the resolution?
-            // TODO: differences between DNS, DNS4, DNS6 not respected
-            (Protocol::Dns(addr), Protocol::Tcp(port))
-            | (Protocol::Dns4(addr), Protocol::Tcp(port))
-            | (Protocol::Dns6(addr), Protocol::Tcp(port)) => {
-                async_std::net::TcpStream::connect((&*addr, port)).await
-            }
-            _ => unreachable!(),
         }
     })
 }
@@ -896,7 +927,12 @@ async fn blocks_request_response(
                     } else {
                         None
                     },
-                    justification: None, // TODO: justifications aren't saved in database at the moment
+                    justifications: if config.fields.justifications {
+                        // TODO: justifications aren't saved in database at the moment
+                        Some(Vec::new())
+                    } else {
+                        None
+                    },
                 });
             }
 

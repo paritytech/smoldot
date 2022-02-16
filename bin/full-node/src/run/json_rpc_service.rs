@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -17,13 +17,13 @@
 
 use futures::{channel::oneshot, prelude::*};
 use smoldot::json_rpc::{self, methods, websocket_server};
-use std::{io, net::SocketAddr, pin::Pin};
+use std::{io, net::SocketAddr};
 use tracing::Instrument as _;
 
 /// Configuration for a [`JsonRpcService`].
-pub struct Config {
+pub struct Config<'a> {
     /// Closure that spawns background tasks.
-    pub tasks_executor: Box<dyn FnMut(Pin<Box<dyn Future<Output = ()> + Send>>) + Send>,
+    pub tasks_executor: &'a mut dyn FnMut(future::BoxFuture<'static, ()>),
 
     /// Where to bind the WebSocket server.
     pub bind_address: SocketAddr,
@@ -37,7 +37,7 @@ pub struct JsonRpcService {
 
 impl JsonRpcService {
     /// Initializes a new [`JsonRpcService`].
-    pub async fn new(mut config: Config) -> Result<Self, io::Error> {
+    pub async fn new(config: Config<'_>) -> Result<Self, io::Error> {
         let server = websocket_server::WsServer::new(websocket_server::Config {
             bind_address: config.bind_address,
             capacity: 1,

@@ -1,0 +1,25 @@
+[package]
+name = "smoldot-light-base"
+version = "0.1.0"
+authors = ["Parity Technologies <admin@parity.io>", "Pierre Krieger <pierre.krieger1708@gmail.com>"]
+description = "Browser bindings to a light client for Substrate-based blockchains"
+repository = "https://github.com/paritytech/smoldot"
+license = "GPL-3.0-or-later WITH Classpath-exception-2.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+blake2-rfc = { version = "0.2.18", default-features = false }
+derive_more = "0.99.17"
+either = { version = "1.6.1", default-features = false }
+fnv = { version = "1.0.7", default-features = false }
+futures = "0.3.21"
+hashbrown = { version = "0.12.0", default-features = false }
+hex = { version = "0.4.3", default-features = false }
+itertools = "0.10.3"
+log = { version = "0.4.14", default-features = false }
+lru = { version = "0.7.1", default-features = false }  # TODO: there's no way to use a custom hasher; remove this dependency
+rand = "0.8.5"
+serde_json = "1.0.79"
+slab = { version = "0.4.5", default-features = false }
+smoldot = { version = "0.2.0", path = "../..", default-features = false }

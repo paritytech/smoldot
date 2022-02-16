@@ -1,5 +1,5 @@
 // Smoldot
-// Copyright (C) 2019-2021  Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2022  Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -28,8 +28,12 @@ fn main() {
 }
 
 async fn async_main() {
-    match <cli::CliOptions as structopt::StructOpt>::from_args() {
+    match <cli::CliOptions as clap::Parser>::parse() {
         cli::CliOptions::Run(r) => run::run(r).await,
         cli::CliOptions::NodeInfo(opt) => node_info::run(opt).await,
+        cli::CliOptions::Blake264BitsHash(opt) => {
+            let hash = blake2_rfc::blake2b::blake2b(8, &[], opt.payload.as_bytes());
+            println!("0x{}", hex::encode(hash));
+        }
     }
 }
