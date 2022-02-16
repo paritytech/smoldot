@@ -194,7 +194,7 @@ impl VirtualMachinePrototype {
             inner: match self.inner {
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
                 VirtualMachinePrototypeInner::Jit(inner) => {
-                    match inner.start(function_name, params) {
+                    match inner.start(min_memory_pages, function_name, params) {
                         Ok(vm) => VirtualMachineInner::Jit(vm),
                         Err((err, proto)) => {
                             self.inner = VirtualMachinePrototypeInner::Jit(proto);

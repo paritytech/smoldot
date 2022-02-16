@@ -314,9 +314,19 @@ impl JitPrototype {
     /// See [`super::VirtualMachinePrototype::start`].
     pub fn start(
         mut self,
+        min_memory_pages: HeapPages,
         function_name: &str,
         params: &[WasmValue],
     ) -> Result<Jit, (StartErr, Self)> {
+        if let Some(memory) = &self.memory {
+            let min_memory_pages = u64::from(min_memory_pages.0);
+            if let Some(to_grow) = min_memory_pages.checked_sub(memory.size(&self.store)) {
+                if memory.grow(&mut self.store, to_grow).is_err() {
+                    return Err((StartErr::RequiredMemoryTooLarge, self));
+                }
+            }
+        }
+
         let function_to_call = match self.instance.get_export(&mut self.store, function_name) {
             Some(export) => match export.into_func() {
                 Some(f) => f,
