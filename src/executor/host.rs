@@ -361,7 +361,7 @@ impl HostVmPrototype {
         // Now create the actual virtual machine. We pass as parameter `heap_base` as the location
         // of the input data.
         let mut vm = match self.vm_proto.start(
-            vm::HeapPages::new(1 + self.heap_base / (64 * 1024)), // TODO: `1 + ` is a hack for the start value; solve with https://github.com/paritytech/smoldot/issues/132
+            vm::HeapPages::new(32 + self.heap_base / (64 * 1024)), // TODO: `32 + ` is a hack for the start value; solve with https://github.com/paritytech/smoldot/issues/132
             function_to_call,
             &[
                 vm::WasmValue::I32(i32::from_ne_bytes(self.heap_base.to_ne_bytes())),
