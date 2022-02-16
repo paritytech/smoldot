@@ -24,6 +24,15 @@
 //! differences between a block and its child or storing on-going changes while a runtime call is
 //! being performed. It can also be used to store an entire storage, by representing a diff where
 //! the base is an empty storage.
+//!
+//! # About keys hashing
+//!
+//! This data structure internally uses a hash map. This hash map assumes that storage keys are
+//! already uniformly distributed and doesn't perform any additional hashing.
+//!
+//! You should be aware that a malicious runtime could perform hash collision attacks that
+//! considerably slow down this data structure.
+//!
 
 // TODO: is this module properly located?
 
@@ -40,6 +49,11 @@ pub struct StorageDiff {
     /// storage item.
     btree: BTreeMap<Vec<u8>, bool>,
 
+    /// Actual diff. For each key, `Some` if the underlying storage item is updated by this diff,
+    /// and `None` if it is deleted.
+    ///
+    /// A FNV hasher is used because the runtime is supposed to guarantee a uniform distribution
+    /// of storage keys.
     hashmap: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
 }
 
