@@ -597,19 +597,9 @@ async fn background_task<TPlat: Platform>(
                     );
 
                     if let Ok(block_body) = block_body {
-                        let block_body_size = block_body.len();
-                        let included_transactions = worker
+                        let _ = worker
                             .pending_transactions
-                            .set_block_body(&block_hash, block_body.into_iter())
-                            .collect::<Vec<_>>();
-
-                        for (tx_id, body_index) in included_transactions {
-                            debug_assert!(body_index < block_body_size);
-                            let tx = worker.pending_transactions.transaction_user_data_mut(tx_id).unwrap();
-                            // We assume that there's no more than 2<<32 transactions per block.
-                            let body_index = u32::try_from(body_index).unwrap();
-                            tx.update_status(TransactionStatus::IncludedBlockUpdate { block_hash: Some((block_hash, body_index)) });
-                        }
+                            .set_block_body(&block_hash, block_body.into_iter());
                     }
                 },
 
