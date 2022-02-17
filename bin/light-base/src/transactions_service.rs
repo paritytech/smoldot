@@ -522,8 +522,19 @@ async fn background_task<TPlat: Platform>(
                     .unpin_block(&block.block_hash)
                     .await;
 
+                log::debug!(
+                    target: &log_target,
+                    "Finalized(block={}, body-transactions={{{}}})",
+                    HashDisplay(&block.block_hash),
+                    block
+                        .included_transactions
+                        .iter()
+                        .map(|(_, _, body, _)| HashDisplay(&blake2_hash(body)).to_string())
+                        .join(", ")
+                );
+
                 debug_assert!(!block.user_data.downloading);
-                for (_, body_index, mut tx) in block.included_transactions {
+                for (_, body_index, _, mut tx) in block.included_transactions {
                     // We assume that there's no more than 2<<32 transactions per block.
                     let body_index = u32::try_from(body_index).unwrap();
                     tx.update_status(TransactionStatus::Dropped(DropReason::Finalized {
@@ -589,19 +600,21 @@ async fn background_task<TPlat: Platform>(
                         block.failed_downloads = block.failed_downloads.saturating_add(1);
                     }
 
-                    log::debug!(
-                        target: &log_target,
-                        "BlockDownloads => {}(block={})",
-                        if block_body.is_ok() { "Success" } else { "Failed" },
-                        HashDisplay(&block_hash)
-                    );
-
                     if let Ok(block_body) = block_body {
                         let block_body_size = block_body.len();
                         let included_transactions = worker
                             .pending_transactions
                             .set_block_body(&block_hash, block_body.into_iter())
                             .collect::<Vec<_>>();
+
+                        log::debug!(
+                            target: &log_target,
+                            "BlockDownloads => Success(block={}, body-transactions={{{}}})",
+                            HashDisplay(&block_hash),
+                            included_transactions.iter()
+                                .map(|(id, _)| HashDisplay(&blake2_hash(worker.pending_transactions.scale_encoding(*id).unwrap())).to_string())
+                                .join(", ")
+                        );
 
                         for (tx_id, body_index) in included_transactions {
                             debug_assert!(body_index < block_body_size);
@@ -610,6 +623,13 @@ async fn background_task<TPlat: Platform>(
                             let body_index = u32::try_from(body_index).unwrap();
                             tx.update_status(TransactionStatus::IncludedBlockUpdate { block_hash: Some((block_hash, body_index)) });
                         }
+
+                    } else {
+                        log::debug!(
+                            target: &log_target,
+                            "BlockDownloads => Failed(block={})",
+                            HashDisplay(&block_hash)
+                        );
                     }
                 },
 
