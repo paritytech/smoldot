@@ -849,7 +849,6 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 // Completely remove this transaction from the pool, similar to what
                 // `remove_transaction` does.
                 let tx = self.transactions.remove(tx_id.0);
-                included_transactions.push((*tx_id, *index_in_block, tx.user_data));
 
                 let blocks_included = self
                     .included_transactions
@@ -888,6 +887,13 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                     .by_hash
                     .remove(&(blake2_hash(&tx.scale_encoded), *tx_id));
                 debug_assert!(_removed);
+
+                included_transactions.push((
+                    *tx_id,
+                    *index_in_block,
+                    tx.scale_encoded,
+                    tx.user_data,
+                ));
             }
 
             // Purge the state from any validation information about that block.
@@ -972,10 +978,10 @@ pub struct PruneBodyFinalized<TTx, TBl> {
     pub user_data: TBl,
 
     /// List of transactions that were included in this block, alongside with their index within
-    /// that block. These transactions have been removed from the pool.
-    ///
-    /// The user data (`TTx`) is stored in an `Option`.
-    pub included_transactions: Vec<(TransactionId, usize, TTx)>,
+    /// that block, SCALE encoding, and user data. These transactions have been removed from the
+    /// pool.
+    // TODO: use proper struct
+    pub included_transactions: Vec<(TransactionId, usize, Vec<u8>, TTx)>,
 }
 
 /// See [`LightPool::set_best_block`].
