@@ -2436,7 +2436,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-light-wasm"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "event-listener",
  "futures",
