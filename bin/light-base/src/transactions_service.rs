@@ -350,7 +350,7 @@ async fn background_task<TPlat: Platform>(
                 },
             );
             if block.is_new_best {
-                worker.set_best_block(&hash);
+                worker.set_best_block(&log_target, &hash);
             }
         }
 
@@ -560,11 +560,11 @@ async fn background_task<TPlat: Platform>(
                                 },
                             );
                             if new_block.is_new_best {
-                                worker.set_best_block(&hash);
+                                worker.set_best_block(&log_target, &hash);
                             }
                         },
                         Some(runtime_service::Notification::Finalized { hash, best_block_hash, .. }) => {
-                            worker.set_best_block(&best_block_hash);
+                            worker.set_best_block(&log_target, &best_block_hash);
                             for pruned in worker
                                 .pending_transactions
                                 .set_finalized_block(&hash)
@@ -609,7 +609,7 @@ async fn background_task<TPlat: Platform>(
 
                         log::debug!(
                             target: &log_target,
-                            "BlockDownloads => Success(block={}, body-transactions={{{}}})",
+                            "BlockDownloads => Success(block={}, included-transactions={{{}}})",
                             HashDisplay(&block_hash),
                             included_transactions.iter()
                                 .map(|(id, _)| HashDisplay(&blake2_hash(worker.pending_transactions.scale_encoding(*id).unwrap())).to_string())
@@ -911,7 +911,7 @@ struct Worker<TPlat: Platform> {
 impl<TPlat: Platform> Worker<TPlat> {
     /// Update the best block. Must have been previously inserted with
     /// [`light_pool::LightPool::add_block`].
-    fn set_best_block(&mut self, new_best_block_hash: &[u8; 32]) {
+    fn set_best_block(&mut self, log_target: &str, new_best_block_hash: &[u8; 32]) {
         let updates = self
             .pending_transactions
             .set_best_block(new_best_block_hash);
@@ -921,6 +921,18 @@ impl<TPlat: Platform> Worker<TPlat> {
         // the old and new best chain.
         // In that situation we need to first signal `Retracted`, then only `InBlock`.
         // Consequently, process `retracted_transactions` first.
+
+        log::debug!(
+            target: log_target,
+            "BestChainUpdate(new-best-block={}, included-transactions={{{}}}, retracted-transactions={{{}}})",
+            HashDisplay(new_best_block_hash),
+            updates.included_transactions.iter()
+                .map(|(id, _, _)| HashDisplay(&blake2_hash(self.pending_transactions.scale_encoding(*id).unwrap())).to_string())
+                .join(", "),
+            updates.retracted_transactions.iter()
+                .map(|(id, _, _)| HashDisplay(&blake2_hash(self.pending_transactions.scale_encoding(*id).unwrap())).to_string())
+                .join(", ")
+        );
 
         for (tx_id, _, _) in updates.retracted_transactions {
             let tx = self
