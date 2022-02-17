@@ -70,6 +70,11 @@ jobs:
       with:
         node-version: '14'
     - run: cargo install twiggy  # TODO: somehow cache this in order to not compile twiggy every single time
+    - name: Install twiggy with cache
+        uses: baptiste0928/cargo-install@v1
+        with:
+          crate: cargo-nextest
+          version: 0.9
     - run: git checkout ${{ github.event.pull_request.base.sha }}
     - run: cd bin/wasm-node/javascript && npm ci && npm run-script build
     - run: cp ./target/wasm32-wasi/min-size-release/smoldot_light_wasm.wasm ./.ci-parent-build.wasm  # TODO: maybe get the path from the `npm build` output or something?
