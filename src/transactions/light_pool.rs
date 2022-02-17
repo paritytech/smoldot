@@ -384,6 +384,20 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         // Make sure that the block exists.
         let block_index = *self.blocks_by_id.get(block_hash_validated_against).unwrap();
 
+        // Make sure that the transaction exists.
+        assert!(self.transactions.contains(id.0));
+
+        // Determine if block the transaction was validated against is best and/or finalized.
+        let block_is_in_best_chain = self
+            .best_block_index
+            .map_or(false, |idx| self.blocks_tree.is_ancestor(block_index, idx));
+        let block_is_finalized = self
+            .finalized_block_index
+            .map_or(false, |idx| self.blocks_tree.is_ancestor(block_index, idx));
+        debug_assert!(!(!block_is_in_best_chain && block_is_finalized));
+
+        // Convert the validation result into something more concise and useful for this data
+        // structure.
         let result = match result {
             Ok(v) => Ok(Validation {
                 longevity_relative_block_height: self
@@ -397,7 +411,22 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             Err(_) => Err(()),
         };
 
-        // This will replace an existing entry.
+        // Update the transaction's validation status.
+        if block_is_finalized {
+            self.transactions[id.0].finalized_chain_validation = Some((
+                self.blocks_tree
+                    .get(block_index)
+                    .unwrap()
+                    .relative_block_height,
+                result.clone(),
+            ));
+        }
+
+        if block_is_in_best_chain {
+            // TODO: no /!\ there could be another block with a validation that is even higher
+            self.transactions[id.0].best_chain_validation = Some(result.clone());
+        }
+
         self.transaction_validations
             .insert((id, *block_hash_validated_against), result);
         self.transactions_by_validation
