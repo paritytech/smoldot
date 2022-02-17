@@ -49,7 +49,7 @@ fn regular_path() {
     let mut iter = pool.prune_finalized_with_body();
     let pruned = iter.next().unwrap();
     assert_eq!(pruned.block_hash, [1; 32]);
-    assert_eq!(pruned.included_transactions, vec![(tx_id, 0, ())]);
+    assert_eq!(pruned.included_transactions, vec![(tx_id, 0, vec![0], ())]);
 }
 
 #[test]
