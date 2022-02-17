@@ -150,6 +150,11 @@ pub struct LightPool<TTx, TBl> {
     /// Hash of the block that serves as root of all the blocks in [`LightPool::blocks_tree`].
     /// Always a finalized block.
     blocks_tree_root_hash: [u8; 32],
+
+    /// Height of the block that serves as root of all the blocks in [`LightPool::blocks_tree`]
+    /// minus height of the block that was passed as [`Config::finalized_block_hash`].
+    /// Always a finalized block.
+    blocks_tree_root_relative_height: u64,
 }
 
 impl<TTx, TBl> LightPool<TTx, TBl> {
@@ -174,6 +179,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             best_block_index: None,
             finalized_block_index: None,
             blocks_tree_root_hash: config.finalized_block_hash,
+            blocks_tree_root_relative_height: 0,
         }
     }
 
@@ -410,13 +416,18 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Panics if the parent block cannot be found in the collection.
     ///
     pub fn add_block(&mut self, hash: [u8; 32], parent_hash: &[u8; 32], user_data: TBl) {
-        let parent_index_in_tree = if *parent_hash == self.blocks_tree_root_hash {
-            None
-        } else {
-            // The transactions service tracks all new blocks.
-            // The parent of each new best block must therefore already be in the tree.
-            Some(*self.blocks_by_id.get(parent_hash).unwrap())
-        };
+        let (parent_index_in_tree, parent_relative_height) =
+            if *parent_hash == self.blocks_tree_root_hash {
+                (None, self.blocks_tree_root_relative_height)
+            } else {
+                // The transactions service tracks all new blocks.
+                // The parent of each new best block must therefore already be in the tree.
+                let idx = *self.blocks_by_id.get(parent_hash).unwrap();
+                (
+                    Some(idx),
+                    self.blocks_tree.get(idx).unwrap().relative_block_height,
+                )
+            };
 
         let entry = match self.blocks_by_id.entry(hash) {
             hashbrown::hash_map::Entry::Occupied(_) => return,
@@ -432,6 +443,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 } else {
                     BodyState::Needed
                 },
+                relative_block_height: parent_relative_height + 1,
                 user_data,
             },
         );
@@ -1014,6 +1026,13 @@ struct Transaction<TTx> {
 }
 
 struct Block<TBl> {
+    /// Height of this block minus height of the block that was passed as
+    /// [`Config::finalized_block_hash`].
+    ///
+    /// All the heights manipulated by the [`LightPool`] are relative to the height of the block
+    /// passed as [`Config::finalized_block_hash`], making it possible to compare and subtract
+    /// them.
+    relative_block_height: u64,
     hash: [u8; 32],
     body: BodyState,
     user_data: TBl,
