@@ -622,7 +622,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                         continue 'tx_in_pool;
                     }
 
-                    // If the transaction is found in a children, un-include it. from the child.
+                    // If the transaction is found in a children, un-include it from the child.
                     if self
                         .blocks_tree
                         .is_ancestor(block_index, existing_included_block_idx)
