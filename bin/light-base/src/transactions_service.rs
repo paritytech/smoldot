@@ -763,6 +763,7 @@ async fn background_task<TPlat: Platform>(
                                 error,
                             );
 
+                            // TODO: don't actually do that directly, but store the result in the pool and later fetch invalid transaction
                             // The validation itself has completed, but the runtime indicated
                             // that the transaction was invalid. Drop the transaction.
                             let mut tx = worker.pending_transactions.remove_transaction(maybe_validated_tx_id);
@@ -783,6 +784,7 @@ async fn background_task<TPlat: Platform>(
                                 error
                             );
 
+                            // TODO: don't actually do that directly, but store the result in the pool and later fetch invalid transaction
                             // Transaction couldn't be validated because of an error while
                             // executing the runtime. This most likely indicates a compatibility
                             // problem between smoldot and the runtime code. Drop the transaction.
