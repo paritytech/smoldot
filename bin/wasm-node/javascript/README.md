@@ -11,7 +11,7 @@ the full nodes of the network.
 ## Example
 
 ```
-import * as smoldot from 'smoldot';
+import * as smoldot from '@substrate/smoldot-light';
 
 // Load a string chain specification.
 const chainSpec = fs.readFileSync('./westend.json', 'utf8');
