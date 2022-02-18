@@ -769,10 +769,12 @@ async fn background_task<TPlat: Platform>(
                         Ok(result) => {
                             log::debug!(
                                 target: &log_target,
-                                "TxValidations => Success(tx={}, block={}, result={:?})",
+                                "TxValidations => Success(tx={}, block={}, priority={}, longevity={}, propagate={:?})",
                                 HashDisplay(&tx_hash),
                                 HashDisplay(&block_hash),
-                                result // TODO: better show result
+                                result.priority,
+                                result.longevity,
+                                result.propagate,
                             );
 
                             log::info!(
