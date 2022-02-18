@@ -796,7 +796,7 @@ async fn background_task<TPlat: Platform>(
 
                             log::warn!(
                                 target: &log_target,
-                                "Discarding invalid transaction {}: {}",
+                                "Transaction {} invalid: {}",
                                 HashDisplay(&tx_hash),
                                 error,
                             );
