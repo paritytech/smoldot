@@ -377,10 +377,9 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// # Panic
     ///
     /// Panics if the transaction with the given id is invalid.
-    /// Panics if no block with that hash has been inserted before.
+    /// Panics if no block with that hash has been inserted before, or the block has been pruned.
     ///
     // TODO: is it correct to pass a `Result`, instead of just a `ValidTransaction`?
-    // TODO: can the block be the finalized block? (i.e. tree_root_hash)
     pub fn set_validation_result(
         &mut self,
         id: TransactionId,
@@ -388,29 +387,47 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         result: Result<ValidTransaction, TransactionValidityError>,
     ) {
         // Make sure that the block exists.
-        let block_index = *self.blocks_by_id.get(block_hash_validated_against).unwrap();
+        let block_index = if *block_hash_validated_against == self.blocks_tree_root_hash {
+            None
+        } else {
+            Some(*self.blocks_by_id.get(block_hash_validated_against).unwrap())
+        };
+
+        // Height of `block_index`, minus the height of the finalized block passed in the
+        // original `Config`.
+        let block_relative_height = match block_index {
+            Some(block_index) => {
+                self.blocks_tree
+                    .get(block_index)
+                    .unwrap()
+                    .relative_block_height
+            }
+            None => self.blocks_tree_root_relative_height,
+        };
 
         // Make sure that the transaction exists.
         assert!(self.transactions.contains(id.0));
 
         // Determine if block the transaction was validated against is best and/or finalized.
-        let block_is_in_best_chain = self
-            .best_block_index
-            .map_or(false, |idx| self.blocks_tree.is_ancestor(block_index, idx));
-        let block_is_finalized = self
-            .finalized_block_index
-            .map_or(false, |idx| self.blocks_tree.is_ancestor(block_index, idx));
+        let block_is_in_best_chain = match (self.best_block_index, block_index) {
+            (None, None) => true,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (Some(b), Some(i)) => self.blocks_tree.is_ancestor(i, b),
+        };
+        let block_is_finalized = match (self.finalized_block_index, block_index) {
+            (None, None) => true,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (Some(b), Some(i)) => self.blocks_tree.is_ancestor(i, b),
+        };
         debug_assert!(!(!block_is_in_best_chain && block_is_finalized));
 
         // Convert the validation result into something more concise and useful for this data
         // structure.
         let result = match result {
             Ok(v) => Ok(Validation {
-                longevity_relative_block_height: self
-                    .blocks_tree
-                    .get(block_index)
-                    .unwrap()
-                    .relative_block_height
+                longevity_relative_block_height: block_relative_height
                     .saturating_add(v.longevity.get()),
                 propagate: v.propagate,
             }),
@@ -419,13 +436,8 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
 
         // Update the transaction's validation status.
         if block_is_finalized {
-            self.transactions[id.0].finalized_chain_validation = Some((
-                self.blocks_tree
-                    .get(block_index)
-                    .unwrap()
-                    .relative_block_height,
-                result.clone(),
-            ));
+            self.transactions[id.0].finalized_chain_validation =
+                Some((block_relative_height, result.clone()));
         }
 
         if block_is_in_best_chain {
