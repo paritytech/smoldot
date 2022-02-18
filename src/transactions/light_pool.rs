@@ -342,25 +342,31 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         outcome
     }
 
-    /// Returns `true` if the given transaction has been validated in the past against an ancestor
-    /// of the best block and is still within its longevity period.
+    /// Returns `true` if the given transaction has been successfully validated in the past against
+    /// an ancestor of the best block and is still within its longevity period.
     ///
-    /// Returns `false` if the block has been included in an ancestor of the best block.
+    /// Returns `false` either if the given transaction hasn't been validated, or if its validation
+    /// resulted in an error.
+    ///
+    /// > **Note**: This function might return `true` or `false` independently of whether or not
+    /// >           the transaction has already been included in the best chain. You might want
+    /// >           to call [`LightPool::is_included_best_chain`] as well.
     ///
     /// # Panic
     ///
     /// Panics if the transaction with the given id is invalid.
     ///
     pub fn is_valid_against_best_block(&self, id: TransactionId) -> bool {
-        if self.is_included_best_chain(id) {
-            return false;
-        }
+        let best_block_relative_height = match self.best_block_index {
+            Some(idx) => self.blocks_tree.get(idx).unwrap().relative_block_height,
+            None => self.blocks_tree_root_relative_height,
+        };
 
-        // TODO: wrong implementation /!\
-        self.transaction_validations
-            .range((id, [0; 32])..=(id, [0xff; 32]))
-            .count()
-            != 0
+        match &self.transactions[id.0].best_chain_validation {
+            None => false,
+            Some(Ok(v)) => v.longevity_relative_block_height >= best_block_relative_height,
+            Some(Err(())) => false,
+        }
     }
 
     /// Sets the outcome of validating the transaction with the given identifier.
