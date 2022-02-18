@@ -59,7 +59,7 @@
 //! the result reported with [`LightPool::set_validation_result`].
 //!
 
-use super::validate::{TransactionValidityError, ValidTransaction};
+use super::validate::ValidTransaction;
 use crate::chain::fork_tree;
 
 use alloc::{
@@ -92,9 +92,9 @@ pub struct Config {
 pub struct TransactionId(usize);
 
 /// Data structure containing transactions. See the module-level documentation for more info.
-pub struct LightPool<TTx, TBl> {
+pub struct LightPool<TTx, TBl, TErr> {
     /// Actual list of transactions.
-    transactions: slab::Slab<Transaction<TTx>>,
+    transactions: slab::Slab<Transaction<TTx, TErr>>,
 
     /// Holds tuples of `(block_hash, transaction_id)`. When an entry is present in this set, it
     /// means that this transaction has been found in the body of this block. The value contains
@@ -116,7 +116,7 @@ pub struct LightPool<TTx, TBl> {
     /// this validation.
     ///
     /// Blocks are guaranteed to be found in [`LightPool::blocks_tree`].
-    transaction_validations: BTreeMap<(TransactionId, [u8; 32]), Result<Validation, ()>>,
+    transaction_validations: BTreeMap<(TransactionId, [u8; 32]), Result<Validation, TErr>>,
 
     /// Symmetry of [`LightPool::transaction_validations`].
     transactions_by_validation: BTreeSet<([u8; 32], TransactionId)>,
@@ -152,7 +152,10 @@ pub struct LightPool<TTx, TBl> {
     blocks_tree_root_relative_height: u64,
 }
 
-impl<TTx, TBl> LightPool<TTx, TBl> {
+impl<TTx, TBl, TErr> LightPool<TTx, TBl, TErr>
+where
+    TErr: Clone,
+{
     /// Initializes a new transactions pool.
     pub fn new(config: Config) -> Self {
         LightPool {
@@ -205,7 +208,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Panics if the identifier is invalid.
     ///
     #[track_caller]
-    pub fn remove_transaction(&mut self, id: TransactionId) -> TTx {
+    pub fn remove_transaction(&mut self, id: TransactionId) -> (Vec<u8>, TTx) {
         let tx = self.transactions.remove(id.0); // Panics if `id` is invalid.
 
         let blocks_included = self
@@ -237,7 +240,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         let _removed = self.by_hash.remove(&(blake2_hash(&tx.scale_encoded), id));
         debug_assert!(_removed);
 
-        tx.user_data
+        (tx.scale_encoded, tx.user_data)
     }
 
     /// Returns a list of transactions whose state is "not validated", and their user data.
@@ -258,7 +261,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             .filter(move |(_, tx)| match &tx.best_chain_validation {
                 None => true,
                 Some(Ok(v)) => v.longevity_relative_block_height < best_block_relative_height,
-                Some(Err(())) => false,
+                Some(Err(_)) => false,
             })
             .map(move |(tx_id, _)| {
                 let tx = self.transactions.get(tx_id).unwrap();
@@ -365,8 +368,49 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         match &self.transactions[id.0].best_chain_validation {
             None => false,
             Some(Ok(v)) => v.longevity_relative_block_height >= best_block_relative_height,
-            Some(Err(())) => false,
+            Some(Err(_)) => false,
         }
+    }
+
+    /// Returns a list of transactions which have been validated against an ancestor of the current
+    /// best block but have encountered an error during their validation (i.e.
+    /// [`LightPool::set_validation_result`] was called with `Err`).
+    ///
+    /// > **Note**: Contrary to [`LightPool::invalid_transactions_finalized_block`], it is
+    /// >           possible for the transaction to become valid again in the future if a reorg
+    /// >           happens and removes the block the transaction was validated against.
+    pub fn invalid_transactions_best_block(
+        &'_ self,
+    ) -> impl Iterator<Item = (TransactionId, &'_ TTx, &'_ TErr)> + '_ {
+        // Note that this iterates over all transactions every time, which seems unoptimal, but
+        // is also way easier to implement and probably doesn't cost too much in practice.
+        self.transactions
+            .iter()
+            .filter_map(move |(tx_id, tx)| match &tx.best_chain_validation {
+                Some(Err(err)) => Some((TransactionId(tx_id), &tx.user_data, err)),
+                _ => None,
+            })
+    }
+
+    /// Returns a list of transactions which have been validated against an ancestor of the current
+    /// finalized block but have encountered an error during their validation (i.e.
+    /// [`LightPool::set_validation_result`] was called with `Err`).
+    ///
+    /// > **Note**: Once a transaction is considered as invalid, it can be assumed that this
+    /// >           transaction will be invalid if verified against any of the descendants of the
+    /// >           block it was verified against. In other words, it can assumed that transactions
+    /// >           returned here will never be valid.
+    pub fn invalid_transactions_finalized_block(
+        &'_ self,
+    ) -> impl Iterator<Item = (TransactionId, &'_ TTx, &'_ TErr)> + '_ {
+        // Note that this iterates over all transactions every time, which seems unoptimal, but
+        // is also way easier to implement and probably doesn't cost too much in practice.
+        self.transactions.iter().filter_map(move |(tx_id, tx)| {
+            match &tx.finalized_chain_validation {
+                Some((_, Err(err))) => Some((TransactionId(tx_id), &tx.user_data, err)),
+                _ => None,
+            }
+        })
     }
 
     /// Sets the outcome of validating the transaction with the given identifier.
@@ -379,12 +423,11 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Panics if the transaction with the given id is invalid.
     /// Panics if no block with that hash has been inserted before, or the block has been pruned.
     ///
-    // TODO: is it correct to pass a `Result`, instead of just a `ValidTransaction`?
     pub fn set_validation_result(
         &mut self,
         id: TransactionId,
         block_hash_validated_against: &[u8; 32],
-        result: Result<ValidTransaction, TransactionValidityError>,
+        result: Result<ValidTransaction, TErr>,
     ) {
         // Make sure that the block exists.
         let block_index = if *block_hash_validated_against == self.blocks_tree_root_hash {
@@ -426,12 +469,12 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         // Convert the validation result into something more concise and useful for this data
         // structure.
         let result = match result {
+            Err(err) => Err(err),
             Ok(v) => Ok(Validation {
                 longevity_relative_block_height: block_relative_height
                     .saturating_add(v.longevity.get()),
                 propagate: v.propagate,
             }),
-            Err(_) => Err(()),
         };
 
         // Update the transaction's validation status.
@@ -1064,7 +1107,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     }
 }
 
-impl<TTx: fmt::Debug, TBl> fmt::Debug for LightPool<TTx, TBl> {
+impl<TTx: fmt::Debug, TBl, TErr> fmt::Debug for LightPool<TTx, TBl, TErr> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_list()
             .entries(
@@ -1112,7 +1155,7 @@ pub struct SetBestBlock {
 }
 
 /// Entry in [`LightPool::transactions`].
-struct Transaction<TTx> {
+struct Transaction<TTx, TErr> {
     /// Bytes corresponding to the SCALE-encoded transaction.
     scale_encoded: Vec<u8>,
 
@@ -1121,11 +1164,11 @@ struct Transaction<TTx> {
 
     /// Relative block height and status of the transaction validation against the highest
     /// finalized block.
-    finalized_chain_validation: Option<(u64, Result<Validation, ()>)>,
+    finalized_chain_validation: Option<(u64, Result<Validation, TErr>)>,
 
     /// Cache of the validation status of the transaction against the highest block of the best
     /// chain that has one.
-    best_chain_validation: Option<Result<Validation, ()>>,
+    best_chain_validation: Option<Result<Validation, TErr>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
