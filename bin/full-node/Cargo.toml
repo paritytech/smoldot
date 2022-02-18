@@ -32,5 +32,5 @@ num_cpus = "1.13.0"
 rand = "0.8.5"
 smoldot = { version = "0.2.0", path = "../..", default-features = false, features = ["database-sqlite", "std"] }
 terminal_size = "0.1.17"
-tracing = { version = "0.1.30", features = ["attributes"] }
+tracing = { version = "0.1.31", features = ["attributes"] }
 tracing-subscriber = { version = "0.2.25", default-features = false, features = ["ansi", "chrono", "env-filter", "json", "fmt", "parking_lot", "smallvec"] }
