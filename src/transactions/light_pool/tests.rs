@@ -24,7 +24,7 @@ use super::{Config, LightPool};
 
 #[test]
 fn regular_path() {
-    let mut pool = LightPool::new(Config {
+    let mut pool = LightPool::<_, _, ()>::new(Config {
         blocks_capacity: 16,
         finalized_block_hash: [0; 32],
         transactions_capacity: 16,
@@ -57,7 +57,7 @@ fn regular_path() {
 
 #[test]
 fn included_after_set_best() {
-    let mut pool = LightPool::new(Config {
+    let mut pool = LightPool::<_, _, ()>::new(Config {
         blocks_capacity: 16,
         finalized_block_hash: [0; 32],
         transactions_capacity: 16,
@@ -83,7 +83,7 @@ fn included_after_set_best() {
 
 #[test]
 fn transaction_retracted_after_reorg() {
-    let mut pool = LightPool::new(Config {
+    let mut pool = LightPool::<_, _, ()>::new(Config {
         blocks_capacity: 16,
         finalized_block_hash: [0; 32],
         transactions_capacity: 16,
@@ -134,7 +134,7 @@ fn transaction_retracted_after_reorg() {
 
 #[test]
 fn longevity_works_non_finalized() {
-    let mut pool = LightPool::new(Config {
+    let mut pool = LightPool::<_, _, ()>::new(Config {
         blocks_capacity: 16,
         finalized_block_hash: [0; 32],
         transactions_capacity: 16,
@@ -194,7 +194,7 @@ fn longevity_works_non_finalized() {
 
 #[test]
 fn longevity_works_finalized() {
-    let mut pool = LightPool::new(Config {
+    let mut pool = LightPool::<_, _, ()>::new(Config {
         blocks_capacity: 16,
         finalized_block_hash: [0; 32],
         transactions_capacity: 16,
@@ -258,7 +258,7 @@ fn longevity_works_finalized() {
 
 #[test]
 fn longevity_works_finalized_base() {
-    let mut pool = LightPool::new(Config {
+    let mut pool = LightPool::<_, _, ()>::new(Config {
         blocks_capacity: 16,
         finalized_block_hash: [0; 32],
         transactions_capacity: 16,

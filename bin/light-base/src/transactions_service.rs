@@ -265,6 +265,12 @@ pub enum ValidateTransactionError {
     NextKeyForbidden,
 }
 
+#[derive(Debug, Clone)]
+enum InvalidOrError {
+    Invalid(validate::TransactionValidityError),
+    ValidateError(ValidateTransactionError),
+}
+
 /// Message sent from the foreground service to the background.
 enum ToBackground {
     SubmitTransaction {
@@ -430,8 +436,8 @@ async fn background_task<TPlat: Platform>(
                             scale_encoded_transaction,
                             validate::TransactionSource::External,
                         )
-                        .await?;
-                        Ok((block_hash, result))
+                        .await;
+                        (block_hash, result)
                     }
                 };
 
@@ -448,6 +454,38 @@ async fn background_task<TPlat: Platform>(
                     .unwrap();
                 debug_assert!(tx.validation_in_progress.is_none());
                 tx.validation_in_progress = Some(result_rx);
+            }
+
+            // Remove transactions that have been determined to be invalid.
+            loop {
+                // Note that we really would like to use a `while let` loop, but the Rust borrow
+                // checker doesn't permit it.
+                let (tx_id, _, error) = match worker
+                    .pending_transactions
+                    .invalid_transactions_finalized_block()
+                    .next()
+                {
+                    Some(v) => v,
+                    None => break,
+                };
+
+                // Clone the error because we need to unborrow `worker.pending_transactions`.
+                let error = error.clone();
+
+                let (tx_body, mut transaction) =
+                    worker.pending_transactions.remove_transaction(tx_id);
+
+                log::debug!(
+                    target: &log_target,
+                    "Discarded(tx_hash={}, error={:?})",
+                    HashDisplay(&blake2_hash(&tx_body)),
+                    error,
+                );
+
+                transaction.update_status(TransactionStatus::Dropped(match error {
+                    InvalidOrError::Invalid(err) => DropReason::Invalid(err),
+                    InvalidOrError::ValidateError(err) => DropReason::ValidateError(err),
+                }));
             }
 
             // Start block bodies downloads that need to be started.
@@ -700,7 +738,7 @@ async fn background_task<TPlat: Platform>(
 
                     // Try extract the validation result of this transaction, or `continue` if it
                     // is a false positive.
-                    let validation_result = match worker.pending_transactions.transaction_user_data_mut(maybe_validated_tx_id) {
+                    let (block_hash, validation_result) = match worker.pending_transactions.transaction_user_data_mut(maybe_validated_tx_id) {
                         None => continue,  // Normal. `maybe_validated_tx_id` is just a hint.
                         Some(tx) => match tx.validation_in_progress.as_mut().and_then(|f| f.now_or_never()) {
                             None => continue,  // Normal. `maybe_validated_tx_id` is just a hint.
@@ -713,28 +751,28 @@ async fn background_task<TPlat: Platform>(
 
                     let tx_hash = blake2_hash(worker.pending_transactions.scale_encoding(maybe_validated_tx_id).unwrap());
 
-                    match validation_result {
-                        Ok((block_hash, Ok(result))) => {
-                            // The validation is made using the runtime service, while the state
-                            // of the chain is tracked using the sync service. As such, it is
-                            // possible for the validation to have been performed against a block
-                            // that has already been finalized and removed from the pool.
-                            if !worker.pending_transactions.has_block(&block_hash) {
-                                log::debug!(
-                                    target: &log_target,
-                                    "TxValidations => ObsoleteBlock(tx={}, block={})",
-                                    HashDisplay(&tx_hash),
-                                    HashDisplay(&block_hash)
-                                );
-                                continue;
-                            }
+                    // The validation is made using the runtime service, while the state
+                    // of the chain is tracked using the sync service. As such, it is
+                    // possible for the validation to have been performed against a block
+                    // that has already been finalized and removed from the pool.
+                    if !worker.pending_transactions.has_block(&block_hash) {
+                        log::debug!(
+                            target: &log_target,
+                            "TxValidations => ObsoleteBlock(tx={}, block={})",
+                            HashDisplay(&tx_hash),
+                            HashDisplay(&block_hash)
+                        );
+                        continue;
+                    }
 
+                    match &validation_result {
+                        Ok(result) => {
                             log::debug!(
                                 target: &log_target,
                                 "TxValidations => Success(tx={}, block={}, result={:?})",
                                 HashDisplay(&tx_hash),
                                 HashDisplay(&block_hash),
-                                result // TODO: better show results
+                                result // TODO: better show result
                             );
 
                             log::info!(
@@ -743,40 +781,34 @@ async fn background_task<TPlat: Platform>(
                                 HashDisplay(&tx_hash)
                             );
 
-                            worker.pending_transactions
-                                .set_validation_result(maybe_validated_tx_id, &block_hash, Ok(result));
-
                             // Schedule this transaction for announcement.
                             worker.next_reannounce.push(async move {
                                 maybe_validated_tx_id
                             }.boxed());
                         }
-                        Ok((_, Err(error))) => {
+                        Err(InvalidOrError::Invalid(error)) => {
                             log::debug!(
                                 target: &log_target,
-                                "TxValidations => Invalid(tx={}, error={:?})",
+                                "TxValidations => Invalid(tx={}, block={}, error={:?})",
                                 HashDisplay(&tx_hash),
+                                HashDisplay(&block_hash),
                                 error,
                             );
 
                             log::warn!(
                                 target: &log_target,
-                                "Discarding invalid transaction {}: {:?}",
+                                "Transaction {} invalid against block {}: {}",
                                 HashDisplay(&tx_hash),
+                                HashDisplay(&block_hash),
                                 error,
                             );
-
-                            // TODO: don't actually do that directly, but store the result in the pool and later fetch invalid transaction
-                            // The validation itself has completed, but the runtime indicated
-                            // that the transaction was invalid. Drop the transaction.
-                            let mut tx = worker.pending_transactions.remove_transaction(maybe_validated_tx_id);
-                            tx.update_status(TransactionStatus::Dropped(DropReason::Invalid(error)));
                         }
-                        Err(error) => {
+                        Err(InvalidOrError::ValidateError(error)) => {
                             log::debug!(
                                 target: &log_target,
-                                "TxValidations => Error(tx={}, error={:?})",
+                                "TxValidations => Error(tx={}, block={}, error={:?})",
                                 HashDisplay(&tx_hash),
+                                HashDisplay(&block_hash),
                                 error,
                             );
 
@@ -786,15 +818,14 @@ async fn background_task<TPlat: Platform>(
                                 HashDisplay(&tx_hash),
                                 error
                             );
-
-                            // TODO: don't actually do that directly, but store the result in the pool and later fetch invalid transaction
-                            // Transaction couldn't be validated because of an error while
-                            // executing the runtime. This most likely indicates a compatibility
-                            // problem between smoldot and the runtime code. Drop the transaction.
-                            let mut tx = worker.pending_transactions.remove_transaction(maybe_validated_tx_id);
-                            tx.update_status(TransactionStatus::Dropped(DropReason::ValidateError(error)));
                         }
                     }
+
+                    // No matter whether the validation is successful, we store the result in
+                    // the transactions pool. This will later be picked up by the code that removes
+                    // invalid transactions from the pool.
+                    worker.pending_transactions
+                        .set_validation_result(maybe_validated_tx_id, &block_hash, validation_result);
                 },
 
                 message = from_foreground.next().fuse() => {
@@ -881,7 +912,7 @@ struct Worker<TPlat: Platform> {
     ///
     /// All the blocks within this data structure are also pinned within the runtime service. They
     /// must be unpinned when they leave the data structure.
-    pending_transactions: light_pool::LightPool<PendingTransaction<TPlat>, Block>,
+    pending_transactions: light_pool::LightPool<PendingTransaction<TPlat>, Block, InvalidOrError>,
 
     /// See [`Config::max_pending_transactions`].
     max_pending_transactions: usize,
@@ -991,15 +1022,7 @@ struct PendingTransaction<TPlat: Platform> {
 
     /// If `Some`, will receive the result of the validation of the transaction.
     validation_in_progress: Option<
-        future::RemoteHandle<
-            Result<
-                (
-                    [u8; 32],
-                    Result<validate::ValidTransaction, validate::TransactionValidityError>,
-                ),
-                ValidateTransactionError,
-            >,
-        >,
+        future::RemoteHandle<([u8; 32], Result<validate::ValidTransaction, InvalidOrError>)>,
     >,
 }
 
@@ -1038,10 +1061,7 @@ async fn validate_transaction<TPlat: Platform>(
     block_scale_encoded_header: &[u8],
     scale_encoded_transaction: impl AsRef<[u8]> + Clone,
     source: validate::TransactionSource,
-) -> Result<
-    Result<validate::ValidTransaction, validate::TransactionValidityError>,
-    ValidateTransactionError,
-> {
+) -> Result<validate::ValidTransaction, InvalidOrError> {
     let runtime_lock = relay_chain_sync
         .pinned_block_runtime_lock(relay_chain_sync_subscription_id, &block_hash)
         .await;
@@ -1071,7 +1091,8 @@ async fn validate_transaction<TPlat: Platform>(
             NonZeroU32::new(1).unwrap(),
         )
         .await
-        .map_err(ValidateTransactionError::Call)?;
+        .map_err(ValidateTransactionError::Call)
+        .map_err(InvalidOrError::ValidateError)?;
 
     let mut validation_in_progress = validate::validate_transaction(validate::Config {
         runtime,
@@ -1083,25 +1104,36 @@ async fn validate_transaction<TPlat: Platform>(
     loop {
         match validation_in_progress {
             validate::Query::Finished {
-                result: Ok(success),
+                result: Ok(Ok(success)),
                 virtual_machine,
             } => {
                 runtime_call_lock.unlock(virtual_machine);
                 break Ok(success);
             }
             validate::Query::Finished {
+                result: Ok(Err(invalid)),
+                virtual_machine,
+            } => {
+                runtime_call_lock.unlock(virtual_machine);
+                break Err(InvalidOrError::Invalid(invalid));
+            }
+            validate::Query::Finished {
                 result: Err(error),
                 virtual_machine,
             } => {
                 runtime_call_lock.unlock(virtual_machine);
-                break Err(ValidateTransactionError::Validation(error));
+                break Err(InvalidOrError::ValidateError(
+                    ValidateTransactionError::Validation(error),
+                ));
             }
             validate::Query::StorageGet(get) => {
                 let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
                     Ok(v) => v,
                     Err(err) => {
                         runtime_call_lock.unlock(validate::Query::StorageGet(get).into_prototype());
-                        return Err(ValidateTransactionError::Call(err));
+                        return Err(InvalidOrError::ValidateError(
+                            ValidateTransactionError::Call(err),
+                        ));
                     }
                 };
                 validation_in_progress = get.inject_value(storage_value.map(iter::once));
@@ -1109,7 +1141,9 @@ async fn validate_transaction<TPlat: Platform>(
             validate::Query::NextKey(nk) => {
                 // TODO:
                 runtime_call_lock.unlock(validate::Query::NextKey(nk).into_prototype());
-                break Err(ValidateTransactionError::NextKeyForbidden);
+                break Err(InvalidOrError::ValidateError(
+                    ValidateTransactionError::NextKeyForbidden,
+                ));
             }
             validate::Query::PrefixKeys(prefix) => {
                 // TODO: lots of allocations because I couldn't figure how to make this annoying borrow checker happy
@@ -1122,7 +1156,9 @@ async fn validate_transaction<TPlat: Platform>(
                     Err(err) => {
                         runtime_call_lock
                             .unlock(validate::Query::PrefixKeys(prefix).into_prototype());
-                        return Err(ValidateTransactionError::Call(err));
+                        return Err(InvalidOrError::ValidateError(
+                            ValidateTransactionError::Call(err),
+                        ));
                     }
                 }
             }
