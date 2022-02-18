@@ -789,23 +789,26 @@ async fn background_task<TPlat: Platform>(
                         Err(InvalidOrError::Invalid(error)) => {
                             log::debug!(
                                 target: &log_target,
-                                "TxValidations => Invalid(tx={}, error={:?})",
+                                "TxValidations => Invalid(tx={}, block={}, error={:?})",
                                 HashDisplay(&tx_hash),
+                                HashDisplay(&block_hash),
                                 error,
                             );
 
                             log::warn!(
                                 target: &log_target,
-                                "Transaction {} invalid: {}",
+                                "Transaction {} invalid against block {}: {}",
                                 HashDisplay(&tx_hash),
+                                HashDisplay(&block_hash),
                                 error,
                             );
                         }
                         Err(InvalidOrError::ValidateError(error)) => {
                             log::debug!(
                                 target: &log_target,
-                                "TxValidations => Error(tx={}, error={:?})",
+                                "TxValidations => Error(tx={}, block={}, error={:?})",
                                 HashDisplay(&tx_hash),
+                                HashDisplay(&block_hash),
                                 error,
                             );
 
