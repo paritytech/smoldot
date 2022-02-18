@@ -644,10 +644,13 @@ async fn background_task<TPlat: Platform>(
                         continue;
                     }
 
-                    // Don't gossip the transaction if it hasn't been validated.
+                    // Don't gossip the transaction if it hasn't been validated or is already
+                    // included.
                     // TODO: if best block changes, we would need to reset all the re-announce period of all transactions, awkward!
                     // TODO: also, if this is false, then the transaction might never be re-announced ever again
-                    if !worker.pending_transactions.is_valid_against_best_block(maybe_reannounce_tx_id) {
+                    if worker.pending_transactions.is_included_best_chain(maybe_reannounce_tx_id) ||
+                        !worker.pending_transactions.is_valid_against_best_block(maybe_reannounce_tx_id)
+                    {
                         continue;
                     }
 
