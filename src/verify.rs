@@ -66,8 +66,6 @@
 //! happen, and many valid blocks don't get finalized.
 //!
 
-mod execute_block;
-
 pub mod aura;
 pub mod babe;
 pub mod header_body;

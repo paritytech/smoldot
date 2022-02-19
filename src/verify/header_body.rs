@@ -15,17 +15,17 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::execute_block;
 use crate::{
     chain::chain_information,
-    executor::{self, host, storage_diff, vm},
+    executor::{self, host, runtime_host, storage_diff, vm},
     header,
     trie::calculate_root,
+    util,
     verify::{aura, babe},
 };
 
 use alloc::{string::String, vec::Vec};
-use core::{num::NonZeroU64, time::Duration};
+use core::{iter, num::NonZeroU64, time::Duration};
 
 /// Configuration for a block verification.
 pub struct Config<'a, TBody> {
@@ -158,8 +158,14 @@ pub enum SuccessConsensus {
 /// Error that can happen during the verification.
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
-    /// Error while verifying the unsealed block.
-    Unsealed(execute_block::Error),
+    /// Error while starting the Wasm virtual machine to execute the block.
+    #[display(fmt = "{}", _0)]
+    WasmStart(host::StartErr),
+    /// Error while running the Wasm virtual machine to execute the block.
+    #[display(fmt = "{}", _0)]
+    WasmVm(runtime_host::ErrorDetail),
+    /// Output of `Core_execute_block` wasn't empty.
+    NonEmptyOutput,
     /// Block header contains items relevant to multiple consensus engines at the same time.
     MultipleConsensusEngines,
     /// Failed to verify the authenticity of the block with the AURA algorithm.
@@ -274,12 +280,31 @@ pub fn verify(
         let mut unsealed_header = config.block_header.clone();
         let _seal_log = unsealed_header.digest.pop_seal();
 
-        execute_block::execute_block(execute_block::Config {
-            parent_runtime: config.parent_runtime,
-            block_header: unsealed_header,
-            block_body: config.block_body,
+        let vm = runtime_host::run(runtime_host::Config {
+            virtual_machine: config.parent_runtime,
+            function_to_call: "Core_execute_block",
+            parameter: {
+                // The `Code_execute_block` function expects a SCALE-encoded `(header, body)`
+                // where `body` is a `Vec<Extrinsic>`. We perform the encoding manually to avoid
+                // performing redundant data copies.
+                let encoded_body_len = util::encode_scale_compact_usize(config.block_body.len());
+                unsealed_header
+                    .scale_encoding()
+                    .map(|b| either::Right(either::Left(b)))
+                    .chain(iter::once(either::Right(either::Right(encoded_body_len))))
+                    .chain(config.block_body.map(either::Left))
+            },
             top_trie_root_calculation_cache: config.top_trie_root_calculation_cache,
-        })
+            storage_top_trie_changes: Default::default(),
+            offchain_storage_changes: Default::default(),
+        });
+
+        match vm {
+            Ok(vm) => vm,
+            Err((error, prototype)) => {
+                return Verify::Finished(Err((Error::WasmStart(error), prototype)))
+            }
+        }
     };
 
     VerifyInner {
@@ -311,17 +336,24 @@ pub enum Verify {
 }
 
 struct VerifyInner {
-    inner: execute_block::Verify,
+    inner: runtime_host::RuntimeHostVm,
     consensus_success: SuccessConsensus,
 }
 
 impl VerifyInner {
     fn run(self) -> Verify {
         match self.inner {
-            execute_block::Verify::Finished(Err((err, prototype))) => {
-                Verify::Finished(Err((Error::Unsealed(err), prototype)))
+            runtime_host::RuntimeHostVm::Finished(Err(err)) => {
+                Verify::Finished(Err((Error::WasmVm(err.detail), err.prototype)))
             }
-            execute_block::Verify::Finished(Ok(success)) => {
+            runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                if !success.virtual_machine.value().as_ref().is_empty() {
+                    return Verify::Finished(Err((
+                        Error::NonEmptyOutput,
+                        success.virtual_machine.into_prototype(),
+                    )));
+                }
+
                 match (
                     success.storage_top_trie_changes.diff_get(&b":code"[..]),
                     success
@@ -332,16 +364,18 @@ impl VerifyInner {
                     (Some(None), _) => {
                         return Verify::Finished(Err((
                             Error::CodeKeyErased,
-                            success.parent_runtime,
+                            success.virtual_machine.into_prototype(),
                         )))
                     }
                     (None, Some(_)) => {
                         return Verify::Finished(Err((
                             Error::HeapPagesOnlyModification,
-                            success.parent_runtime,
+                            success.virtual_machine.into_prototype(),
                         )))
                     }
                     (Some(Some(_code)), heap_pages) => {
+                        let parent_runtime = success.virtual_machine.into_prototype();
+
                         let heap_pages = match heap_pages {
                             Some(heap_pages) => {
                                 match executor::storage_heap_pages_to_value(heap_pages.as_deref()) {
@@ -349,24 +383,29 @@ impl VerifyInner {
                                     Err(err) => {
                                         return Verify::Finished(Err((
                                             Error::HeapPagesParseError(err),
-                                            success.parent_runtime,
+                                            parent_runtime,
                                         )))
                                     }
                                 }
                             }
-                            None => success.parent_runtime.heap_pages(),
+                            None => parent_runtime.heap_pages(),
                         };
 
                         return Verify::RuntimeCompilation(RuntimeCompilation {
                             consensus_success: self.consensus_success,
+                            parent_runtime,
                             heap_pages,
-                            success,
+                            logs: success.logs,
+                            offchain_storage_changes: success.offchain_storage_changes,
+                            storage_top_trie_changes: success.storage_top_trie_changes,
+                            top_trie_root_calculation_cache: success
+                                .top_trie_root_calculation_cache,
                         });
                     }
                 }
 
                 Verify::Finished(Ok(Success {
-                    parent_runtime: success.parent_runtime,
+                    parent_runtime: success.virtual_machine.into_prototype(),
                     new_runtime: None,
                     consensus: self.consensus_success,
                     storage_top_trie_changes: success.storage_top_trie_changes,
@@ -375,17 +414,17 @@ impl VerifyInner {
                     logs: success.logs,
                 }))
             }
-            execute_block::Verify::StorageGet(inner) => Verify::StorageGet(StorageGet {
+            runtime_host::RuntimeHostVm::StorageGet(inner) => Verify::StorageGet(StorageGet {
                 inner,
                 consensus_success: self.consensus_success,
             }),
-            execute_block::Verify::PrefixKeys(inner) => {
+            runtime_host::RuntimeHostVm::PrefixKeys(inner) => {
                 Verify::StoragePrefixKeys(StoragePrefixKeys {
                     inner,
                     consensus_success: self.consensus_success,
                 })
             }
-            execute_block::Verify::NextKey(inner) => Verify::StorageNextKey(StorageNextKey {
+            runtime_host::RuntimeHostVm::NextKey(inner) => Verify::StorageNextKey(StorageNextKey {
                 inner,
                 consensus_success: self.consensus_success,
             }),
@@ -396,7 +435,7 @@ impl VerifyInner {
 /// Loading a storage value is required in order to continue.
 #[must_use]
 pub struct StorageGet {
-    inner: execute_block::StorageGet,
+    inner: runtime_host::StorageGet,
     consensus_success: SuccessConsensus,
 }
 
@@ -426,7 +465,7 @@ impl StorageGet {
 /// Fetching the list of keys with a given prefix is required in order to continue.
 #[must_use]
 pub struct StoragePrefixKeys {
-    inner: execute_block::PrefixKeys,
+    inner: runtime_host::PrefixKeys,
     consensus_success: SuccessConsensus,
 }
 
@@ -449,7 +488,7 @@ impl StoragePrefixKeys {
 /// Fetching the key that follows a given one is required in order to continue.
 #[must_use]
 pub struct StorageNextKey {
-    inner: execute_block::NextKey,
+    inner: runtime_host::NextKey,
     consensus_success: SuccessConsensus,
 }
 
@@ -480,7 +519,11 @@ impl StorageNextKey {
 /// make it possible to benchmark the time it takes to compile runtimes.
 #[must_use]
 pub struct RuntimeCompilation {
-    success: execute_block::Success,
+    parent_runtime: host::HostVmPrototype,
+    storage_top_trie_changes: storage_diff::StorageDiff,
+    offchain_storage_changes: storage_diff::StorageDiff,
+    top_trie_root_calculation_cache: calculate_root::CalculationCache,
+    logs: String,
     heap_pages: vm::HeapPages,
     consensus_success: SuccessConsensus,
 }
@@ -491,7 +534,6 @@ impl RuntimeCompilation {
         // A `RuntimeCompilation` object is built only if `:code` has been modified and to a
         // specific value.
         let code = self
-            .success
             .storage_top_trie_changes
             .diff_get(&b":code"[..])
             .unwrap()
@@ -507,19 +549,19 @@ impl RuntimeCompilation {
             Err(err) => {
                 return Verify::Finished(Err((
                     Error::NewRuntimeCompilationError(err),
-                    self.success.parent_runtime,
+                    self.parent_runtime,
                 )))
             }
         };
 
         Verify::Finished(Ok(Success {
-            parent_runtime: self.success.parent_runtime,
+            parent_runtime: self.parent_runtime,
             new_runtime: Some(new_runtime),
             consensus: self.consensus_success,
-            storage_top_trie_changes: self.success.storage_top_trie_changes,
-            offchain_storage_changes: self.success.offchain_storage_changes,
-            top_trie_root_calculation_cache: self.success.top_trie_root_calculation_cache,
-            logs: self.success.logs,
+            storage_top_trie_changes: self.storage_top_trie_changes,
+            offchain_storage_changes: self.offchain_storage_changes,
+            top_trie_root_calculation_cache: self.top_trie_root_calculation_cache,
+            logs: self.logs,
         }))
     }
 }
