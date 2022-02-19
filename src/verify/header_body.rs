@@ -274,6 +274,27 @@ pub fn verify(
         }
     };
 
+    // The two runtime functions we call during the verification expect a SCALE-encoded
+    // `(header, body)` where `body` is a `Vec<Extrinsic>`. We perform the encoding ahead of time
+    // in order to re-use it later for the second call.
+    let block_parameter = {
+        // Consensus engines adds a seal at the end of the digest logs. This seal is guaranteed to be
+        // the last item. We need to remove it before we can verify the unsealed header.
+        let mut unsealed_header = config.block_header.clone();
+        let _seal_log = unsealed_header.digest.pop_seal();
+
+        let encoded_body_len = util::encode_scale_compact_usize(config.block_body.len());
+        unsealed_header
+            .scale_encoding()
+            .map(|b| either::Right(either::Left(b)))
+            .chain(iter::once(either::Right(either::Right(encoded_body_len))))
+            .chain(config.block_body.map(either::Left))
+            .fold(Vec::with_capacity(8192), |mut a, b| {
+                a.extend_from_slice(AsRef::<[u8]>::as_ref(&b));
+                a
+            })
+    };
+
     // Consensus engines adds a seal at the end of the digest logs. This seal is guaranteed to be
     // the last item. We need to remove it before we can verify the unsealed header.
     let import_process = {
@@ -283,17 +304,7 @@ pub fn verify(
         let vm = runtime_host::run(runtime_host::Config {
             virtual_machine: config.parent_runtime,
             function_to_call: "Core_execute_block",
-            parameter: {
-                // The `Code_execute_block` function expects a SCALE-encoded `(header, body)`
-                // where `body` is a `Vec<Extrinsic>`. We perform the encoding manually to avoid
-                // performing redundant data copies.
-                let encoded_body_len = util::encode_scale_compact_usize(config.block_body.len());
-                unsealed_header
-                    .scale_encoding()
-                    .map(|b| either::Right(either::Left(b)))
-                    .chain(iter::once(either::Right(either::Right(encoded_body_len))))
-                    .chain(config.block_body.map(either::Left))
-            },
+            parameter: iter::once(&block_parameter),
             top_trie_root_calculation_cache: config.top_trie_root_calculation_cache,
             storage_top_trie_changes: Default::default(),
             offchain_storage_changes: Default::default(),
