@@ -56,25 +56,25 @@ impl InherentData {
     pub fn as_raw_list(
         &'_ self,
     ) -> impl ExactSizeIterator<Item = ([u8; 8], impl AsRef<[u8]> + Clone + '_)> + Clone + '_ {
-        // Note: we use `IntoIter::new` because of a Rust backwards compatibility issue.
-        // See https://doc.rust-lang.org/std/primitive.array.html#editions
-        core::array::IntoIter::new([
-            (*b"timstap0", self.timestamp.to_le_bytes()),
-            match self.consensus {
-                InherentDataConsensus::Aura { slot_number } => {
-                    (*b"auraslot", slot_number.to_le_bytes())
-                }
-                InherentDataConsensus::Babe { slot_number } => {
-                    (*b"babeslot", slot_number.to_le_bytes())
-                }
-            },
-        ])
+        let timestamp = (*b"timstap0", self.timestamp.to_le_bytes());
+        match self.consensus {
+            InherentDataConsensus::None => either::Left([timestamp].into_iter()),
+            InherentDataConsensus::Aura { slot_number } => {
+                either::Right([timestamp, (*b"auraslot", slot_number.to_le_bytes())].into_iter())
+            }
+            InherentDataConsensus::Babe { slot_number } => {
+                either::Right([timestamp, (*b"babeslot", slot_number.to_le_bytes())].into_iter())
+            }
+        }
     }
 }
 
 /// Extra consensus-specific items in [`InherentData`].
 #[derive(Debug)]
 pub enum InherentDataConsensus {
+    // TODO: unclear?!
+    None,
+
     /// Aura-specific items.
     Aura {
         /// Number of the Aura slot being claimed to generate this block.
