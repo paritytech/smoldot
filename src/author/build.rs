@@ -22,6 +22,7 @@ use crate::{
     executor::host,
     header,
     trie::calculate_root,
+    verify::inherents,
 };
 
 use alloc::vec::Vec;
@@ -227,11 +228,11 @@ impl AuthoringStart {
             },
         });
 
-        let inherent_data = runtime::InherentData {
+        let inherent_data = inherents::InherentData {
             timestamp: u64::try_from(config.now_from_unix_epoch.as_millis())
                 .unwrap_or(u64::max_value()),
             consensus: match self.consensus {
-                WaitSlotConsensus::Aura(slot) => runtime::InherentDataConsensus::Aura {
+                WaitSlotConsensus::Aura(slot) => inherents::InherentDataConsensus::Aura {
                     slot_number: slot.slot_number,
                 },
             },
@@ -431,7 +432,7 @@ pub enum Error {
 struct Shared {
     /// Inherent data waiting to be injected. Will be extracted from its `Option` when the inner
     /// block builder requests it.
-    inherent_data: Option<runtime::InherentData>,
+    inherent_data: Option<inherents::InherentData>,
 
     /// Slot that has been claimed.
     slot_claim: WaitSlotConsensus,
