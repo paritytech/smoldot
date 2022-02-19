@@ -478,8 +478,8 @@ impl InherentExtrinsics {
     /// See the module-level documentation for more information.
     ///
     /// > **Note**: Some of the values are redundant with the values passed through
-    /// >           [`ConfigPreRuntime::Aura`]. This redundancy is considered as a wart in the
-    /// >           runtime environment and is kept for backwards compatibility.
+    /// >           [`ConfigPreRuntime`]. This redundancy is considered as a wart in the runtime
+    /// >           environment and is kept for backwards compatibility.
     pub fn inject_inherents(self, inherents: inherents::InherentData) -> BlockBuild {
         self.inject_raw_inherents_list(inherents.as_raw_list())
     }
