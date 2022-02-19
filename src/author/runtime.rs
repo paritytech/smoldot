@@ -52,6 +52,7 @@ use crate::{
     header,
     trie::calculate_root,
     util,
+    verify::inherents,
 };
 
 use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
@@ -475,7 +476,11 @@ impl InherentExtrinsics {
     /// Injects the inherents extrinsics and resumes execution.
     ///
     /// See the module-level documentation for more information.
-    pub fn inject_inherents(self, inherents: InherentData) -> BlockBuild {
+    ///
+    /// > **Note**: Some of the values are redundant with the values passed through
+    /// >           [`ConfigPreRuntime`]. This redundancy is considered as a wart in the runtime
+    /// >           environment and is kept for backwards compatibility.
+    pub fn inject_inherents(self, inherents: inherents::InherentData) -> BlockBuild {
         self.inject_raw_inherents_list(inherents.as_raw_list())
     }
 
@@ -522,78 +527,6 @@ impl InherentExtrinsics {
 
         BlockBuild::from_inner(vm, self.shared)
     }
-}
-
-/// Values of the inherents to pass to the runtime.
-#[derive(Debug)]
-pub struct InherentData {
-    /// Number of milliseconds since the UNIX epoch when the block is generated, ignoring leap
-    /// seconds.
-    ///
-    /// Its identifier passed to the runtime is: `timstap0`.
-    pub timestamp: u64,
-
-    /// Consensus-specific fields.
-    pub consensus: InherentDataConsensus,
-    // TODO: figure out uncles
-    /*/// List of valid block headers that have the same height as the parent of the one being
-    /// generated.
-    ///
-    /// Its identifier passed to the runtime is: `uncles00`.
-    ///
-    /// `TUnc` must be an iterator yielding SCALE-encoded headers.
-    pub uncles: TUnc,*/
-
-    // TODO: parachain-related inherents are missing
-}
-
-impl InherentData {
-    /// Turns this list of inherents into a list that can be passed as parameter to the runtime.
-    pub fn as_raw_list(
-        &'_ self,
-    ) -> impl ExactSizeIterator<Item = ([u8; 8], impl AsRef<[u8]> + Clone + '_)> + Clone + '_ {
-        // Note: we use `IntoIter::new` because of a Rust backwards compatibility issue.
-        // See https://doc.rust-lang.org/std/primitive.array.html#editions
-        core::array::IntoIter::new([
-            (*b"timstap0", self.timestamp.to_le_bytes()),
-            match self.consensus {
-                InherentDataConsensus::Aura { slot_number } => {
-                    (*b"auraslot", slot_number.to_le_bytes())
-                }
-                InherentDataConsensus::Babe { slot_number } => {
-                    (*b"babeslot", slot_number.to_le_bytes())
-                }
-            },
-        ])
-    }
-}
-
-/// Extra consensus-specific items in [`InherentData`].
-#[derive(Debug)]
-pub enum InherentDataConsensus {
-    /// Aura-specific items.
-    Aura {
-        /// Number of the Aura slot being claimed to generate this block.
-        ///
-        /// Its identifier passed to the runtime is: `auraslot`.
-        ///
-        /// > **Note**: This is redundant with the value passed through
-        /// >           [`ConfigPreRuntime::Aura`]. This redundancy is considered as a wart in the
-        /// >           runtime environment and is kept for backwards compatibility.
-        slot_number: u64,
-    },
-
-    /// Babe-specific items.
-    Babe {
-        /// Number of the Babe slot being claimed to generate this block.
-        ///
-        /// Its identifier passed to the runtime is: `babeslot`.
-        ///
-        /// > **Note**: This is redundant with the value passed through
-        /// >           [`ConfigPreRuntime::Babe`]. This redundancy is considered as a wart in the
-        /// >           runtime environment and is kept for backwards compatibility.
-        slot_number: u64,
-    },
 }
 
 /// More transactions can be added.
