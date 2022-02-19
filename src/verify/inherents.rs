@@ -80,10 +80,6 @@ pub enum InherentDataConsensus {
         /// Number of the Aura slot being claimed to generate this block.
         ///
         /// Its identifier passed to the runtime is: `auraslot`.
-        ///
-        /// > **Note**: This is redundant with the value passed through
-        /// >           [`ConfigPreRuntime::Aura`]. This redundancy is considered as a wart in the
-        /// >           runtime environment and is kept for backwards compatibility.
         slot_number: u64,
     },
 
@@ -92,10 +88,6 @@ pub enum InherentDataConsensus {
         /// Number of the Babe slot being claimed to generate this block.
         ///
         /// Its identifier passed to the runtime is: `babeslot`.
-        ///
-        /// > **Note**: This is redundant with the value passed through
-        /// >           [`ConfigPreRuntime::Babe`]. This redundancy is considered as a wart in the
-        /// >           runtime environment and is kept for backwards compatibility.
         slot_number: u64,
     },
 }
