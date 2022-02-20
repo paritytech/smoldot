@@ -715,8 +715,12 @@ impl<TPlat: Platform> Background<TPlat> {
                 .await
             }
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
-                self.author_unwatch_extrinsic(request_id, &state_machine_request_id, subscription)
-                    .await;
+                self.author_unwatch_extrinsic(
+                    request_id,
+                    &state_machine_request_id,
+                    &*subscription,
+                )
+                .await;
             }
             methods::MethodCall::chain_getBlock { hash } => {
                 self.chain_get_block(request_id, &state_machine_request_id, hash)
@@ -819,7 +823,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.state_unsubscribe_runtime_version(
                     request_id,
                     &state_machine_request_id,
-                    subscription,
+                    &*subscription,
                 )
                 .await;
             }
@@ -828,8 +832,12 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::state_unsubscribeStorage { subscription } => {
-                self.state_unsubscribe_storage(request_id, &state_machine_request_id, subscription)
-                    .await;
+                self.state_unsubscribe_storage(
+                    request_id,
+                    &state_machine_request_id,
+                    &*subscription,
+                )
+                .await;
             }
             methods::MethodCall::state_getRuntimeVersion { at } => {
                 self.state_get_runtime_version(
@@ -884,7 +892,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_stop_body(
                     request_id,
                     &state_machine_request_id,
-                    subscription,
+                    &*subscription,
                 )
                 .await;
             }
@@ -896,7 +904,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_body(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription,
+                    &*follow_subscription,
                     hash,
                     network_config,
                 )
@@ -912,9 +920,9 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_call(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription,
+                    &*follow_subscription,
                     hash,
-                    function,
+                    &*function,
                     call_parameters,
                     network_config,
                 )
@@ -924,7 +932,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_stop_call(
                     request_id,
                     &state_machine_request_id,
-                    subscription,
+                    &*subscription,
                 )
                 .await;
             }
@@ -932,7 +940,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_stop_storage(
                     request_id,
                     &state_machine_request_id,
-                    subscription,
+                    &*subscription,
                 )
                 .await;
             }
@@ -947,7 +955,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_storage(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription,
+                    &*follow_subscription,
                     hash,
                     key,
                     child_key,
@@ -971,7 +979,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_header(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription,
+                    &*follow_subscription,
                     hash,
                 )
                 .await;
@@ -983,7 +991,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_unpin(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription,
+                    &*follow_subscription,
                     hash,
                 )
                 .await;
@@ -994,7 +1002,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_unstable_unfollow(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription,
+                    &*follow_subscription,
                 )
                 .await;
             }
@@ -1011,7 +1019,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } => {
-                self.sudo_unstable_p2p_discover(request_id, &state_machine_request_id, multiaddr)
+                self.sudo_unstable_p2p_discover(request_id, &state_machine_request_id, &*multiaddr)
                     .await;
             }
             methods::MethodCall::sudo_unstable_version {} => {
@@ -1031,7 +1039,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.transaction_unstable_unwatch(
                     request_id,
                     &state_machine_request_id,
-                    subscription,
+                    &*subscription,
                 )
                 .await;
             }

@@ -72,7 +72,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
-                methods::Response::chainSpec_unstable_chainName(&self.chain_name)
+                methods::Response::chainSpec_unstable_chainName((&self.chain_name).into())
                     .to_json_response(request_id),
             )
             .await;
@@ -141,10 +141,9 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
-                methods::Response::sudo_unstable_version(&format!(
-                    "{} {}",
-                    self.system_name, self.system_version
-                ))
+                methods::Response::sudo_unstable_version(
+                    format!("{} {}", self.system_name, self.system_version).into(),
+                )
                 .to_json_response(request_id),
             )
             .await;
@@ -159,7 +158,8 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
-                methods::Response::system_chain(&self.chain_name).to_json_response(request_id),
+                methods::Response::system_chain((&self.chain_name).into())
+                    .to_json_response(request_id),
             )
             .await;
     }
@@ -173,7 +173,8 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
-                methods::Response::system_chainType(&self.chain_ty).to_json_response(request_id),
+                methods::Response::system_chainType((&self.chain_ty).into())
+                    .to_json_response(request_id),
             )
             .await;
     }
@@ -224,7 +225,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
-                methods::Response::system_localPeerId(&self.peer_id_base58)
+                methods::Response::system_localPeerId((&self.peer_id_base58).into())
                     .to_json_response(request_id),
             )
             .await;
@@ -239,7 +240,8 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
-                methods::Response::system_name(&self.system_name).to_json_response(request_id),
+                methods::Response::system_name((&self.system_name).into())
+                    .to_json_response(request_id),
             )
             .await;
     }
@@ -300,7 +302,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
-                methods::Response::system_version(&self.system_version)
+                methods::Response::system_version((&self.system_version).into())
                     .to_json_response(request_id),
             )
             .await;

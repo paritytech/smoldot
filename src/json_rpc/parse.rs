@@ -17,19 +17,20 @@
 
 //! Parse JSON-RPC method calls and notifications, and build responses messages.
 
-use alloc::string::String;
+use alloc::{borrow::Cow, string::String};
 
 /// Parses a JSON-encoded RPC method call or notification.
 pub fn parse_call(call_json: &str) -> Result<Call, ParseError> {
     let serde_call: SerdeCall = serde_json::from_str(call_json).map_err(ParseError)?;
 
     if let Some(id) = &serde_call.id {
+        // Because of https://github.com/serde-rs/json/issues/742, we can't use ̀`&str`.
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         #[serde(untagged)]
         enum SerdeId<'a> {
             Num(u64),
-            Str(&'a str),
+            Str(Cow<'a, str>),
         }
 
         if let Err(err) = serde_json::from_str::<SerdeId>(id.get()) {
@@ -352,6 +353,16 @@ mod tests {
                 .unwrap();
         assert_eq!(call.id_json.unwrap(), "\"hello\"");
         assert_eq!(call.method, "foo");
+        assert_eq!(call.params_json, "[]");
+    }
+
+    #[test]
+    fn parse_id_string_escaped() {
+        let call =
+            super::parse_call(r#"{"jsonrpc":"2.0","id":"extern:\"health-checker:0\"","method":"system_health","params":[]}"#)
+                .unwrap();
+        assert_eq!(call.id_json.unwrap(), r#""extern:\"health-checker:0\"""#);
+        assert_eq!(call.method, "system_health");
         assert_eq!(call.params_json, "[]");
     }
 
