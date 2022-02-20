@@ -53,8 +53,7 @@ impl Module {
         // environment variables whatsoever. Whether to use `Enable` or `Disable` below isn't
         // very important, so long as it is not `Environment`.
         config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
-        let engine = wasmtime::Engine::new(&config)
-            .map_err(|err| ModuleError(err.to_string()))?;
+        let engine = wasmtime::Engine::new(&config).map_err(|err| ModuleError(err.to_string()))?;
 
         let inner = wasmtime::Module::from_binary(&engine, module_bytes.as_ref())
             .map_err(|err| ModuleError(err.to_string()))?;
