@@ -102,7 +102,7 @@ enum ModuleInner {
 
 impl Module {
     /// Compiles the given Wasm code.
-    pub fn new(module: impl AsRef<[u8]>, exec_hint: ExecHint) -> Result<Self, NewErr> {
+    pub fn new(module: impl AsRef<[u8]>, exec_hint: ExecHint) -> Result<Self, ModuleError> {
         Ok(Module {
             inner: match exec_hint {
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
