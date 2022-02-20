@@ -174,11 +174,13 @@ impl<TPlat: Platform> Background<TPlat> {
             .respond(
                 &state_machine_request_id,
                 if is_legacy {
-                    methods::Response::author_submitAndWatchExtrinsic(&subscription_id)
+                    methods::Response::author_submitAndWatchExtrinsic((&subscription_id).into())
                         .to_json_response(request_id)
                 } else {
-                    methods::Response::transaction_unstable_submitAndWatch(&subscription_id)
-                        .to_json_response(request_id)
+                    methods::Response::transaction_unstable_submitAndWatch(
+                        (&subscription_id).into(),
+                    )
+                    .to_json_response(request_id)
                 },
             )
             .await;
@@ -202,7 +204,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             let update = match (update, is_legacy) {
                                 (transactions_service::TransactionStatus::Broadcast(peers), false) => {
                                     methods::ServerToClient::author_extrinsicUpdate {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::TransactionStatus::Broadcast(
                                             peers.into_iter().map(|peer| peer.to_base58()).collect(),
                                         )
@@ -212,7 +214,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 (transactions_service::TransactionStatus::Broadcast(peers), true) => {
                                     num_broadcasted_peers += peers.len();
                                     methods::ServerToClient::transaction_unstable_watchEvent {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::TransactionWatchEvent::Broadcasted {
                                             num_peers: u32::try_from(num_broadcasted_peers).unwrap_or(u32::max_value()),
                                         }
@@ -225,7 +227,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 }, true) => {
                                     included_block = Some(block_hash);
                                     methods::ServerToClient::author_extrinsicUpdate {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::TransactionStatus::InBlock(methods::HashHexString(
                                             block_hash,
                                         ))
@@ -237,7 +239,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 }, true) => {
                                     if let Some(block_hash) = included_block.take() {
                                         methods::ServerToClient::author_extrinsicUpdate {
-                                            subscription: &subscription_id,
+                                            subscription: (&subscription_id).into(),
                                             result: methods::TransactionStatus::Retracted(
                                                 methods::HashHexString(block_hash),
                                             )
@@ -253,7 +255,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 }, false) => {
                                     included_block = Some(block_hash);
                                     methods::ServerToClient::transaction_unstable_watchEvent {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::TransactionWatchEvent::BestChainBlockIncluded {
                                             block: Some(methods::TransactionWatchEventBlock {
                                                 hash: methods::HashHexString(block_hash),
@@ -267,7 +269,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     block_hash: None,
                                 }, false) => {
                                     methods::ServerToClient::transaction_unstable_watchEvent {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::TransactionWatchEvent::BestChainBlockIncluded {
                                             block: None,
                                         }
@@ -288,7 +290,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     transactions_service::DropReason::ValidateError(_),
                                 ), true) => {
                                     methods::ServerToClient::author_extrinsicUpdate {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::TransactionStatus::Dropped,
                                     }
                                     .to_json_call_object_parameters(None)
@@ -297,9 +299,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                     transactions_service::DropReason::GapInChain,
                                 ), false) => {
                                     methods::ServerToClient::transaction_unstable_watchEvent {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::TransactionWatchEvent::Dropped {
-                                            error: "gap in chain of blocks",
+                                            error: "gap in chain of blocks".into(),
                                             broadcasted: num_broadcasted_peers != 0,
                                         }
                                     }
@@ -309,9 +311,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                     transactions_service::DropReason::MaxPendingTransactionsReached,
                                 ), false) => {
                                     methods::ServerToClient::transaction_unstable_watchEvent {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::TransactionWatchEvent::Dropped {
-                                            error: "transactions pool full",
+                                            error: "transactions pool full".into(),
                                             broadcasted: num_broadcasted_peers != 0,
                                         }
                                     }
@@ -321,9 +323,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                     transactions_service::DropReason::Invalid(error),
                                 ), false) => {
                                     methods::ServerToClient::transaction_unstable_watchEvent {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::TransactionWatchEvent::Invalid {
-                                            error: &error.to_string(),
+                                            error: error.to_string().into(),
                                         }
                                     }
                                     .to_json_call_object_parameters(None)
@@ -332,9 +334,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                     transactions_service::DropReason::ValidateError(error),
                                 ), false) => {
                                     methods::ServerToClient::transaction_unstable_watchEvent {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::TransactionWatchEvent::Error {
-                                            error: &error.to_string(),
+                                            error: error.to_string().into(),
                                         }
                                     }
                                     .to_json_call_object_parameters(None)
@@ -344,7 +346,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     transactions_service::DropReason::Finalized { block_hash, .. },
                                 ), true) => {
                                     methods::ServerToClient::author_extrinsicUpdate {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::TransactionStatus::Finalized(methods::HashHexString(
                                             block_hash,
                                         ))
@@ -355,7 +357,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     transactions_service::DropReason::Finalized { block_hash, index },
                                 ), false) => {
                                     methods::ServerToClient::transaction_unstable_watchEvent {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::TransactionWatchEvent::Finalized {
                                             block: methods::TransactionWatchEventBlock {
                                                 hash: methods::HashHexString(block_hash),
