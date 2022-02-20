@@ -388,7 +388,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 &state_machine_request_id,
-                methods::Response::chain_subscribeAllHeads(&subscription_id)
+                methods::Response::chain_subscribeAllHeads((&subscription_id).into())
                     .to_json_response(request_id),
             )
             .await;
@@ -434,7 +434,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 .try_push_notification(
                                     &state_machine_subscription,
                                     methods::ServerToClient::chain_newHead {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::Header::from_scale_encoded_header(
                                             &block.scale_encoded_header,
                                         )
@@ -511,7 +511,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 &state_machine_request_id,
-                methods::Response::chain_subscribeFinalizedHeads(&subscription_id)
+                methods::Response::chain_subscribeFinalizedHeads((&subscription_id).into())
                     .to_json_response(request_id),
             )
             .await;
@@ -537,7 +537,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     &state_machine_subscription,
                                     0,
                                     methods::ServerToClient::chain_finalizedHead {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: header,
                                     }
                                     .to_json_call_object_parameters(None),
@@ -610,7 +610,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 &state_machine_request_id,
-                methods::Response::chain_subscribeNewHeads(&subscription_id)
+                methods::Response::chain_subscribeNewHeads((&subscription_id).into())
                     .to_json_response(request_id),
             )
             .await;
@@ -634,7 +634,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     &state_machine_subscription,
                                     0,
                                     methods::ServerToClient::chain_newHead {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: header,
                                     }
                                     .to_json_call_object_parameters(None),
@@ -1226,7 +1226,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 &state_machine_request_id,
-                methods::Response::state_subscribeRuntimeVersion(&subscription_id)
+                methods::Response::state_subscribeRuntimeVersion((&subscription_id).into())
                     .to_json_response(request_id),
             )
             .await;
@@ -1244,7 +1244,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     let notification_body = if let Ok(runtime_spec) = new_runtime.unwrap() {
                         let runtime_spec = runtime_spec.decode();
                         methods::ServerToClient::state_runtimeVersion {
-                            subscription: &subscription_id,
+                            subscription: (&subscription_id).into(),
                             result: Some(methods::RuntimeVersion {
                                 spec_name: runtime_spec.spec_name.into(),
                                 impl_name: runtime_spec.impl_name.into(),
@@ -1266,7 +1266,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         .to_json_call_object_parameters(None)
                     } else {
                         methods::ServerToClient::state_runtimeVersion {
-                            subscription: &subscription_id,
+                            subscription: (&subscription_id).into(),
                             result: None,
                         }
                         .to_json_call_object_parameters(None)
@@ -1435,7 +1435,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 &state_machine_request_id,
-                methods::Response::state_subscribeStorage(&subscription_id)
+                methods::Response::state_subscribeStorage((&subscription_id).into())
                     .to_json_response(request_id),
             )
             .await;
@@ -1550,7 +1550,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     &state_machine_subscription,
                                     0,
                                     methods::ServerToClient::state_storage {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: changes,
                                     }
                                     .to_json_call_object_parameters(None),
