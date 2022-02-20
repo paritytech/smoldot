@@ -255,7 +255,7 @@ impl HostVmPrototype {
         // TODO: configurable maximum allowed size? a uniform value is important for consensus
         let module = zstd::zstd_decode_if_necessary(config.module.as_ref(), 50 * 1024 * 1024)
             .map_err(NewErr::BadFormat)?;
-        let module = vm::Module::new(module, config.exec_hint)?;
+        let module = vm::Module::new(module, config.exec_hint).map_err(vm::NewErr::ModuleError)?;
         Self::from_module(module, config.heap_pages, config.allow_unresolved_imports)
     }
 

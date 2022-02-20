@@ -36,10 +36,9 @@ pub struct Module {
 
 impl Module {
     /// See [`super::Module::new`].
-    pub fn new(module_bytes: impl AsRef<[u8]>) -> Result<Self, NewErr> {
+    pub fn new(module_bytes: impl AsRef<[u8]>) -> Result<Self, ModuleError> {
         let module = wasmi::Module::from_buffer(module_bytes.as_ref())
-            .map_err(|err| ModuleError(err.to_string()))
-            .map_err(NewErr::ModuleError)?;
+            .map_err(|err| ModuleError(err.to_string()))?;
 
         Ok(Module {
             inner: Arc::new(module),
