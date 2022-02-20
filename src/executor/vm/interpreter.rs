@@ -468,27 +468,15 @@ impl Interpreter {
             .checked_add(size.try_into().map_err(|_| OutOfBoundsError)?)
             .ok_or(OutOfBoundsError)?;
 
-        enum AccessOffset<T> {
-            Enabled {
-                access: T,
-                offset: usize,
-                max: usize,
-            },
-            Empty,
+        struct AccessOffset<T> {
+            access: T,
+            offset: usize,
+            max: usize,
         }
 
         impl<T: AsRef<[u8]>> AsRef<[u8]> for AccessOffset<T> {
             fn as_ref(&self) -> &[u8] {
-                if let AccessOffset::Enabled {
-                    access,
-                    offset,
-                    max,
-                } = self
-                {
-                    &access.as_ref()[*offset..*max]
-                } else {
-                    &[]
-                }
+                &self.access.as_ref()[self.offset..self.max]
             }
         }
 
@@ -497,7 +485,7 @@ impl Interpreter {
             return Err(OutOfBoundsError);
         }
 
-        Ok(AccessOffset::Enabled {
+        Ok(AccessOffset {
             access,
             offset,
             max,
