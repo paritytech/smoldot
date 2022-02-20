@@ -72,9 +72,8 @@ pub struct JitPrototype {
     /// Shared between the "outside" and the external functions. See [`Shared`].
     shared: Arc<Mutex<Shared>>,
 
-    /// Reference to the memory used by the module, if any.
-    // TODO: shouldn't be an Option? just return error if no memory?
-    memory: Option<wasmtime::Memory>,
+    /// Reference to the memory used by the module.
+    memory: wasmtime::Memory,
 
     /// Reference to the table of indirect functions, in case we need to access it.
     /// `None` if the module doesn't export such table.
@@ -259,10 +258,10 @@ impl JitPrototype {
         };
 
         let memory = match (exported_memory, imported_memory) {
-            (Some(_), Some(_)) => todo!(),
-            (Some(m), None) => Some(m),
-            (None, Some(m)) => Some(m),
-            (None, None) => None,
+            (Some(_), Some(_)) => return Err(NewErr::TwoMemories),
+            (Some(m), None) => m,
+            (None, Some(m)) => m,
+            (None, None) => return Err(NewErr::NoMemory),
         };
 
         let indirect_table =
@@ -298,15 +297,11 @@ impl JitPrototype {
 
     /// See [`super::VirtualMachinePrototype::memory_max_pages`].
     pub fn memory_max_pages(&self) -> Option<HeapPages> {
-        if let Some(memory) = &self.memory {
-            let num = memory.ty(&self.store).maximum()?;
-            match u32::try_from(num) {
-                Ok(n) => Some(HeapPages::new(n)),
-                // If `num` doesn't fit in a `u32`, we return `None` to mean "infinite".
-                Err(_) => None,
-            }
-        } else {
-            None
+        let num = self.memory.ty(&self.store).maximum()?;
+        match u32::try_from(num) {
+            Ok(n) => Some(HeapPages::new(n)),
+            // If `num` doesn't fit in a `u32`, we return `None` to mean "infinite".
+            Err(_) => None,
         }
     }
 
@@ -317,12 +312,10 @@ impl JitPrototype {
         function_name: &str,
         params: &[WasmValue],
     ) -> Result<Jit, (StartErr, Self)> {
-        if let Some(memory) = &self.memory {
-            let min_memory_pages = u64::from(min_memory_pages.0);
-            if let Some(to_grow) = min_memory_pages.checked_sub(memory.size(&self.store)) {
-                if memory.grow(&mut self.store, to_grow).is_err() {
-                    return Err((StartErr::RequiredMemoryTooLarge, self));
-                }
+        let min_memory_pages = u64::from(min_memory_pages.0);
+        if let Some(to_grow) = min_memory_pages.checked_sub(self.memory.size(&self.store)) {
+            if self.memory.grow(&mut self.store, to_grow).is_err() {
+                return Err((StartErr::RequiredMemoryTooLarge, self));
             }
         }
 
@@ -455,7 +448,7 @@ pub struct Jit {
     shared: Arc<Mutex<Shared>>,
 
     /// See [`JitPrototype::memory`].
-    memory: Option<wasmtime::Memory>,
+    memory: wasmtime::Memory,
 
     /// See [`JitPrototype::indirect_table`].
     indirect_table: Option<wasmtime::Table>,
@@ -495,7 +488,7 @@ impl Jit {
                     } => {
                         *shared_lock = Shared::Return {
                             return_value: value,
-                            memory: self.memory.as_ref().unwrap().clone(), // TODO: unwrap()?!
+                            memory: self.memory.clone(),
                         };
 
                         if let Some(waker) = in_interrupted_waker {
@@ -521,7 +514,7 @@ impl Jit {
                 // TODO: check that value is None
 
                 *self.shared.try_lock().unwrap() = Shared::OutsideFunctionCall {
-                    memory: self.memory.as_ref().unwrap().clone(), // TODO: unwrap()?!
+                    memory: self.memory.clone(),
                 };
 
                 // Check whether the function to call has a return value.
@@ -625,7 +618,7 @@ impl Jit {
     pub fn memory_size(&self) -> HeapPages {
         match &self.inner {
             JitInner::NotStarted { store, .. } | JitInner::Done(store) => {
-                let heap_pages = self.memory.as_ref().unwrap().size(store);
+                let heap_pages = self.memory.size(store);
                 HeapPages::new(u32::try_from(heap_pages).unwrap())
             }
             JitInner::Executing(_) => {
@@ -651,10 +644,7 @@ impl Jit {
         size: u32,
     ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
         let memory_slice = match &self.inner {
-            JitInner::NotStarted { store, .. } | JitInner::Done(store) => {
-                let memory = self.memory.as_ref().unwrap();
-                memory.data(store)
-            }
+            JitInner::NotStarted { store, .. } | JitInner::Done(store) => self.memory.data(store),
             JitInner::Executing(_) => {
                 let (memory_pointer, memory_size) = match *self.shared.try_lock().unwrap() {
                     Shared::WithinFunctionCall {
@@ -686,8 +676,7 @@ impl Jit {
     pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), OutOfBoundsError> {
         let memory_slice = match &mut self.inner {
             JitInner::NotStarted { store, .. } | JitInner::Done(store) => {
-                let memory = self.memory.as_ref().unwrap();
-                memory.data_mut(store)
+                self.memory.data_mut(store)
             }
             JitInner::Executing(_) => {
                 let (memory_pointer, memory_size) = match *self.shared.try_lock().unwrap() {
@@ -723,16 +712,11 @@ impl Jit {
         // TODO: must check whether additional is within bounds
         let additional = u64::from(u32::from(additional));
 
-        let memory = match self.memory.as_ref() {
-            Some(m) => m.clone(),
-            None => return Err(OutOfBoundsError),
-        };
-
         match &mut self.inner {
             JitInner::NotStarted { store, .. } | JitInner::Done(store) => {
                 // This is the simple case: we still have access to the `store` and can perform
                 // the growth synchronously.
-                memory.grow(store, additional).unwrap();
+                self.memory.grow(store, additional).unwrap();
             }
             JitInner::Poisoned => unreachable!(),
             JitInner::Executing(function_call) => {
@@ -749,7 +733,10 @@ impl Jit {
                             waker.wake();
                         }
 
-                        *shared_lock = Shared::MemoryGrowRequired { memory, additional }
+                        *shared_lock = Shared::MemoryGrowRequired {
+                            memory: self.memory.clone(),
+                            additional,
+                        }
                     }
                     _ => unreachable!(),
                 }
