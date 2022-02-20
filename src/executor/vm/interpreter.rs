@@ -52,12 +52,7 @@ pub struct InterpreterPrototype {
     module: wasmi::ModuleRef,
 
     /// Memory of the module instantiation.
-    ///
-    /// Right now we only support one unique `Memory` object per process. This is it.
-    /// Contains `None` if the process doesn't export any memory object, which means it doesn't
-    /// use any memory.
-    // TODO: should just return an error instead of None
-    memory: Option<wasmi::MemoryRef>,
+    memory: wasmi::MemoryRef,
 
     /// Table of the indirect function calls.
     ///
@@ -187,15 +182,22 @@ impl InterpreterPrototype {
         let module = not_started.assert_no_start();
 
         let memory = if let Some(import_memory) = import_memory {
-            Some(import_memory)
+            if module
+                .export_by_name("memory")
+                .map_or(false, |m| m.as_memory().is_some())
+            {
+                return Err(NewErr::TwoMemories);
+            }
+
+            import_memory
         } else if let Some(mem) = module.export_by_name("memory") {
             if let Some(mem) = mem.as_memory() {
-                Some(mem.clone())
+                mem.clone()
             } else {
                 return Err(NewErr::MemoryIsntMemory);
             }
         } else {
-            None
+            return Err(NewErr::NoMemory);
         };
 
         let indirect_table = if let Some(tbl) = module.export_by_name("__indirect_function_table") {
@@ -236,13 +238,10 @@ impl InterpreterPrototype {
 
     /// See [`super::VirtualMachinePrototype::memory_max_pages`].
     pub fn memory_max_pages(&self) -> Option<HeapPages> {
-        match &self.memory {
-            Some(memory) => memory
-                .maximum()
-                .and_then(|hp| u32::try_from(hp.0).ok()) // An overflow in the maximum leads to returning `None`
-                .map(|hp| HeapPages(hp)),
-            None => None,
-        }
+        self.memory
+            .maximum()
+            .and_then(|hp| u32::try_from(hp.0).ok()) // An overflow in the maximum leads to returning `None`
+            .map(|hp| HeapPages(hp))
     }
 
     /// See [`super::VirtualMachinePrototype::start`].
@@ -252,16 +251,18 @@ impl InterpreterPrototype {
         function_name: &str,
         params: &[WasmValue],
     ) -> Result<Interpreter, (StartErr, Self)> {
-        if let Some(memory) = &self.memory {
-            let min_memory_pages = match usize::try_from(min_memory_pages.0) {
-                Ok(hp) => hp,
-                Err(_) => return Err((StartErr::RequiredMemoryTooLarge, self)),
-            };
+        let min_memory_pages = match usize::try_from(min_memory_pages.0) {
+            Ok(hp) => hp,
+            Err(_) => return Err((StartErr::RequiredMemoryTooLarge, self)),
+        };
 
-            if let Some(to_grow) = min_memory_pages.checked_sub(memory.current_size().0) {
-                if memory.grow(wasmi::memory_units::Pages(to_grow)).is_err() {
-                    return Err((StartErr::RequiredMemoryTooLarge, self));
-                }
+        if let Some(to_grow) = min_memory_pages.checked_sub(self.memory.current_size().0) {
+            if self
+                .memory
+                .grow(wasmi::memory_units::Pages(to_grow))
+                .is_err()
+            {
+                return Err((StartErr::RequiredMemoryTooLarge, self));
             }
         }
 
@@ -322,11 +323,7 @@ pub struct Interpreter {
     _module: wasmi::ModuleRef,
 
     /// Memory of the module instantiation.
-    ///
-    /// Right now we only support one unique `Memory` object per process. This is it.
-    /// Contains `None` if the process doesn't export any memory object, which means it doesn't
-    /// use any memory.
-    memory: Option<wasmi::MemoryRef>,
+    memory: wasmi::MemoryRef,
 
     /// Table of the indirect function calls.
     ///
@@ -454,14 +451,9 @@ impl Interpreter {
 
     /// See [`super::VirtualMachine::memory_size`].
     pub fn memory_size(&self) -> HeapPages {
-        let mem = match self.memory.as_ref() {
-            Some(m) => m,
-            None => return HeapPages(0), // TODO: correct? we promise things in the API of new() regarding this, and it seems incoherent
-        };
-
         // Being a 32bits platform, it's impossible that the vm has a number of currently
         // allocated pages that can't fit in 32bits, so this unwrap can't fail.
-        HeapPages(u32::try_from(mem.current_size().0).unwrap())
+        HeapPages(u32::try_from(self.memory.current_size().0).unwrap())
     }
 
     /// See [`super::VirtualMachine::read_memory`].
@@ -470,53 +462,30 @@ impl Interpreter {
         offset: u32,
         size: u32,
     ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
-        let mem = match self.memory.as_ref() {
-            Some(m) => m,
-            None => {
-                return if offset == 0 && size == 0 {
-                    Ok(AccessOffset::Empty)
-                } else {
-                    Err(OutOfBoundsError)
-                }
-            }
-        };
-
         let offset = usize::try_from(offset).map_err(|_| OutOfBoundsError)?;
 
         let max = offset
             .checked_add(size.try_into().map_err(|_| OutOfBoundsError)?)
             .ok_or(OutOfBoundsError)?;
 
-        enum AccessOffset<T> {
-            Enabled {
-                access: T,
-                offset: usize,
-                max: usize,
-            },
-            Empty,
+        struct AccessOffset<T> {
+            access: T,
+            offset: usize,
+            max: usize,
         }
 
         impl<T: AsRef<[u8]>> AsRef<[u8]> for AccessOffset<T> {
             fn as_ref(&self) -> &[u8] {
-                if let AccessOffset::Enabled {
-                    access,
-                    offset,
-                    max,
-                } = self
-                {
-                    &access.as_ref()[*offset..*max]
-                } else {
-                    &[]
-                }
+                &self.access.as_ref()[self.offset..self.max]
             }
         }
 
-        let access = mem.direct_access();
+        let access = self.memory.direct_access();
         if max > access.as_ref().len() {
             return Err(OutOfBoundsError);
         }
 
-        Ok(AccessOffset::Enabled {
+        Ok(AccessOffset {
             access,
             offset,
             max,
@@ -525,28 +494,16 @@ impl Interpreter {
 
     /// See [`super::VirtualMachine::write_memory`].
     pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), OutOfBoundsError> {
-        let mem = match self.memory.as_ref() {
-            Some(m) => m,
-            None => {
-                return if offset == 0 && value.is_empty() {
-                    Ok(())
-                } else {
-                    Err(OutOfBoundsError)
-                }
-            }
-        };
-
-        mem.set(offset, value).map_err(|_| OutOfBoundsError)
+        self.memory.set(offset, value).map_err(|_| OutOfBoundsError)
     }
 
     /// See [`super::VirtualMachine::write_memory`].
     pub fn grow_memory(&mut self, additional: HeapPages) -> Result<(), OutOfBoundsError> {
-        if let Some(mem) = &self.memory {
-            mem.grow(wasmi::memory_units::Pages(
+        self.memory
+            .grow(wasmi::memory_units::Pages(
                 usize::try_from(additional.0).unwrap(),
             ))
             .map_err(|_| OutOfBoundsError)?;
-        }
 
         Ok(())
     }
