@@ -1070,12 +1070,13 @@ async fn validate_transaction<TPlat: Platform>(
 
     log::debug!(
         target: log_target,
-        "TxValidations <= Start(tx={}, block={}, block_height={:?})",
+        "TxValidations <= Start(tx={}, block={}, block_height={})",
         HashDisplay(&blake2_hash(scale_encoded_transaction.as_ref())),
         HashDisplay(runtime_lock.block_hash()),
         header::decode(block_scale_encoded_header)
             .ok()
-            .map(|h| h.number) // TODO: show this better than with the `Debug` trait
+            .map(|h| format!("#{}", h.number))
+            .unwrap_or_else(|| "unknown".to_owned())
     );
 
     let block_hash = *runtime_lock.block_hash();
