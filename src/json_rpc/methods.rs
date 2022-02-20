@@ -244,7 +244,7 @@ macro_rules! define_methods {
 
                             // This `_dummy` field is necessary to not have an "unused lifetime"
                             // error if the parameters don't have a lifetime.
-                            #[serde(skip)]
+                            #[serde(borrow, skip)]
                             _dummy: core::marker::PhantomData<&'a ()>,
                         }
                         if let Ok(params) = serde_json::from_str(params) {
@@ -473,7 +473,7 @@ define_methods! {
     // The functions below are experimental and are defined in the document https://github.com/paritytech/json-rpc-interface-spec/
     chainHead_unstable_bodyEvent(subscription: Cow<'a, str>, result: ChainHeadBodyEvent) -> (),
     chainHead_unstable_callEvent(subscription: Cow<'a, str>, result: ChainHeadCallEvent<'a>) -> (),
-    chainHead_unstable_followEvent(subscription: &'a str, result: FollowEvent<'a>) -> (), // TODO: using `Cow` causes borrowck error specifically on this line; figure out
+    chainHead_unstable_followEvent(subscription: Cow<'a, str>, result: FollowEvent<'a>) -> (),
     chainHead_unstable_storageEvent(subscription: Cow<'a, str>, result: ChainHeadStorageEvent) -> (),
     transaction_unstable_watchEvent(subscription: Cow<'a, str>, result: TransactionWatchEvent<'a>) -> (),
 }
@@ -597,7 +597,6 @@ pub enum FollowEvent<'a> {
         #[serde(rename = "finalizedBlockHash")]
         finalized_block_hash: HashHexString,
         #[serde(
-            borrow,
             rename = "finalizedBlockRuntime",
             skip_serializing_if = "Option::is_none"
         )]
@@ -609,7 +608,7 @@ pub enum FollowEvent<'a> {
         block_hash: HashHexString,
         #[serde(rename = "parentBlockHash")]
         parent_block_hash: HashHexString,
-        #[serde(rename = "newRuntime", borrow)]
+        #[serde(rename = "newRuntime")]
         // TODO: must not be present if runtime_updates: false
         new_runtime: Option<MaybeRuntimeSpec<'a>>,
     },
@@ -795,7 +794,6 @@ pub struct RpcMethods {
 pub enum MaybeRuntimeSpec<'a> {
     #[serde(rename = "valid")]
     Valid {
-        #[serde(borrow)]
         spec: RuntimeSpec<'a>,
     },
     #[serde(rename = "invalid")]
