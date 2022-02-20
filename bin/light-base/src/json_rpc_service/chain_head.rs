@@ -425,7 +425,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                     initial_notifications.push({
                         methods::ServerToClient::chainHead_unstable_followEvent {
-                            subscription: &subscription_id,
+                            subscription: (&subscription_id).into(),
                             result: methods::FollowEvent::Initialized {
                                 finalized_block_hash: methods::HashHexString(finalized_block_hash),
                                 finalized_block_runtime: Some(convert_runtime_spec(
@@ -458,7 +458,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                         initial_notifications.push(
                             methods::ServerToClient::chainHead_unstable_followEvent {
-                                subscription: &subscription_id,
+                                subscription: (&subscription_id).into(),
                                 result: methods::FollowEvent::NewBlock {
                                     block_hash: methods::HashHexString(hash),
                                     new_runtime: if let Some(new_runtime) = &block.new_runtime {
@@ -475,7 +475,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         if block.is_new_best {
                             initial_notifications.push(
                                 methods::ServerToClient::chainHead_unstable_followEvent {
-                                    subscription: &subscription_id,
+                                    subscription: (&subscription_id).into(),
                                     result: methods::FollowEvent::BestBlockChanged {
                                         best_block_hash: methods::HashHexString(hash),
                                     },
@@ -497,7 +497,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                     initial_notifications.push(
                         methods::ServerToClient::chainHead_unstable_followEvent {
-                            subscription: &subscription_id,
+                            subscription: (&subscription_id).into(),
                             result: methods::FollowEvent::Initialized {
                                 finalized_block_hash: methods::HashHexString(finalized_block_hash),
                                 finalized_block_runtime: None,
@@ -528,7 +528,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                         initial_notifications.push(
                             methods::ServerToClient::chainHead_unstable_followEvent {
-                                subscription: &subscription_id,
+                                subscription: (&subscription_id).into(),
                                 result: methods::FollowEvent::NewBlock {
                                     block_hash: methods::HashHexString(hash),
                                     new_runtime: None,
@@ -541,7 +541,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         if block.is_new_best {
                             initial_notifications.push(
                                 methods::ServerToClient::chainHead_unstable_followEvent {
-                                    subscription: &subscription_id,
+                                    subscription: (&subscription_id).into(),
                                     result: methods::FollowEvent::BestBlockChanged {
                                         best_block_hash: methods::HashHexString(hash),
                                     },
@@ -633,7 +633,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 .try_push_notification(
                                     &state_machine_subscription,
                                     methods::ServerToClient::chainHead_unstable_followEvent {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::FollowEvent::BestBlockChanged {
                                             best_block_hash: methods::HashHexString(
                                                 best_block_hash,
@@ -653,7 +653,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 .try_push_notification(
                                     &state_machine_subscription,
                                     methods::ServerToClient::chainHead_unstable_followEvent {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::FollowEvent::Finalized {
                                             finalized_blocks_hashes,
                                             pruned_blocks_hashes,
@@ -692,7 +692,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 .try_push_notification(
                                     &state_machine_subscription,
                                     methods::ServerToClient::chainHead_unstable_followEvent {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::FollowEvent::NewBlock {
                                             block_hash: methods::HashHexString(hash),
                                             parent_block_hash: methods::HashHexString(
@@ -721,7 +721,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     .try_push_notification(
                                         &state_machine_subscription,
                                         methods::ServerToClient::chainHead_unstable_followEvent {
-                                            subscription: &subscription_id,
+                                            subscription: (&subscription_id).into(),
                                             result: methods::FollowEvent::BestBlockChanged {
                                                 best_block_hash: methods::HashHexString(hash),
                                             },
@@ -759,7 +759,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 .try_push_notification(
                                     &state_machine_subscription,
                                     methods::ServerToClient::chainHead_unstable_followEvent {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::FollowEvent::NewBlock {
                                             block_hash: methods::HashHexString(hash),
                                             parent_block_hash: methods::HashHexString(
@@ -782,7 +782,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     .try_push_notification(
                                         &state_machine_subscription,
                                         methods::ServerToClient::chainHead_unstable_followEvent {
-                                            subscription: &subscription_id,
+                                            subscription: (&subscription_id).into(),
                                             result: methods::FollowEvent::BestBlockChanged {
                                                 best_block_hash: methods::HashHexString(hash),
                                             },
@@ -810,7 +810,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .push_notification(
                         &state_machine_subscription,
                         methods::ServerToClient::chainHead_unstable_followEvent {
-                            subscription: &subscription_id,
+                            subscription: (&subscription_id).into(),
                             result: methods::FollowEvent::Stop {},
                         }
                         .to_json_call_object_parameters(None),
