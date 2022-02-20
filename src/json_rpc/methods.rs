@@ -793,9 +793,7 @@ pub struct RpcMethods {
 #[serde(tag = "type")]
 pub enum MaybeRuntimeSpec<'a> {
     #[serde(rename = "valid")]
-    Valid {
-        spec: RuntimeSpec<'a>,
-    },
+    Valid { spec: RuntimeSpec<'a> },
     #[serde(rename = "invalid")]
     Invalid { error: String }, // TODO: String because it's more convenient; improve
 }
