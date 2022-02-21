@@ -304,6 +304,10 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     /// that will run indefinitely. To do so, the `tasks_spawner` channel must be provided and that
     /// the clients can send tasks to run to. The first tuple element is the name of the task used
     /// for debugging purposes.
+    ///
+    /// `system_name` and `system_version` are the values returned when a JSON-RPC client requests
+    /// the name and/or version of the client. Reasonable values are `env!("CARGO_PKG_NAME")` and
+    /// `env!("CARGO_PKG_VERSION")`.
     pub fn new(
         tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
         system_name: impl Into<String>,
