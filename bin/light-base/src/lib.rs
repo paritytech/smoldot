@@ -298,7 +298,7 @@ impl<TPlat: Platform> Clone for ChainServices<TPlat> {
 }
 
 impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
-    /// Initializes the smoldot Wasm client.
+    /// Initializes the smoldot client.
     ///
     /// In order for the client to function, it needs to be able to spawn tasks in the background
     /// that will run indefinitely. To do so, the `tasks_spawner` channel must be provided and that
