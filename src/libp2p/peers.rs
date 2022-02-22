@@ -843,6 +843,7 @@ where
                 desired: true,
                 open: NotificationsOutOpenState::Closed,
             });
+            current_state.desired = true;
 
             // If substream is closed, try to open it.
             if matches!(current_state.open, NotificationsOutOpenState::Closed) {
