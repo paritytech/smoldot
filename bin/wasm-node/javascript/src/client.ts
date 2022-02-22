@@ -314,7 +314,13 @@ export interface AddChainOptions {
   potentialRelayChains?: Chain[];
 
   /**
-   * Callback invoked by smoldot in response to calling `sendJsonRpc`.
+   * Callback invoked by smoldot in response to calling {Chain.sendJsonRpc}.
+   *
+   * This field is optional. If no callback is provided, the client will save up resources by not
+   * starting the JSON-RPC endpoint, and it is forbidden to call {Chain.sendJsonRpc}.
+   *
+   * Will never be called after ̀{Chain.remove} has been called or if a {CrashError} has been
+   * generated.
    */
   jsonRpcCallback?: JsonRpcCallback;
 }
