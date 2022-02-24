@@ -384,13 +384,9 @@ impl CalcInner {
                         }
                     },
                     children: (0..16u8).map(|child_idx| {
-                        if let Some(child) =
-                            current.child_user_data(Nibble::try_from(child_idx).unwrap())
-                        {
-                            Some(child.merkle_value.as_ref().unwrap())
-                        } else {
-                            None
-                        }
+                        current
+                            .child_user_data(Nibble::try_from(child_idx).unwrap())
+                            .map(|child| child.merkle_value.as_ref().unwrap())
                     }),
                     stored_value: None::<Vec<u8>>,
                 });

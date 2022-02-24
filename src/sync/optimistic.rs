@@ -1387,7 +1387,7 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
                     } else {
                         inner_key.as_ref()
                     },
-                    key.map(|k| k.as_ref()),
+                    key,
                 )
         };
 

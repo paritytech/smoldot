@@ -1300,13 +1300,13 @@ where
 
                         if ephemeral_guarded.chains[chain_index]
                             .in_peers
-                            .contains(&peer_id)
+                            .contains(peer_id)
                         {
                             SlotTy::Inbound
                         } else {
                             debug_assert!(ephemeral_guarded.chains[chain_index]
                                 .out_peers
-                                .contains(&peer_id));
+                                .contains(peer_id));
                             SlotTy::Outbound
                         }
                     };
