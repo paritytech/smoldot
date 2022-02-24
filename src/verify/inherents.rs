@@ -32,10 +32,11 @@
 ///
 /// Historically, the inherent data included an Aura or Babe slot number, using the identifiers
 /// `auraslot` or `babeslot`. The runtime-side verification of the slot number has been removed in
-/// May 2021. Older runtime versions still require the slot number. For this reason, errors
-/// concerning the Aura or Babe modules must be ignored when verifying the inherents of blocks
-/// that are using older runtime versions (by calling `BlockBuilder_check_inherents`). Authoring
-/// blocks using older runtime versions is not supported anymore.
+/// May 2021, and all the checks performed by the runtime are now performed by the client instead.
+/// Older runtime versions still require the slot number. For this reason, verifying the inherents
+/// (calling `BlockBuilder_check_inherents`) of blocks that are using older runtime versions will
+/// lead to errors concerning the Aura or Babe modules. These errors should simply be ignored.
+/// Authoring blocks using older runtime versions is not supported anymore.
 #[derive(Debug)]
 pub struct InherentData {
     /// Number of milliseconds since the UNIX epoch when the block is generated, ignoring leap
