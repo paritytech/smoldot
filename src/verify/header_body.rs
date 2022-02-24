@@ -268,12 +268,19 @@ pub fn verify(
         }
     };
 
-    // The two runtime functions we call during the verification expect a SCALE-encoded
+    // Now that we have verified the header, we need to call two runtime functions:
+    //
+    // - `BlockBuilder_check_inherents`, which does some basic verification of the inherents
+    //   contained in the block.
+    // - `Core_execute_block`, which goes through transactions and makes sure that everything is
+    //   valid.
+    //
+    // The first parameter of these two runtime functions is the same: a SCALE-encoded
     // `(header, body)` where `body` is a `Vec<Extrinsic>`. We perform the encoding ahead of time
     // in order to re-use it later for the second call.
     let block_parameter = {
-        // Consensus engines adds a seal at the end of the digest logs. This seal is guaranteed to be
-        // the last item. We need to remove it before we can verify the unsealed header.
+        // Consensus engines add a seal at the end of the digest logs. This seal is guaranteed to
+        // be the last item. We need to remove it before we can verify the unsealed header.
         let mut unsealed_header = config.block_header.clone();
         let _seal_log = unsealed_header.digest.pop_seal();
 
@@ -284,12 +291,15 @@ pub fn verify(
             .chain(iter::once(either::Right(either::Right(encoded_body_len))))
             .chain(config.block_body.map(either::Left))
             .fold(Vec::with_capacity(8192), |mut a, b| {
+                // TODO: better capacity ^ ?
                 a.extend_from_slice(AsRef::<[u8]>::as_ref(&b));
                 a
             })
     };
 
+    // Start the virtual machine with `BlockBuilder_check_inherents`.
     let check_inherents_process = {
+        // The second parameter of `BlockBuilder_check_inherents` is a list of inherents. 
         let inherent_data = inherents::InherentData {
             timestamp: u64::try_from(config.now_from_unix_epoch.as_millis())
                 .unwrap_or(u64::max_value()),
