@@ -43,7 +43,6 @@ pub struct InherentData {
     ///
     /// Its identifier passed to the runtime is: `timstap0`.
     pub timestamp: u64,
-
     // TODO: figure out uncles
     /*/// List of valid block headers that have the same height as the parent of the one being
     /// generated.
@@ -63,8 +62,6 @@ impl InherentData {
     ) -> impl ExactSizeIterator<Item = ([u8; 8], impl AsRef<[u8]> + Clone + '_)> + Clone + '_ {
         // Note: we use `IntoIter::new` because of a Rust backwards compatibility issue.
         // See https://doc.rust-lang.org/std/primitive.array.html#editions
-        core::array::IntoIter::new([
-            (*b"timstap0", self.timestamp.to_le_bytes())
-        ])
+        core::array::IntoIter::new([(*b"timstap0", self.timestamp.to_le_bytes())])
     }
 }
