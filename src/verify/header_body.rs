@@ -187,7 +187,6 @@ pub fn verify(
     config: Config<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
 ) -> Verify {
     // Start the consensus engine verification process.
-    // TODO: is it necessary to call this, considering that we call `check_inherents`?
     let consensus_success = match &config.consensus {
         ConfigConsensus::AllAuthorized => {
             // `has_any_aura()` and `has_any_babe()` also make sure that no seal is present.
