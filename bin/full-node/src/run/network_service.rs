@@ -462,8 +462,11 @@ impl NetworkService {
         }
 
         // A channel is used to communicate new tasks dedicated to handling connections.
-        let (connec_tx, mut connec_rx) =
-            mpsc::channel(thread::available_parallelism().unwrap_or(4));
+        let (connec_tx, mut connec_rx) = mpsc::channel(
+            thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4),
+        );
 
         // For each listening address in the configuration, create a background task dedicated to
         // listening on that address.
