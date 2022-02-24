@@ -29,6 +29,13 @@
 //! passing as parameter an encoded [`InherentData`] as well.
 
 /// Values of the inherents to pass to the runtime.
+///
+/// Historically, the inherent data included an Aura or Babe slot number, using the identifiers
+/// `auraslot` or `babeslot`. The runtime-side verification of the slot number has been removed in
+/// May 2021. Older runtime versions still require the slot number. For this reason, errors
+/// concerning the Aura or Babe modules must be ignored when verifying the inherents of blocks
+/// that are using older runtime versions (by calling `BlockBuilder_check_inherents`). Authoring
+/// blocks using older runtime versions is not supported anymore.
 #[derive(Debug)]
 pub struct InherentData {
     /// Number of milliseconds since the UNIX epoch when the block is generated, ignoring leap
@@ -37,8 +44,6 @@ pub struct InherentData {
     /// Its identifier passed to the runtime is: `timstap0`.
     pub timestamp: u64,
 
-    /// Consensus-specific fields.
-    pub consensus: InherentDataConsensus,
     // TODO: figure out uncles
     /*/// List of valid block headers that have the same height as the parent of the one being
     /// generated.
@@ -59,35 +64,7 @@ impl InherentData {
         // Note: we use `IntoIter::new` because of a Rust backwards compatibility issue.
         // See https://doc.rust-lang.org/std/primitive.array.html#editions
         core::array::IntoIter::new([
-            (*b"timstap0", self.timestamp.to_le_bytes()),
-            match self.consensus {
-                InherentDataConsensus::Aura { slot_number } => {
-                    (*b"auraslot", slot_number.to_le_bytes())
-                }
-                InherentDataConsensus::Babe { slot_number } => {
-                    (*b"babeslot", slot_number.to_le_bytes())
-                }
-            },
+            (*b"timstap0", self.timestamp.to_le_bytes())
         ])
     }
-}
-
-/// Extra consensus-specific items in [`InherentData`].
-#[derive(Debug)]
-pub enum InherentDataConsensus {
-    /// Aura-specific items.
-    Aura {
-        /// Number of the Aura slot being claimed to generate this block.
-        ///
-        /// Its identifier passed to the runtime is: `auraslot`.
-        slot_number: u64,
-    },
-
-    /// Babe-specific items.
-    Babe {
-        /// Number of the Babe slot being claimed to generate this block.
-        ///
-        /// Its identifier passed to the runtime is: `babeslot`.
-        slot_number: u64,
-    },
 }
