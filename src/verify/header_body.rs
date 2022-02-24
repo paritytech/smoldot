@@ -160,6 +160,14 @@ pub enum Error {
     /// Error while running the Wasm virtual machine to execute the block.
     #[display(fmt = "{}", _0)]
     WasmVm(runtime_host::ErrorDetail),
+    /// Runtime has returned some errors when verifying inherents.
+    #[display(fmt = "Runtime has returned some errors when verifying inherents")]
+    CheckInherentsError {
+        /// List of errors produced by the runtime.
+        errors: Vec<([u8; 8], Vec<u8>)>,
+    },
+    /// Failed to parse the output of `BlockBuilder_check_inherents`.
+    CheckInherentsOutputParseFailure,
     /// Output of `Core_execute_block` wasn't empty.
     NonEmptyOutput,
     /// Block header contains items relevant to multiple consensus engines at the same time.
@@ -409,7 +417,33 @@ impl VerifyInner {
                 runtime_host::RuntimeHostVm::Finished(Ok(success))
                     if self.execution_not_started.is_some() =>
                 {
-                    // TODO: /!\ must check output
+                    let check_inherents_result =
+                        match parse_check_inherents_result::<nom::error::Error<&[u8]>>(
+                            success.virtual_machine.value().as_ref(),
+                        ) {
+                            Err(_err) => Err(Error::CheckInherentsOutputParseFailure),
+                            Ok((_, info)) => {
+                                // TODO: unclear whether to use info.okay or info.errors.is_empty()
+                                if info.errors.is_empty() {
+                                    Ok(())
+                                } else {
+                                    Err(Error::CheckInherentsError {
+                                        errors: info
+                                            .errors
+                                            .iter()
+                                            .map(|(c, d)| (*c, d.to_vec()))
+                                            .collect(),
+                                    })
+                                }
+                            }
+                        };
+
+                    if let Err(err) = check_inherents_result {
+                        return Verify::Finished(Err((
+                            err,
+                            success.virtual_machine.into_prototype(),
+                        )));
+                    }
 
                     let import_process = {
                         let vm = runtime_host::run(runtime_host::Config {
@@ -674,4 +708,45 @@ impl RuntimeCompilation {
             logs: self.logs,
         }))
     }
+}
+
+#[derive(Debug, Clone)]
+struct CheckInherentsResult<'a> {
+    /// Did the check succeed?
+    okay: bool,
+    /// Did we encounter a fatal error?
+    fatal_error: bool,
+    /// List of errors that have happened.
+    ///
+    /// Note that we use a `Vec` out of laziness. Errors aren't supposed to happen, meaning that
+    /// the overhead of using a `Vec` isn't very important.
+    errors: Vec<([u8; 8], &'a [u8])>,
+}
+
+fn parse_check_inherents_result<'a, E: nom::error::ParseError<&'a [u8]>>(
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], CheckInherentsResult, E> {
+    nom::combinator::all_consuming(nom::combinator::map(
+        nom::sequence::tuple((
+            crate::util::nom_bool_decode,
+            crate::util::nom_bool_decode,
+            nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
+                nom::multi::many_m_n(
+                    num_elems,
+                    num_elems,
+                    nom::sequence::tuple((
+                        nom::combinator::map(nom::bytes::complete::take(8u8), |b| {
+                            <[u8; 8]>::try_from(b).unwrap()
+                        }),
+                        crate::util::nom_bytes_decode,
+                    )),
+                )
+            }),
+        )),
+        move |(okay, fatal_error, errors)| CheckInherentsResult {
+            okay,
+            fatal_error,
+            errors,
+        },
+    ))(bytes)
 }
