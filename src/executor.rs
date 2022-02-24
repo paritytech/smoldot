@@ -342,7 +342,7 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
 
     match result {
         Ok((_, out)) => Ok(out),
-        Err(nom::Err::Error(_)) | Err(nom::Err::Failure(_)) => Err(()),
+        Err(nom::Err::Error(_) | nom::Err::Failure(_)) => Err(()),
         Err(_) => unreachable!(),
     }
 }

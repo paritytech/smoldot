@@ -157,10 +157,9 @@ impl FromVmPrototypeError {
         matches!(
             self,
             FromVmPrototypeError::VmStart(
-                host::StartErr::VirtualMachine(vm::StartErr::FunctionNotFound,),
-                _
-            ) | FromVmPrototypeError::VmStart(
-                host::StartErr::VirtualMachine(vm::StartErr::NotAFunction,),
+                host::StartErr::VirtualMachine(
+                    vm::StartErr::FunctionNotFound | vm::StartErr::NotAFunction
+                ),
                 _
             )
         )
@@ -194,7 +193,7 @@ fn decode_config(scale_encoded: &[u8]) -> Result<GrandpaGenesisConfiguration, ()
 
     match result {
         Ok((_, out)) => Ok(out),
-        Err(nom::Err::Error(_)) | Err(nom::Err::Failure(_)) => Err(()),
+        Err(nom::Err::Error(_) | nom::Err::Failure(_)) => Err(()),
         Err(_) => unreachable!(),
     }
 }

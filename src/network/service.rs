@@ -1154,16 +1154,15 @@ where
                             },
                             _ => unreachable!(),
                         };
-                    } else {
-                        let _ = self.inner.respond(*request_id, Err(())).await;
-                        return match guarded.to_process_pre_event.take().unwrap() {
-                            peers::Event::RequestIn { peer_id, .. } => Event::ProtocolError {
-                                peer_id,
-                                error: ProtocolError::BadIdentifyRequest,
-                            },
-                            _ => unreachable!(),
-                        };
                     }
+                    let _ = self.inner.respond(*request_id, Err(())).await;
+                    return match guarded.to_process_pre_event.take().unwrap() {
+                        peers::Event::RequestIn { peer_id, .. } => Event::ProtocolError {
+                            peer_id,
+                            error: ProtocolError::BadIdentifyRequest,
+                        },
+                        _ => unreachable!(),
+                    };
                 }
                 // Incoming requests of the "sync" protocol.
                 peers::Event::RequestIn {
@@ -1548,9 +1547,8 @@ where
                             },
                             unassigned_slot_ty,
                         };
-                    } else {
-                        guarded.to_process_pre_event = None;
                     }
+                    guarded.to_process_pre_event = None;
                 }
 
                 // Other protocol.
@@ -1814,9 +1812,8 @@ where
                             }
                             _ => unreachable!(),
                         };
-                    } else {
-                        guarded.to_process_pre_event = None;
                     }
+                    guarded.to_process_pre_event = None;
                 }
 
                 // Remote wants to open a transactions substream.
