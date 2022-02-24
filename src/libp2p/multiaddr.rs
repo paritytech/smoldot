@@ -424,11 +424,7 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             4 => nom::combinator::map(nom::bytes::complete::take(4_u32), |ip: &'a [u8]| {
                 ProtocolRef::Ip4(ip.try_into().unwrap())
             })(bytes),
-            6 => {
-                nom::combinator::map(nom::number::complete::be_u16, |port| ProtocolRef::Tcp(port))(
-                    bytes,
-                )
-            }
+            6 => nom::combinator::map(nom::number::complete::be_u16, ProtocolRef::Tcp)(bytes),
             41 => nom::combinator::map(nom::bytes::complete::take(16_u32), |ip: &'a [u8]| {
                 ProtocolRef::Ip6(ip.try_into().unwrap())
             })(bytes),
@@ -476,11 +472,7 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
                 ),
                 ProtocolRef::DnsAddr,
             )(bytes),
-            273 => {
-                nom::combinator::map(nom::number::complete::be_u16, |port| ProtocolRef::Udp(port))(
-                    bytes,
-                )
-            }
+            273 => nom::combinator::map(nom::number::complete::be_u16, ProtocolRef::Udp)(bytes),
             421 => nom::combinator::map(
                 nom::combinator::verify(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
