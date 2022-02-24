@@ -161,9 +161,18 @@ pub enum Error {
     #[display(fmt = "{}", _0)]
     WasmVm(runtime_host::ErrorDetail),
     /// Runtime has returned some errors when verifying inherents.
-    #[display(fmt = "Runtime has returned some errors when verifying inherents")]
+    #[display(
+        fmt = "Runtime has returned some errors when verifying inherents: {:?}",
+        errors
+    )]
     CheckInherentsError {
         /// List of errors produced by the runtime.
+        ///
+        /// The first element of each tuple is an identifier of the module that produced the
+        /// error, while the second element is a SCALE-encoded piece of data.
+        ///
+        /// Due to the fact that errors are not supposed to happen, and that the format of errors
+        /// has changed depending on runtime versions, no utility is provided to decode them.
         errors: Vec<([u8; 8], Vec<u8>)>,
     },
     /// Failed to parse the output of `BlockBuilder_check_inherents`.
