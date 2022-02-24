@@ -241,7 +241,7 @@ impl InterpreterPrototype {
         self.memory
             .maximum()
             .and_then(|hp| u32::try_from(hp.0).ok()) // An overflow in the maximum leads to returning `None`
-            .map(|hp| HeapPages(hp))
+            .map(HeapPages)
     }
 
     /// See [`super::VirtualMachinePrototype::start`].

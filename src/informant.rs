@@ -45,8 +45,8 @@
 //! });
 //! ```
 
-use alloc::{format, string::String};
-use core::{cmp, fmt, iter};
+use alloc::{format};
+use core::{cmp, fmt};
 
 /// Values used to build the informant line. Implements the [`core::fmt::Display`] trait.
 // TODO: some fields here aren't printed; remove them once what is printed is final
@@ -167,24 +167,18 @@ impl<'a> fmt::Display for InformantLine<'a> {
             .unwrap_or(0); // TODO: hack to not panic
         let bar_done_width = u32::try_from(bar_done_width).unwrap();
 
-        let done_bar1 = iter::repeat('=')
-            .take(usize::try_from(bar_done_width.saturating_sub(1)).unwrap())
-            .collect::<String>();
+        let done_bar1 = "=".repeat(usize::try_from(bar_done_width.saturating_sub(1)).unwrap());
         let done_bar2 = if bar_done_width == bar_width {
             '='
         } else {
             '>'
         };
-        let todo_bar = iter::repeat(' ')
-            .take(
-                usize::try_from(
+        let todo_bar = " ".repeat(usize::try_from(
                     bar_width
                         .checked_sub(bar_done_width.saturating_sub(1).saturating_add(1))
                         .unwrap(),
                 )
-                .unwrap(),
-            )
-            .collect::<String>();
+                .unwrap());
         assert_eq!(
             done_bar1.len() + 1 + todo_bar.len(),
             usize::try_from(bar_width).unwrap()

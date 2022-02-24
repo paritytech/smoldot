@@ -378,7 +378,7 @@ impl VerifyInner {
 
                         let heap_pages = match heap_pages {
                             Some(heap_pages) => {
-                                match executor::storage_heap_pages_to_value(heap_pages.as_deref()) {
+                                match executor::storage_heap_pages_to_value(heap_pages) {
                                     Ok(hp) => hp,
                                     Err(err) => {
                                         return Verify::Finished(Err((

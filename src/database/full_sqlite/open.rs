@@ -280,7 +280,7 @@ impl DatabaseEmpty {
                 .database
                 .prepare("INSERT INTO finalized_storage_top_trie(key, value) VALUES(?, ?)")
                 .unwrap();
-            for (key, value) in finalized_block_storage_top_trie_entries.clone() {
+            for (key, value) in finalized_block_storage_top_trie_entries {
                 statement.bind(1, key).unwrap();
                 statement.bind(2, value).unwrap();
                 statement.next().unwrap();

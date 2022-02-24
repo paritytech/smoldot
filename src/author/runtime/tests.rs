@@ -30,9 +30,7 @@ fn block_building_works() {
 
     let parent_runtime = {
         let code = genesis_storage
-            .iter()
-            .filter(|(k, _)| k == b":code")
-            .next()
+            .iter().find(|(k, _)| k == b":code")
             .unwrap()
             .1;
         crate::executor::host::HostVmPrototype::new(crate::executor::host::Config {

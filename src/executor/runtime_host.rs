@@ -85,7 +85,7 @@ pub fn run(
             .virtual_machine
             .run_vectored(config.function_to_call, config.parameter)?
             .into(),
-        top_trie_changes: config.storage_top_trie_changes.into(),
+        top_trie_changes: config.storage_top_trie_changes,
         top_trie_transaction_revert: None,
         offchain_storage_changes: config.offchain_storage_changes,
         top_trie_root_calculation_cache: Some(
@@ -440,7 +440,7 @@ impl NextKey {
                     };
                     self.inner
                         .top_trie_changes
-                        .storage_next_key(requested_key, key.map(|k| k.as_ref()))
+                        .storage_next_key(requested_key, key)
                 };
 
                 match search {
@@ -517,7 +517,7 @@ impl Inner {
                 host::HostVm::Finished(finished) => {
                     return RuntimeHostVm::Finished(Ok(Success {
                         virtual_machine: SuccessVirtualMachine(finished),
-                        storage_top_trie_changes: self.top_trie_changes.into(),
+                        storage_top_trie_changes: self.top_trie_changes,
                         offchain_storage_changes: self.offchain_storage_changes,
                         top_trie_root_calculation_cache: self
                             .top_trie_root_calculation_cache

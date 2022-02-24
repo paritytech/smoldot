@@ -425,7 +425,7 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
                 ProtocolRef::Ip4(ip.try_into().unwrap())
             })(bytes),
             6 => {
-                nom::combinator::map(nom::number::complete::be_u16, |port| ProtocolRef::Tcp(port))(
+                nom::combinator::map(nom::number::complete::be_u16, ProtocolRef::Tcp)(
                     bytes,
                 )
             }
@@ -477,7 +477,7 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
                 ProtocolRef::DnsAddr,
             )(bytes),
             273 => {
-                nom::combinator::map(nom::number::complete::be_u16, |port| ProtocolRef::Udp(port))(
+                nom::combinator::map(nom::number::complete::be_u16, ProtocolRef::Udp)(
                     bytes,
                 )
             }
