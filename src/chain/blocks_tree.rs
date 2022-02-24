@@ -388,15 +388,30 @@ where
     T: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        struct Blocks<'a, T>(&'a Box<NonFinalizedTreeInner<T>>);
+        impl<'a, T> fmt::Debug for Blocks<'a, T>
+        where
+            T: fmt::Debug,
+        {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.debug_map()
+                    .entries(
+                        self.0
+                            .blocks
+                            .iter_unordered()
+                            .map(|(_, v)| (format!("0x{}", hex::encode(&v.hash)), &v.user_data)),
+                    )
+                    .finish()
+            }
+        }
+
         let inner = self.inner.as_ref().unwrap();
-        // TODO: add the finalized block hash
-        f.debug_map()
-            .entries(
-                inner
-                    .blocks
-                    .iter_unordered()
-                    .map(|(_, v)| (format!("0x{}", hex::encode(&v.hash)), &v.user_data)),
+        f.debug_struct("NonFinalizedTree")
+            .field(
+                "finalized_block_hash",
+                &format!("0x{}", hex::encode(&inner.finalized_block_header.hash())),
             )
+            .field("non_finalized_blocks", &Blocks(inner))
             .finish()
     }
 }

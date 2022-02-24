@@ -69,7 +69,7 @@
 //! - Or by importing a memory object in its `(import)` section.
 //!
 //! The virtual machine in this module supports both variants. However, no more than one memory
-//! object can be exported or imported.
+//! object can be exported or imported, and it is illegal to not use any memory.
 //!
 //! The first variant used to be the default model when compiling to WebAssembly, but the second
 //! variant (importing memory objects) is preferred nowadays.
@@ -102,7 +102,7 @@ enum ModuleInner {
 
 impl Module {
     /// Compiles the given Wasm code.
-    pub fn new(module: impl AsRef<[u8]>, exec_hint: ExecHint) -> Result<Self, NewErr> {
+    pub fn new(module: impl AsRef<[u8]>, exec_hint: ExecHint) -> Result<Self, ModuleError> {
         Ok(Module {
             inner: match exec_hint {
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
@@ -646,6 +646,10 @@ pub enum NewErr {
     MemoryIsntMemory,
     /// Wasm module imports a memory that isn't named "memory".
     MemoryNotNamedMemory,
+    /// Wasm module doesn't contain any memory.
+    NoMemory,
+    /// Wasm module both imports and exports a memory.
+    TwoMemories,
     /// If a "__indirect_function_table" symbol is provided, it must be a table.
     #[display(fmt = "If a \"__indirect_function_table\" symbol is provided, it must be a table.")]
     IndirectTableIsntTable,

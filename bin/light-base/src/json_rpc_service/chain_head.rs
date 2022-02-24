@@ -153,7 +153,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 me.requests_subscriptions
                     .respond(
                         &state_machine_request_id,
-                        methods::Response::chainHead_unstable_call(&subscription_id)
+                        methods::Response::chainHead_unstable_call((&subscription_id).into())
                             .to_json_response(&request_id),
                     )
                     .await;
@@ -190,9 +190,9 @@ impl<TPlat: Platform> Background<TPlat> {
                             Err((error, prototype)) => {
                                 runtime_call_lock.unlock(prototype);
                                 methods::ServerToClient::chainHead_unstable_callEvent {
-                                    subscription: &subscription_id,
+                                    subscription: (&subscription_id).into(),
                                     result: methods::ChainHeadCallEvent::Error {
-                                        error: &error.to_string(),
+                                        error: error.to_string().into(),
                                     },
                                 }
                                 .to_json_call_object_parameters(None)
@@ -206,7 +206,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                             runtime_call_lock
                                                 .unlock(success.virtual_machine.into_prototype());
                                             break methods::ServerToClient::chainHead_unstable_callEvent {
-                                                    subscription: &subscription_id,
+                                                    subscription: (&subscription_id).into(),
                                                     result: methods::ChainHeadCallEvent::Done {
                                                         output: methods::HexString(output),
                                                     },
@@ -216,9 +216,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                         runtime_host::RuntimeHostVm::Finished(Err(error)) => {
                                             runtime_call_lock.unlock(error.prototype);
                                             break methods::ServerToClient::chainHead_unstable_callEvent {
-                                                    subscription: &subscription_id,
+                                                    subscription: (&subscription_id).into(),
                                                     result: methods::ChainHeadCallEvent::Error {
-                                                        error: &error.detail.to_string(),
+                                                        error: error.detail.to_string().into(),
                                                     },
                                                 }
                                                 .to_json_call_object_parameters(None);
@@ -237,9 +237,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                                         .into_prototype(),
                                                     );
                                                     break methods::ServerToClient::chainHead_unstable_callEvent {
-                                                            subscription: &subscription_id,
+                                                            subscription: (&subscription_id).into(),
                                                             result: methods::ChainHeadCallEvent::Inaccessible {
-                                                                error: &error.to_string(),
+                                                                error: error.to_string().into(),
                                                             },
                                                         }
                                                         .to_json_call_object_parameters(None);
@@ -255,9 +255,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                                     .into_prototype(),
                                             );
                                             break methods::ServerToClient::chainHead_unstable_callEvent {
-                                                    subscription: &subscription_id,
+                                                    subscription: (&subscription_id).into(),
                                                     result: methods::ChainHeadCallEvent::Inaccessible {
-                                                        error: &"getting next key not implemented",
+                                                        error: "getting next key not implemented".into(),
                                                     },
                                                 }
                                                 .to_json_call_object_parameters(None);
@@ -269,9 +269,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                                     .into_prototype(),
                                             );
                                             break methods::ServerToClient::chainHead_unstable_callEvent {
-                                                    subscription: &subscription_id,
+                                                    subscription: (&subscription_id).into(),
                                                     result: methods::ChainHeadCallEvent::Inaccessible {
-                                                        error: &"getting prefix keys not implemented",
+                                                        error: "getting prefix keys not implemented".into(),
                                                     },
                                                 }
                                                 .to_json_call_object_parameters(None);
@@ -283,42 +283,42 @@ impl<TPlat: Platform> Background<TPlat> {
                     }
                     Some(Err(runtime_service::RuntimeCallError::InvalidRuntime(error))) => {
                         methods::ServerToClient::chainHead_unstable_callEvent {
-                            subscription: &subscription_id,
+                            subscription: (&subscription_id).into(),
                             result: methods::ChainHeadCallEvent::Error {
-                                error: &error.to_string(),
+                                error: error.to_string().into(),
                             },
                         }
                         .to_json_call_object_parameters(None)
                     }
                     Some(Err(runtime_service::RuntimeCallError::StorageRetrieval(error))) => {
                         methods::ServerToClient::chainHead_unstable_callEvent {
-                            subscription: &subscription_id,
+                            subscription: (&subscription_id).into(),
                             result: methods::ChainHeadCallEvent::Error {
-                                error: &error.to_string(),
+                                error: error.to_string().into(),
                             },
                         }
                         .to_json_call_object_parameters(None)
                     }
                     Some(Err(runtime_service::RuntimeCallError::CallProof(error))) => {
                         methods::ServerToClient::chainHead_unstable_callEvent {
-                            subscription: &subscription_id,
+                            subscription: (&subscription_id).into(),
                             result: methods::ChainHeadCallEvent::Error {
-                                error: &error.to_string(),
+                                error: error.to_string().into(),
                             },
                         }
                         .to_json_call_object_parameters(None)
                     }
                     Some(Err(runtime_service::RuntimeCallError::StorageQuery(error))) => {
                         methods::ServerToClient::chainHead_unstable_callEvent {
-                            subscription: &subscription_id,
+                            subscription: (&subscription_id).into(),
                             result: methods::ChainHeadCallEvent::Error {
-                                error: &format!("failed to fetch call proof: {}", error),
+                                error: format!("failed to fetch call proof: {}", error).into(),
                             },
                         }
                         .to_json_call_object_parameters(None)
                     }
                     None => methods::ServerToClient::chainHead_unstable_callEvent {
-                        subscription: &subscription_id,
+                        subscription: (&subscription_id).into(),
                         result: methods::ChainHeadCallEvent::Disjoint {},
                     }
                     .to_json_call_object_parameters(None),
@@ -398,7 +398,7 @@ impl<TPlat: Platform> Background<TPlat> {
             self.requests_subscriptions
                 .respond(
                     &state_machine_request_id,
-                    methods::Response::chainHead_unstable_follow(&subscription_id)
+                    methods::Response::chainHead_unstable_follow((&subscription_id).into())
                         .to_json_response(request_id),
                 )
                 .await;
@@ -425,7 +425,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                     initial_notifications.push({
                         methods::ServerToClient::chainHead_unstable_followEvent {
-                            subscription: &subscription_id,
+                            subscription: (&subscription_id).into(),
                             result: methods::FollowEvent::Initialized {
                                 finalized_block_hash: methods::HashHexString(finalized_block_hash),
                                 finalized_block_runtime: Some(convert_runtime_spec(
@@ -458,7 +458,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                         initial_notifications.push(
                             methods::ServerToClient::chainHead_unstable_followEvent {
-                                subscription: &subscription_id,
+                                subscription: (&subscription_id).into(),
                                 result: methods::FollowEvent::NewBlock {
                                     block_hash: methods::HashHexString(hash),
                                     new_runtime: if let Some(new_runtime) = &block.new_runtime {
@@ -475,7 +475,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         if block.is_new_best {
                             initial_notifications.push(
                                 methods::ServerToClient::chainHead_unstable_followEvent {
-                                    subscription: &subscription_id,
+                                    subscription: (&subscription_id).into(),
                                     result: methods::FollowEvent::BestBlockChanged {
                                         best_block_hash: methods::HashHexString(hash),
                                     },
@@ -497,7 +497,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                     initial_notifications.push(
                         methods::ServerToClient::chainHead_unstable_followEvent {
-                            subscription: &subscription_id,
+                            subscription: (&subscription_id).into(),
                             result: methods::FollowEvent::Initialized {
                                 finalized_block_hash: methods::HashHexString(finalized_block_hash),
                                 finalized_block_runtime: None,
@@ -528,7 +528,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                         initial_notifications.push(
                             methods::ServerToClient::chainHead_unstable_followEvent {
-                                subscription: &subscription_id,
+                                subscription: (&subscription_id).into(),
                                 result: methods::FollowEvent::NewBlock {
                                     block_hash: methods::HashHexString(hash),
                                     new_runtime: None,
@@ -541,7 +541,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         if block.is_new_best {
                             initial_notifications.push(
                                 methods::ServerToClient::chainHead_unstable_followEvent {
-                                    subscription: &subscription_id,
+                                    subscription: (&subscription_id).into(),
                                     result: methods::FollowEvent::BestBlockChanged {
                                         best_block_hash: methods::HashHexString(hash),
                                     },
@@ -633,7 +633,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 .try_push_notification(
                                     &state_machine_subscription,
                                     methods::ServerToClient::chainHead_unstable_followEvent {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::FollowEvent::BestBlockChanged {
                                             best_block_hash: methods::HashHexString(
                                                 best_block_hash,
@@ -653,7 +653,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 .try_push_notification(
                                     &state_machine_subscription,
                                     methods::ServerToClient::chainHead_unstable_followEvent {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::FollowEvent::Finalized {
                                             finalized_blocks_hashes,
                                             pruned_blocks_hashes,
@@ -692,7 +692,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 .try_push_notification(
                                     &state_machine_subscription,
                                     methods::ServerToClient::chainHead_unstable_followEvent {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::FollowEvent::NewBlock {
                                             block_hash: methods::HashHexString(hash),
                                             parent_block_hash: methods::HashHexString(
@@ -721,7 +721,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     .try_push_notification(
                                         &state_machine_subscription,
                                         methods::ServerToClient::chainHead_unstable_followEvent {
-                                            subscription: &subscription_id,
+                                            subscription: (&subscription_id).into(),
                                             result: methods::FollowEvent::BestBlockChanged {
                                                 best_block_hash: methods::HashHexString(hash),
                                             },
@@ -759,7 +759,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 .try_push_notification(
                                     &state_machine_subscription,
                                     methods::ServerToClient::chainHead_unstable_followEvent {
-                                        subscription: &subscription_id,
+                                        subscription: (&subscription_id).into(),
                                         result: methods::FollowEvent::NewBlock {
                                             block_hash: methods::HashHexString(hash),
                                             parent_block_hash: methods::HashHexString(
@@ -782,7 +782,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                     .try_push_notification(
                                         &state_machine_subscription,
                                         methods::ServerToClient::chainHead_unstable_followEvent {
-                                            subscription: &subscription_id,
+                                            subscription: (&subscription_id).into(),
                                             result: methods::FollowEvent::BestBlockChanged {
                                                 best_block_hash: methods::HashHexString(hash),
                                             },
@@ -810,7 +810,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .push_notification(
                         &state_machine_subscription,
                         methods::ServerToClient::chainHead_unstable_followEvent {
-                            subscription: &subscription_id,
+                            subscription: (&subscription_id).into(),
                             result: methods::FollowEvent::Stop {},
                         }
                         .to_json_call_object_parameters(None),
@@ -942,7 +942,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 &state_machine_request_id,
-                methods::Response::chainHead_unstable_storage(&subscription_id)
+                methods::Response::chainHead_unstable_storage((&subscription_id).into())
                     .to_json_response(request_id),
             )
             .await;
@@ -994,20 +994,20 @@ impl<TPlat: Platform> Background<TPlat> {
                                 };
 
                                 methods::ServerToClient::chainHead_unstable_storageEvent {
-                                    subscription: &subscription_id,
+                                    subscription: (&subscription_id).into(),
                                     result: methods::ChainHeadStorageEvent::Done { value: output },
                                 }
                                 .to_json_call_object_parameters(None)
                             }
                             Err(_) => methods::ServerToClient::chainHead_unstable_storageEvent {
-                                subscription: &subscription_id,
+                                subscription: (&subscription_id).into(),
                                 result: methods::ChainHeadStorageEvent::Inaccessible {},
                             }
                             .to_json_call_object_parameters(None),
                         }
                     } else {
                         methods::ServerToClient::chainHead_unstable_storageEvent {
-                            subscription: &subscription_id,
+                            subscription: (&subscription_id).into(),
                             result: methods::ChainHeadStorageEvent::Disjoint {},
                         }
                         .to_json_call_object_parameters(None)
@@ -1025,7 +1025,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .lock()
                     .await
                     .misc
-                    .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadStorage));
+                    .remove(&(subscription_id, SubscriptionTy::ChainHeadStorage));
             }
         };
 
@@ -1120,7 +1120,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 &state_machine_request_id,
-                methods::Response::chainHead_unstable_body(&subscription_id)
+                methods::Response::chainHead_unstable_body((&subscription_id).into())
                     .to_json_response(request_id),
             )
             .await;
@@ -1151,7 +1151,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         .await;
                     match response {
                         Ok(block_data) => methods::ServerToClient::chainHead_unstable_bodyEvent {
-                            subscription: &subscription_id,
+                            subscription: (&subscription_id).into(),
                             result: methods::ChainHeadBodyEvent::Done {
                                 value: block_data
                                     .body
@@ -1163,14 +1163,14 @@ impl<TPlat: Platform> Background<TPlat> {
                         }
                         .to_json_call_object_parameters(None),
                         Err(()) => methods::ServerToClient::chainHead_unstable_bodyEvent {
-                            subscription: &subscription_id,
+                            subscription: (&subscription_id).into(),
                             result: methods::ChainHeadBodyEvent::Inaccessible {},
                         }
                         .to_json_call_object_parameters(None),
                     }
                 } else {
                     methods::ServerToClient::chainHead_unstable_bodyEvent {
-                        subscription: &subscription_id,
+                        subscription: (&subscription_id).into(),
                         result: methods::ChainHeadBodyEvent::Disjoint {},
                     }
                     .to_json_call_object_parameters(None)
@@ -1188,7 +1188,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .lock()
                     .await
                     .misc
-                    .remove(&(subscription_id.to_owned(), SubscriptionTy::ChainHeadBody));
+                    .remove(&(subscription_id, SubscriptionTy::ChainHeadBody));
             }
         };
 
@@ -1429,8 +1429,8 @@ fn convert_runtime_spec(
             let runtime = runtime.decode();
             methods::MaybeRuntimeSpec::Valid {
                 spec: methods::RuntimeSpec {
-                    impl_name: runtime.impl_name,
-                    spec_name: runtime.spec_name,
+                    impl_name: runtime.impl_name.into(),
+                    spec_name: runtime.spec_name.into(),
                     impl_version: runtime.impl_version,
                     spec_version: runtime.spec_version,
                     authoring_version: runtime.authoring_version,

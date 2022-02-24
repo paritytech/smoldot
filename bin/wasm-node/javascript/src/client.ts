@@ -314,7 +314,13 @@ export interface AddChainOptions {
   potentialRelayChains?: Chain[];
 
   /**
-   * Callback invoked by smoldot in response to calling `sendJsonRpc`.
+   * Callback invoked by smoldot in response to calling {Chain.sendJsonRpc}.
+   *
+   * This field is optional. If no callback is provided, the client will save up resources by not
+   * starting the JSON-RPC endpoint, and it is forbidden to call {Chain.sendJsonRpc}.
+   *
+   * Will never be called after ̀{Chain.remove} has been called or if a {CrashError} has been
+   * generated.
    */
   jsonRpcCallback?: JsonRpcCallback;
 }
@@ -514,14 +520,15 @@ export function start(options?: ClientOptions): Client {
   workerOnError(worker, (error) => {
     // A worker error should only happen in case of a critical error as the result of a bug
     // somewhere. Consequently, nothing is really in place to cleanly report the error.
+    const errorToString = error.toString();
     console.error(
       "Smoldot has panicked" +
       (workerCurrentTask.name ? (" while executing task `" + workerCurrentTask.name + "`") : "") +
       ". This is a bug in smoldot. Please open an issue at " +
-      "https://github.com/paritytech/smoldot/issues with the following message:"
+      "https://github.com/paritytech/smoldot/issues with the following message:\n" +
+      errorToString
     );
-    console.error(error);
-    workerError = new CrashError(error.toString());
+    workerError = new CrashError(errorToString);
 
     // Reject all promises returned by `addChain`.
     for (var pending of pendingConfirmations) {

@@ -433,7 +433,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                     (Err(None), false) => {
                                         log::debug!(
                                             target: "connections",
-                                            "Pending({:?}, {}) => Timeout ({})",
+                                            "Pending({:?}, {}) => Timeout({})",
                                             start_connect.id, start_connect.expected_peer_id,
                                             start_connect.multiaddr
                                         );
@@ -449,9 +449,9 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                     (Err(Some(err)), _) => {
                                         log::debug!(
                                             target: "connections",
-                                            "Pending({:?}, {}) => Failed to reach ({}): {}",
+                                            "Pending({:?}, {}) => ReachFailed(addr={}, known-unreachable={:?}, error={:?})",
                                             start_connect.id, start_connect.expected_peer_id,
-                                            start_connect.multiaddr, err.message
+                                            start_connect.multiaddr, err.is_bad_addr, err.message
                                         );
                                     }
                                 }
