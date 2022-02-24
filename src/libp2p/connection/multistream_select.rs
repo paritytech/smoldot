@@ -314,13 +314,12 @@ where
 
                     if done {
                         return Ok(Negotiation::Success(protocol));
-                    } else {
-                        self.state = InProgressState::SendProtocolOk {
-                            num_bytes_written,
-                            protocol,
-                        };
-                        break;
                     }
+                    self.state = InProgressState::SendProtocolOk {
+                        num_bytes_written,
+                        protocol,
+                    };
+                    break;
                 }
 
                 (
@@ -600,7 +599,7 @@ where
                     Some(either::Right(either::Left(protocol)))
                 }
                 (MessageOut::LsResponse(_), _) => Some(either::Left(&b"\n"[..])),
-                (MessageOut::ProtocolOk(_), 0) | (MessageOut::ProtocolRequest(_), 0) => {
+                (MessageOut::ProtocolOk(_) | MessageOut::ProtocolRequest(_), 0) => {
                     let proto = match mem::replace(&mut self, MessageOut::Ls) {
                         MessageOut::ProtocolOk(p) | MessageOut::ProtocolRequest(p) => p,
                         _ => unreachable!(),
@@ -609,7 +608,7 @@ where
                     n = 499;
                     Some(either::Right(either::Left(proto)))
                 }
-                (MessageOut::ProtocolOk(_), _) | (MessageOut::ProtocolRequest(_), _) => {
+                (MessageOut::ProtocolOk(_) | MessageOut::ProtocolRequest(_), _) => {
                     unreachable!()
                 }
                 (MessageOut::ProtocolNa, 0) => Some(either::Left(&b"na\n"[..])),

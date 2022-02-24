@@ -128,9 +128,8 @@ impl Verifier {
         if self.fragments.is_empty() {
             if self.is_proof_complete {
                 return Ok(Next::EmptyProof);
-            } else {
-                return Err(Error::EmptyProof);
             }
+            return Err(Error::EmptyProof);
         }
 
         debug_assert!(self.fragments.len() > self.index);

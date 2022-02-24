@@ -564,7 +564,7 @@ impl ReadyToRun {
                 // consecutive I32s representing the length and size of the SCALE-encoded
                 // return value.
                 let value_size = u32::try_from(ret >> 32).unwrap();
-                let value_ptr = u32::try_from(ret & 0xffffffff).unwrap();
+                let value_ptr = u32::try_from(ret & 0xffff_ffff).unwrap();
 
                 if value_size.saturating_add(value_ptr)
                     <= u32::from(self.inner.vm.memory_size()) * 64 * 1024
@@ -574,18 +574,17 @@ impl ReadyToRun {
                         value_ptr,
                         value_size,
                     });
-                } else {
-                    let error = Error::ReturnedPtrOutOfRange {
-                        pointer: value_ptr,
-                        size: value_size,
-                        memory_size: u32::from(self.inner.vm.memory_size()) * 64 * 1024,
-                    };
-
-                    return HostVm::Error {
-                        prototype: self.inner.into_prototype(),
-                        error,
-                    };
                 }
+                let error = Error::ReturnedPtrOutOfRange {
+                    pointer: value_ptr,
+                    size: value_size,
+                    memory_size: u32::from(self.inner.vm.memory_size()) * 64 * 1024,
+                };
+
+                return HostVm::Error {
+                    prototype: self.inner.into_prototype(),
+                    error,
+                };
             }
 
             Ok(vm::ExecOutcome::Finished {
