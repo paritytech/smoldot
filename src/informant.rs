@@ -45,7 +45,7 @@
 //! });
 //! ```
 
-use alloc::{format};
+use alloc::format;
 use core::{cmp, fmt};
 
 /// Values used to build the informant line. Implements the [`core::fmt::Display`] trait.
@@ -173,12 +173,14 @@ impl<'a> fmt::Display for InformantLine<'a> {
         } else {
             '>'
         };
-        let todo_bar = " ".repeat(usize::try_from(
-                    bar_width
-                        .checked_sub(bar_done_width.saturating_sub(1).saturating_add(1))
-                        .unwrap(),
-                )
-                .unwrap());
+        let todo_bar = " ".repeat(
+            usize::try_from(
+                bar_width
+                    .checked_sub(bar_done_width.saturating_sub(1).saturating_add(1))
+                    .unwrap(),
+            )
+            .unwrap(),
+        );
         assert_eq!(
             done_bar1.len() + 1 + todo_bar.len(),
             usize::try_from(bar_width).unwrap()

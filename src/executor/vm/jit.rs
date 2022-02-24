@@ -196,9 +196,7 @@ impl JitPrototype {
                                                 assert!(ret_val.is_empty());
                                             }
 
-                                            *shared_lock = Shared::OutsideFunctionCall {
-                                                memory,
-                                            };
+                                            *shared_lock = Shared::OutsideFunctionCall { memory };
                                             Poll::Ready(Ok(()))
                                         }
                                         Shared::AbortRequired => {
@@ -230,9 +228,7 @@ impl JitPrototype {
                             wasmtime::Memory::new(&mut store, m)
                                 .map_err(|_| NewErr::CouldntAllocateMemory)?,
                         );
-                        imports.push(wasmtime::Extern::Memory(
-                            *imported_memory.as_ref().unwrap(),
-                        ));
+                        imports.push(wasmtime::Extern::Memory(*imported_memory.as_ref().unwrap()));
                     }
                 };
             }
