@@ -49,7 +49,7 @@ pub fn encode(value: impl Into<u64>) -> impl ExactSizeIterator<Item = u8> + Clon
                 return Some(u8::try_from(self.value).unwrap());
             }
 
-            let ret = (1 << 7) | u8::try_from(self.value & 0b1111111).unwrap();
+            let ret = (1 << 7) | u8::try_from(self.value & 0b111_1111).unwrap();
             self.value >>= 7;
             Some(ret)
         }
@@ -85,7 +85,7 @@ pub(crate) fn nom_leb128_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
     let mut out = 0usize;
 
     for (n, byte) in bytes.iter().enumerate() {
-        match usize::from(*byte & 0b1111111).checked_mul(1 << (7 * n)) {
+        match usize::from(*byte & 0b111_1111).checked_mul(1 << (7 * n)) {
             Some(o) => out |= o,
             None => {
                 return Err(nom::Err::Error(nom::error::make_error(
@@ -159,7 +159,7 @@ impl FramedInProgress {
             let mut out = 0usize;
 
             for (n, byte) in buffer.iter().enumerate() {
-                match usize::from(*byte & 0b1111111).checked_mul(1 << (7 * n)) {
+                match usize::from(*byte & 0b111_1111).checked_mul(1 << (7 * n)) {
                     Some(o) => out |= o,
                     None => return Some(Err(FramedError::LengthPrefixTooLarge)),
                 };
@@ -220,9 +220,8 @@ impl FramedInProgress {
 
                     if expected_len == self.buffer.len() {
                         return Ok((total_read, Framed::Finished(self.buffer)));
-                    } else {
-                        return Ok((total_read, Framed::InProgress(self)));
                     }
+                    return Ok((total_read, Framed::InProgress(self)));
                 }
             }
         }
@@ -252,7 +251,7 @@ pub enum FramedError {
 mod tests {
     #[test]
     fn basic_encode() {
-        let obtained = super::encode(0x123456789abcdefu64).collect::<Vec<_>>();
+        let obtained = super::encode(0x123_4567_89ab_cdef_u64).collect::<Vec<_>>();
         assert_eq!(obtained, &[239, 155, 175, 205, 248, 172, 209, 145, 1]);
     }
 

@@ -238,7 +238,7 @@ impl hash::Hash for PeerId {
         H: hash::Hasher,
     {
         let digest = self.as_ref() as &[u8];
-        hash::Hash::hash(digest, state)
+        hash::Hash::hash(digest, state);
     }
 }
 

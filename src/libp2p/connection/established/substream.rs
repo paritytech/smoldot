@@ -228,7 +228,7 @@ where
     /// A [`Event::InboundError`] can also be generated, either before or after the
     /// [`Event::InboundNegotiated`], but always before any [`Event::NotificationsInOpen`].
     ///
-    /// If [̀ InboundTy::Notifications`] is passed, then a [`Event::NotificationsInOpen`] will be
+    /// If [̀`InboundTy::Notifications`] is passed, then a [`Event::NotificationsInOpen`] will be
     /// generated (unless an error happens, in which case [`Event::InboundError`]).
     /// In response, the API user must call either [`Substream::accept_in_notifications_substream`]
     /// or [`Substream::reject_in_notifications_substream`]. Before one of these two methods is
@@ -961,7 +961,7 @@ where
                     let available = payload_in.remaining_capacity();
                     payload_in.extend(read_write.incoming_bytes_iter().take(available));
                     if payload_in.is_full() {
-                        payload_out.extend(payload_in.iter().cloned());
+                        payload_out.extend(payload_in.iter().copied());
                         payload_in.clear();
                     }
                     read_write.write_from_vec_deque(&mut payload_out);
@@ -1218,7 +1218,7 @@ where
             SubstreamInner::NotificationsOut { notifications, .. } => {
                 // TODO: expensive copying?
                 notifications.extend(leb128::encode_usize(notification.len()));
-                notifications.extend(notification.into_iter())
+                notifications.extend(notification.into_iter());
             }
             _ => panic!(),
         }

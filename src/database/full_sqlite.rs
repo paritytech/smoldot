@@ -1298,8 +1298,7 @@ fn decode_babe_epoch_information(
 
     let result = match result {
         Ok(r) if r.validate().is_ok() => Ok(r),
-        Ok(_) => Err(()),
-        Err(()) => Err(()),
+        Ok(_) | Err(()) => Err(()),
     };
 
     result

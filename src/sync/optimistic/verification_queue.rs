@@ -224,7 +224,7 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
                 )
                 .unwrap(),
                 ty: VerificationQueueEntryTy::Missing,
-            })
+            });
         }
         debug_assert!(matches!(
             self.verification_queue.back().unwrap().ty,
@@ -288,13 +288,12 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
             .verification_queue
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| match &entry.ty {
+            .find_map(|(index, entry)| match &entry.ty {
                 VerificationQueueEntryTy::Requested {
                     source, user_data, ..
                 } if request_find(user_data) => Some((index, *source)),
                 _ => None,
             })
-            .next()
             .unwrap();
 
         let prev_value;
@@ -418,10 +417,7 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
     pub fn source_num_ongoing_requests(&self, source_id: SourceId) -> usize {
         self.verification_queue
             .iter()
-            .filter(|elem| match elem.ty {
-                VerificationQueueEntryTy::Requested { source, .. } if source == source_id => true,
-                _ => false,
-            })
+            .filter(|elem| matches!(elem.ty, VerificationQueueEntryTy::Requested { source, .. } if source == source_id))
             .count()
     }
 }
@@ -438,14 +434,10 @@ impl<'a, TRq, TBl> Iterator for SourceDrain<'a, TRq, TBl> {
     fn next(&mut self) -> Option<Self::Item> {
         // TODO: unoptimized
         let source_id = self.source_id;
-        let entry = self
-            .queue
-            .verification_queue
-            .iter_mut()
-            .find(|entry| match entry.ty {
-                VerificationQueueEntryTy::Requested { source, .. } if source == source_id => true,
-                _ => false,
-            })?;
+        let entry = self.queue.verification_queue.iter_mut().find(|entry| {
+            matches!(entry.ty,
+                VerificationQueueEntryTy::Requested { source, .. } if source == source_id)
+        })?;
 
         match mem::replace(&mut entry.ty, VerificationQueueEntryTy::Missing) {
             VerificationQueueEntryTy::Requested { user_data, .. } => Some(user_data),

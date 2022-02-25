@@ -107,10 +107,7 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
 
     /// Returns the size of the data available in the incoming buffer.
     pub fn incoming_buffer_available(&self) -> usize {
-        self.incoming_buffer
-            .as_ref()
-            .map(|buf| buf.len())
-            .unwrap_or(0)
+        self.incoming_buffer.as_ref().map_or(0, |buf| buf.len())
     }
 
     /// Shortcut to [`ReadWrite::advance_read`], passing as parameter the value of
@@ -150,8 +147,7 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
     pub fn outgoing_buffer_available(&self) -> usize {
         self.outgoing_buffer
             .as_ref()
-            .map(|(a, b)| a.len() + b.len())
-            .unwrap_or(0)
+            .map_or(0, |(a, b)| a.len() + b.len())
     }
 
     /// Copies the content of `data` to [`ReadWrite::outgoing_buffer`] and increases
