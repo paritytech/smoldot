@@ -380,9 +380,8 @@ where
                             num_peer_connections,
                             peer_id,
                         };
-                    } else {
-                        unreachable!()
                     }
+                    unreachable!()
                 }
 
                 collection::Event::Shutdown {
@@ -444,9 +443,8 @@ where
                             connection_id: id,
                             error,
                         };
-                    } else {
-                        unreachable!()
                     }
+                    unreachable!()
                 }
 
                 collection::Event::RequestIn { .. } => {
@@ -476,9 +474,8 @@ where
                             request_id,
                             request_payload,
                         };
-                    } else {
-                        unreachable!()
                     }
+                    unreachable!()
                 }
 
                 collection::Event::NotificationsOutResult { .. } => {
@@ -522,9 +519,8 @@ where
                             notifications_protocol_index,
                             result,
                         };
-                    } else {
-                        unreachable!()
                     }
+                    unreachable!()
                 }
 
                 collection::Event::NotificationsOutClose { .. } => {
@@ -557,9 +553,8 @@ where
                             peer_id: guarded.peers[peer_index].peer_id.clone(),
                             notifications_protocol_index,
                         };
-                    } else {
-                        unreachable!()
                     }
+                    unreachable!()
                 }
 
                 collection::Event::NotificationsInOpen {
@@ -613,9 +608,8 @@ where
                             notifications_protocol_index,
                             handshake,
                         };
-                    } else {
-                        unreachable!()
                     }
+                    unreachable!()
                 }
 
                 collection::Event::NotificationsIn { .. } => {
@@ -636,9 +630,8 @@ where
                             notifications_protocol_index,
                             notification,
                         };
-                    } else {
-                        unreachable!()
                     }
+                    unreachable!()
                 }
 
                 collection::Event::NotificationsInClose { .. } => {
@@ -662,9 +655,8 @@ where
                             notifications_protocol_index,
                             outcome,
                         };
-                    } else {
-                        unreachable!()
                     }
+                    unreachable!()
                 }
 
                 collection::Event::PingOutSuccess { .. } => {
@@ -1075,12 +1067,13 @@ where
             .map(|state| &state.open)
         {
             None
-            | Some(NotificationsOutOpenState::Closed)
-            | Some(NotificationsOutOpenState::ApiHandshakeWait(_)) => {
-                return Err(QueueNotificationError::NoSubstream)
-            }
-            Some(NotificationsOutOpenState::Opening(c_id, s_id))
-            | Some(NotificationsOutOpenState::Open(c_id, s_id)) => (c_id, s_id),
+            | Some(
+                NotificationsOutOpenState::Closed | NotificationsOutOpenState::ApiHandshakeWait(_),
+            ) => return Err(QueueNotificationError::NoSubstream),
+            Some(
+                NotificationsOutOpenState::Opening(c_id, s_id)
+                | NotificationsOutOpenState::Open(c_id, s_id),
+            ) => (c_id, s_id),
         };
 
         let result = self
