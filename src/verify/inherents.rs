@@ -29,6 +29,14 @@
 //! passing as parameter an encoded [`InherentData`] as well.
 
 /// Values of the inherents to pass to the runtime.
+///
+/// Historically, the inherent data included an Aura or Babe slot number, using the identifiers
+/// `auraslot` or `babeslot`. The runtime-side verification of the slot number has been removed in
+/// May 2021, and all the checks performed by the runtime are now performed by the client instead.
+/// Older runtime versions still require the slot number. For this reason, verifying the inherents
+/// (calling `BlockBuilder_check_inherents`) of blocks that are using older runtime versions will
+/// lead to errors concerning the Aura or Babe modules that should simply be ignored. Authoring
+/// blocks using older runtime versions is not supported anymore.
 #[derive(Debug)]
 pub struct InherentData {
     /// Number of milliseconds since the UNIX epoch when the block is generated, ignoring leap
@@ -36,9 +44,6 @@ pub struct InherentData {
     ///
     /// Its identifier passed to the runtime is: `timstap0`.
     pub timestamp: u64,
-
-    /// Consensus-specific fields.
-    pub consensus: InherentDataConsensus,
     // TODO: figure out uncles
     /*/// List of valid block headers that have the same height as the parent of the one being
     /// generated.
@@ -56,38 +61,8 @@ impl InherentData {
     pub fn as_raw_list(
         &'_ self,
     ) -> impl ExactSizeIterator<Item = ([u8; 8], impl AsRef<[u8]> + Clone + '_)> + Clone + '_ {
-        let timestamp = (*b"timstap0", self.timestamp.to_le_bytes());
-        match self.consensus {
-            InherentDataConsensus::None => either::Left([timestamp].into_iter()),
-            InherentDataConsensus::Aura { slot_number } => {
-                either::Right([timestamp, (*b"auraslot", slot_number.to_le_bytes())].into_iter())
-            }
-            InherentDataConsensus::Babe { slot_number } => {
-                either::Right([timestamp, (*b"babeslot", slot_number.to_le_bytes())].into_iter())
-            }
-        }
+        // Note: we use `IntoIter::new` because of a Rust backwards compatibility issue.
+        // See https://doc.rust-lang.org/std/primitive.array.html#editions
+        core::array::IntoIter::new([(*b"timstap0", self.timestamp.to_le_bytes())])
     }
-}
-
-/// Extra consensus-specific items in [`InherentData`].
-#[derive(Debug)]
-pub enum InherentDataConsensus {
-    // TODO: unclear?!
-    None,
-
-    /// Aura-specific items.
-    Aura {
-        /// Number of the Aura slot being claimed to generate this block.
-        ///
-        /// Its identifier passed to the runtime is: `auraslot`.
-        slot_number: u64,
-    },
-
-    /// Babe-specific items.
-    Babe {
-        /// Number of the Babe slot being claimed to generate this block.
-        ///
-        /// Its identifier passed to the runtime is: `babeslot`.
-        slot_number: u64,
-    },
 }

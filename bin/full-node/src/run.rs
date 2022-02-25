@@ -135,12 +135,10 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             (None, None)
         };
 
-    let relay_genesis_chain_information = if let Some(relay_chain_spec) = &relay_chain_spec {
-        // TODO: don't unwrap?
-        Some(relay_chain_spec.as_chain_information().unwrap())
-    } else {
-        None
-    };
+    // TODO: don't unwrap?
+    let relay_genesis_chain_information = relay_chain_spec
+        .as_ref()
+        .map(|relay_chain_spec| relay_chain_spec.as_chain_information().unwrap());
 
     let threads_pool = futures::executor::ThreadPool::builder()
         .name_prefix("tasks-pool-")
@@ -456,7 +454,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                         } else {
                             None
                         },
-                        max_line_width: terminal_size::terminal_size().map(|(w, _)| w.0.into()).unwrap_or(80),
+                        max_line_width: terminal_size::terminal_size().map_or(80, |(w, _)| w.0.into()),
                         num_peers: u64::try_from(network_service.num_peers(0).await)
                             .unwrap_or(u64::max_value()),
                         num_network_connections: u64::try_from(network_service.num_established_connections().await)
@@ -647,7 +645,7 @@ async fn background_open_database(
     })
     .map(|_| ());
 
-    let mut next_progress_icon = ['-', '\\', '|', '/'].iter().cloned().cycle();
+    let mut next_progress_icon = ['-', '\\', '|', '/'].iter().copied().cycle();
 
     loop {
         futures::select! {

@@ -843,8 +843,10 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                     .map(|ud| &ud.state)
                 {
                     None | Some(UnverifiedBlockState::HeightHashKnown) => true,
-                    Some(UnverifiedBlockState::HeaderKnown { .. })
-                    | Some(UnverifiedBlockState::HeaderBodyKnown { .. }) => false,
+                    Some(
+                        UnverifiedBlockState::HeaderKnown { .. }
+                        | UnverifiedBlockState::HeaderBodyKnown { .. },
+                    ) => false,
                 })
             });
 

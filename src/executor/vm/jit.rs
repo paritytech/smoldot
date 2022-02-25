@@ -196,9 +196,7 @@ impl JitPrototype {
                                                 assert!(ret_val.is_empty());
                                             }
 
-                                            *shared_lock = Shared::OutsideFunctionCall {
-                                                memory: memory.clone(),
-                                            };
+                                            *shared_lock = Shared::OutsideFunctionCall { memory };
                                             Poll::Ready(Ok(()))
                                         }
                                         Shared::AbortRequired => {
@@ -230,9 +228,7 @@ impl JitPrototype {
                             wasmtime::Memory::new(&mut store, m)
                                 .map_err(|_| NewErr::CouldntAllocateMemory)?,
                         );
-                        imports.push(wasmtime::Extern::Memory(
-                            imported_memory.as_ref().unwrap().clone(),
-                        ));
+                        imports.push(wasmtime::Extern::Memory(*imported_memory.as_ref().unwrap()));
                     }
                 };
             }
@@ -488,7 +484,7 @@ impl Jit {
                     } => {
                         *shared_lock = Shared::Return {
                             return_value: value,
-                            memory: self.memory.clone(),
+                            memory: self.memory,
                         };
 
                         if let Some(waker) = in_interrupted_waker {
@@ -514,7 +510,7 @@ impl Jit {
                 // TODO: check that value is None
 
                 *self.shared.try_lock().unwrap() = Shared::OutsideFunctionCall {
-                    memory: self.memory.clone(),
+                    memory: self.memory,
                 };
 
                 // Check whether the function to call has a return value.
@@ -734,7 +730,7 @@ impl Jit {
                         }
 
                         *shared_lock = Shared::MemoryGrowRequired {
-                            memory: self.memory.clone(),
+                            memory: self.memory,
                             additional,
                         }
                     }

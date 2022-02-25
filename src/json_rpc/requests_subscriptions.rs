@@ -208,8 +208,8 @@ impl RequestsSubscriptions {
             next_request_id: atomic::Atomic::new(0),
             next_subscription_id: atomic::Atomic::new(0),
             max_clients: AtomicUsize::new(max_clients),
-            max_requests_per_client: max_requests_per_client,
-            max_subscriptions_per_client: max_subscriptions_per_client,
+            max_requests_per_client,
+            max_subscriptions_per_client,
         }
     }
 
@@ -426,17 +426,16 @@ impl RequestsSubscriptions {
                         // Note that the check `num_inactive_alive_subscriptions > 0` is purely
                         // for optimization, to avoid doing a hashmap lookup every time.
                         if guarded_lock.num_inactive_alive_subscriptions > 0 {
-                            if !guarded_lock.active_subscriptions.contains_key(&sub_id) {
-                                if guarded_lock
+                            if !guarded_lock.active_subscriptions.contains_key(&sub_id)
+                                && guarded_lock
                                     .notification_messages
                                     .range(
                                         (sub_id, usize::min_value())..=(sub_id, usize::max_value()),
                                     )
                                     .next()
                                     .is_none()
-                                {
-                                    guarded_lock.num_inactive_alive_subscriptions -= 1;
-                                }
+                            {
+                                guarded_lock.num_inactive_alive_subscriptions -= 1;
                             }
                         } else {
                             debug_assert!(guarded_lock.active_subscriptions.contains_key(&sub_id));
