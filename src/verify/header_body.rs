@@ -408,31 +408,9 @@ impl VerifyInner {
                 runtime_host::RuntimeHostVm::Finished(Ok(success))
                     if self.execution_not_started.is_some() =>
                 {
+                    // Check the output of the `BlockBuilder_check_inherents` runtime call.
                     let check_inherents_result =
-                        match parse_check_inherents_result::<nom::error::Error<&[u8]>>(
-                            success.virtual_machine.value().as_ref(),
-                        ) {
-                            Err(_err) => Err(Error::CheckInherentsOutputParseFailure),
-                            Ok((_, info)) => {
-                                let filtered_errors = info
-                                    .errors
-                                    .into_iter()
-                                    .filter(|(module, _)| {
-                                        module != b"auraslot" && module != b"babeslot"
-                                    })
-                                    .map(|(c, d)| (c, d.to_vec()))
-                                    .collect::<Vec<_>>();
-
-                                if filtered_errors.is_empty() {
-                                    Ok(())
-                                } else {
-                                    Err(Error::CheckInherentsError {
-                                        errors: filtered_errors,
-                                    })
-                                }
-                            }
-                        };
-
+                        check_check_inherents_output(success.virtual_machine.value().as_ref());
                     if let Err(err) = check_inherents_result {
                         return Verify::Finished(Err((
                             err,
@@ -440,6 +418,7 @@ impl VerifyInner {
                         )));
                     }
 
+                    // Switch to phase 2: calling `Core_execute_block`.
                     let import_process = {
                         let vm = runtime_host::run(runtime_host::Config {
                             virtual_machine: success.virtual_machine.into_prototype(),
@@ -703,43 +682,45 @@ impl RuntimeCompilation {
     }
 }
 
-#[derive(Debug, Clone)]
-struct CheckInherentsResult<'a> {
-    /// Did the check succeed?
-    _okay: bool,
-    /// Did we encounter a fatal error?
-    _fatal_error: bool,
-    /// List of errors that have happened.
-    ///
-    /// Note that we use a `Vec` out of laziness. Errors aren't supposed to happen, meaning that
-    /// the overhead of using a `Vec` isn't very important.
-    errors: Vec<([u8; 8], &'a [u8])>,
-}
+/// Checks the output of the `BlockBuilder_check_inherents` runtime call.
+fn check_check_inherents_output(output: &[u8]) -> Result<(), Error> {
+    // The format of the output of `check_inherents` consists of two booleans and a list of
+    // errors.
+    // We don't care about the value of the two booleans, and they are ignored during the parsing.
+    // Because we don't pass as parameter the `auraslot` or `babeslot`, errors will be generated
+    // on older runtimes that expect these values. For this reason, errors concerning `auraslot`
+    // and `babeslot` are ignored.
+    let parser = nom::sequence::preceded(
+        nom::sequence::tuple((crate::util::nom_bool_decode, crate::util::nom_bool_decode)),
+        nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
+            nom::multi::fold_many_m_n(
+                num_elems,
+                num_elems,
+                nom::sequence::tuple((
+                    nom::combinator::map(nom::bytes::complete::take(8u8), |b| {
+                        <[u8; 8]>::try_from(b).unwrap()
+                    }),
+                    crate::util::nom_bytes_decode,
+                )),
+                || Vec::new(),
+                |mut errors, (module, error)| {
+                    if module != *b"auraslot" && module != *b"babeslot" {
+                        errors.push((module, error.to_vec()));
+                    }
+                    errors
+                },
+            )
+        }),
+    );
 
-fn parse_check_inherents_result<'a, E: nom::error::ParseError<&'a [u8]>>(
-    bytes: &'a [u8],
-) -> nom::IResult<&'a [u8], CheckInherentsResult, E> {
-    nom::combinator::all_consuming(nom::combinator::map(
-        nom::sequence::tuple((
-            crate::util::nom_bool_decode,
-            crate::util::nom_bool_decode,
-            nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-                nom::multi::many_m_n(
-                    num_elems,
-                    num_elems,
-                    nom::sequence::tuple((
-                        nom::combinator::map(nom::bytes::complete::take(8u8), |b| {
-                            <[u8; 8]>::try_from(b).unwrap()
-                        }),
-                        crate::util::nom_bytes_decode,
-                    )),
-                )
-            }),
-        )),
-        move |(okay, fatal_error, errors)| CheckInherentsResult {
-            _okay: okay,
-            _fatal_error: fatal_error,
-            errors,
-        },
-    ))(bytes)
+    match nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(parser)(output) {
+        Err(_err) => Err(Error::CheckInherentsOutputParseFailure),
+        Ok((_, errors)) => {
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(Error::CheckInherentsError { errors })
+            }
+        }
+    }
 }
