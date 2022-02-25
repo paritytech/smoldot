@@ -296,16 +296,15 @@ impl<T> Yamux<T> {
                                 user_data: Some(user_data),
                             }),
                         });
-                    } else {
-                        return Ok(IncomingDataOutcome {
-                            yamux: self,
-                            bytes_read: total_read,
-                            detail: Some(IncomingDataDetail::StreamClosed {
-                                substream_id,
-                                user_data: None,
-                            }),
-                        });
                     }
+                    return Ok(IncomingDataOutcome {
+                        yamux: self,
+                        bytes_read: total_read,
+                        detail: Some(IncomingDataDetail::StreamClosed {
+                            substream_id,
+                            user_data: None,
+                        }),
+                    });
                 }
 
                 Incoming::DataFrame {
@@ -346,12 +345,11 @@ impl<T> Yamux<T> {
                                 start_offset,
                             }),
                         });
-                    } else {
-                        if *remaining_bytes == 0 {
-                            self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
-                        }
-                        continue;
                     }
+                    if *remaining_bytes == 0 {
+                        self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+                    }
+                    continue;
                 }
 
                 Incoming::Header(ref mut incoming_header) => {
@@ -425,10 +423,9 @@ impl<T> Yamux<T> {
                                     .unwrap();
                                 self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                                 continue;
-                            // TODO: pong handling
-                            } else {
-                                return Err(Error::BadPingFlags(flags_field));
+                                // TODO: pong handling
                             }
+                            return Err(Error::BadPingFlags(flags_field));
                         }
                         3 => {
                             // TODO: go away
@@ -462,13 +459,12 @@ impl<T> Yamux<T> {
                                     user_data: removed.user_data,
                                 }),
                             });
-                        } else {
-                            // The remote might have sent a RST frame concerning a substream for
-                            // which we have sent a RST frame earlier. Considering that we don't
-                            // keep traces of old substreams, we have no way to know whether this
-                            // is the case or not.
-                            continue;
                         }
+                        // The remote might have sent a RST frame concerning a substream for
+                        // which we have sent a RST frame earlier. Considering that we don't
+                        // keep traces of old substreams, we have no way to know whether this
+                        // is the case or not.
+                        continue;
                     }
 
                     // Find the element in `self.substreams` corresponding to the substream
@@ -485,28 +481,27 @@ impl<T> Yamux<T> {
                         // Remote has sent a SYN flag.
                         if self.substreams.contains_key(&substream_id.0) {
                             return Err(Error::UnexpectedSyn(substream_id.0));
-                        } else {
-                            self.incoming = Incoming::PendingIncomingSubstream {
-                                substream_id,
-                                extra_window: if incoming_header[1] == 1 {
-                                    length_field
-                                } else {
-                                    0
-                                },
-                                data_frame_size: if incoming_header[1] == 0 {
-                                    length_field
-                                } else {
-                                    0
-                                },
-                                fin: (flags_field & 0x4) != 0,
-                            };
-
-                            return Ok(IncomingDataOutcome {
-                                yamux: self,
-                                bytes_read: total_read,
-                                detail: Some(IncomingDataDetail::IncomingSubstream),
-                            });
                         }
+                        self.incoming = Incoming::PendingIncomingSubstream {
+                            substream_id,
+                            extra_window: if incoming_header[1] == 1 {
+                                length_field
+                            } else {
+                                0
+                            },
+                            data_frame_size: if incoming_header[1] == 0 {
+                                length_field
+                            } else {
+                                0
+                            },
+                            fin: (flags_field & 0x4) != 0,
+                        };
+
+                        return Ok(IncomingDataOutcome {
+                            yamux: self,
+                            bytes_read: total_read,
+                            detail: Some(IncomingDataDetail::IncomingSubstream),
+                        });
                     };
 
                     if incoming_header[1] == 0 {

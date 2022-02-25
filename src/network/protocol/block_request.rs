@@ -270,7 +270,7 @@ pub fn decode_block_response(
                     nom::combinator::all_consuming(justifications)(&block.justifications);
                 match result {
                     Ok((_, out)) => Some(out),
-                    Err(nom::Err::Error(_)) | Err(nom::Err::Failure(_)) => {
+                    Err(nom::Err::Error(_) | nom::Err::Failure(_)) => {
                         return Err(DecodeBlockResponseError::InvalidJustifications)
                     }
                     Err(_) => unreachable!(),

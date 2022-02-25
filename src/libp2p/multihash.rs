@@ -53,7 +53,7 @@ impl<'a> MultihashRef<'a> {
 
     /// Checks whether `input` is a valid multihash.
     pub fn from_bytes(input: &'a [u8]) -> Result<MultihashRef, FromBytesError> {
-        match nom::combinator::all_consuming(multihash::<nom::error::Error<&[u8]>>)(&input) {
+        match nom::combinator::all_consuming(multihash::<nom::error::Error<&[u8]>>)(input) {
             Ok((_rest, multihash)) => {
                 debug_assert!(_rest.is_empty());
                 Ok(multihash)

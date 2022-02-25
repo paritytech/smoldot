@@ -90,7 +90,7 @@ pub enum Error {
 /// The maximum number of bytes that can be allocated at one time.
 // The maximum possible allocation size was chosen rather arbitrary, 32 MiB should be enough for
 // everybody.
-pub const MAX_POSSIBLE_ALLOCATION: u32 = 33554432; // 2^25 bytes, 32 MiB
+pub const MAX_POSSIBLE_ALLOCATION: u32 = 33_554_432; // 2^25 bytes, 32 MiB
 
 /// The minimal alignment guaranteed by this allocator.
 ///
@@ -864,11 +864,11 @@ mod tests {
         let mut mem = [0u8; PAGE_SIZE as usize];
 
         // when
-        Memory::write_le_u64(mem.as_mut(), 40, 4480113).unwrap();
+        Memory::write_le_u64(mem.as_mut(), 40, 4_480_113).unwrap();
 
         // then
         let value = Memory::read_le_u64(mem.as_mut(), 40).unwrap();
-        assert_eq!(value, 4480113);
+        assert_eq!(value, 4_480_113);
     }
 
     #[test]
