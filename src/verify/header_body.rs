@@ -316,30 +316,12 @@ pub fn verify(
 
     // Start the virtual machine with `BlockBuilder_check_inherents`.
     let check_inherents_process = {
-        // The second parameter of `BlockBuilder_check_inherents` contains the current timestamp
-        // and current Aura or Babe slot number. The Aura/Babe slot number is no longer used in
-        // more recent runtimes and will lead to errors, but needs to be passed anyway to verify
-        // older blocks.
-        // TODO: remove slot number, see https://github.com/paritytech/smoldot/issues/2096
+        // The second parameter of `BlockBuilder_check_inherents` contains information such as
+        // the current timestamp.
         // TODO: uncles?! it's a weird inherent as even in Substrate it's half implemented
         let inherent_data = inherents::InherentData {
             timestamp: u64::try_from(config.now_from_unix_epoch.as_millis())
                 .unwrap_or(u64::max_value()),
-            consensus: match config.consensus {
-                ConfigConsensus::AllAuthorized => inherents::InherentDataConsensus::None,
-                // TODO: consider using a function to get current slot from aura/babe module
-                ConfigConsensus::Aura { slot_duration, .. } => {
-                    inherents::InherentDataConsensus::Aura {
-                        slot_number: config.now_from_unix_epoch.as_secs() * 1000
-                            / slot_duration.get(),
-                    }
-                }
-                ConfigConsensus::Babe { .. } => {
-                    inherents::InherentDataConsensus::Babe {
-                        slot_number: u64::max_value(), // TODO: hack /!\ but we don't really care as we're planning to remove this with https://github.com/paritytech/smoldot/issues/2096
-                    }
-                }
-            },
         };
 
         let vm = runtime_host::run(runtime_host::Config {
