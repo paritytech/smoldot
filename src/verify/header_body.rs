@@ -414,16 +414,20 @@ impl VerifyInner {
                         ) {
                             Err(_err) => Err(Error::CheckInherentsOutputParseFailure),
                             Ok((_, info)) => {
-                                // TODO: unclear whether to use info.okay or info.errors.is_empty()
-                                if info.errors.is_empty() {
+                                let filtered_errors = info
+                                    .errors
+                                    .into_iter()
+                                    .filter(|(module, _)| {
+                                        module != b"auraslot" && module != b"babeslot"
+                                    })
+                                    .map(|(c, d)| (c, d.to_vec()))
+                                    .collect::<Vec<_>>();
+
+                                if filtered_errors.is_empty() {
                                     Ok(())
                                 } else {
                                     Err(Error::CheckInherentsError {
-                                        errors: info
-                                            .errors
-                                            .iter()
-                                            .map(|(c, d)| (*c, d.to_vec()))
-                                            .collect(),
+                                        errors: filtered_errors,
                                     })
                                 }
                             }
@@ -702,9 +706,9 @@ impl RuntimeCompilation {
 #[derive(Debug, Clone)]
 struct CheckInherentsResult<'a> {
     /// Did the check succeed?
-    okay: bool,
+    _okay: bool,
     /// Did we encounter a fatal error?
-    fatal_error: bool,
+    _fatal_error: bool,
     /// List of errors that have happened.
     ///
     /// Note that we use a `Vec` out of laziness. Errors aren't supposed to happen, meaning that
@@ -733,8 +737,8 @@ fn parse_check_inherents_result<'a, E: nom::error::ParseError<&'a [u8]>>(
             }),
         )),
         move |(okay, fatal_error, errors)| CheckInherentsResult {
-            okay,
-            fatal_error,
+            _okay: okay,
+            _fatal_error: fatal_error,
             errors,
         },
     ))(bytes)
