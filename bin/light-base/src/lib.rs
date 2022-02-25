@@ -636,7 +636,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                                 target: "smoldot",
                                 "Chain initialization complete for {}. Name: {:?}. Genesis \
                                 hash: {}. State root hash: 0x{}. Network identity: {}. Chain \
-                                specification starting at: {} (#{})",
+                                specification or database starting at: {} (#{})",
                                 log_name,
                                 chain_name,
                                 HashDisplay(&genesis_block_hash),
