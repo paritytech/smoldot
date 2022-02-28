@@ -228,7 +228,7 @@ where
     /// A [`Event::InboundError`] can also be generated, either before or after the
     /// [`Event::InboundNegotiated`], but always before any [`Event::NotificationsInOpen`].
     ///
-    /// If [̀`InboundTy::Notifications`] is passed, then a [`Event::NotificationsInOpen`] will be
+    /// If [`InboundTy::Notifications`] is passed, then a [`Event::NotificationsInOpen`] will be
     /// generated (unless an error happens, in which case [`Event::InboundError`]).
     /// In response, the API user must call either [`Substream::accept_in_notifications_substream`]
     /// or [`Substream::reject_in_notifications_substream`]. Before one of these two methods is
