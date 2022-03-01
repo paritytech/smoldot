@@ -670,7 +670,6 @@ impl<T> BodyVerifyRuntimeRequired<T> {
                 VerifyConsensusSpecific::Aura { authorities_list },
             ) => verify::header_body::ConfigConsensus::Aura {
                 current_authorities: header::AuraAuthoritiesIter::from_slice(&*authorities_list),
-                now_from_unix_epoch: self.now_from_unix_epoch,
                 slot_duration: *slot_duration,
             },
             (
@@ -685,7 +684,6 @@ impl<T> BodyVerifyRuntimeRequired<T> {
                 parent_block_epoch: current_epoch.as_ref().map(|v| (&**v).into()),
                 parent_block_next_epoch: (&**next_epoch).into(),
                 slots_per_epoch: *slots_per_epoch,
-                now_from_unix_epoch: self.now_from_unix_epoch,
             },
             _ => {
                 return BodyVerifyStep2::Error {
@@ -701,6 +699,7 @@ impl<T> BodyVerifyRuntimeRequired<T> {
         let process = verify::header_body::verify(verify::header_body::Config {
             parent_runtime,
             consensus: config_consensus,
+            now_from_unix_epoch: self.now_from_unix_epoch,
             block_header: (&self.context.header).into(),
             parent_block_header: parent_block_header.into(),
             block_body,
