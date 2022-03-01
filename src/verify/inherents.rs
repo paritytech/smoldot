@@ -61,8 +61,6 @@ impl InherentData {
     pub fn as_raw_list(
         &'_ self,
     ) -> impl ExactSizeIterator<Item = ([u8; 8], impl AsRef<[u8]> + Clone + '_)> + Clone + '_ {
-        // Note: we use `IntoIter::new` because of a Rust backwards compatibility issue.
-        // See https://doc.rust-lang.org/std/primitive.array.html#editions
-        core::array::IntoIter::new([(*b"timstap0", self.timestamp.to_le_bytes())])
+        [(*b"timstap0", self.timestamp.to_le_bytes())].into_iter()
     }
 }
