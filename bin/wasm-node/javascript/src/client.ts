@@ -73,12 +73,12 @@ export interface Client {
    *
    * Smoldot will automatically de-duplicate chains if multiple identical chains are added, in
    * order to save resources. In other words, it is not a problem to call `addChain` multiple
-   * times with the same chain specifications and obtain multiple `SmoldotChain`.
+   * times with the same chain specifications and obtain multiple `Chain`.
    * When the same client is used for multiple different purposes, you are in fact strongly
    * encouraged to trust smoldot and not attempt to de-duplicate chains yourself, as determining
    * whether two chains are identical is complicated and might have security implications.
    *
-   * Smoldot tries to distribute CPU resources equally between all active `SmoldotChain` objects.
+   * Smoldot tries to distribute CPU resources equally between all active `Chain` objects.
    *
    * @param options Configuration of the chain to add.
    *
@@ -161,7 +161,7 @@ export interface Chain {
    * to track parachains and relaychains, or to destroy them in the correct order, as this is
    * handled automatically.
    *
-   * @throws {AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
+   * @throws {AlreadyDestroyedError} If the chain has already been removed or the client has been terminated.
    * @throws {CrashError} If the background client has crashed.
    */
   remove(): void;
@@ -309,7 +309,7 @@ export interface AddChainOptions {
    * When multiple different parachains use the same relay chain, it is important to be sure that
    * they are indeed using the same relay chain, and not accidentally using different ones. For
    * this reason, this parameter is a list of potential relay chains in which only one chain
-   * should match, rather than a single `SmoldotChain` corresponding to the relay chain.
+   * should match, rather than a single `Chain` corresponding to the relay chain.
    */
   potentialRelayChains?: Chain[];
 
