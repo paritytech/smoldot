@@ -279,14 +279,22 @@ impl<TSrc> AllForksSources<TSrc> {
         debug_assert_eq!(_was_in1, _was_in2);
     }
 
-    /// Sets the best block of this source.
+    /// Registers a new block that the source is aware of and sets it as its best block.
+    ///
+    /// If the block height is inferior or equal to the finalized block height, the block itself
+    /// isn't kept in memory but is still set as the source's best block.
     ///
     /// # Panic
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
     #[track_caller]
-    pub fn set_best_block(&mut self, source_id: SourceId, height: u64, hash: [u8; 32]) {
+    pub fn add_known_block_and_set_best(
+        &mut self,
+        source_id: SourceId,
+        height: u64,
+        hash: [u8; 32],
+    ) {
         self.add_known_block(source_id, height, hash);
 
         let source = self.sources.get_mut(&source_id).unwrap();
@@ -400,7 +408,7 @@ mod tests {
         assert_eq!(sources.num_blocks(), 1);
         assert!(sources.source_knows_non_finalized_block(source1, 12, &[1; 32]));
 
-        sources.set_best_block(source1, 13, [2; 32]);
+        sources.add_known_block_and_set_best(source1, 13, [2; 32]);
         assert_eq!(sources.num_blocks(), 2);
         assert!(sources.source_knows_non_finalized_block(source1, 12, &[1; 32]));
         assert!(sources.source_knows_non_finalized_block(source1, 13, &[2; 32]));

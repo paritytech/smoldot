@@ -753,7 +753,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         if known_to_be_source_best {
             self.inner
                 .blocks
-                .set_best_block(source_id, header.number, *header_hash);
+                .add_known_block_and_set_best(source_id, header.number, *header_hash);
         } else {
             self.inner
                 .blocks

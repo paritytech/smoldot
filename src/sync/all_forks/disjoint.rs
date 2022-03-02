@@ -219,6 +219,8 @@ impl<TBl> DisjointBlocks<TBl> {
     /// # Panic
     ///
     /// Panics if the block with the given height and hash hasn't been inserted before.
+    /// Panics if the parent hash of that block was already known, and is different from the one
+    /// passed as parameter.
     ///
     #[track_caller]
     pub fn set_parent_hash(&mut self, height: u64, hash: &[u8; 32], parent_hash: [u8; 32]) {
@@ -233,7 +235,7 @@ impl<TBl> DisjointBlocks<TBl> {
         let block = self.blocks.get_mut(&(height, *hash)).unwrap();
 
         match &mut block.parent_hash {
-            &mut Some(ph) => debug_assert_eq!(ph, parent_hash),
+            &mut Some(ph) => assert_eq!(ph, parent_hash),
             ph @ &mut None => *ph = Some(parent_hash),
         }
 
