@@ -386,7 +386,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
     /// Returns the current best block of the given source.
     ///
-    /// This corresponds either the latest call to [`PendingBlocks::set_best_block`],
+    /// This corresponds either the latest call to [`PendingBlocks::add_known_block_and_set_best`],
     /// or to the parameter passed to [`PendingBlocks::add_source`].
     ///
     /// # Panic
@@ -429,9 +429,10 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         self.sources.knows_non_finalized_block(height, hash)
     }
 
-    /// Returns true if [`PendingBlocks::add_known_block`] or [`PendingBlocks::set_best_block`]
-    /// has earlier been called on this source with this height and hash, or if the source was
-    /// originally created (using [`PendingBlocks::add_source`]) with this height and hash.
+    /// Returns true if [`PendingBlocks::add_known_block`] or
+    /// [`PendingBlocks::add_known_block_and_set_best`] has earlier been called on this source
+    /// with this height and hash, or if the source was originally created (using
+    /// [`PendingBlocks::add_source`]) with this height and hash.
     ///
     /// # Panic
     ///
@@ -475,7 +476,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Returns the previous user data associated to this block, if any.
     ///
     /// > **Note**: You should probably also call [`PendingBlocks::add_known_block`] or
-    /// >           [`PendingBlocks::set_best_block`].
+    /// >           [`PendingBlocks::add_known_block_and_set_best`].
     pub fn insert_unverified_block(
         &mut self,
         height: u64,

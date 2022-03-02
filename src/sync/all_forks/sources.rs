@@ -309,8 +309,9 @@ impl<TSrc> AllForksSources<TSrc> {
 
     /// Returns the current best block of the given source.
     ///
-    /// This corresponds either the latest call to [`AllForksSources::set_best_block`],
-    /// or to the parameter passed to [`AllForksSources::add_source`].
+    /// This corresponds either the latest call to
+    /// [`AllForksSources::add_known_block_and_set_best`], or to the parameter passed to
+    /// [`AllForksSources::add_source`].
     ///
     /// # Panic
     ///
@@ -344,9 +345,10 @@ impl<TSrc> AllForksSources<TSrc> {
             .map(|(_, _, id)| *id)
     }
 
-    /// Returns true if [`AllForksSources::add_known_block`] or [`AllForksSources::set_best_block`]
-    /// has earlier been called on this source with this height and hash, or if the source was
-    /// originally created (using [`AllForksSources::add_source`]) with this height and hash.
+    /// Returns true if [`AllForksSources::add_known_block`] or
+    /// [`AllForksSources::add_known_block_and_set_best`] has earlier been called on this source
+    /// with this height and hash, or if the source was originally created (using
+    /// [`AllForksSources::add_source`]) with this height and hash.
     ///
     /// # Panic
     ///
