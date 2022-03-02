@@ -351,6 +351,29 @@ impl<TBl> DisjointBlocks<TBl> {
             (None, None) => None,
         })
     }
+
+    /// Returns whether a block is marked as bad.
+    ///
+    /// Returns `None` if the block isn't known.
+    pub fn is_bad(&self, height: u64, hash: &[u8; 32]) -> Option<bool> {
+        Some(self.blocks.get(&(height, *hash))?.bad)
+    }
+
+    /// Returns whether the parent of a block is bad.
+    ///
+    /// Returns `None` if either the block or its parent isn't known.
+    pub fn is_parent_bad(&self, height: u64, hash: &[u8; 32]) -> Option<bool> {
+        let parent_hash = self.blocks.get(&(height, *hash))?.parent_hash?;
+        let parent_height = match height.checked_sub(1) {
+            Some(h) => h,
+            None => return Some(false), // Parent is known and isn't present in the data structure.
+        };
+        Some(
+            self.blocks
+                .get(&(parent_height, parent_hash))
+                .map_or(false, |parent| parent.bad),
+        )
+    }
 }
 
 impl<TBl: fmt::Debug> fmt::Debug for DisjointBlocks<TBl> {

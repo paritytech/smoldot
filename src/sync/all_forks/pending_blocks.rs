@@ -674,6 +674,71 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         })
     }
 
+    /// Returns an iterator to a list of blocks in the data structure that aren't necessary to keep
+    /// in order to complete the chain.
+    ///
+    /// The returned blocks are ordered by increasing order of importance. In other words, the
+    /// earlier blocks are less useful.
+    ///
+    /// In details, this returns:
+    ///
+    /// - Blocks that have a bad parent and that aren't the best block of any given source.
+    /// - Blocks whose parent is in the data structure and that aren't the best block of any given
+    ///   source.
+    /// - Blocks that are bad and that aren't the best block of any given source.
+    ///
+    /// It is guaranteed that, even if you always immediately remove all the blocks provided by
+    /// this iterator, the chain will eventually become fully synchronized (assuming that block
+    /// requests eventually succeed).
+    ///
+    /// > **Note**: You are encouraged to use this method to remove blocks in order to prevent the
+    /// >           data structure from reaching unreasonable sizes. Please keep in mind, however,
+    /// >           that removing blocks will lead to redownloading these blocks later. In other
+    /// >           words, it is better to keep these blocks.
+    pub fn unnecessary_blocks(&'_ self) -> impl Iterator<Item = (u64, &'_ [u8; 32])> + '_ {
+        // TODO: this entire function is O(n) everywhere
+
+        // List of blocks that have a bad parent.
+        // If a block has a bad parent, it is also bad itself, hence why we use `bad_blocks()`.
+        let bad_parent_iter = self
+            .blocks
+            .iter()
+            .filter(|(height, hash, _)| self.blocks.is_parent_bad(*height, *hash).unwrap_or(false));
+
+        // List of blocks whose parent is in the data structure.
+        let parent_known_iter = self.blocks.iter().filter(|(height, hash, _)| {
+            match (
+                height.checked_sub(1),
+                self.blocks.parent_hash(*height, *hash),
+            ) {
+                (Some(n), Some(h)) => self.blocks.contains(n, h),
+                _ => false,
+            }
+        });
+
+        // List of blocks that are bad but don't have a bad parent.
+        // This is the same as `bad_parent_iter`, but the filter is reversed.
+        let bad_iter = self
+            .blocks
+            .iter()
+            .filter(|(height, hash, _)| self.blocks.is_bad(*height, *hash).unwrap())
+            .filter(|(height, hash, _)| {
+                !self.blocks.is_parent_bad(*height, *hash).unwrap_or(false)
+            });
+
+        // Never return any block that is the best block of a source.
+        bad_parent_iter
+            .chain(parent_known_iter)
+            .chain(bad_iter)
+            .map(|(height, hash, _)| (height, hash))
+            .filter(|(height, hash)| {
+                !self
+                    .sources
+                    .iter()
+                    .any(|source_id| self.sources.best_block(source_id) == (*height, hash))
+            })
+    }
+
     /// Inserts a new request in the data structure.
     ///
     /// > **Note**: The request doesn't necessarily have to match a request returned by

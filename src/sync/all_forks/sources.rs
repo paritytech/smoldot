@@ -92,6 +92,11 @@ impl<TSrc> AllForksSources<TSrc> {
         self.sources.is_empty()
     }
 
+    /// Iterates over all sources.
+    pub fn iter(&'_ self) -> impl Iterator<Item = SourceId> + '_ {
+        self.sources.keys().copied()
+    }
+
     /// Returns the number of sources in the data structure.
     pub fn len(&self) -> usize {
         self.sources.len()
