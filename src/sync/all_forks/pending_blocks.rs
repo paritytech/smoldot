@@ -618,6 +618,10 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         self.blocks.set_parent_hash(height, hash, parent_hash);
     }
 
+    pub fn remove_block_tracking(&mut self, height: u64, hash: &[u8; 32]) {
+        self.sources.remove_known_block(height, hash);
+    }
+
     /// Removes the given block from the collection.
     ///
     /// > **Note**: Use this method after a block has been successfully verified, or in order to
@@ -627,8 +631,19 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the block wasn't present in the data structure.
     ///
-    pub fn remove(&mut self, height: u64, hash: &[u8; 32]) -> TBl {
+    pub fn remove_block(&mut self, height: u64, hash: &[u8; 32]) -> TBl {
         self.blocks.remove(height, hash).user_data
+    }
+
+    /// Shortcut for [`PendingBlocks::remove_block_tracking`] and [`PendingBlocks::remove_block`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the block wasn't present in the data structure.
+    ///
+    pub fn remove_block_and_tracking(&mut self, height: u64, hash: &[u8; 32]) -> TBl {
+        self.remove_block_tracking(height, hash);
+        self.remove_block(height, hash)
     }
 
     /// Marks the given block and all its known children as "bad".

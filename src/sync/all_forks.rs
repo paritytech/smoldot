@@ -1096,7 +1096,7 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
 
         // Remove the verified block from `pending_blocks`.
         let justifications = if result.is_ok() {
-            let outcome = self.parent.inner.blocks.remove(
+            let outcome = self.parent.inner.blocks.remove_block_and_tracking(
                 self.block_to_verify.block_number,
                 &self.block_to_verify.block_hash,
             );
