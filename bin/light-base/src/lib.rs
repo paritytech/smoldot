@@ -261,6 +261,11 @@ struct ChainKey {
 
     /// Network protocol id, found in the chain specification.
     protocol_id: String,
+
+    /// Optional fork identifier, used to differentiate between chains with the same genesis hash.
+    ///
+    /// This can be a counter (e.g. "1", "2", "3") or some unique identifier (e.g. "classic").
+    fork_id: Option<String>,
 }
 
 struct RunningChain<TPlat: Platform> {
@@ -488,6 +493,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                 )
             }),
             protocol_id: chain_spec.protocol_id().to_owned(),
+            fork_id: chain_spec.fork_id().map(|s| s.to_owned()),
         };
 
         // If the chain we are adding is a parachain, grab the services of the relay chain.
@@ -982,6 +988,7 @@ async fn start_services<TPlat: Platform>(
                     chain_information.as_ref().finalized_block_header.hash(),
                 ),
                 protocol_id: chain_spec.protocol_id().to_string(),
+                fork_id: chain_spec.fork_id().map(|s| s.to_string()),
             }],
         })
         .await;
