@@ -165,7 +165,7 @@ impl UnverifiedBlockState {
     }
 }
 
-/// Identifier for a request in the [`PendingBlocks`].
+/// Identifier for a request in the [`AllForksSync`].
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct RequestId(usize);
 
