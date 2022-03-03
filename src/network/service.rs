@@ -16,6 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::header;
+use crate::informant::HashDisplay;
 use crate::libp2p::{
     connection, multiaddr, peer_id,
     peers::{self, QueueNotificationError},
@@ -118,6 +119,12 @@ pub struct ChainConfig {
     /// > **Note**: This value is typically found in the specification of the chain (the
     /// >           "chain spec").
     pub protocol_id: String,
+
+    /// Optional fork identifier, used to differentiate between chains with the same genesis hash.
+    ///
+    /// > **Note**: This value is typically found in the specification of the chain (the
+    /// >           "chain spec").
+    pub fork_id: Option<String>,
 
     /// If `Some`, the chain uses the GrandPa networking protocol.
     pub grandpa_protocol_config: Option<GrandpaState>,
@@ -282,7 +289,12 @@ where
                     // chains, in order to make the rest of the code of this module more
                     // comprehensible.
                     iter::once(peers::NotificationProtocolConfig {
-                        protocol_name: "/paritytech/grandpa/1".to_string(),
+                        protocol_name: match &chain.fork_id {
+                            Some(id) => {
+                                format!("/{}/{}/grandpa/1", HashDisplay(&chain.genesis_hash), id)
+                            }
+                            None => format!("/{}/grandpa/1", HashDisplay(&chain.genesis_hash)),
+                        },
                         fallback_protocol_names: Vec::new(),
                         max_handshake_size: 4,
                         max_notification_size: 1024 * 1024,
