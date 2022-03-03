@@ -309,7 +309,7 @@ impl<TSrc> AllForksSources<TSrc> {
 
     /// Returns the current best block of the given source.
     ///
-    /// This corresponds either the latest call to
+    /// This corresponds either to the latest call to
     /// [`AllForksSources::add_known_block_and_set_best`], or to the parameter passed to
     /// [`AllForksSources::add_source`].
     ///

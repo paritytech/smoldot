@@ -548,7 +548,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// state where the header is known.
     ///
     /// > **Note**: A user of this data structure is expected to manually add the parent block to
-    ///             this data structure as well in case it is unknown.
+    ///             this data structure as well in case it is unverified.
     ///
     /// # Panic
     ///
@@ -589,7 +589,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// to a state where the header and body are known.
     ///
     /// > **Note**: A user of this data structure is expected to manually add the parent block to
-    ///             this data structure as well in case it is unknown.
+    ///             this data structure as well in case it is unverified.
     ///
     /// # Panic
     ///
