@@ -284,10 +284,6 @@ where
                     max_notification_size: 16 * 1024 * 1024,
                 }))
                 .chain({
-                    // The `has_grandpa_protocol` flag controls whether the chain uses GrandPa.
-                    // Note, however, that GrandPa is technically left enabled (but unused) on all
-                    // chains, in order to make the rest of the code of this module more
-                    // comprehensible.
                     iter::once(peers::NotificationProtocolConfig {
                         protocol_name: match &chain.fork_id {
                             Some(id) => {
