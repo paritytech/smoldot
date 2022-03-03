@@ -28,7 +28,7 @@ use crate::util::{self, SipHasherBuild};
 use alloc::{
     borrow::Cow,
     format,
-    string::{String, ToString as _},
+    string::String,
     vec::Vec,
 };
 use core::{
