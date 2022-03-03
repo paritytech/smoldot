@@ -243,20 +243,16 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             block.async_op_user_data.clone().unwrap();
                         let block_index = block.index;
 
-                        let parent_header: &Vec<u8> = async_tree
-                            .parent(block_index)
-                            .map(|idx| {
-                                async_tree
-                                    .block_async_user_data(idx)
-                                    .unwrap()
-                                    .as_ref()
-                                    .unwrap()
-                            })
-                            .or_else(|| async_tree.finalized_async_user_data().as_ref())
-                            .unwrap_or(&finalized_parahead);
-
-                        // Do not report the new block if it is the same as its parent.
-                        if *parent_header == scale_encoded_header {
+                        // Do not report the new block if it has already been reported in the
+                        // past. This covers situations where the parahead is identical to the
+                        // relay chain's parent's parahead, but also situations where multiple
+                        // sibling relay chain blocks have the same parahead.
+                        if async_tree
+                            .input_iter_unordered()
+                            .filter(|item| item.id != block_index)
+                            .filter_map(|item| item.async_op_user_data)
+                            .any(|item| item.as_ref() == Some(&scale_encoded_header))
+                        {
                             continue;
                         }
 
@@ -270,9 +266,22 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             ))
                         );
 
+                        let parent_hash = header::hash_from_scale_encoded_header(
+                            &async_tree
+                                .parent(block_index)
+                                .map(|idx| {
+                                    async_tree
+                                        .block_async_user_data(idx)
+                                        .unwrap()
+                                        .as_ref()
+                                        .unwrap()
+                                })
+                                .or_else(|| async_tree.finalized_async_user_data().as_ref())
+                                .unwrap_or(&finalized_parahead),
+                        );
+
                         // Elements in `all_subscriptions` are removed one by one and
                         // inserted back if the channel is still open.
-                        let parent_hash = header::hash_from_scale_encoded_header(&parent_header);
                         for index in (0..all_subscriptions.len()).rev() {
                             let mut sender = all_subscriptions.swap_remove(index);
                             let notif = super::Notification::Block(super::BlockNotification {
