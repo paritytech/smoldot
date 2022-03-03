@@ -165,7 +165,7 @@ impl UnverifiedBlockState {
     }
 }
 
-/// Identifier for a request in the [`AllForksSync`].
+/// Identifier for a request in the [`super::AllForksSync`].
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct RequestId(usize);
 
