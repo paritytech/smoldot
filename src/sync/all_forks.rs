@@ -806,6 +806,19 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                         .collect::<Vec<_>>(),
                 },
             );
+
+            // If there are too many blocks stored in the blocks list, remove unnecessary ones.
+            // Not doing this could lead to an explosion of the size of the collections.
+            // TODO: removing blocks should only be done explicitly through an API endpoint, because we want to store user datas in unverified blocks too; see https://github.com/paritytech/smoldot/issues/1572
+            while self.inner.blocks.num_blocks() >= 100 { // TODO: arbitrary constant
+                let (height, hash) = match self.inner.blocks.unnecessary_blocks().next() {
+                    Some((n, h)) => (n, *h),
+                    None => break,
+                };
+
+                self.inner.blocks.remove_block_and_tracking(height, &hash);
+            }
+
         } else {
             if body.is_some() {
                 self.inner.blocks.set_block_header_body_known(
