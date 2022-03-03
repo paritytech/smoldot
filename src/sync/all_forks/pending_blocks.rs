@@ -42,18 +42,21 @@
 //! - A list of non-finalized blocks known by this source.
 //! - An opaque user data, of type `TSrc`.
 //!
-//! # Blocks
+//! # Unverified blocks
 //!
-//! The [`PendingBlocks`] collection stores a list of pending blocks.
+//! The [`PendingBlocks`] collection also stores a list of unverified blocks.
 //!
-//! Blocks are expected to be added to this collection whenever we hear about them from a source
-//! of blocks (such as a peer) and that it is not possible to verify them immediately (because
-//! their parent isn't known).
+//! Note that unverified blocks are added/removed completely separately from blocks known by
+//! sources.
 //!
-//! Blocks can be added by calling [`PendingBlocks::insert_unverified_block`] and remove by
-//! calling [`PendingBlocks::remove`].
+//! Unverified blocks are expected to be added to this collection whenever we hear about them
+//! from a source of blocks (such as a peer) and that it is not possible to verify them
+//! immediately (because their parent isn't known).
 //!
-//! Each block stored in this collection has the following properties associated to it:
+//! Blocks can be added by calling [`PendingBlocks::insert_unverified_block`] and removed by
+//! calling [`PendingBlocks::remove_unverified_block`].
+//!
+//! Each unverified block stored in this collection has the following properties associated to it:
 //!
 //! - A height.
 //! - A hash.
@@ -335,7 +338,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
-    pub fn add_known_block(&mut self, source_id: SourceId, height: u64, hash: [u8; 32]) {
+    pub fn add_source_known_block(&mut self, source_id: SourceId, height: u64, hash: [u8; 32]) {
         self.sources.add_known_block(source_id, height, hash);
     }
 
@@ -350,7 +353,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
-    pub fn remove_known_block(&mut self, source_id: SourceId, height: u64, hash: &[u8; 32]) {
+    pub fn remove_source_known_block(&mut self, source_id: SourceId, height: u64, hash: &[u8; 32]) {
         self.sources
             .source_remove_known_block(source_id, height, hash);
     }
@@ -366,7 +369,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
-    pub fn add_known_block_and_set_best(
+    pub fn add_source_known_block_and_set_best(
         &mut self,
         source_id: SourceId,
         height: u64,
@@ -378,7 +381,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
     /// Returns the current best block of the given source.
     ///
-    /// This corresponds either the latest call to [`PendingBlocks::add_known_block_and_set_best`],
+    /// This corresponds either the latest call to [`PendingBlocks::add_source_known_block_and_set_best`],
     /// or to the parameter passed to [`PendingBlocks::add_source`].
     ///
     /// # Panic
@@ -421,9 +424,9 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         self.sources.knows_non_finalized_block(height, hash)
     }
 
-    /// Returns true if [`PendingBlocks::add_known_block`] or
-    /// [`PendingBlocks::add_known_block_and_set_best`] has earlier been called on this source
-    /// with this height and hash, or if the source was originally created (using
+    /// Returns true if [`PendingBlocks::add_source_known_block`] or
+    /// [`PendingBlocks::add_source_known_block_and_set_best`] has earlier been called on this
+    /// source with this height and hash, or if the source was originally created (using
     /// [`PendingBlocks::add_source`]) with this height and hash.
     ///
     /// # Panic
@@ -446,8 +449,8 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
     /// Updates the height of the finalized block.
     ///
-    /// This removes from the collection, and will ignore in the future, all blocks whose height
-    /// is inferior or equal to this value.
+    /// This removes from the collection all blocks (both source-known and unverified) whose
+    /// height is inferior or equal to this value.
     ///
     /// # Panic
     ///
@@ -467,8 +470,8 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Returns the previous user data associated to this block, if any.
     ///
-    /// > **Note**: You should probably also call [`PendingBlocks::add_known_block`] or
-    /// >           [`PendingBlocks::add_known_block_and_set_best`].
+    /// > **Note**: You should probably also call [`PendingBlocks::add_source_known_block`] or
+    /// >           [`PendingBlocks::add_source_known_block_and_set_best`].
     pub fn insert_unverified_block(
         &mut self,
         height: u64,
@@ -493,7 +496,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     }
 
     /// Returns `true` if the block with the given height and hash is in the collection.
-    pub fn contains_block(&self, height: u64, hash: &[u8; 32]) -> bool {
+    pub fn contains_unverified_block(&self, height: u64, hash: &[u8; 32]) -> bool {
         self.blocks.contains(height, hash)
     }
 
@@ -503,7 +506,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the block wasn't present in the data structure.
     ///
-    pub fn block_user_data(&self, height: u64, hash: &[u8; 32]) -> &TBl {
+    pub fn unverified_block_user_data(&self, height: u64, hash: &[u8; 32]) -> &TBl {
         &self.blocks.user_data(height, hash).unwrap().user_data
     }
 
@@ -513,7 +516,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the block wasn't present in the data structure.
     ///
-    pub fn block_user_data_mut(&mut self, height: u64, hash: &[u8; 32]) -> &mut TBl {
+    pub fn unverified_block_user_data_mut(&mut self, height: u64, hash: &[u8; 32]) -> &mut TBl {
         &mut self.blocks.user_data_mut(height, hash).unwrap().user_data
     }
 
@@ -525,7 +528,12 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the block wasn't present in the data structure.
     ///
-    pub fn set_block_state(&mut self, height: u64, hash: &[u8; 32], state: UnverifiedBlockState) {
+    pub fn set_unverified_block_state(
+        &mut self,
+        height: u64,
+        hash: &[u8; 32],
+        state: UnverifiedBlockState,
+    ) {
         if let Some(parent_hash) = state.parent_hash() {
             self.blocks.set_parent_hash(height, hash, *parent_hash);
         }
@@ -534,7 +542,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     }
 
     /// Modifies the state of the given block. This is a convenience around
-    /// [`PendingBlocks::set_block_state`].
+    /// [`PendingBlocks::set_unverified_block_state`].
     ///
     /// If the current block's state implies that the header isn't known yet, updates it to a
     /// state where the header is known.
@@ -548,7 +556,12 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Panics if the block's header was already known and the its parent hash doesn't match
     /// the one passed as parameter.
     ///
-    pub fn set_block_header_known(&mut self, height: u64, hash: &[u8; 32], parent_hash: [u8; 32]) {
+    pub fn set_unverified_block_header_known(
+        &mut self,
+        height: u64,
+        hash: &[u8; 32],
+        parent_hash: [u8; 32],
+    ) {
         let curr = &mut self.blocks.user_data_mut(height, hash).unwrap().state;
 
         match curr {
@@ -570,7 +583,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     }
 
     /// Modifies the state of the given block. This is a convenience around
-    /// [`PendingBlocks::set_block_state`].
+    /// [`PendingBlocks::set_unverified_block_state`].
     ///
     /// If the current block's state implies that the header or body isn't known yet, updates it
     /// to a state where the header and body are known.
@@ -584,7 +597,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Panics if the block's header was already known and the its parent hash doesn't match
     /// the one passed as parameter.
     ///
-    pub fn set_block_header_body_known(
+    pub fn set_unverified_block_header_body_known(
         &mut self,
         height: u64,
         hash: &[u8; 32],
@@ -610,11 +623,15 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         self.blocks.set_parent_hash(height, hash, parent_hash);
     }
 
-    pub fn remove_block_tracking(&mut self, height: u64, hash: &[u8; 32]) {
+    /// Removes the given block from the list of known blocks of all from the sources.
+    ///
+    /// This is equivalent to calling [`PendingBlocks::remove_source_known_block`] for each
+    /// source.
+    pub fn remove_sources_known_block(&mut self, height: u64, hash: &[u8; 32]) {
         self.sources.remove_known_block(height, hash);
     }
 
-    /// Removes the given block from the collection.
+    /// Removes the given unverified block from the collection.
     ///
     /// > **Note**: Use this method after a block has been successfully verified, or in order to
     /// >           remove uninteresting blocks if there are too many blocks in the collection.
@@ -623,22 +640,11 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the block wasn't present in the data structure.
     ///
-    pub fn remove_block(&mut self, height: u64, hash: &[u8; 32]) -> TBl {
+    pub fn remove_unverified_block(&mut self, height: u64, hash: &[u8; 32]) -> TBl {
         self.blocks.remove(height, hash).user_data
     }
 
-    /// Shortcut for [`PendingBlocks::remove_block_tracking`] and [`PendingBlocks::remove_block`].
-    ///
-    /// # Panic
-    ///
-    /// Panics if the block wasn't present in the data structure.
-    ///
-    pub fn remove_block_and_tracking(&mut self, height: u64, hash: &[u8; 32]) -> TBl {
-        self.remove_block_tracking(height, hash);
-        self.remove_block(height, hash)
-    }
-
-    /// Marks the given block and all its known children as "bad".
+    /// Marks the given unverified block and all its known children as "bad".
     ///
     /// If a child of this block is later added to the collection, it is also automatically
     /// marked as bad.
@@ -648,12 +654,12 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Panics if the block wasn't present in the data structure.
     ///
     #[track_caller]
-    pub fn set_block_bad(&mut self, height: u64, hash: &[u8; 32]) {
+    pub fn set_unverified_block_bad(&mut self, height: u64, hash: &[u8; 32]) {
         self.blocks.set_block_bad(height, hash);
     }
 
-    /// Returns the number of blocks stored in the data structure.
-    pub fn num_blocks(&self) -> usize {
+    /// Returns the number of unverified blocks stored in the data structure.
+    pub fn num_unverified_blocks(&self) -> usize {
         self.blocks.len()
     }
 
@@ -682,8 +688,8 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         })
     }
 
-    /// Returns an iterator to a list of blocks in the data structure that aren't necessary to keep
-    /// in order to complete the chain.
+    /// Returns an iterator to a list of unverified blocks in the data structure that aren't
+    /// necessary to keep in order to complete the chain.
     ///
     /// The returned blocks are ordered by increasing order of importance. In other words, the
     /// earlier blocks are less useful.
@@ -703,7 +709,9 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// >           data structure from reaching unreasonable sizes. Please keep in mind, however,
     /// >           that removing blocks will lead to redownloading these blocks later. In other
     /// >           words, it is better to keep these blocks.
-    pub fn unnecessary_blocks(&'_ self) -> impl Iterator<Item = (u64, &'_ [u8; 32])> + '_ {
+    pub fn unnecessary_unverified_blocks(
+        &'_ self,
+    ) -> impl Iterator<Item = (u64, &'_ [u8; 32])> + '_ {
         // TODO: this entire function is O(n) everywhere
 
         // List of blocks that have a bad parent.
@@ -876,7 +884,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     }
 
     /// Returns a list of requests that should be started in order to learn about the missing
-    /// blocks.
+    /// unverified blocks.
     ///
     /// In details, the requests concern:
     ///
@@ -907,7 +915,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     }
 
     /// Returns a list of requests that should be started in order to learn about the missing
-    /// blocks.
+    /// unverified blocks.
     ///
     /// This method is similar to [`PendingBlocks::desired_requests`], except that only requests
     /// concerning the given source will be returned.

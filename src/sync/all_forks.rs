@@ -306,7 +306,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         let is_in_disjoints_list = self
             .inner
             .blocks
-            .contains_block(best_block_number, &best_block_hash);
+            .contains_unverified_block(best_block_number, &best_block_hash);
         debug_assert!(!(!needs_verification && is_in_disjoints_list));
 
         if needs_verification && !is_in_disjoints_list {
@@ -324,7 +324,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             if self.inner.banned_blocks.contains(&best_block_hash) {
                 self.inner
                     .blocks
-                    .set_block_bad(best_block_number, &best_block_hash);
+                    .set_unverified_block_bad(best_block_number, &best_block_hash);
             }
         }
 
@@ -620,7 +620,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             // Assume that the source doesn't know this block, as it is apparently unable to
             // serve it anyway. This avoids sending the same request to the same source over and
             // over again.
-            self.inner.blocks.remove_known_block(
+            self.inner.blocks.remove_source_known_block(
                 source_id,
                 requested_block_height,
                 &requested_block_hash,
@@ -767,19 +767,21 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         // No matter what is done below, start by updating the view the state machine maintains
         // for this source.
         if known_to_be_source_best {
-            self.inner
-                .blocks
-                .add_known_block_and_set_best(source_id, header.number, *header_hash);
+            self.inner.blocks.add_source_known_block_and_set_best(
+                source_id,
+                header.number,
+                *header_hash,
+            );
         } else {
             self.inner
                 .blocks
-                .add_known_block(source_id, header.number, *header_hash);
+                .add_source_known_block(source_id, header.number, *header_hash);
         }
 
         // Source also knows the parent of the announced block.
         self.inner
             .blocks
-            .add_known_block(source_id, header.number - 1, *header.parent_hash);
+            .add_source_known_block(source_id, header.number - 1, *header.parent_hash);
 
         // It is assumed that all sources will eventually agree on the same finalized chain. If
         // the block number is lower or equal than the locally-finalized block number, it is
@@ -801,7 +803,11 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         // At this point, we have excluded blocks that are already part of the chain or too old.
         // We insert the block in the list of unverified blocks so as to treat all blocks the
         // same.
-        if !self.inner.blocks.contains_block(header.number, header_hash) {
+        if !self
+            .inner
+            .blocks
+            .contains_unverified_block(header.number, header_hash)
+        {
             self.inner.blocks.insert_unverified_block(
                 header.number,
                 *header_hash,
@@ -824,30 +830,34 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             );
 
             if self.inner.banned_blocks.contains(header_hash) {
-                self.inner.blocks.set_block_bad(header.number, header_hash);
+                self.inner
+                    .blocks
+                    .set_unverified_block_bad(header.number, header_hash);
             }
 
             // If there are too many blocks stored in the blocks list, remove unnecessary ones.
             // Not doing this could lead to an explosion of the size of the collections.
             // TODO: removing blocks should only be done explicitly through an API endpoint, because we want to store user datas in unverified blocks too; see https://github.com/paritytech/smoldot/issues/1572
-            while self.inner.blocks.num_blocks() >= 100 {
+            while self.inner.blocks.num_unverified_blocks() >= 100 {
                 // TODO: arbitrary constant
-                let (height, hash) = match self.inner.blocks.unnecessary_blocks().next() {
+                let (height, hash) = match self.inner.blocks.unnecessary_unverified_blocks().next()
+                {
                     Some((n, h)) => (n, *h),
                     None => break,
                 };
 
-                self.inner.blocks.remove_block_and_tracking(height, &hash);
+                self.inner.blocks.remove_sources_known_block(height, &hash);
+                self.inner.blocks.remove_unverified_block(height, &hash);
             }
         } else {
             if body.is_some() {
-                self.inner.blocks.set_block_header_body_known(
+                self.inner.blocks.set_unverified_block_header_body_known(
                     header.number,
                     header_hash,
                     *header.parent_hash,
                 );
             } else {
-                self.inner.blocks.set_block_header_known(
+                self.inner.blocks.set_unverified_block_header_known(
                     header.number,
                     header_hash,
                     *header.parent_hash,
@@ -857,7 +867,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             let block_user_data = self
                 .inner
                 .blocks
-                .block_user_data_mut(header.number, header_hash);
+                .unverified_block_user_data_mut(header.number, header_hash);
             if block_user_data.header.is_none() {
                 block_user_data.header = Some(header.clone().into()); // TODO: copying bytes :-/
             }
@@ -1089,7 +1099,7 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
             .parent
             .inner
             .blocks
-            .block_user_data(
+            .unverified_block_user_data(
                 self.block_to_verify.block_number,
                 &self.block_to_verify.block_hash,
             )
@@ -1129,13 +1139,17 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
 
         // Remove the verified block from `pending_blocks`.
         let justifications = if result.is_ok() {
-            let outcome = self.parent.inner.blocks.remove_block_and_tracking(
+            self.parent.inner.blocks.remove_sources_known_block(
+                self.block_to_verify.block_number,
+                &self.block_to_verify.block_hash,
+            );
+            let outcome = self.parent.inner.blocks.remove_unverified_block(
                 self.block_to_verify.block_number,
                 &self.block_to_verify.block_hash,
             );
             outcome.justifications
         } else {
-            self.parent.inner.blocks.set_block_bad(
+            self.parent.inner.blocks.set_unverified_block_bad(
                 self.block_to_verify.block_number,
                 &self.block_to_verify.block_hash,
             );
