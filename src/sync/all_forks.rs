@@ -102,7 +102,7 @@ pub use pending_blocks::{RequestId, RequestParams, SourceId};
 
 /// Configuration for the [`AllForksSync`].
 #[derive(Debug)]
-pub struct Config {
+pub struct Config<TBannedBlocksIter> {
     /// Information about the latest finalized block and its ancestors.
     pub chain_information: chain_information::ValidChainInformation,
 
@@ -156,8 +156,7 @@ pub struct Config {
     /// > **Note**: This list is typically filled with a list of blocks found in the chain
     /// >           specification. It is part of the "trusted setup" of the node, in other words
     /// >           the information that is passed by the user and blindly assumed to be true.
-    // TODO: use iterator instead
-    pub banned_blocks: hashbrown::HashSet<[u8; 32], fnv::FnvBuildHasher>,
+    pub banned_blocks: TBannedBlocksIter,
 }
 
 pub struct AllForksSync<TBl, TRq, TSrc> {
@@ -197,7 +196,7 @@ struct Block<TBl> {
 
 impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Initializes a new [`AllForksSync`].
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config<impl Iterator<Item = [u8; 32]>>) -> Self {
         let finalized_block_height = config
             .chain_information
             .as_ref()
@@ -220,7 +219,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     verify_bodies: config.full,
                 }),
                 pending_justifications_verify: Vec::new().into_iter(),
-                banned_blocks: config.banned_blocks,
+                banned_blocks: config.banned_blocks.collect(),
             },
         }
     }
