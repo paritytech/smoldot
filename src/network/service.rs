@@ -25,12 +25,7 @@ use crate::libp2p::{
 use crate::network::{kademlia, protocol};
 use crate::util::{self, SipHasherBuild};
 
-use alloc::{
-    borrow::Cow,
-    format,
-    string::String,
-    vec::Vec,
-};
+use alloc::{borrow::Cow, format, string::String, vec::Vec};
 use core::{
     fmt, iter, mem,
     num::NonZeroUsize,
