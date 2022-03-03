@@ -150,6 +150,14 @@ pub struct Config {
 
     /// If true, the block bodies and storage are also synchronized.
     pub full: bool,
+
+    /// List of block hashes that are known to be bad and shouldn't be downloaded or verified.
+    ///
+    /// > **Note**: This list is typically filled with a list of blocks found in the chain
+    /// >           specification. It is part of the "trusted setup" of the node, in other words
+    /// >           the information that is passed by the user and blindly assumed to be true.
+    // TODO: use iterator instead
+    pub banned_blocks: hashbrown::HashSet<[u8; 32], fnv::FnvBuildHasher>,
 }
 
 pub struct AllForksSync<TBl, TRq, TSrc> {
@@ -171,6 +179,9 @@ struct Inner<TRq, TSrc> {
     /// These justifications came with a block header that has been successfully verified in the
     /// past.
     pending_justifications_verify: vec::IntoIter<([u8; 4], Vec<u8>)>,
+
+    /// Same value as [`Config::banned_blocks`].
+    banned_blocks: hashbrown::HashSet<[u8; 32], fnv::FnvBuildHasher>,
 }
 
 struct PendingBlock {
@@ -207,9 +218,9 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     max_requests_per_block: config.max_requests_per_block,
                     sources_capacity: config.sources_capacity,
                     verify_bodies: config.full,
-                    banned_blocks: Vec::new(), // TODO:
                 }),
                 pending_justifications_verify: Vec::new().into_iter(),
+                banned_blocks: config.banned_blocks,
             },
         }
     }
@@ -310,6 +321,12 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     justifications: Vec::new(),
                 },
             );
+
+            if self.inner.banned_blocks.contains(&best_block_hash) {
+                self.inner
+                    .blocks
+                    .set_block_bad(best_block_number, &best_block_hash);
+            }
         }
 
         source_id
@@ -807,10 +824,15 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 },
             );
 
+            if self.inner.banned_blocks.contains(header_hash) {
+                self.inner.blocks.set_block_bad(header.number, header_hash);
+            }
+
             // If there are too many blocks stored in the blocks list, remove unnecessary ones.
             // Not doing this could lead to an explosion of the size of the collections.
             // TODO: removing blocks should only be done explicitly through an API endpoint, because we want to store user datas in unverified blocks too; see https://github.com/paritytech/smoldot/issues/1572
-            while self.inner.blocks.num_blocks() >= 100 { // TODO: arbitrary constant
+            while self.inner.blocks.num_blocks() >= 100 {
+                // TODO: arbitrary constant
                 let (height, hash) = match self.inner.blocks.unnecessary_blocks().next() {
                     Some((n, h)) => (n, *h),
                     None => break,
@@ -818,7 +840,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
                 self.inner.blocks.remove_block_and_tracking(height, &hash);
             }
-
         } else {
             if body.is_some() {
                 self.inner.blocks.set_block_header_body_known(

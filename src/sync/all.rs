@@ -2218,6 +2218,7 @@ impl<TRq> Shared<TRq> {
             max_disjoint_headers: self.max_disjoint_headers,
             max_requests_per_block: self.max_requests_per_block,
             full: false,
+            banned_blocks: Default::default(), // TODO: not implemented, should be passed by config
         });
 
         debug_assert!(self
