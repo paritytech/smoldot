@@ -17,7 +17,7 @@
 
 //! Extension module containing the best block determination.
 
-use super::*;
+use super::{fork_tree, header, Block};
 use core::{cmp::Ordering, iter};
 
 /// Accepts as parameter a container of blocks and indices within this container.

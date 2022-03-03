@@ -86,10 +86,10 @@ impl Builder {
                 slot_duration,
             } => {
                 let consensus = match aura::next_slot_claim(aura::Config {
-                    current_authorities,
-                    local_authorities,
                     now_from_unix_epoch,
                     slot_duration,
+                    current_authorities,
+                    local_authorities,
                 }) {
                     Some(c) => c,
                     None => return Builder::Idle,

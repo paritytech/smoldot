@@ -210,7 +210,7 @@ mod tests {
                     182, 68, 115, 35, 15, 201, 152, 195, 12, 181, 59, 244, 231, 124, 34, 248, 98,
                     253, 4, 180, 158, 70, 161, 84, 76, 118, 151, 68, 101, 104, 187, 82,
                 ],
-                target_number: 5105457,
+                target_number: 5_105_457,
                 precommits: vec![
                     super::UnsignedPrecommitRef {
                         target_hash: &[

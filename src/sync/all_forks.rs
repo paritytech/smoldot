@@ -681,10 +681,8 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             // In case where the commit message concerns a block older or equal to the finalized
             // block, the operation is silently considered successful.
             Err(blocks_tree::CommitVerifyError::FinalityVerify(
-                blocks_tree::FinalityVerifyError::EqualToFinalized,
-            ))
-            | Err(blocks_tree::CommitVerifyError::FinalityVerify(
-                blocks_tree::FinalityVerifyError::BelowFinalized,
+                blocks_tree::FinalityVerifyError::EqualToFinalized
+                | blocks_tree::FinalityVerifyError::BelowFinalized,
             )) => Ok(()),
             Err(err) => Err(err),
         }
@@ -802,7 +800,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     body,
                     header: Some(header.clone().into()),
                     justifications: justifications
-                        .map(|(e, j)| (e, j.to_vec()))
+                        .map(|(e, j)| (e, j.clone()))
                         .collect::<Vec<_>>(),
                 },
             );
@@ -1090,8 +1088,10 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
                 Err((HeaderVerifyError::ConsensusMismatch, user_data))
             }
             Ok(blocks_tree::HeaderVerifySuccess::Duplicate)
-            | Err(blocks_tree::HeaderVerifyError::BadParent { .. })
-            | Err(blocks_tree::HeaderVerifyError::InvalidHeader(_)) => unreachable!(),
+            | Err(
+                blocks_tree::HeaderVerifyError::BadParent { .. }
+                | blocks_tree::HeaderVerifyError::InvalidHeader(_),
+            ) => unreachable!(),
         };
 
         // Remove the verified block from `pending_blocks`.

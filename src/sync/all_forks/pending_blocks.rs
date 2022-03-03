@@ -165,7 +165,7 @@ impl UnverifiedBlockState {
     }
 }
 
-/// Identifier for a request in the [`PendingBlocks`].
+/// Identifier for a request in the [`super::AllForksSync`].
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct RequestId(usize);
 
@@ -289,7 +289,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                 (source_id, RequestId(usize::min_value()))
                     ..=(source_id, RequestId(usize::max_value())),
             )
-            .cloned()
+            .copied()
             .collect::<Vec<_>>();
 
         // TODO: optimize with a custom iterator?
@@ -847,7 +847,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
                         UnverifiedBlockState::HeaderKnown { .. }
                         | UnverifiedBlockState::HeaderBodyKnown { .. },
                     ) => false,
-                })
+                });
             });
 
         // Combine the two block iterators and find sources.

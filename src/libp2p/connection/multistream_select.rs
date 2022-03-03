@@ -240,7 +240,7 @@ where
                             }
                         }
                         (true, Config::Listener { .. }) => {
-                            self.state = InProgressState::HandshakeExpected
+                            self.state = InProgressState::HandshakeExpected;
                         }
                     };
                 }
@@ -506,14 +506,14 @@ where
 
                 // Invalid states.
                 (InProgressState::SendProtocolRequest { .. }, Some(Config::Listener { .. })) => {
-                    unreachable!()
+                    unreachable!();
                 }
                 (InProgressState::SendLsResponse { .. }, Some(Config::Dialer { .. })) => {
-                    unreachable!()
+                    unreachable!();
                 }
                 (InProgressState::CommandExpected, Some(Config::Dialer { .. })) => unreachable!(),
                 (InProgressState::ProtocolRequestAnswerExpected, Some(Config::Listener { .. })) => {
-                    unreachable!()
+                    unreachable!();
                 }
                 (_, None) => unreachable!(),
             };

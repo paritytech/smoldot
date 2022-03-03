@@ -225,7 +225,7 @@ impl RequestsSubscriptions {
     /// > **Note**: This function can typically be used at runtime to adjust the maximum number
     /// >           of clients based on the resource consumptions of the binary.
     pub fn set_max_clients(&self, max_clients: usize) {
-        self.max_clients.store(max_clients, Ordering::Relaxed)
+        self.max_clients.store(max_clients, Ordering::Relaxed);
     }
 
     /// Adds a new client to the state machine. A new [`ClientId`] is attributed.
@@ -449,7 +449,7 @@ impl RequestsSubscriptions {
                 guarded_lock.responses_send_back_pushed_or_dead.listen()
             };
 
-            sleep_until.await
+            sleep_until.await;
         }
     }
 
@@ -513,7 +513,7 @@ impl RequestsSubscriptions {
             }
 
             if let Some(sleep_until) = sleep_until.take() {
-                sleep_until.await
+                sleep_until.await;
             } else {
                 sleep_until = Some(client.total_requests_in_fly_dec_or_dead.listen());
             }
@@ -606,7 +606,7 @@ impl RequestsSubscriptions {
                 }
 
                 if let Some(sleep_until) = sleep_until.take() {
-                    sleep_until.await
+                    sleep_until.await;
                 } else {
                     sleep_until = Some(self.new_unpulled_request.listen());
                 }
@@ -938,7 +938,7 @@ impl RequestsSubscriptions {
                 }
             };
 
-            sleep_until.await
+            sleep_until.await;
         };
 
         // Inserts or replaces the current value under the key `(subscription, index)`.

@@ -801,10 +801,12 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                     });
                     None
                 }
-                Ok(blocks_tree::HeaderVerifySuccess::Duplicate)
-                | Ok(blocks_tree::HeaderVerifySuccess::Insert {
-                    is_new_best: false, ..
-                }) => Some(ResetCause::NonCanonical),
+                Ok(
+                    blocks_tree::HeaderVerifySuccess::Duplicate
+                    | blocks_tree::HeaderVerifySuccess::Insert {
+                        is_new_best: false, ..
+                    },
+                ) => Some(ResetCause::NonCanonical),
                 Err(err) => Some(ResetCause::HeaderError(err)),
             };
 
@@ -1098,10 +1100,12 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         reason: ResetCause::InvalidHeader(error),
                     };
                 }
-                Inner::Step1(blocks_tree::BodyVerifyStep1::Duplicate(old_chain))
-                | Inner::Step1(blocks_tree::BodyVerifyStep1::BadParent {
-                    chain: old_chain, ..
-                }) => {
+                Inner::Step1(
+                    blocks_tree::BodyVerifyStep1::Duplicate(old_chain)
+                    | blocks_tree::BodyVerifyStep1::BadParent {
+                        chain: old_chain, ..
+                    },
+                ) => {
                     if let Some(source) = shared.inner.sources.get_mut(&shared.source_id) {
                         source.banned = true;
                     }
