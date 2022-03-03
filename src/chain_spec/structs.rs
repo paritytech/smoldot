@@ -169,9 +169,9 @@ impl<'a> serde::Deserialize<'a> for NumberAsString {
         } else if let Ok(num) = string.parse() {
             Ok(NumberAsString(num))
         } else {
-            return Err(serde::de::Error::custom(
+            Err(serde::de::Error::custom(
                 "block number is neither hexadecimal nor decimal",
-            ));
+            ))
         }
     }
 }

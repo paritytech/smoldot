@@ -159,10 +159,10 @@ impl ConsensusService {
             .await;
 
         let sync_state = Arc::new(Mutex::new(SyncState {
-            best_block_hash,
             best_block_number,
-            finalized_block_hash,
+            best_block_hash,
             finalized_block_number,
+            finalized_block_hash,
         }));
 
         // Spawn the background task that synchronizes blocks and updates the database.
@@ -511,7 +511,7 @@ impl SyncBackground {
                         let (_, response_outcome) = self.sync.blocks_request_response(request_id, result.map(|v| v.into_iter().map(|block| all::BlockRequestSuccessBlock {
                             scale_encoded_header: block.header.unwrap(), // TODO: don't unwrap
                             scale_encoded_extrinsics: block.body.unwrap(), // TODO: don't unwrap
-                            scale_encoded_justifications: block.justifications.unwrap_or(Vec::new()),
+                            scale_encoded_justifications: block.justifications.unwrap_or_default(),
                             user_data: (),
                         })));
 

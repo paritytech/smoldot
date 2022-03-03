@@ -218,7 +218,7 @@ mod tests {
                             248, 98, 253, 4, 180, 158, 70, 161, 84, 76, 118, 151, 68, 101, 104,
                             187, 82,
                         ],
-                        target_number: 5105457,
+                        target_number: 5_105_457,
                     },
                     super::UnsignedPrecommitRef {
                         target_hash: &[
@@ -226,7 +226,7 @@ mod tests {
                             248, 98, 253, 4, 180, 158, 70, 161, 84, 76, 118, 151, 68, 101, 104,
                             187, 82,
                         ],
-                        target_number: 5105457,
+                        target_number: 5_105_457,
                     },
                     super::UnsignedPrecommitRef {
                         target_hash: &[
@@ -234,7 +234,7 @@ mod tests {
                             248, 98, 253, 4, 180, 158, 70, 161, 84, 76, 118, 151, 68, 101, 104,
                             187, 82,
                         ],
-                        target_number: 5105457,
+                        target_number: 5_105_457,
                     },
                     super::UnsignedPrecommitRef {
                         target_hash: &[
@@ -242,7 +242,7 @@ mod tests {
                             248, 98, 253, 4, 180, 158, 70, 161, 84, 76, 118, 151, 68, 101, 104,
                             187, 82,
                         ],
-                        target_number: 5105457,
+                        target_number: 5_105_457,
                     },
                     super::UnsignedPrecommitRef {
                         target_hash: &[
@@ -250,7 +250,7 @@ mod tests {
                             248, 98, 253, 4, 180, 158, 70, 161, 84, 76, 118, 151, 68, 101, 104,
                             187, 82,
                         ],
-                        target_number: 5105457,
+                        target_number: 5_105_457,
                     },
                     super::UnsignedPrecommitRef {
                         target_hash: &[
@@ -258,7 +258,7 @@ mod tests {
                             248, 98, 253, 4, 180, 158, 70, 161, 84, 76, 118, 151, 68, 101, 104,
                             187, 82,
                         ],
-                        target_number: 5105457,
+                        target_number: 5_105_457,
                     },
                     super::UnsignedPrecommitRef {
                         target_hash: &[
@@ -266,7 +266,7 @@ mod tests {
                             248, 98, 253, 4, 180, 158, 70, 161, 84, 76, 118, 151, 68, 101, 104,
                             187, 82,
                         ],
-                        target_number: 5105457,
+                        target_number: 5_105_457,
                     },
                 ],
                 auth_data: vec![

@@ -31,8 +31,7 @@ fn block_building_works() {
     let parent_runtime = {
         let code = genesis_storage
             .iter()
-            .filter(|(k, _)| k == b":code")
-            .next()
+            .find(|(k, _)| k == b":code")
             .unwrap()
             .1;
         crate::executor::host::HostVmPrototype::new(crate::executor::host::Config {
@@ -69,10 +68,7 @@ fn block_building_works() {
             super::BlockBuild::ApplyExtrinsic(ext) => builder = ext.finish(),
             super::BlockBuild::ApplyExtrinsicResult { .. } => unreachable!(),
             super::BlockBuild::InherentExtrinsics(ext) => {
-                builder = ext.inject_inherents(inherents::InherentData {
-                    timestamp: 1234,
-                    consensus: inherents::InherentDataConsensus::Aura { slot_number: 1234 },
-                });
+                builder = ext.inject_inherents(inherents::InherentData { timestamp: 1234 });
             }
             super::BlockBuild::StorageGet(get) => {
                 let key = get.key_as_vec();

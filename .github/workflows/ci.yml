@@ -29,7 +29,7 @@ jobs:
     container:
       image: rust:1.57
     steps:
-    - uses: actions/checkout@v2.4.0
+    - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
     - run: RUSTFLAGS=-Dwarnings cargo test --locked --workspace --all-features
 
@@ -38,7 +38,7 @@ jobs:
     container:
       image: rust:1.57
     steps:
-    - uses: actions/checkout@v2.4.0
+    - uses: actions/checkout@v3
     - run: apt-get update && apt-get install -y libc6-dev-i386
     - uses: Swatinem/rust-cache@v1
     - run: rustup target add i686-unknown-linux-gnu
@@ -49,9 +49,9 @@ jobs:
     container:
       image: rust:1.57
     steps:
-    - uses: actions/checkout@v2.4.0
+    - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
-    - uses: actions/setup-node@v2.5.1
+    - uses: actions/setup-node@v3.0.0
       with:
         node-version: '14'
     - run: apt-get update && apt install -y binaryen # For `wasm-opt`
@@ -62,11 +62,11 @@ jobs:
     container:
       image: rust:1.57
     steps:
-    - uses: actions/checkout@v2.4.0
+    - uses: actions/checkout@v3
       with:
         fetch-depth: 0  # Necessary to fetch pull request base below
     - uses: Swatinem/rust-cache@v1
-    - uses: actions/setup-node@v2.5.1
+    - uses: actions/setup-node@v3.0.0
       with:
         node-version: '14'
     - uses: baptiste0928/cargo-install@v1  # This action ensures that the twiggy compilation is cached.
@@ -96,7 +96,7 @@ jobs:
     container:
       image: rust:1.57
     steps:
-    - uses: actions/checkout@v2.4.0
+    - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
     - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features
     - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features database-sqlite
@@ -108,7 +108,7 @@ jobs:
     container:
       image: rust:1.57
     steps:
-    - uses: actions/checkout@v2.4.0
+    - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
     - run: cargo doc --verbose --workspace --all-features --no-deps --document-private-items
 
@@ -116,7 +116,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Checks `rustfmt` formatting
-      - uses: actions/checkout@v2.4.0
+      - uses: actions/checkout@v3
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
@@ -131,7 +131,7 @@ jobs:
   clippy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2.4.0
+      - uses: actions/checkout@v3
       - uses: actions-rs/toolchain@v1
         with:
             toolchain: nightly
@@ -151,7 +151,7 @@ jobs:
         checks:
           - bans licenses sources
     steps:
-    - uses: actions/checkout@v2.4.0
+    - uses: actions/checkout@v3
     - uses: EmbarkStudios/cargo-deny-action@v1
       with:
         command: check --config .github/cargo-deny.toml ${{ matrix.checks }}
@@ -160,7 +160,7 @@ jobs:
   wasm-node-versions-match:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2.4.0
+      - uses: actions/checkout@v3
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable

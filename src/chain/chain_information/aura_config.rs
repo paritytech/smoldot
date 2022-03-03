@@ -191,10 +191,9 @@ impl FromVmPrototypeError {
         matches!(
             self,
             FromVmPrototypeError::VmStart(
-                host::StartErr::VirtualMachine(vm::StartErr::FunctionNotFound,),
-                _
-            ) | FromVmPrototypeError::VmStart(
-                host::StartErr::VirtualMachine(vm::StartErr::NotAFunction,),
+                host::StartErr::VirtualMachine(
+                    vm::StartErr::FunctionNotFound | vm::StartErr::NotAFunction
+                ),
                 _
             )
         )

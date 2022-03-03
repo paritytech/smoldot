@@ -801,10 +801,11 @@ impl<TPlat: Platform> Task<TPlat> {
 
                 log::debug!(
                     target: &self.log_target,
-                    "Sync <= BlockAnnounce(sender={}, hash={}, is_best={})",
+                    "Sync <= BlockAnnounce(sender={}, hash={}, is_best={}, parent_hash={})",
                     peer_id,
                     HashDisplay(&header::hash_from_scale_encoded_header(&decoded.scale_encoded_header)),
-                    decoded.is_best
+                    decoded.is_best,
+                    HashDisplay(decoded.header.parent_hash)
                 );
 
                 match self.sync.block_announce(

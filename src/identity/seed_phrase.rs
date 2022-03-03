@@ -215,7 +215,7 @@ pub fn bip39_to_seed(phrase: &str, password: &str) -> Result<[u8; 32], Bip39ToSe
 
     // These rules are part of the seed phrase format "specification" and have been copy-pasted
     // from the Substrate code base.
-    if entropy_len < 16 || entropy_len > 32 || entropy_len % 4 != 0 {
+    if !(16..=32).contains(&entropy_len) || entropy_len % 4 != 0 {
         return Err(Bip39ToSeedError::BadWordsCount);
     }
 

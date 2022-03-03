@@ -219,8 +219,8 @@ where
     /// Returns `None` if there is no best block. In terms of logic, this means that the best block
     /// is the finalized block, which is out of scope of this data structure.
     pub fn best_block_index(&self) -> Option<(NodeIndex, &'_ TAsync)> {
-        if let Some(best_block_index) = self.best_block_index {
-            Some((
+        self.best_block_index.map(|best_block_index| {
+            (
                 best_block_index,
                 match &self
                     .non_finalized_blocks
@@ -234,10 +234,8 @@ where
                     } => user_data,
                     _ => unreachable!(),
                 },
-            ))
-        } else {
-            None
-        }
+            )
+        })
     }
 
     /// Returns the user data associated to the given block.

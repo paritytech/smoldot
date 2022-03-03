@@ -24,7 +24,7 @@ use core::fmt;
 pub fn decode_grandpa(scale_encoded: &[u8]) -> Result<GrandpaJustificationRef, Error> {
     match nom::combinator::all_consuming(grandpa_justification)(scale_encoded) {
         Ok((_, justification)) => Ok(justification),
-        Err(nom::Err::Error(err)) | Err(nom::Err::Failure(err)) => Err(Error(err.code)),
+        Err(nom::Err::Error(err) | nom::Err::Failure(err)) => Err(Error(err.code)),
         Err(_) => unreachable!(),
     }
 }
@@ -38,7 +38,7 @@ pub fn decode_partial_grandpa(
 ) -> Result<(GrandpaJustificationRef, &[u8]), Error> {
     match grandpa_justification(scale_encoded) {
         Ok((remainder, justification)) => Ok((justification, remainder)),
-        Err(nom::Err::Error(err)) | Err(nom::Err::Failure(err)) => Err(Error(err.code)),
+        Err(nom::Err::Error(err) | nom::Err::Failure(err)) => Err(Error(err.code)),
         Err(_) => unreachable!(),
     }
 }
@@ -199,7 +199,7 @@ impl<'a> PrecommitRef<'a> {
     pub fn decode_partial(scale_encoded: &[u8]) -> Result<(PrecommitRef, &[u8]), Error> {
         match precommit(scale_encoded) {
             Ok((remainder, precommit)) => Ok((precommit, remainder)),
-            Err(nom::Err::Error(err)) | Err(nom::Err::Failure(err)) => Err(Error(err.code)),
+            Err(nom::Err::Error(err) | nom::Err::Failure(err)) => Err(Error(err.code)),
             Err(_) => unreachable!(),
         }
     }

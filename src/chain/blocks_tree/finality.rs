@@ -189,9 +189,8 @@ impl<T> NonFinalizedTreeInner<T> {
                 if target_number == self.finalized_block_header.number {
                     if *target_hash == self.finalized_block_hash {
                         return Err(FinalityVerifyError::EqualToFinalized);
-                    } else {
-                        return Err(FinalityVerifyError::EqualFinalizedHeightButInequalHash);
                     }
+                    return Err(FinalityVerifyError::EqualFinalizedHeightButInequalHash);
                 } else if target_number < self.finalized_block_header.number {
                     return Err(FinalityVerifyError::BelowFinalized);
                 }
