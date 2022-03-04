@@ -1114,11 +1114,12 @@ impl ReadyToRun {
             }
             HostFunction::ext_crypto_ecdsa_generate_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ecdsa_sign_version_1 => {
-                let mut data = [0; 32];
-                data.copy_from_slice(
+                // NOTE: safe to unwrap here because we supply the nn to blake2b fn
+                let data = <[u8; 32]>::try_from(
                     blake2_rfc::blake2b::blake2b(32, &[], expect_pointer_size!(0).as_ref())
                         .as_bytes(),
-                );
+                )
+                .unwrap();
                 let message = libsecp256k1::Message::parse(&data);
 
                 if let Ok(sc) =
@@ -1126,7 +1127,6 @@ impl ReadyToRun {
                 {
                     let (sig, ri) = libsecp256k1::sign(&message, &sc);
 
-                    // NOTE: the function returns 2 slices: signature and recovery ID (AS A SLICE)
                     self.inner.alloc_write_and_return_pointer(
                         host_fn.name(),
                         [&sig.serialize()[..], &[ri.serialize()]].into_iter(),
@@ -1141,11 +1141,12 @@ impl ReadyToRun {
             HostFunction::ext_crypto_ecdsa_public_keys_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ecdsa_verify_version_1 => {
                 let success = {
-                    let mut data = [0; 32];
-                    data.copy_from_slice(
+                    // NOTE: safe to unwrap here because we supply the nn to blake2b fn
+                    let data = <[u8; 32]>::try_from(
                         blake2_rfc::blake2b::blake2b(32, &[], expect_pointer_size!(0).as_ref())
                             .as_bytes(),
-                    );
+                    )
+                    .unwrap();
                     let message = libsecp256k1::Message::parse(&data);
 
                     // signature (64 bytes) + recovery ID (1 byte)
