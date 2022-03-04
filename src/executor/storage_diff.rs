@@ -156,8 +156,7 @@ impl StorageDiff {
     ) -> Option<&'a [u8]> {
         self.hashmap
             .get(key)
-            .map(|opt| opt.as_ref().map(|v| &v[..]))
-            .unwrap_or_else(or_parent)
+            .map_or_else(or_parent, |opt| opt.as_ref().map(|v| &v[..]))
     }
 
     /// Returns the storage key that immediately follows the provided `key`. Must be passed the
@@ -308,7 +307,7 @@ impl FromIterator<(Vec<u8>, Option<Vec<u8>>)> for StorageDiff {
             .map(|(k, v)| (k.clone(), v.is_some()))
             .collect();
 
-        Self { hashmap, btree }
+        Self { btree, hashmap }
     }
 }
 

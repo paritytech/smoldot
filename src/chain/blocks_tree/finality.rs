@@ -262,7 +262,7 @@ impl<T> NonFinalizedTreeInner<T> {
                         let block_to_finalize_hash = self
                             .blocks
                             .node_to_root_path(block_index)
-                            .filter_map(|b| {
+                            .find_map(|b| {
                                 let b = self.blocks.get(b).unwrap();
                                 if b.header.number == earliest_trigger {
                                     Some(b.hash)
@@ -270,7 +270,6 @@ impl<T> NonFinalizedTreeInner<T> {
                                     None
                                 }
                             })
-                            .next()
                             .unwrap();
                         return Err(FinalityVerifyError::TooFarAhead {
                             justification_block_number: target_number,
@@ -285,8 +284,7 @@ impl<T> NonFinalizedTreeInner<T> {
                 let authorities_list = finalized_scheduled_change
                     .as_ref()
                     .filter(|(trigger_height, _)| *trigger_height < target_number)
-                    .map(|(_, list)| list)
-                    .unwrap_or(finalized_triggered_authorities);
+                    .map_or(finalized_triggered_authorities, |(_, list)| list);
 
                 // As per above check, we know that the authorities of the target block are either
                 // the same as the ones of the latest finalized block, or the ones contained in

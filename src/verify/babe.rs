@@ -46,7 +46,7 @@
 //!
 //! The first epoch (epoch number 0) starts at `slot_number(block #1)` and ends at
 //! `slot_number(block #1) + slots_per_epoch`. The second epoch (epoch #1) starts at slot
-//! `end_of_epoch_1 + 1`. All epochs end at `start_of_new_epoch + slots_per_epoch`. Block #0
+//! `end_of_epoch_0 + 1`. All epochs end at `start_of_new_epoch + slots_per_epoch`. Block #0
 //! doesn't belong to any epoch.
 //!
 //! The header of first block produced after a transition to a new epoch (including block #1) must

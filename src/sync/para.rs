@@ -80,7 +80,7 @@ pub fn decode_persisted_validation_data_return_value(
     )(scale_encoded);
     match res {
         Ok((_, data)) => Ok(data),
-        Err(nom::Err::Error(err)) | Err(nom::Err::Failure(err)) => Err(Error(err.code)),
+        Err(nom::Err::Error(err) | nom::Err::Failure(err)) => Err(Error(err.code)),
         Err(_) => unreachable!(),
     }
 }

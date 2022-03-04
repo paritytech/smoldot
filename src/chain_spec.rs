@@ -249,8 +249,7 @@ impl ChainSpec {
         self.client_spec
             .properties
             .as_ref()
-            .map(|p| p.get())
-            .unwrap_or("{}")
+            .map_or("{}", |p| p.get())
     }
 
     pub fn light_sync_state(&self) -> Option<LightSyncState> {
@@ -335,7 +334,7 @@ impl LightSyncState {
             .epochs
             .iter()
             .filter(|((_, block_num), _)| {
-                *block_num as u64 <= self.inner.finalized_block_header.number
+                u64::from(*block_num) <= self.inner.finalized_block_header.number
             })
             .filter_map(|((_, block_num), epoch)| match epoch {
                 light_sync_state::PersistedEpoch::Regular(epoch) => Some((block_num, epoch)),

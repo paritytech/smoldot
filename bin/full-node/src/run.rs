@@ -415,7 +415,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     let mut informant_timer = stream::once(future::ready(())).chain(
         stream::unfold((), move |_| {
-            futures_timer::Delay::new(Duration::from_secs(1)).map(|_| Some(((), ())))
+            futures_timer::Delay::new(Duration::from_millis(100)).map(|_| Some(((), ())))
         })
         .map(|_| ()),
     );

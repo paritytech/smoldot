@@ -85,7 +85,7 @@ fn block_building_works() {
                     .iter()
                     .filter(move |(k, _)| k.starts_with(&p))
                     .map(|(k, _)| k);
-                builder = prefix.inject_keys_ordered(list)
+                builder = prefix.inject_keys_ordered(list);
             }
         }
     }

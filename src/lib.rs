@@ -240,7 +240,7 @@ pub fn calculate_genesis_block_header(chain_spec: &chain_spec::ChainSpec) -> hea
                     }
                     trie::calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
                         calculation =
-                            keys.inject(genesis_storage.iter().map(|(k, _)| k.iter().cloned()));
+                            keys.inject(genesis_storage.iter().map(|(k, _)| k.iter().copied()));
                     }
                     trie::calculate_root::RootMerkleValueCalculation::StorageValue(val) => {
                         let key: alloc::vec::Vec<u8> = val.key().collect();

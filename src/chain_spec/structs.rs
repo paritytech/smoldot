@@ -132,14 +132,14 @@ impl<'a> serde::Deserialize<'a> for HexString {
     {
         let string = String::deserialize(deserializer)?;
 
-        if !string.starts_with("0x") {
-            return Err(serde::de::Error::custom(
-                "hexadecimal string doesn't start with 0x",
-            ));
+        if let Some(hex) = string.strip_prefix("0x") {
+            let bytes = hex::decode(&hex).map_err(serde::de::Error::custom)?;
+            return Ok(HexString(bytes));
         }
 
-        let bytes = hex::decode(&string[2..]).map_err(serde::de::Error::custom)?;
-        Ok(HexString(bytes))
+        Err(serde::de::Error::custom(
+            "hexadecimal string doesn't start with 0x",
+        ))
     }
 }
 
@@ -162,9 +162,9 @@ impl<'a> serde::Deserialize<'a> for NumberAsString {
     {
         let string = String::deserialize(deserializer)?;
 
-        if string.starts_with("0x") {
+        if let Some(hex) = string.strip_prefix("0x") {
             // TODO: the hexadecimal format support is just a complete hack during a transition period for https://github.com/paritytech/substrate/pull/10600 ; must be removed before we actually make use of the code substitutes
-            let _bytes = hex::decode(&string[2..]).map_err(serde::de::Error::custom)?;
+            let _bytes = hex::decode(&hex).map_err(serde::de::Error::custom)?;
             Ok(NumberAsString(0))
         } else if let Ok(num) = string.parse() {
             Ok(NumberAsString(num))

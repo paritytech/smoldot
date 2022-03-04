@@ -503,7 +503,7 @@ where
                                 .max_handshake_size,
                         });
                     } else {
-                        unreachable!()
+                        unreachable!();
                     }
 
                     continue;

@@ -407,7 +407,7 @@ impl<'a> From<&'a Signature> for wasmi::Signature {
         wasmi::Signature::new(
             sig.params
                 .iter()
-                .cloned()
+                .copied()
                 .map(wasmi::ValueType::from)
                 .collect::<Vec<_>>(),
             sig.ret_ty.map(wasmi::ValueType::from),
@@ -429,7 +429,7 @@ impl<'a> TryFrom<&'a wasmi::Signature> for Signature {
             params: sig
                 .params()
                 .iter()
-                .cloned()
+                .copied()
                 .map(ValueType::try_from)
                 .collect::<Result<_, _>>()?,
             ret_ty: sig.return_type().map(ValueType::try_from).transpose()?,
