@@ -1114,32 +1114,50 @@ impl ReadyToRun {
             }
             HostFunction::ext_crypto_ecdsa_generate_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ecdsa_sign_version_1 => {
-                let data = [0; 32];
+                let mut data = [0; 32];
                 data.copy_from_slice(
                     blake2_rfc::blake2b::blake2b(32, &[], expect_pointer_size!(0).as_ref())
                         .as_bytes(),
                 );
                 let message = libsecp256k1::Message::parse(&data);
-                let (sig, ri) =
-                    libsecp256k1::sign(&message, &expect_pointer_constant_size!(1, 32).into());
 
-                // NOTE: the function returns 2 slices: signature and recovery ID (AS A SLICE)
-                self.inner.alloc_write_and_return_pointer(
-                    host_fn.name(),
-                    [&sig.serialize()[..], &[ri.serialize()]].into_iter(),
-                )
+                if let Ok(sc) =
+                    libsecp256k1::SecretKey::parse(&expect_pointer_constant_size!(1, 32))
+                {
+                    let (sig, ri) = libsecp256k1::sign(&message, &sc);
+
+                    // NOTE: the function returns 2 slices: signature and recovery ID (AS A SLICE)
+                    self.inner.alloc_write_and_return_pointer(
+                        host_fn.name(),
+                        [&sig.serialize()[..], &[ri.serialize()]].into_iter(),
+                    )
+                } else {
+                    HostVm::Error {
+                        error: Error::ParamDecodeError,
+                        prototype: self.inner.into_prototype(),
+                    }
+                }
             }
             HostFunction::ext_crypto_ecdsa_public_keys_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_crypto_ecdsa_sign_prehashed_version_1 => {
                 let message = libsecp256k1::Message::parse(&expect_pointer_constant_size!(0, 32));
-                let (sig, ri) =
-                    libsecp256k1::sign(&message, &expect_pointer_constant_size!(1, 32).into());
 
-                // NOTE: the function returns 2 slices: signature and recovery ID (AS A SLICE)
-                self.inner.alloc_write_and_return_pointer(
-                    host_fn.name(),
-                    [&sig.serialize()[..], &[ri.serialize()]].into_iter(),
-                )
+                if let Ok(sc) =
+                    libsecp256k1::SecretKey::parse(&expect_pointer_constant_size!(1, 32))
+                {
+                    let (sig, ri) = libsecp256k1::sign(&message, &sc);
+
+                    // NOTE: the function returns 2 slices: signature and recovery ID (AS A SLICE)
+                    self.inner.alloc_write_and_return_pointer(
+                        host_fn.name(),
+                        [&sig.serialize()[..], &[ri.serialize()]].into_iter(),
+                    )
+                } else {
+                    HostVm::Error {
+                        error: Error::ParamDecodeError,
+                        prototype: self.inner.into_prototype(),
+                    }
+                }
             }
             HostFunction::ext_crypto_ecdsa_verify_prehashed_version_1 => {
                 let success = {
