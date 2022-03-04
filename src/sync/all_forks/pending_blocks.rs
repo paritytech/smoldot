@@ -338,7 +338,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
-    pub fn add_source_known_block(&mut self, source_id: SourceId, height: u64, hash: [u8; 32]) {
+    pub fn add_known_block_to_source(&mut self, source_id: SourceId, height: u64, hash: [u8; 32]) {
         self.sources.add_known_block(source_id, height, hash);
     }
 
@@ -353,7 +353,12 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
-    pub fn remove_source_known_block(&mut self, source_id: SourceId, height: u64, hash: &[u8; 32]) {
+    pub fn remove_known_block_of_source(
+        &mut self,
+        source_id: SourceId,
+        height: u64,
+        hash: &[u8; 32],
+    ) {
         self.sources
             .source_remove_known_block(source_id, height, hash);
     }
@@ -369,7 +374,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
-    pub fn add_source_known_block_and_set_best(
+    pub fn add_known_block_to_source_and_set_best(
         &mut self,
         source_id: SourceId,
         height: u64,
@@ -381,7 +386,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
     /// Returns the current best block of the given source.
     ///
-    /// This corresponds either the latest call to [`PendingBlocks::add_source_known_block_and_set_best`],
+    /// This corresponds either the latest call to [`PendingBlocks::add_known_block_to_source_and_set_best`],
     /// or to the parameter passed to [`PendingBlocks::add_source`].
     ///
     /// # Panic
@@ -424,8 +429,8 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         self.sources.knows_non_finalized_block(height, hash)
     }
 
-    /// Returns true if [`PendingBlocks::add_source_known_block`] or
-    /// [`PendingBlocks::add_source_known_block_and_set_best`] has earlier been called on this
+    /// Returns true if [`PendingBlocks::add_known_block_to_source`] or
+    /// [`PendingBlocks::add_known_block_to_source_and_set_best`] has earlier been called on this
     /// source with this height and hash, or if the source was originally created (using
     /// [`PendingBlocks::add_source`]) with this height and hash.
     ///
@@ -470,8 +475,8 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     ///
     /// Returns the previous user data associated to this block, if any.
     ///
-    /// > **Note**: You should probably also call [`PendingBlocks::add_source_known_block`] or
-    /// >           [`PendingBlocks::add_source_known_block_and_set_best`].
+    /// > **Note**: You should probably also call [`PendingBlocks::add_known_block_to_source`] or
+    /// >           [`PendingBlocks::add_known_block_to_source_and_set_best`].
     pub fn insert_unverified_block(
         &mut self,
         height: u64,
@@ -625,7 +630,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
 
     /// Removes the given block from the list of known blocks of all from the sources.
     ///
-    /// This is equivalent to calling [`PendingBlocks::remove_source_known_block`] for each
+    /// This is equivalent to calling [`PendingBlocks::remove_known_block_of_source`] for each
     /// source.
     pub fn remove_sources_known_block(&mut self, height: u64, hash: &[u8; 32]) {
         self.sources.remove_known_block(height, hash);

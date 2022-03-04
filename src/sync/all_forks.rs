@@ -620,7 +620,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             // Assume that the source doesn't know this block, as it is apparently unable to
             // serve it anyway. This avoids sending the same request to the same source over and
             // over again.
-            self.inner.blocks.remove_source_known_block(
+            self.inner.blocks.remove_known_block_of_source(
                 source_id,
                 requested_block_height,
                 &requested_block_hash,
@@ -767,7 +767,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         // No matter what is done below, start by updating the view the state machine maintains
         // for this source.
         if known_to_be_source_best {
-            self.inner.blocks.add_source_known_block_and_set_best(
+            self.inner.blocks.add_known_block_to_source_and_set_best(
                 source_id,
                 header.number,
                 *header_hash,
@@ -775,13 +775,15 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         } else {
             self.inner
                 .blocks
-                .add_source_known_block(source_id, header.number, *header_hash);
+                .add_known_block_to_source(source_id, header.number, *header_hash);
         }
 
         // Source also knows the parent of the announced block.
-        self.inner
-            .blocks
-            .add_source_known_block(source_id, header.number - 1, *header.parent_hash);
+        self.inner.blocks.add_known_block_to_source(
+            source_id,
+            header.number - 1,
+            *header.parent_hash,
+        );
 
         // It is assumed that all sources will eventually agree on the same finalized chain. If
         // the block number is lower or equal than the locally-finalized block number, it is
