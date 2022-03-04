@@ -1139,6 +1139,39 @@ impl ReadyToRun {
                 }
             }
             HostFunction::ext_crypto_ecdsa_public_keys_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_crypto_ecdsa_verify_version_1 => {
+                let success = {
+                    let mut data = [0; 32];
+                    data.copy_from_slice(
+                        blake2_rfc::blake2b::blake2b(32, &[], expect_pointer_size!(0).as_ref())
+                            .as_bytes(),
+                    );
+                    let message = libsecp256k1::Message::parse(&data);
+
+                    // signature (64 bytes) + recovery ID (1 byte)
+                    let sig_bytes = expect_pointer_constant_size!(0, 65);
+                    if let Ok(sig) = libsecp256k1::Signature::parse_standard_slice(&sig_bytes[..64])
+                    {
+                        if let Ok(ri) = libsecp256k1::RecoveryId::parse(sig_bytes[64]) {
+                            if let Ok(actual) = libsecp256k1::recover(&message, &sig, &ri) {
+                                expect_pointer_constant_size!(2, 33)[..]
+                                    == actual.serialize_compressed()[..]
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+
+                HostVm::ReadyToRun(ReadyToRun {
+                    resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+                    inner: self.inner,
+                })
+            }
             HostFunction::ext_crypto_ecdsa_sign_prehashed_version_1 => {
                 let message = libsecp256k1::Message::parse(&expect_pointer_constant_size!(0, 32));
 
@@ -2776,6 +2809,7 @@ externalities! {
     ext_crypto_ecdsa_generate_version_1,
     ext_crypto_ecdsa_sign_version_1,
     ext_crypto_ecdsa_public_keys_version_1,
+    ext_crypto_ecdsa_verify_version_1,
     ext_crypto_ecdsa_sign_prehashed_version_1,
     ext_crypto_ecdsa_verify_prehashed_version_1,
     ext_crypto_secp256k1_ecdsa_recover_version_1,
@@ -2885,6 +2919,7 @@ impl HostFunction {
             HostFunction::ext_crypto_ecdsa_generate_version_1 => todo!(),
             HostFunction::ext_crypto_ecdsa_sign_version_1 => 2,
             HostFunction::ext_crypto_ecdsa_public_keys_version_1 => todo!(),
+            HostFunction::ext_crypto_ecdsa_verify_version_1 => 3,
             HostFunction::ext_crypto_ecdsa_sign_prehashed_version_1 => 2,
             HostFunction::ext_crypto_ecdsa_verify_prehashed_version_1 => 3,
             HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1 => 2,
