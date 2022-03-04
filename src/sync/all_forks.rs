@@ -324,7 +324,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             if self.inner.banned_blocks.contains(&best_block_hash) {
                 self.inner
                     .blocks
-                    .set_unverified_block_bad(best_block_number, &best_block_hash);
+                    .mark_unverified_block_as_bad(best_block_number, &best_block_hash);
             }
         }
 
@@ -832,7 +832,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             if self.inner.banned_blocks.contains(header_hash) {
                 self.inner
                     .blocks
-                    .set_unverified_block_bad(header.number, header_hash);
+                    .mark_unverified_block_as_bad(header.number, header_hash);
             }
 
             // If there are too many blocks stored in the blocks list, remove unnecessary ones.
@@ -1149,7 +1149,7 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
             );
             outcome.justifications
         } else {
-            self.parent.inner.blocks.set_unverified_block_bad(
+            self.parent.inner.blocks.mark_unverified_block_as_bad(
                 self.block_to_verify.block_number,
                 &self.block_to_verify.block_hash,
             );

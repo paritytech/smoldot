@@ -654,7 +654,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Panics if the block wasn't present in the data structure.
     ///
     #[track_caller]
-    pub fn set_unverified_block_bad(&mut self, height: u64, hash: &[u8; 32]) {
+    pub fn mark_unverified_block_as_bad(&mut self, height: u64, hash: &[u8; 32]) {
         self.blocks.set_block_bad(height, hash);
     }
 
