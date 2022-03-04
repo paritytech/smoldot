@@ -49,7 +49,7 @@
 //! Note that unverified blocks are added/removed completely separately from blocks known by
 //! sources.
 //!
-//! Unverified blocks are expected to be added to this collection whenever we hear about them
+//! Unverified blocks are expected to be added to this collection whenever this node hears about them
 //! from a source of blocks (such as a peer) and that it is not possible to verify them
 //! immediately (because their parent isn't known).
 //!
