@@ -1127,6 +1127,7 @@ impl ReadyToRun {
                 {
                     let (sig, ri) = libsecp256k1::sign(&message, &sc);
 
+                    // NOTE: the function returns 2 slices: signature (64 bytes) and recovery ID (1 byte; AS A SLICE)
                     self.inner.alloc_write_and_return_pointer(
                         host_fn.name(),
                         [&sig.serialize()[..], &[ri.serialize()]].into_iter(),
@@ -1181,7 +1182,7 @@ impl ReadyToRun {
                 {
                     let (sig, ri) = libsecp256k1::sign(&message, &sc);
 
-                    // NOTE: the function returns 2 slices: signature and recovery ID (AS A SLICE)
+                    // NOTE: the function returns 2 slices: signature (64 bytes) and recovery ID (1 byte; AS A SLICE)
                     self.inner.alloc_write_and_return_pointer(
                         host_fn.name(),
                         [&sig.serialize()[..], &[ri.serialize()]].into_iter(),
