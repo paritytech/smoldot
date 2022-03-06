@@ -446,12 +446,18 @@ mod tests {
         assert!(!collection.is_bad(2, &[2; 32]).unwrap());
         collection.insert(3, [3; 32], Some([2; 32]), ());
         assert!(!collection.is_bad(3, &[3; 32]).unwrap());
+        collection.insert(3, [31; 32], Some([2; 32]), ());
+        assert!(!collection.is_bad(3, &[31; 32]).unwrap());
+        collection.insert(4, [4; 32], Some([3; 32]), ());
+        assert!(!collection.is_bad(4, &[4; 32]).unwrap());
         assert_eq!(collection.unknown_blocks().count(), 1);
 
         collection.set_parent_hash(2, &[2; 32], [1; 32]);
         assert_eq!(collection.unknown_blocks().count(), 0);
         assert!(collection.is_bad(2, &[2; 32]).unwrap());
         assert!(collection.is_bad(3, &[3; 32]).unwrap());
+        assert!(collection.is_bad(3, &[31; 32]).unwrap());
+        assert!(collection.is_bad(4, &[4; 32]).unwrap());
     }
 
     #[test]
