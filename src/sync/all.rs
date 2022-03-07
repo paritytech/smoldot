@@ -1117,58 +1117,51 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 };
 
                 let (sync, request_user_data, outcome) = if let Ok(blocks) = blocks {
-                    // We use a `loop` but without any intention to actually do looping, just to
-                    // act as some sort of `goto`.
-                    'insert_end: loop {
-                        let (request_user_data, mut blocks_append) =
-                            sync.finish_ancestry_search(inner_request_id);
+                    let (request_user_data, mut blocks_append) =
+                        sync.finish_ancestry_search(inner_request_id);
+                    let mut blocks_iter = blocks.into_iter().enumerate();
 
-                        for (block_index, block) in blocks.into_iter().enumerate() {
-                            // TODO: many of the errors don't properly translate here, needs some refactoring
-                            match blocks_append.add_block(
-                                block.scale_encoded_header,
-                                block.scale_encoded_justifications.into_iter(),
-                            ) {
-                                Ok(ba) => blocks_append = ba,
-                                Err((
-                                    all_forks::AncestrySearchResponseError::NotFinalizedChain {
+                    loop {
+                        let (block_index, block) = match blocks_iter.next() {
+                            Some(v) => v,
+                            None => {
+                                break (
+                                    blocks_append.finish(),
+                                    request_user_data,
+                                    ResponseOutcome::Queued,
+                                );
+                            }
+                        };
+
+                        // TODO: many of the errors don't properly translate here, needs some refactoring
+                        match blocks_append.add_block(
+                            block.scale_encoded_header,
+                            block.scale_encoded_justifications.into_iter(),
+                        ) {
+                            Ok(ba) => blocks_append = ba,
+                            Err((
+                                all_forks::AncestrySearchResponseError::NotFinalizedChain {
+                                    discarded_unverified_block_headers,
+                                },
+                                sync,
+                            )) => {
+                                break (
+                                    sync,
+                                    request_user_data,
+                                    ResponseOutcome::NotFinalizedChain {
                                         discarded_unverified_block_headers,
                                     },
-                                    sync,
-                                )) => {
-                                    break 'insert_end (
-                                        sync,
-                                        request_user_data,
-                                        ResponseOutcome::NotFinalizedChain {
-                                            discarded_unverified_block_headers,
-                                        },
-                                    )
-                                }
-                                Err((
-                                    all_forks::AncestrySearchResponseError::AlreadyInChain,
-                                    sync,
-                                )) if block_index == 0 => {
-                                    break 'insert_end (
-                                        sync,
-                                        request_user_data,
-                                        ResponseOutcome::AllAlreadyInChain,
-                                    )
-                                }
-                                Err((_, sync)) => {
-                                    break 'insert_end (
-                                        sync,
-                                        request_user_data,
-                                        ResponseOutcome::Queued,
-                                    );
-                                }
+                                )
+                            }
+                            Err((all_forks::AncestrySearchResponseError::AlreadyInChain, sync))
+                                if block_index == 0 =>
+                            {
+                                break (sync, request_user_data, ResponseOutcome::AllAlreadyInChain)
+                            }
+                            Err((_, sync)) => {
+                                break (sync, request_user_data, ResponseOutcome::Queued);
                             }
                         }
-
-                        break (
-                            blocks_append.finish(),
-                            request_user_data,
-                            ResponseOutcome::Queued,
-                        );
                     }
                 } else {
                     let (ud, sync) = sync.ancestry_search_failed(inner_request_id);
