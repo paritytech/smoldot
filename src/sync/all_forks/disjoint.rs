@@ -240,7 +240,7 @@ impl<TBl> DisjointBlocks<TBl> {
         }
 
         if parent_is_bad {
-            block.bad = true;
+            self.set_block_bad(height, hash);
         }
     }
 
@@ -432,8 +432,8 @@ mod tests {
 
     #[test]
     fn set_parent_hash_updates_bad() {
-        // Calling `set_parent_hash` where the parent is a known a bad block marks the block as
-        // bad as well.
+        // Calling `set_parent_hash` where the parent is a known a bad block marks the block and
+        // its children as bad as well.
 
         let mut collection = super::DisjointBlocks::new();
 
@@ -443,10 +443,21 @@ mod tests {
         assert_eq!(collection.unknown_blocks().count(), 0);
 
         collection.insert(2, [2; 32], None, ());
+        assert!(!collection.is_bad(2, &[2; 32]).unwrap());
+        collection.insert(3, [3; 32], Some([2; 32]), ());
+        assert!(!collection.is_bad(3, &[3; 32]).unwrap());
+        collection.insert(3, [31; 32], Some([2; 32]), ());
+        assert!(!collection.is_bad(3, &[31; 32]).unwrap());
+        collection.insert(4, [4; 32], Some([3; 32]), ());
+        assert!(!collection.is_bad(4, &[4; 32]).unwrap());
         assert_eq!(collection.unknown_blocks().count(), 1);
 
         collection.set_parent_hash(2, &[2; 32], [1; 32]);
         assert_eq!(collection.unknown_blocks().count(), 0);
+        assert!(collection.is_bad(2, &[2; 32]).unwrap());
+        assert!(collection.is_bad(3, &[3; 32]).unwrap());
+        assert!(collection.is_bad(3, &[31; 32]).unwrap());
+        assert!(collection.is_bad(4, &[4; 32]).unwrap());
     }
 
     #[test]
