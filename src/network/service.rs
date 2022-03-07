@@ -16,7 +16,6 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::header;
-use crate::informant::HashDisplay;
 use crate::libp2p::{
     connection, multiaddr, peer_id,
     peers::{self, QueueNotificationError},
@@ -282,9 +281,9 @@ where
                     iter::once(peers::NotificationProtocolConfig {
                         protocol_name: match &chain.fork_id {
                             Some(id) => {
-                                format!("/{}/{}/grandpa/1", HashDisplay(&chain.genesis_hash), id)
+                                format!("/{}/{}/grandpa/1", hex::encode(&chain.genesis_hash), id)
                             }
-                            None => format!("/{}/grandpa/1", HashDisplay(&chain.genesis_hash)),
+                            None => format!("/{}/grandpa/1", hex::encode(&chain.genesis_hash)),
                         },
                         fallback_protocol_names: Vec::new(),
                         max_handshake_size: 4,
