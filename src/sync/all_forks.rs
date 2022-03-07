@@ -480,33 +480,23 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         self.inner.blocks.obsolete_requests()
     }
 
-    /// Call in response to a response being finished.
+    /// Call in response to a blocks request being successful.
     ///
-    /// The headers are expected to be sorted in decreasing order. The first element of the
-    /// iterator should be the block with the hash that was referred by
-    /// [`RequestParams::first_block_hash`]. Each subsequent element is then expected to
-    /// be the parent of the previous one.
+    /// This method takes ownership of the [`AllForksSync`] and puts it in a mode where the blocks
+    /// of the response can be added one by one.
     ///
-    /// It is legal for the iterator to be shorter than the number of blocks that were requested
-    /// through [`RequestParams::num_blocks`].
+    /// The added blocks are expected to be sorted in decreasing order. The first block should be
+    /// the block with the hash that was referred by [`RequestParams::first_block_hash`]. Each
+    /// subsequent element is then expected to be the parent of the previous one.
     ///
     /// # Panic
     ///
     /// Panics if the [`RequestId`] is invalid.
     ///
     pub fn finish_ancestry_search(
-        &mut self,
+        mut self,
         request_id: RequestId,
-        received_blocks: Result<
-            impl Iterator<
-                Item = RequestSuccessBlock<
-                    impl AsRef<[u8]>,
-                    impl Iterator<Item = ([u8; 4], impl AsRef<[u8]>)>,
-                >,
-            >,
-            (),
-        >,
-    ) -> (TRq, AncestrySearchResponseOutcome) {
+    ) -> (TRq, FinishAncestrySearch<TBl, TRq, TSrc>) {
         // Sets the `occupation` of `source_id` back to `AllSync`.
         let (
             pending_blocks::RequestParams {
@@ -518,119 +508,36 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             request_user_data,
         ) = self.inner.blocks.finish_request(request_id);
 
-        // The body of this function mostly consists in verifying that the received answer is
-        // correct.
-        // TODO: shouldn't that be done in the networking? ^
-
-        // Set to true below if any block at all have been received.
-        let mut any_progress = false;
-
-        // The next block in the list of headers should have a hash and height equal to this one.
-        let mut expected_next_hash = requested_block_hash;
-        let mut expected_next_height = requested_block_height;
-
-        // Iterate through the headers. If the request has failed, treat it the same way as if
-        // no blocks were returned.
-        for (index_in_response, received_block) in received_blocks.into_iter().flatten().enumerate()
-        {
-            let scale_encoded_header = received_block.scale_encoded_header.as_ref();
-
-            // Compare expected with actual hash.
-            // This ensure that each header being processed is the parent of the previous one.
-            if expected_next_hash != header::hash_from_scale_encoded_header(scale_encoded_header) {
-                break;
-            }
-
-            // Invalid headers are skipped. The next iteration will likely fail when comparing
-            // actual with expected hash, but we give it a chance.
-            let decoded_header = match header::decode(scale_encoded_header) {
-                Ok(h) => h,
-                Err(_) => continue,
-            };
-
-            // Also compare the block numbers.
-            // The utility of checking the height (even though we've already checked the hash) is
-            // questionable, but considering that blocks are identified with their combination of
-            // hash and number, checking both the hash and number might prevent malicious sources
-            // from introducing state inconsistenties.
-            if expected_next_height != decoded_header.number {
-                break;
-            }
-
-            match self.block_from_source(
-                source_id,
-                &expected_next_hash,
-                decoded_header.clone(),
-                None,
-                &mut received_block
-                    .scale_encoded_justifications
-                    .map(|(e, j)| (e, j.as_ref().to_owned())),
-                false,
-            ) {
-                HeaderFromSourceOutcome::HeaderVerify => {
-                    // Note: we should normally set `any_progress` to `true` here, but this is
-                    // pointless since we return from the function.
-                    return (request_user_data, AncestrySearchResponseOutcome::Verify);
-                }
-                HeaderFromSourceOutcome::TooOld { .. } => {
-                    // Block is below the finalized block number.
-                    // Ancestry searches never request any block earlier than the finalized block
-                    // number. `TooOld` can happen if the source is misbehaving, but also if the
-                    // finalized block has been updated between the moment the request was emitted
-                    // and the moment the response is received.
-                    any_progress = true;
-                    debug_assert_eq!(index_in_response, 0);
-                    break;
-                }
-                HeaderFromSourceOutcome::NotFinalizedChain => {
-                    // Block isn't part of the finalized chain.
-                    // This doesn't necessarily mean that the source and the local node disagree
-                    // on the finalized chain. It is possible that the finalized block has been
-                    // updated between the moment the request was emitted and the moment the
-                    // response is received.
-                    let outcome = AncestrySearchResponseOutcome::NotFinalizedChain {
-                        discarded_unverified_block_headers: Vec::new(), // TODO:
-                    };
-                    return (request_user_data, outcome);
-                }
-                HeaderFromSourceOutcome::AlreadyInChain => {
-                    // Block is already in chain. Can happen if a different response or
-                    // announcement has arrived and been processed between the moment the request
-                    // was emitted and the moment the response is received.
-                    //
-                    // Note: we should normally set `any_progress` to `true` here, but this is
-                    // pointless since we return from the function.
-                    debug_assert_eq!(index_in_response, 0);
-                    let outcome = AncestrySearchResponseOutcome::AllAlreadyInChain;
-                    return (request_user_data, outcome);
-                }
-                HeaderFromSourceOutcome::Disjoint => {
-                    // Block of unknown ancestry. Continue looping.
-                    any_progress = true;
-                    expected_next_hash = *decoded_header.parent_hash;
-                    debug_assert_ne!(expected_next_height, 0);
-                    expected_next_height -= 1;
-                }
-            }
-        }
-
-        // If this is reached, then the ancestry search was inconclusive. None of the blocks the
-        // source has sent back were useful.
-        if !any_progress {
-            // Assume that the source doesn't know this block, as it is apparently unable to
-            // serve it anyway. This avoids sending the same request to the same source over and
-            // over again.
-            self.inner.blocks.remove_known_block_of_source(
-                source_id,
-                requested_block_height,
-                &requested_block_hash,
-            );
-        }
-
         (
             request_user_data,
-            AncestrySearchResponseOutcome::Inconclusive,
+            FinishAncestrySearch {
+                inner: self,
+                source_id,
+                any_progress: false,
+                index_in_response: 0,
+                requested_block_hash,
+                requested_block_height,
+                expected_next_hash: requested_block_hash,
+                expected_next_height: requested_block_height,
+            },
         )
+    }
+
+    /// Call in response to a blocks request having failed.
+    ///
+    /// This removes the request from the state machine and returns its user data.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    ///
+    // TODO: taking a `&mut self` instead of a `self` would be more correct, however this doesn't give any benefit and complicates the implementation at the moment, so it might not be worth doing
+    pub fn ancestry_search_failed(
+        self,
+        request_id: RequestId,
+    ) -> (TRq, AllForksSync<TBl, TRq, TSrc>) {
+        let (user_data, inner) = self.finish_ancestry_search(request_id);
+        (user_data, inner.finish())
     }
 
     /// Update the source with a newly-announced block.
@@ -976,13 +883,153 @@ impl<TBl, TRq, TSrc> ops::IndexMut<SourceId> for AllForksSync<TBl, TRq, TSrc> {
     }
 }
 
-/// Struct to pass back when a block request has succeeded.
-#[derive(Debug)]
-pub struct RequestSuccessBlock<THdr, TJs> {
-    /// SCALE-encoded header returned by the remote.
-    pub scale_encoded_header: THdr,
-    /// SCALE-encoded justification returned by the remote.
-    pub scale_encoded_justifications: TJs,
+/// See [`AllForksSync::finish_ancestry_search`].
+pub struct FinishAncestrySearch<TBl, TRq, TSrc> {
+    inner: AllForksSync<TBl, TRq, TSrc>,
+
+    /// Source that has sent the request that is being answered.
+    source_id: SourceId,
+
+    /// Set to true if any block at all have been added.
+    any_progress: bool,
+
+    /// Number of blocks added before through that data structure.
+    index_in_response: usize,
+
+    /// Hash of the block that was initially request.
+    requested_block_hash: [u8; 32],
+    /// Height of the block that was initially request.
+    requested_block_height: u64,
+
+    /// The next block to add should have a hash equal to this one.
+    expected_next_hash: [u8; 32],
+    /// The next block to add should have a height equal to this one.
+    expected_next_height: u64,
+}
+
+impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
+    /// Adds a block coming from the response that the source has provided.
+    ///
+    /// On success, the block is inserted in the state machine.
+    ///
+    /// If an error is returned, the [`FinishAncestrySearch`] is turned back again into a
+    /// [`AllForksSync`], but all the blocks that have already been added are retained.
+    pub fn add_block(
+        mut self,
+        scale_encoded_header: impl AsRef<[u8]>,
+        scale_encoded_justifications: impl Iterator<Item = ([u8; 4], impl AsRef<[u8]>)>,
+    ) -> Result<Self, (AncestrySearchResponseError, AllForksSync<TBl, TRq, TSrc>)> {
+        let scale_encoded_header = scale_encoded_header.as_ref();
+
+        // Compare expected with actual hash.
+        // This ensure that each header being processed is the parent of the previous one.
+        if self.expected_next_hash != header::hash_from_scale_encoded_header(scale_encoded_header) {
+            return Err((AncestrySearchResponseError::UnexpectedBlock, self.finish()));
+        }
+
+        // Invalid headers are skipped. The next iteration will likely fail when comparing
+        // actual with expected hash, but we give it a chance.
+        let decoded_header = match header::decode(scale_encoded_header) {
+            Ok(h) => h,
+            Err(err) => {
+                return Err((
+                    AncestrySearchResponseError::InvalidHeader(err),
+                    self.finish(),
+                ))
+            }
+        };
+
+        // Also compare the block numbers.
+        // The utility of checking the height (even though we've already checked the hash) is
+        // questionable, but considering that blocks are identified with their combination of
+        // hash and number, checking both the hash and number might prevent malicious sources
+        // from introducing state inconsistenties.
+        if self.expected_next_height != decoded_header.number {
+            return Err((AncestrySearchResponseError::UnexpectedBlock, self.finish()));
+        }
+
+        // At this point, the source has given us correct blocks, and we consider the response
+        // to be useful.
+        self.any_progress = true;
+
+        match self.inner.block_from_source(
+            self.source_id,
+            &self.expected_next_hash,
+            decoded_header.clone(),
+            None,
+            &mut scale_encoded_justifications.map(|(e, j)| (e, j.as_ref().to_owned())),
+            false,
+        ) {
+            HeaderFromSourceOutcome::HeaderVerify => {
+                // Header is ready to be verified.
+                // We continue accepting blocks, knowing that the next block should return
+                // `Err(AlreadyInChain)`.
+            }
+            HeaderFromSourceOutcome::TooOld { .. } => {
+                // Block is below the finalized block number.
+                // Ancestry searches never request any block earlier than the finalized block
+                // number. `TooOld` can happen if the source is misbehaving, but also if the
+                // finalized block has been updated between the moment the request was emitted
+                // and the moment the response is received.
+                debug_assert_eq!(self.index_in_response, 0);
+                return Err((AncestrySearchResponseError::TooOld, self.finish()));
+            }
+            HeaderFromSourceOutcome::NotFinalizedChain => {
+                // Block isn't part of the finalized chain.
+                // This doesn't necessarily mean that the source and the local node disagree
+                // on the finalized chain. It is possible that the finalized block has been
+                // updated between the moment the request was emitted and the moment the
+                // response is received.
+                let error = AncestrySearchResponseError::NotFinalizedChain {
+                    discarded_unverified_block_headers: Vec::new(), // TODO: not properly implemented /!\
+                };
+                return Err((error, self.finish()));
+            }
+            HeaderFromSourceOutcome::AlreadyInChain => {
+                // Block is already in chain. Can happen if a different response or
+                // announcement has arrived and been processed between the moment the request
+                // was emitted and the moment the response is received.
+                debug_assert_eq!(self.index_in_response, 0);
+                return Err((AncestrySearchResponseError::AlreadyInChain, self.finish()));
+            }
+            HeaderFromSourceOutcome::Disjoint => {
+                // Block of unknown ancestry. Continue accepting blocks.
+            }
+        }
+
+        // Update the state machine for the next iteration.
+        self.expected_next_hash = *decoded_header.parent_hash;
+        debug_assert_ne!(self.expected_next_height, 0);
+        self.expected_next_height -= 1;
+        self.index_in_response += 1;
+        Ok(self)
+    }
+
+    /// Notifies of the end of the response, and returns back the [`AllForksSync`].
+    ///
+    /// It is legal to insert fewer blocks than the number of blocks that were requested through
+    /// [`RequestParams::num_blocks`].
+    /// However, if no block has been added at all (i.e. the response is empty), then the source
+    /// of the request is marked as bad.
+    ///
+    /// > **Note**: Network protocols have a limit to the size of their response, meaning that all
+    /// >           the requested blocks might not fit in a single response. For this reason, it
+    /// >           is legal for a response to be shorter than expected.
+    pub fn finish(mut self) -> AllForksSync<TBl, TRq, TSrc> {
+        // If this is reached, then none of the blocks the source has sent back were useful.
+        if !self.any_progress {
+            // Assume that the source doesn't know this block, as it is apparently unable to
+            // serve it anyway. This avoids sending the same request to the same source over and
+            // over again.
+            self.inner.inner.blocks.remove_known_block_of_source(
+                self.source_id,
+                self.requested_block_height,
+                &self.requested_block_hash,
+            );
+        }
+
+        self.inner
+    }
 }
 
 /// Outcome of calling [`AllForksSync::block_from_source`].
@@ -1039,6 +1086,47 @@ pub enum BlockAnnounceOutcome {
     Disjoint,
     /// Failed to decode announce header.
     InvalidHeader(header::Error),
+}
+
+/// Error when adding a block using [`FinishAncestrySearch::add_block`].
+pub enum AncestrySearchResponseError {
+    /// Failed to decode block header.
+    InvalidHeader(header::Error),
+
+    /// Provided block isn't a block that we expect to be added.
+    ///
+    /// If this is the first block, then it doesn't correspond to the block that has been
+    /// requested. If this is not the first block, then it doesn't correspond to the parent of
+    /// the previous block that has been added.
+    UnexpectedBlock,
+
+    /// The block height is equal to the locally-known finalized block height, but its hash isn't
+    /// the same.
+    ///
+    /// This doesn't necessarily mean that the source is malicious or uses a different chain. It
+    /// is possible for this to legitimately happen, for example if the finalized chain has been
+    /// updated while the ancestry search was in progress.
+    NotFinalizedChain {
+        /// List of block headers that were pending verification and that have now been discarded
+        /// since it has been found out that they don't belong to the finalized chain.
+        discarded_unverified_block_headers: Vec<Vec<u8>>,
+    },
+
+    /// Height of the block is below the height of the finalized block.
+    ///
+    /// Note that in most situation the previous block should have returned a
+    /// [`AncestrySearchResponseError::NotFinalizedChain`] as we notice that its height is equal
+    /// to the finalized block's height but hash is different.
+    /// However, a [`AncestrySearchResponseError::TooOld`] can still happen in some niche
+    /// situations, such as an update to the finalized block height above the first block of the
+    /// request.
+    TooOld,
+
+    /// The block is already in the list of verified blocks.
+    ///
+    /// This can happen for example if a block announce or different ancestry search response has
+    /// been processed in between the request and response.
+    AlreadyInChain,
 }
 
 /// Outcome of calling [`AllForksSync::finish_ancestry_search`].
