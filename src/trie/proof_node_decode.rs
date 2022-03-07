@@ -29,7 +29,7 @@ pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
 
     // Length of the partial key, in nibbles.
     let pk_len = {
-        let mut accumulator = usize::from(node_value[0] & 0b111111);
+        let mut accumulator = usize::from(node_value[0] & 0b11_1111);
         node_value = &node_value[1..];
         let mut continue_iter = accumulator == 63;
         while continue_iter {

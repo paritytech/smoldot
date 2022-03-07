@@ -1711,7 +1711,7 @@ where
 
                 peers::Event::NotificationsIn { .. } => {
                     // Unrecognized notifications protocol.
-                    unreachable!()
+                    unreachable!();
                 }
 
                 // Remote wants to open a block announces substream.
@@ -1892,7 +1892,7 @@ where
 
                 peers::Event::DesiredInNotification { .. } => {
                     // Unrecognized notifications protocol.
-                    unreachable!()
+                    unreachable!();
                 }
 
                 peers::Event::DesiredInNotificationCancel { .. } => {
@@ -2414,7 +2414,7 @@ where
     pub async fn insert(self, now: &TNow) {
         self.service
             .discover(now, self.chain_index, self.outcome)
-            .await
+            .await;
     }
 }
 

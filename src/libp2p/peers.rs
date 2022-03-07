@@ -381,7 +381,7 @@ where
                             peer_id,
                         };
                     }
-                    unreachable!()
+                    unreachable!();
                 }
 
                 collection::Event::Shutdown {
@@ -444,7 +444,7 @@ where
                             error,
                         };
                     }
-                    unreachable!()
+                    unreachable!();
                 }
 
                 collection::Event::RequestIn { .. } => {
@@ -475,7 +475,7 @@ where
                             request_payload,
                         };
                     }
-                    unreachable!()
+                    unreachable!();
                 }
 
                 collection::Event::NotificationsOutResult { .. } => {
@@ -520,7 +520,7 @@ where
                             result,
                         };
                     }
-                    unreachable!()
+                    unreachable!();
                 }
 
                 collection::Event::NotificationsOutClose { .. } => {
@@ -554,7 +554,7 @@ where
                             notifications_protocol_index,
                         };
                     }
-                    unreachable!()
+                    unreachable!();
                 }
 
                 collection::Event::NotificationsInOpen {
@@ -609,7 +609,7 @@ where
                             handshake,
                         };
                     }
-                    unreachable!()
+                    unreachable!();
                 }
 
                 collection::Event::NotificationsIn { .. } => {
@@ -631,7 +631,7 @@ where
                             notification,
                         };
                     }
-                    unreachable!()
+                    unreachable!();
                 }
 
                 collection::Event::NotificationsInClose { .. } => {
@@ -656,7 +656,7 @@ where
                             outcome,
                         };
                     }
-                    unreachable!()
+                    unreachable!();
                 }
 
                 collection::Event::PingOutSuccess { .. } => {
@@ -878,7 +878,7 @@ where
                 | NotificationsOutOpenState::Opening(connection_id, substream_id) => {
                     self.inner
                         .close_notifications_substream(connection_id, substream_id)
-                        .await
+                        .await;
                 }
             }
 

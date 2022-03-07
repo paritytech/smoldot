@@ -132,10 +132,10 @@ pub fn trie_node_info<'a, 'b>(
                 blake2_rfc::blake2b::blake2b(32, &[], proof_entry)
                     .as_bytes()
                     .iter()
-                    .cloned()
+                    .copied()
                     .collect()
             } else {
-                proof_entry.iter().cloned().collect()
+                proof_entry.iter().copied().collect()
             }
         })
         .collect::<Vec<_>>();

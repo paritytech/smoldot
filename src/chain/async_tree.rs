@@ -481,15 +481,14 @@ where
             let same_as_parent = self
                 .non_finalized_blocks
                 .parent(index)
-                .map(
-                    |idx| match self.non_finalized_blocks.get(idx).unwrap().async_op {
+                .map_or(false, |idx| {
+                    match self.non_finalized_blocks.get(idx).unwrap().async_op {
                         AsyncOpState::InProgress {
                             async_op_id: id, ..
                         } => id == async_op_id,
                         _ => false,
-                    },
-                )
-                .unwrap_or(false);
+                    }
+                });
 
             self.non_finalized_blocks.get_mut(index).unwrap().async_op = AsyncOpState::Pending {
                 same_as_parent,

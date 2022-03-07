@@ -91,7 +91,7 @@ impl PrefixScan {
 
             for query in &self.next_queries {
                 let info = match proof_verify::trie_node_info(proof_verify::TrieNodeInfoConfig {
-                    requested_key: query.iter().cloned(),
+                    requested_key: query.iter().copied(),
                     trie_root_hash: &self.trie_root_hash,
                     proof: proof.clone(),
                 }) {

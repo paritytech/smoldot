@@ -373,7 +373,7 @@ mod tests {
         let expected = super::GrandpaNotificationRef::Neighbor(super::NeighborPacket {
             round_number: 3671,
             set_id: 3490,
-            commit_finalized_height: 5105457,
+            commit_finalized_height: 5_105_457,
         });
 
         assert_eq!(actual, expected);

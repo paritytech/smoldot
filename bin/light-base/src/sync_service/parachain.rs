@@ -482,7 +482,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             let decoded_header_hash = decoded.header.hash();
                             sync_sources.add_known_block(local_id, decoded.header.number, decoded_header_hash);
                             if decoded.is_best {
-                                sync_sources.set_best_block(local_id, decoded.header.number, decoded_header_hash);
+                                sync_sources.add_known_block_and_set_best(local_id, decoded.header.number, decoded_header_hash);
                             }
                         },
                         _ => {

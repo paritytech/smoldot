@@ -437,7 +437,7 @@ impl Interpreter {
                     params: interrupt
                         .args
                         .iter()
-                        .cloned()
+                        .copied()
                         .map(TryFrom::try_from)
                         .collect::<Result<_, _>>()
                         .unwrap(),

@@ -163,9 +163,7 @@ where
         let mut list = self.iter().collect::<Vec<_>>();
         list.sort_by_key(|(key, _)| {
             let key_hashed = Key::new(key.as_ref());
-            distance_log2(&key_hashed, &target_hashed)
-                .map(|d| u16::from(d) + 1)
-                .unwrap_or(0)
+            distance_log2(&key_hashed, &target_hashed).map_or(0, |d| u16::from(d) + 1)
         });
         list.into_iter()
     }
@@ -210,7 +208,7 @@ where
     K: Clone + PartialEq + AsRef<[u8]>,
     TNow: Clone + Add<Duration, Output = TNow> + Ord,
 {
-    /// If `self` is [`Entry::Occupied`], returns the inner [`OccupiedEntry ]. Otherwise returns
+    /// If `self` is [`Entry::Occupied`], returns the inner [`OccupiedEntry`]. Otherwise returns
     /// `None`.
     pub fn into_occupied(self) -> Option<OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>> {
         match self {

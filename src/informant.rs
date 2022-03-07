@@ -134,8 +134,7 @@ impl<'a> fmt::Display for InformantLine<'a> {
             network_best = self
                 .network_known_best
                 .map(BlockNumberDisplay)
-                .map(either::Left)
-                .unwrap_or(either::Right("?")),
+                .map_or(either::Right("?"), either::Left),
             peers = self.num_network_connections,
             connec = self.num_network_connections,
             white_bold = white_bold,
