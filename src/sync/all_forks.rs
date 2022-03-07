@@ -997,8 +997,9 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
         }
 
         // Update the state machine for the next iteration.
+        // Note: this can't be reached if `expected_next_height` is 0, because that should have
+        // resulted either in `NotFinalizedChain` or `AlreadyInChain`, both of which return early.
         self.expected_next_hash = *decoded_header.parent_hash;
-        debug_assert_ne!(self.expected_next_height, 0);
         self.expected_next_height -= 1;
         self.index_in_response += 1;
         Ok(self)
