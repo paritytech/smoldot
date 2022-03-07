@@ -927,8 +927,7 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             return Err((AncestrySearchResponseError::UnexpectedBlock, self.finish()));
         }
 
-        // Invalid headers are skipped. The next iteration will likely fail when comparing
-        // actual with expected hash, but we give it a chance.
+        // Invalid headers are erroneous.
         let decoded_header = match header::decode(scale_encoded_header) {
             Ok(h) => h,
             Err(err) => {
@@ -943,13 +942,13 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
         // The utility of checking the height (even though we've already checked the hash) is
         // questionable, but considering that blocks are identified with their combination of
         // hash and number, checking both the hash and number might prevent malicious sources
-        // from introducing state inconsistenties.
+        // from introducing state inconsistenties, even though it's unclear how that could happen.
         if self.expected_next_height != decoded_header.number {
             return Err((AncestrySearchResponseError::UnexpectedBlock, self.finish()));
         }
 
         // At this point, the source has given us correct blocks, and we consider the response
-        // to be useful.
+        // as a whole to be useful.
         self.any_progress = true;
 
         match self.inner.block_from_source(
