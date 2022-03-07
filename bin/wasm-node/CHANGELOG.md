@@ -4,14 +4,14 @@
 
 ### Changed
 
-- Prune list of unverified blocks if it grows too much in order to resist spam attacks.
-- Log block's parent hash in case of block announce.
-- Only call `console.error` once in case of a Rust panic.
+- Prune list of unverified blocks if it grows too much in order to resist spam attacks ([#2114](https://github.com/paritytech/smoldot/pull/2114)).
+- Log block's parent hash in case of block announce ([#2105](https://github.com/paritytech/smoldot/pull/2105)).
+- Only call `console.error` once in case of a Rust panic ([#2093](https://github.com/paritytech/smoldot/pull/2093)).
 
 ### Fixed
 
-- Fix parachain blocks being reported multiple times in case of a relay chain fork.
-- Implement the `ext_crypto_ecdsa_sign_version_1` host function.
-- Implement the `ext_crypto_ecdsa_verify_version_1` host function.
-- Implement the `ext_crypto_ecdsa_sign_prehashed_version_1` host function.
-- Implement the `ext_crypto_ecdsa_verify_prehashed_version_1` host function.
+- Fix parachain blocks being reported multiple times in case of a relay chain fork ([#2106](https://github.com/paritytech/smoldot/pull/2106)).
+- Implement the `ext_crypto_ecdsa_sign_version_1` host function ([#2120](https://github.com/paritytech/smoldot/pull/2120)).
+- Implement the `ext_crypto_ecdsa_verify_version_1` host function ([#2120](https://github.com/paritytech/smoldot/pull/2120)).
+- Implement the `ext_crypto_ecdsa_sign_prehashed_version_1` host function ([#2120](https://github.com/paritytech/smoldot/pull/2120)).
+- Implement the `ext_crypto_ecdsa_verify_prehashed_version_1` host function ([#2120](https://github.com/paritytech/smoldot/pull/2120)).
