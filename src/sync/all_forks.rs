@@ -1129,34 +1129,6 @@ pub enum AncestrySearchResponseError {
     AlreadyInChain,
 }
 
-/// Outcome of calling [`AllForksSync::finish_ancestry_search`].
-pub enum AncestrySearchResponseOutcome {
-    /// Ready to start verifying one or more headers returned in the ancestry search.
-    // TODO: might not actually mean that ProcessOne isn't AllSync; confusing
-    Verify,
-
-    /// Source has given blocks that aren't part of the finalized chain.
-    ///
-    /// This doesn't necessarily mean that the source is malicious or uses a different chain. It
-    /// is possible for this to legitimately happen, for example if the finalized chain has been
-    /// updated while the ancestry search was in progress.
-    NotFinalizedChain {
-        /// List of block headers that were pending verification and that have now been discarded
-        /// since it has been found out that they don't belong to the finalized chain.
-        discarded_unverified_block_headers: Vec<Vec<u8>>,
-    },
-
-    /// Couldn't verify any of the blocks of the ancestry search. Some or all of these blocks
-    /// have been stored in the local machine for later.
-    Inconclusive,
-
-    /// All blocks in the ancestry search response were already in the list of verified blocks.
-    ///
-    /// This can happen if a block announce or different ancestry search response has been
-    /// processed in between the request and response.
-    AllAlreadyInChain,
-}
-
 /// Header verification to be performed.
 ///
 /// Internally holds the [`AllForksSync`].
