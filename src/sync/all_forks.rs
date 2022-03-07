@@ -916,11 +916,9 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
     /// [`AllForksSync`], but all the blocks that have already been added are retained.
     pub fn add_block(
         mut self,
-        scale_encoded_header: impl AsRef<[u8]>,
+        scale_encoded_header: &[u8],
         scale_encoded_justifications: impl Iterator<Item = ([u8; 4], impl AsRef<[u8]>)>,
     ) -> Result<Self, (AncestrySearchResponseError, AllForksSync<TBl, TRq, TSrc>)> {
-        let scale_encoded_header = scale_encoded_header.as_ref();
-
         // Compare expected with actual hash.
         // This ensure that each header being processed is the parent of the previous one.
         if self.expected_next_hash != header::hash_from_scale_encoded_header(scale_encoded_header) {

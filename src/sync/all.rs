@@ -1135,7 +1135,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                         // TODO: many of the errors don't properly translate here, needs some refactoring
                         match blocks_append.add_block(
-                            block.scale_encoded_header,
+                            &block.scale_encoded_header,
                             block.scale_encoded_justifications.into_iter(),
                         ) {
                             Ok(ba) => blocks_append = ba,
