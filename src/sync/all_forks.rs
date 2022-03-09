@@ -1073,7 +1073,7 @@ pub struct AddBlockOccupied<TBl, TRq, TSrc> {
 }
 
 impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
-    pub fn replace(self, user_data: TBl) -> FinishAncestrySearch<TBl, TRq, TSrc> {
+    pub fn replace(mut self, user_data: TBl) -> FinishAncestrySearch<TBl, TRq, TSrc> {
         self.inner
             .inner
             .inner
