@@ -863,7 +863,8 @@ pub struct FinishAncestrySearch<TBl, TRq, TSrc> {
 impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
     /// Adds a block coming from the response that the source has provided.
     ///
-    /// On success, the block is inserted in the state machine.
+    /// On success, the [`FinishAncestrySearch`] is turned into an [`AddBlock`]. The block is
+    /// inserted in the state machine only after one of the methods in [`AddBlock`] is added.
     ///
     /// If an error is returned, the [`FinishAncestrySearch`] is turned back again into a
     /// [`AllForksSync`], but all the blocks that have already been added are retained.
@@ -994,8 +995,12 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
     }
 }
 
+/// Result of calling [`FinishAncestrySearch::add_block`].
 pub enum AddBlock<TBl, TRq, TSrc> {
+    /// The block is already in the list of unverified blocks.
     AlreadyPending(AddBlockOccupied<TBl, TRq, TSrc>),
+
+    /// The block hasn't been heard of before.
     UnknownBlock(AddBlockVacant<TBl, TRq, TSrc>),
 
     /// The block is already in the list of verified blocks.
@@ -1005,6 +1010,7 @@ pub enum AddBlock<TBl, TRq, TSrc> {
     AlreadyInChain(AddBlockOccupied<TBl, TRq, TSrc>),
 }
 
+/// See [`FinishAncestrySearch::add_block`] and ̀[`AddBlock`].
 pub struct AddBlockOccupied<TBl, TRq, TSrc> {
     inner: FinishAncestrySearch<TBl, TRq, TSrc>,
     decoded_header: header::Header,
@@ -1012,6 +1018,7 @@ pub struct AddBlockOccupied<TBl, TRq, TSrc> {
 }
 
 impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
+    /// Replace the existing user data of the block.
     // TODO: return old user data
     pub fn replace(mut self, user_data: TBl) -> FinishAncestrySearch<TBl, TRq, TSrc> {
         // Update the view the state machine maintains for this source.
@@ -1078,11 +1085,14 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
         self.inner
     }
 
+    /// Do not update the state machine with this block. Equivalent to calling
+    /// [`FinishAncestrySearch::finish`].
     pub fn cancel(self) -> AllForksSync<TBl, TRq, TSrc> {
         self.inner.inner
     }
 }
 
+/// See [`FinishAncestrySearch::add_block`] and ̀[`AddBlock`].
 pub struct AddBlockVacant<TBl, TRq, TSrc> {
     inner: FinishAncestrySearch<TBl, TRq, TSrc>,
     decoded_header: header::Header,
@@ -1090,6 +1100,7 @@ pub struct AddBlockVacant<TBl, TRq, TSrc> {
 }
 
 impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
+    /// Insert the block in the state machine, with the given user data.
     pub fn insert(mut self, _user_data: TBl) -> FinishAncestrySearch<TBl, TRq, TSrc> {
         // Update the view the state machine maintains for this source.
         self.inner.inner.inner.blocks.add_known_block_to_source(
@@ -1173,6 +1184,8 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
         self.inner
     }
 
+    /// Do not update the state machine with this block. Equivalent to calling
+    /// [`FinishAncestrySearch::finish`].
     pub fn cancel(self) -> AllForksSync<TBl, TRq, TSrc> {
         self.inner.inner
     }
