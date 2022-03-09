@@ -957,12 +957,6 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
         // that has been received is either part of the finalized chain or belongs to a fork that
         // will get discarded by this source in the future.
         if decoded_header.number <= self.inner.chain.finalized_block_header().number {
-            // Block is below the finalized block number.
-            // Ancestry searches never request any block earlier than the finalized block
-            // number. `TooOld` can happen if the source is misbehaving, but also if the
-            // finalized block has been updated between the moment the request was emitted
-            // and the moment the response is received.
-            debug_assert_eq!(self.index_in_response, 0);
             return Err((AncestrySearchResponseError::TooOld, self.finish()));
         }
 
@@ -972,11 +966,11 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             .chain
             .contains_non_finalized_block(&self.expected_next_hash)
         {
-            // Block is already in chain. Can happen if a different response or
-            // announcement has arrived and been processed between the moment the request
-            // was emitted and the moment the response is received.
-            debug_assert_eq!(self.index_in_response, 0);
-            return Err((AncestrySearchResponseError::AlreadyInChain, self.finish()));
+            return Ok(AddBlock::AlreadyInChain(AddBlockOccupied {
+                inner: self,
+                decoded_header: decoded_header.into(),
+                is_verified: true,
+            }));
         }
 
         // Block is not part of the finalized chain.
@@ -1016,6 +1010,7 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             Ok(AddBlock::Occupied(AddBlockOccupied {
                 inner: self,
                 decoded_header: decoded_header.into(),
+                is_verified: false,
             }))
         }
     }
@@ -1050,11 +1045,18 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
 pub enum AddBlock<TBl, TRq, TSrc> {
     Occupied(AddBlockOccupied<TBl, TRq, TSrc>),
     Vacant(AddBlockVacant<TBl, TRq, TSrc>),
+
+    /// The block is already in the list of verified blocks.
+    ///
+    /// This can happen for example if a block announce or different ancestry search response has
+    /// been processed in between the request and response.
+    AlreadyInChain(AddBlockOccupied<TBl, TRq, TSrc>),
 }
 
 pub struct AddBlockOccupied<TBl, TRq, TSrc> {
     inner: FinishAncestrySearch<TBl, TRq, TSrc>,
     decoded_header: header::Header,
+    is_verified: bool,
 }
 
 impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
@@ -1075,27 +1077,38 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
             self.decoded_header.parent_hash,
         );
 
-        self.inner
-            .inner
-            .inner
-            .blocks
-            .set_unverified_block_header_known(
-                self.decoded_header.number,
-                &self.inner.expected_next_hash,
-                self.decoded_header.parent_hash,
-            );
+        if self.is_verified {
+            self.inner
+                .inner
+                .chain
+                .non_finalized_block_by_hash(&self.inner.expected_next_hash)
+                .unwrap()
+                .into_user_data()
+                .user_data = user_data;
+        } else {
+            self.inner
+                .inner
+                .inner
+                .blocks
+                .set_unverified_block_header_known(
+                    self.decoded_header.number,
+                    &self.inner.expected_next_hash,
+                    self.decoded_header.parent_hash,
+                );
 
-        let block_user_data = self
-            .inner
-            .inner
-            .inner
-            .blocks
-            .unverified_block_user_data_mut(
-                self.decoded_header.number,
-                &self.inner.expected_next_hash,
-            );
-        if block_user_data.header.is_none() {
-            block_user_data.header = Some(self.decoded_header.clone().into()); // TODO: copying bytes :-/
+            let block_user_data = self
+                .inner
+                .inner
+                .inner
+                .blocks
+                .unverified_block_user_data_mut(
+                    self.decoded_header.number,
+                    &self.inner.expected_next_hash,
+                );
+            if block_user_data.header.is_none() {
+                block_user_data.header = Some(self.decoded_header.clone().into());
+                // TODO: copying bytes :-/
+            }
         }
 
         // TODO: what if the pending block already contains a justification and it is not the
@@ -1109,6 +1122,10 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
         self.inner.expected_next_height -= 1;
         self.inner.index_in_response += 1;
         self.inner
+    }
+
+    pub fn cancel(self) -> AllForksSync<TBl, TRq, TSrc> {
+        self.inner.inner
     }
 }
 
@@ -1202,6 +1219,10 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
         self.inner.index_in_response += 1;
         self.inner
     }
+
+    pub fn cancel(self) -> AllForksSync<TBl, TRq, TSrc> {
+        self.inner.inner
+    }
 }
 
 /// Outcome of calling [`AllForksSync::block_from_source`].
@@ -1293,12 +1314,6 @@ pub enum AncestrySearchResponseError {
     /// situations, such as an update to the finalized block height above the first block of the
     /// request.
     TooOld,
-
-    /// The block is already in the list of verified blocks.
-    ///
-    /// This can happen for example if a block announce or different ancestry search response has
-    /// been processed in between the request and response.
-    AlreadyInChain,
 }
 
 /// Header verification to be performed.
