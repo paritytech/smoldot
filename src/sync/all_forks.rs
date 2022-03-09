@@ -949,27 +949,6 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
         // as a whole to be useful.
         self.any_progress = true;
 
-        // Code below does `header.number - 1`. Make sure that `header.number` isn't 0.
-        if decoded_header.number == 0 {
-            debug_assert_eq!(self.index_in_response, 0);
-            return Err((AncestrySearchResponseError::TooOld, self.finish()));
-        }
-
-        // No matter what is done below, start by updating the view the state machine maintains
-        // for this source.
-        self.inner.inner.blocks.add_known_block_to_source(
-            self.source_id,
-            decoded_header.number,
-            self.expected_next_hash,
-        );
-
-        // Source also knows the parent of the announced block.
-        self.inner.inner.blocks.add_known_block_to_source(
-            self.source_id,
-            decoded_header.number - 1,
-            *decoded_header.parent_hash,
-        );
-
         // It is assumed that all sources will eventually agree on the same finalized chain. If
         // the block number is lower or equal than the locally-finalized block number, it is
         // assumed that this source is simply late compared to the local node, and that the block
@@ -984,6 +963,22 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             debug_assert_eq!(self.index_in_response, 0);
             return Err((AncestrySearchResponseError::TooOld, self.finish()));
         }
+
+        // No matter what is done next, update the view the state machine maintains for this
+        // source.
+        self.inner.inner.blocks.add_known_block_to_source(
+            self.source_id,
+            decoded_header.number,
+            self.expected_next_hash,
+        );
+
+        // Source also knows the parent of the announced block.
+        // TODO: do this for the entire chain of blocks if it is known locally?
+        self.inner.inner.blocks.add_known_block_to_source(
+            self.source_id,
+            decoded_header.number - 1,
+            *decoded_header.parent_hash,
+        );
 
         // If the block is already part of the local tree of blocks, nothing more to do.
         if self
