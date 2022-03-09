@@ -1138,7 +1138,12 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             &block.scale_encoded_header,
                             block.scale_encoded_justifications.into_iter(),
                         ) {
-                            Ok(ba) => blocks_append = ba,
+                            Ok(all_forks::AddBlock::Vacant(ba)) => {
+                                blocks_append = ba.insert(block.user_data)
+                            }
+                            Ok(all_forks::AddBlock::Occupied(ba)) => {
+                                blocks_append = ba.replace(block.user_data)
+                            }
                             Err((
                                 all_forks::AncestrySearchResponseError::NotFinalizedChain {
                                     discarded_unverified_block_headers,
