@@ -960,17 +960,9 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
 
             // No matter what is done below, start by updating the view the state machine maintains
             // for this source.
-            if false {
-                self.inner.inner.blocks.add_known_block_to_source_and_set_best(
-                    self.source_id,
-                    decoded_header.number,
-                    self.expected_next_hash,
-                );
-            } else {
-                self.inner.inner
-                    .blocks
-                    .add_known_block_to_source(self.source_id, decoded_header.number, self.expected_next_hash);
-            }
+            self.inner.inner
+                .blocks
+                .add_known_block_to_source(self.source_id, decoded_header.number, self.expected_next_hash);
 
             // Source also knows the parent of the announced block.
             self.inner.inner.blocks.add_known_block_to_source(
@@ -1007,10 +999,8 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
                 self.inner.inner.blocks.insert_unverified_block(
                     decoded_header.number,
                     self.expected_next_hash,
-                    {
-                        pending_blocks::UnverifiedBlockState::HeaderKnown {
-                            parent_hash: *decoded_header.parent_hash,
-                        }
+                    pending_blocks::UnverifiedBlockState::HeaderKnown {
+                        parent_hash: *decoded_header.parent_hash,
                     },
                     PendingBlock {
                         body: None,
@@ -1042,13 +1032,11 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
                     self.inner.inner.blocks.remove_unverified_block(height, &hash);
                 }
             } else {
-                {
-                    self.inner.inner.blocks.set_unverified_block_header_known(
-                        decoded_header.number,
-                        &self.expected_next_hash,
-                        *decoded_header.parent_hash,
-                    );
-                }
+                self.inner.inner.blocks.set_unverified_block_header_known(
+                    decoded_header.number,
+                    &self.expected_next_hash,
+                    *decoded_header.parent_hash,
+                );
 
                 let block_user_data = self.inner
                     .inner
@@ -1056,9 +1044,6 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
                     .unverified_block_user_data_mut(decoded_header.number, &self.expected_next_hash);
                 if block_user_data.header.is_none() {
                     block_user_data.header = Some(decoded_header.clone().into()); // TODO: copying bytes :-/
-                }
-                // TODO: what if body was already known, but differs from what is stored?
-                if block_user_data.body.is_none() {
                 }
             }
 
