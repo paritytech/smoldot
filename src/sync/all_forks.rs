@@ -950,35 +950,33 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
         self.any_progress = true;
 
         let block_from_source_result = {
-            debug_assert_eq!(header.hash(), *header_hash);
-
             // Code below does `header.number - 1`. Make sure that `header.number` isn't 0.
-            if header.number == 0 {
+            if decoded_header.number == 0 {
                 return HeaderFromSourceOutcome::TooOld {
                     announce_block_height: 0,
-                    finalized_block_height: self.chain.finalized_block_header().number,
+                    finalized_block_height: self.inner.chain.finalized_block_header().number,
                 };
             }
 
             // No matter what is done below, start by updating the view the state machine maintains
             // for this source.
-            if known_to_be_source_best {
-                self.inner.blocks.add_known_block_to_source_and_set_best(
-                    source_id,
-                    header.number,
-                    *header_hash,
+            if false {
+                self.inner.inner.blocks.add_known_block_to_source_and_set_best(
+                    self.source_id,
+                    decoded_header.number,
+                    self.expected_next_hash,
                 );
             } else {
-                self.inner
+                self.inner.inner
                     .blocks
-                    .add_known_block_to_source(source_id, header.number, *header_hash);
+                    .add_known_block_to_source(self.source_id, decoded_header.number, self.expected_next_hash);
             }
 
             // Source also knows the parent of the announced block.
-            self.inner.blocks.add_known_block_to_source(
-                source_id,
-                header.number - 1,
-                *header.parent_hash,
+            self.inner.inner.blocks.add_known_block_to_source(
+                self.source_id,
+                decoded_header.number - 1,
+                *decoded_header.parent_hash,
             );
 
             // It is assumed that all sources will eventually agree on the same finalized chain. If
@@ -986,94 +984,81 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             // assumed that this source is simply late compared to the local node, and that the block
             // that has been received is either part of the finalized chain or belongs to a fork that
             // will get discarded by this source in the future.
-            if header.number <= self.chain.finalized_block_header().number {
+            if decoded_header.number <= self.inner.chain.finalized_block_header().number {
                 return HeaderFromSourceOutcome::TooOld {
-                    announce_block_height: header.number,
-                    finalized_block_height: self.chain.finalized_block_header().number,
+                    announce_block_height: decoded_header.number,
+                    finalized_block_height: self.inner.chain.finalized_block_header().number,
                 };
             }
 
             // If the block is already part of the local tree of blocks, nothing more to do.
-            if self.chain.contains_non_finalized_block(header_hash) {
+            if self.inner.chain.contains_non_finalized_block(&self.expected_next_hash) {
                 return HeaderFromSourceOutcome::AlreadyInChain;
             }
 
             // At this point, we have excluded blocks that are already part of the chain or too old.
             // We insert the block in the list of unverified blocks so as to treat all blocks the
             // same.
-            if !self
+            if !self.inner
                 .inner
                 .blocks
-                .contains_unverified_block(header.number, header_hash)
+                .contains_unverified_block(decoded_header.number, &self.expected_next_hash)
             {
-                self.inner.blocks.insert_unverified_block(
-                    header.number,
-                    *header_hash,
-                    if body.is_some() {
-                        pending_blocks::UnverifiedBlockState::HeaderBodyKnown {
-                            parent_hash: *header.parent_hash,
-                        }
-                    } else {
+                self.inner.inner.blocks.insert_unverified_block(
+                    decoded_header.number,
+                    self.expected_next_hash,
+                    {
                         pending_blocks::UnverifiedBlockState::HeaderKnown {
-                            parent_hash: *header.parent_hash,
+                            parent_hash: *decoded_header.parent_hash,
                         }
                     },
                     PendingBlock {
-                        body,
-                        header: Some(header.clone().into()),
-                        justifications: justifications
-                            .map(|(e, j)| (e, j.clone()))
+                        body: None,
+                        header: Some(decoded_header.clone().into()),
+                        justifications: scale_encoded_justifications
+                            .map(|(e, j)| (e, j.as_ref().to_owned()))
                             .collect::<Vec<_>>(),
                     },
                 );
 
-                if self.inner.banned_blocks.contains(header_hash) {
-                    self.inner
+                if self.inner.inner.banned_blocks.contains(&self.expected_next_hash) {
+                    self.inner.inner
                         .blocks
-                        .mark_unverified_block_as_bad(header.number, header_hash);
+                        .mark_unverified_block_as_bad(decoded_header.number, &self.expected_next_hash);
                 }
 
                 // If there are too many blocks stored in the blocks list, remove unnecessary ones.
                 // Not doing this could lead to an explosion of the size of the collections.
                 // TODO: removing blocks should only be done explicitly through an API endpoint, because we want to store user datas in unverified blocks too; see https://github.com/paritytech/smoldot/issues/1572
-                while self.inner.blocks.num_unverified_blocks() >= 100 {
+                while self.inner.inner.blocks.num_unverified_blocks() >= 100 {
                     // TODO: arbitrary constant
                     let (height, hash) =
-                        match self.inner.blocks.unnecessary_unverified_blocks().next() {
+                        match self.inner.inner.blocks.unnecessary_unverified_blocks().next() {
                             Some((n, h)) => (n, *h),
                             None => break,
                         };
 
-                    self.inner.blocks.remove_sources_known_block(height, &hash);
-                    self.inner.blocks.remove_unverified_block(height, &hash);
+                    self.inner.inner.blocks.remove_sources_known_block(height, &hash);
+                    self.inner.inner.blocks.remove_unverified_block(height, &hash);
                 }
             } else {
-                if body.is_some() {
-                    self.inner.blocks.set_unverified_block_header_body_known(
-                        header.number,
-                        header_hash,
-                        *header.parent_hash,
-                    );
-                } else {
-                    self.inner.blocks.set_unverified_block_header_known(
-                        header.number,
-                        header_hash,
-                        *header.parent_hash,
+                {
+                    self.inner.inner.blocks.set_unverified_block_header_known(
+                        decoded_header.number,
+                        &self.expected_next_hash,
+                        *decoded_header.parent_hash,
                     );
                 }
 
-                let block_user_data = self
+                let block_user_data = self.inner
                     .inner
                     .blocks
-                    .unverified_block_user_data_mut(header.number, header_hash);
+                    .unverified_block_user_data_mut(decoded_header.number, &self.expected_next_hash);
                 if block_user_data.header.is_none() {
-                    block_user_data.header = Some(header.clone().into()); // TODO: copying bytes :-/
+                    block_user_data.header = Some(decoded_header.clone().into()); // TODO: copying bytes :-/
                 }
                 // TODO: what if body was already known, but differs from what is stored?
                 if block_user_data.body.is_none() {
-                    if let Some(body) = body {
-                        block_user_data.body = Some(body);
-                    }
                 }
             }
 
@@ -1082,17 +1067,17 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             //       for a malicious peer to send us bad justifications
 
             // Block is not part of the finalized chain.
-            if header.number == self.chain.finalized_block_header().number + 1
-                && *header.parent_hash != self.chain.finalized_block_hash()
+            if decoded_header.number == self.inner.chain.finalized_block_header().number + 1
+                && *decoded_header.parent_hash != self.inner.chain.finalized_block_hash()
             {
                 // TODO: remove_verify_failed
                 return HeaderFromSourceOutcome::NotFinalizedChain;
             }
 
-            if *header.parent_hash == self.chain.finalized_block_hash()
-                || self
+            if *decoded_header.parent_hash == self.inner.chain.finalized_block_hash()
+                || self.inner
                     .chain
-                    .non_finalized_block_by_hash(header.parent_hash)
+                    .non_finalized_block_by_hash(decoded_header.parent_hash)
                     .is_some()
             {
                 // TODO: ambiguous naming
@@ -1104,14 +1089,7 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             HeaderFromSourceOutcome::Disjoint
         };
 
-        match self.inner.block_from_source(
-            self.source_id,
-            &self.expected_next_hash,
-            decoded_header.clone(),
-            None,
-            &mut scale_encoded_justifications.map(|(e, j)| (e, j.as_ref().to_owned())),
-            false,
-        ) {
+        match block_from_source_result {
             HeaderFromSourceOutcome::HeaderVerify => {
                 // Header is ready to be verified.
                 // We continue accepting blocks, knowing that the next block should return
