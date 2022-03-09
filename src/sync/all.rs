@@ -1138,10 +1138,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             &block.scale_encoded_header,
                             block.scale_encoded_justifications.into_iter(),
                         ) {
-                            Ok(all_forks::AddBlock::Vacant(ba)) => {
+                            Ok(all_forks::AddBlock::UnknownBlock(ba)) => {
                                 blocks_append = ba.insert(block.user_data)
                             }
-                            Ok(all_forks::AddBlock::Occupied(ba)) => {
+                            Ok(all_forks::AddBlock::AlreadyPending(ba)) => {
                                 blocks_append = ba.replace(block.user_data)
                             }
                             Ok(all_forks::AddBlock::AlreadyInChain(ba)) if block_index == 0 => {

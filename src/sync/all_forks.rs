@@ -951,7 +951,7 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             .blocks
             .contains_unverified_block(decoded_header.number, &self.expected_next_hash)
         {
-            Ok(AddBlock::Vacant(AddBlockVacant {
+            Ok(AddBlock::UnknownBlock(AddBlockVacant {
                 inner: self,
                 decoded_header: decoded_header.into(),
                 justifications: scale_encoded_justifications
@@ -959,7 +959,7 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
                     .collect::<Vec<_>>(),
             }))
         } else {
-            Ok(AddBlock::Occupied(AddBlockOccupied {
+            Ok(AddBlock::AlreadyPending(AddBlockOccupied {
                 inner: self,
                 decoded_header: decoded_header.into(),
                 is_verified: false,
@@ -995,8 +995,8 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
 }
 
 pub enum AddBlock<TBl, TRq, TSrc> {
-    Occupied(AddBlockOccupied<TBl, TRq, TSrc>),
-    Vacant(AddBlockVacant<TBl, TRq, TSrc>),
+    AlreadyPending(AddBlockOccupied<TBl, TRq, TSrc>),
+    UnknownBlock(AddBlockVacant<TBl, TRq, TSrc>),
 
     /// The block is already in the list of verified blocks.
     ///
