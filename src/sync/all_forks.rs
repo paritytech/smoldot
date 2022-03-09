@@ -918,7 +918,8 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
         mut self,
         scale_encoded_header: &[u8],
         scale_encoded_justifications: impl Iterator<Item = ([u8; 4], impl AsRef<[u8]>)>,
-    ) -> Result<Self, (AncestrySearchResponseError, AllForksSync<TBl, TRq, TSrc>)> {
+    ) -> Result<AddBlock<TBl, TRq, TSrc>, (AncestrySearchResponseError, AllForksSync<TBl, TRq, TSrc>)>
+    {
         // Compare expected with actual hash.
         // This ensure that each header being processed is the parent of the previous one.
         if self.expected_next_hash != header::hash_from_scale_encoded_header(scale_encoded_header) {
@@ -1002,102 +1003,19 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             .blocks
             .contains_unverified_block(decoded_header.number, &self.expected_next_hash)
         {
-            self.inner.inner.blocks.insert_unverified_block(
-                decoded_header.number,
-                self.expected_next_hash,
-                pending_blocks::UnverifiedBlockState::HeaderKnown {
-                    parent_hash: *decoded_header.parent_hash,
-                },
-                PendingBlock {
-                    body: None,
-                    header: Some(decoded_header.clone().into()),
-                    justifications: scale_encoded_justifications
-                        .map(|(e, j)| (e, j.as_ref().to_owned()))
-                        .collect::<Vec<_>>(),
-                },
-            );
-
-            if self
-                .inner
-                .inner
-                .banned_blocks
-                .contains(&self.expected_next_hash)
-            {
-                self.inner
-                    .inner
-                    .blocks
-                    .mark_unverified_block_as_bad(decoded_header.number, &self.expected_next_hash);
-            }
-
-            // If there are too many blocks stored in the blocks list, remove unnecessary ones.
-            // Not doing this could lead to an explosion of the size of the collections.
-            // TODO: removing blocks should only be done explicitly through an API endpoint, because we want to store user datas in unverified blocks too; see https://github.com/paritytech/smoldot/issues/1572
-            while self.inner.inner.blocks.num_unverified_blocks() >= 100 {
-                // TODO: arbitrary constant
-                let (height, hash) = match self
-                    .inner
-                    .inner
-                    .blocks
-                    .unnecessary_unverified_blocks()
-                    .next()
-                {
-                    Some((n, h)) => (n, *h),
-                    None => break,
-                };
-
-                self.inner
-                    .inner
-                    .blocks
-                    .remove_sources_known_block(height, &hash);
-                self.inner
-                    .inner
-                    .blocks
-                    .remove_unverified_block(height, &hash);
-            }
+            Ok(AddBlock::Vacant(AddBlockVacant {
+                inner: self,
+                decoded_header: decoded_header.into(),
+                justifications: scale_encoded_justifications
+                    .map(|(e, j)| (e, j.as_ref().to_owned()))
+                    .collect::<Vec<_>>(),
+            }))
         } else {
-            self.inner.inner.blocks.set_unverified_block_header_known(
-                decoded_header.number,
-                &self.expected_next_hash,
-                *decoded_header.parent_hash,
-            );
-
-            let block_user_data = self
-                .inner
-                .inner
-                .blocks
-                .unverified_block_user_data_mut(decoded_header.number, &self.expected_next_hash);
-            if block_user_data.header.is_none() {
-                block_user_data.header = Some(decoded_header.clone().into()); // TODO: copying bytes :-/
-            }
+            Ok(AddBlock::Occupied(AddBlockOccupied {
+                inner: self,
+                decoded_header: decoded_header.into(),
+            }))
         }
-
-        // TODO: what if the pending block already contains a justification and it is not the
-        //       same as here? since justifications aren't immediately verified, it is possible
-        //       for a malicious peer to send us bad justifications
-
-        // Block is not part of the finalized chain.
-        if decoded_header.number == self.inner.chain.finalized_block_header().number + 1
-            && *decoded_header.parent_hash != self.inner.chain.finalized_block_hash()
-        {
-            // TODO: remove_verify_failed
-            // Block isn't part of the finalized chain.
-            // This doesn't necessarily mean that the source and the local node disagree
-            // on the finalized chain. It is possible that the finalized block has been
-            // updated between the moment the request was emitted and the moment the
-            // response is received.
-            let error = AncestrySearchResponseError::NotFinalizedChain {
-                discarded_unverified_block_headers: Vec::new(), // TODO: not properly implemented /!\
-            };
-            return Err((error, self.finish()));
-        }
-
-        // Update the state machine for the next iteration.
-        // Note: this can't be reached if `expected_next_height` is 0, because that should have
-        // resulted either in `NotFinalizedChain` or `AlreadyInChain`, both of which return early.
-        self.expected_next_hash = *decoded_header.parent_hash;
-        self.expected_next_height -= 1;
-        self.index_in_response += 1;
-        Ok(self)
     }
 
     /// Notifies of the end of the response, and returns back the [`AllForksSync`].
@@ -1123,6 +1041,164 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             );
         }
 
+        self.inner
+    }
+}
+
+pub enum AddBlock<TBl, TRq, TSrc> {
+    Occupied(AddBlockOccupied<TBl, TRq, TSrc>),
+    Vacant(AddBlockVacant<TBl, TRq, TSrc>),
+}
+
+pub struct AddBlockOccupied<TBl, TRq, TSrc> {
+    inner: FinishAncestrySearch<TBl, TRq, TSrc>,
+    decoded_header: header::Header,
+}
+
+impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
+    pub fn replace(self, user_data: TBl) -> FinishAncestrySearch<TBl, TRq, TSrc> {
+        self.inner
+            .inner
+            .inner
+            .blocks
+            .set_unverified_block_header_known(
+                self.decoded_header.number,
+                &self.inner.expected_next_hash,
+                self.decoded_header.parent_hash,
+            );
+
+        let block_user_data = self
+            .inner
+            .inner
+            .inner
+            .blocks
+            .unverified_block_user_data_mut(
+                self.decoded_header.number,
+                &self.inner.expected_next_hash,
+            );
+        if block_user_data.header.is_none() {
+            block_user_data.header = Some(self.decoded_header.clone().into()); // TODO: copying bytes :-/
+        }
+
+        // TODO: what if the pending block already contains a justification and it is not the
+        //       same as here? since justifications aren't immediately verified, it is possible
+        //       for a malicious peer to send us bad justifications
+
+        // Block is not part of the finalized chain.
+        if self.decoded_header.number == self.inner.inner.chain.finalized_block_header().number + 1
+            && self.decoded_header.parent_hash != self.inner.inner.chain.finalized_block_hash()
+        {
+            // TODO: remove_verify_failed
+            // Block isn't part of the finalized chain.
+            // This doesn't necessarily mean that the source and the local node disagree
+            // on the finalized chain. It is possible that the finalized block has been
+            // updated between the moment the request was emitted and the moment the
+            // response is received.
+            let error = AncestrySearchResponseError::NotFinalizedChain {
+                discarded_unverified_block_headers: Vec::new(), // TODO: not properly implemented /!\
+            };
+            return Err((error, self.inner.finish()));
+        }
+
+        // Update the state machine for the next iteration.
+        // Note: this can't be reached if `expected_next_height` is 0, because that should have
+        // resulted either in `NotFinalizedChain` or `AlreadyInChain`, both of which return early.
+        self.inner.expected_next_hash = self.decoded_header.parent_hash;
+        self.inner.expected_next_height -= 1;
+        self.inner.index_in_response += 1;
+        self.inner
+    }
+}
+
+pub struct AddBlockVacant<TBl, TRq, TSrc> {
+    inner: FinishAncestrySearch<TBl, TRq, TSrc>,
+    decoded_header: header::Header,
+    justifications: Vec<([u8; 4], Vec<u8>)>,
+}
+
+impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
+    pub fn insert(mut self, user_data: TBl) -> FinishAncestrySearch<TBl, TRq, TSrc> {
+        self.inner.inner.inner.blocks.insert_unverified_block(
+            self.decoded_header.number,
+            self.inner.expected_next_hash,
+            pending_blocks::UnverifiedBlockState::HeaderKnown {
+                parent_hash: self.decoded_header.parent_hash,
+            },
+            PendingBlock {
+                body: None,
+                header: Some(self.decoded_header.clone().into()),
+                justifications: self.justifications,
+            },
+        );
+
+        if self
+            .inner
+            .inner
+            .inner
+            .banned_blocks
+            .contains(&self.inner.expected_next_hash)
+        {
+            self.inner.inner.inner.blocks.mark_unverified_block_as_bad(
+                self.decoded_header.number,
+                &self.inner.expected_next_hash,
+            );
+        }
+
+        // If there are too many blocks stored in the blocks list, remove unnecessary ones.
+        // Not doing this could lead to an explosion of the size of the collections.
+        // TODO: removing blocks should only be done explicitly through an API endpoint, because we want to store user datas in unverified blocks too; see https://github.com/paritytech/smoldot/issues/1572
+        while self.inner.inner.inner.blocks.num_unverified_blocks() >= 100 {
+            // TODO: arbitrary constant
+            let (height, hash) = match self
+                .inner
+                .inner
+                .inner
+                .blocks
+                .unnecessary_unverified_blocks()
+                .next()
+            {
+                Some((n, h)) => (n, *h),
+                None => break,
+            };
+
+            self.inner
+                .inner
+                .inner
+                .blocks
+                .remove_sources_known_block(height, &hash);
+            self.inner
+                .inner
+                .inner
+                .blocks
+                .remove_unverified_block(height, &hash);
+        }
+
+        // TODO: what if the pending block already contains a justification and it is not the
+        //       same as here? since justifications aren't immediately verified, it is possible
+        //       for a malicious peer to send us bad justifications
+
+        // Block is not part of the finalized chain.
+        if self.decoded_header.number == self.inner.inner.chain.finalized_block_header().number + 1
+            && self.decoded_header.parent_hash != self.inner.inner.chain.finalized_block_hash()
+        {
+            // TODO: remove_verify_failed
+            // Block isn't part of the finalized chain.
+            // This doesn't necessarily mean that the source and the local node disagree
+            // on the finalized chain. It is possible that the finalized block has been
+            // updated between the moment the request was emitted and the moment the
+            // response is received.
+            let error = AncestrySearchResponseError::NotFinalizedChain {
+                discarded_unverified_block_headers: Vec::new(), // TODO: not properly implemented /!\
+            };
+            return Err((error, self.inner.finish()));
+        }
+
+        // Update the state machine for the next iteration.
+        // Note: this can't be reached if `expected_next_height` is 0, because that should have
+        // resulted either in `NotFinalizedChain` or `AlreadyInChain`, both of which return early.
+        self.inner.expected_next_hash = self.decoded_header.parent_hash;
+        self.inner.expected_next_height -= 1;
+        self.inner.index_in_response += 1;
         self.inner
     }
 }
