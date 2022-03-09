@@ -187,6 +187,7 @@ struct PendingBlock {
     header: Option<header::Header>,
     body: Option<Vec<Vec<u8>>>,
     justifications: Vec<([u8; 4], Vec<u8>)>,
+    // TODO: add user_data as soon as block announces and add_source APIs support passing a user data
 }
 
 struct Block<TBl> {
@@ -1073,6 +1074,7 @@ pub struct AddBlockOccupied<TBl, TRq, TSrc> {
 }
 
 impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
+    // TODO: return old user data
     pub fn replace(mut self, user_data: TBl) -> FinishAncestrySearch<TBl, TRq, TSrc> {
         self.inner
             .inner
