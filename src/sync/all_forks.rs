@@ -91,7 +91,7 @@ use alloc::{
     borrow::ToOwned as _,
     vec::{self, Vec},
 };
-use core::{iter, num::NonZeroU32, ops, time::Duration};
+use core::{num::NonZeroU32, ops, time::Duration};
 
 mod disjoint;
 mod pending_blocks;
@@ -185,7 +185,7 @@ struct Inner<TRq, TSrc> {
 
 struct PendingBlock {
     header: Option<header::Header>,
-    body: Option<Vec<Vec<u8>>>,
+    // TODO: add body: Option<Vec<Vec<u8>>>, when adding full node support
     justifications: Vec<([u8; 4], Vec<u8>)>,
     // TODO: add user_data as soon as block announces and add_source APIs support passing a user data
 }
@@ -317,7 +317,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 pending_blocks::UnverifiedBlockState::HeightHashKnown,
                 PendingBlock {
                     header: None,
-                    body: None,
                     justifications: Vec::new(),
                 },
             );
@@ -635,7 +634,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     }
                 },
                 PendingBlock {
-                    body: None,
                     header: Some(announced_header.clone().into()),
                     justifications: Vec::new(),
                 },
@@ -1063,6 +1061,8 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
                 block_user_data.header = Some(self.decoded_header.clone().into());
                 // TODO: copying bytes :-/
             }
+
+            // TODO: update user_data here
         }
 
         // TODO: what if the pending block already contains a justification and it is not the
@@ -1090,7 +1090,7 @@ pub struct AddBlockVacant<TBl, TRq, TSrc> {
 }
 
 impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
-    pub fn insert(mut self, user_data: TBl) -> FinishAncestrySearch<TBl, TRq, TSrc> {
+    pub fn insert(mut self, _user_data: TBl) -> FinishAncestrySearch<TBl, TRq, TSrc> {
         // Update the view the state machine maintains for this source.
         self.inner.inner.inner.blocks.add_known_block_to_source(
             self.inner.source_id,
@@ -1113,7 +1113,6 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
                 parent_hash: self.decoded_header.parent_hash,
             },
             PendingBlock {
-                body: None,
                 header: Some(self.decoded_header.clone().into()),
                 justifications: self.justifications,
             },
