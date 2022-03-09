@@ -952,10 +952,8 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
         let block_from_source_result = {
             // Code below does `header.number - 1`. Make sure that `header.number` isn't 0.
             if decoded_header.number == 0 {
-                return HeaderFromSourceOutcome::TooOld {
-                    announce_block_height: 0,
-                    finalized_block_height: self.inner.chain.finalized_block_header().number,
-                };
+                debug_assert_eq!(self.index_in_response, 0);
+                return Err((AncestrySearchResponseError::TooOld, self.finish()));
             }
 
             // No matter what is done below, start by updating the view the state machine maintains
@@ -977,15 +975,22 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             // that has been received is either part of the finalized chain or belongs to a fork that
             // will get discarded by this source in the future.
             if decoded_header.number <= self.inner.chain.finalized_block_header().number {
-                return HeaderFromSourceOutcome::TooOld {
-                    announce_block_height: decoded_header.number,
-                    finalized_block_height: self.inner.chain.finalized_block_header().number,
-                };
+                // Block is below the finalized block number.
+                // Ancestry searches never request any block earlier than the finalized block
+                // number. `TooOld` can happen if the source is misbehaving, but also if the
+                // finalized block has been updated between the moment the request was emitted
+                // and the moment the response is received.
+                debug_assert_eq!(self.index_in_response, 0);
+                return Err((AncestrySearchResponseError::TooOld, self.finish()));
             }
 
             // If the block is already part of the local tree of blocks, nothing more to do.
             if self.inner.chain.contains_non_finalized_block(&self.expected_next_hash) {
-                return HeaderFromSourceOutcome::AlreadyInChain;
+                // Block is already in chain. Can happen if a different response or
+                // announcement has arrived and been processed between the moment the request
+                // was emitted and the moment the response is received.
+                debug_assert_eq!(self.index_in_response, 0);
+                return Err((AncestrySearchResponseError::AlreadyInChain, self.finish()));
             }
 
             // At this point, we have excluded blocks that are already part of the chain or too old.
@@ -1056,40 +1061,6 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
                 && *decoded_header.parent_hash != self.inner.chain.finalized_block_hash()
             {
                 // TODO: remove_verify_failed
-                return HeaderFromSourceOutcome::NotFinalizedChain;
-            }
-
-            if *decoded_header.parent_hash == self.inner.chain.finalized_block_hash()
-                || self.inner
-                    .chain
-                    .non_finalized_block_by_hash(decoded_header.parent_hash)
-                    .is_some()
-            {
-                // TODO: ambiguous naming
-                return HeaderFromSourceOutcome::HeaderVerify;
-            }
-
-            // TODO: if pending_blocks.num_blocks() > some_max { remove uninteresting block }
-
-            HeaderFromSourceOutcome::Disjoint
-        };
-
-        match block_from_source_result {
-            HeaderFromSourceOutcome::HeaderVerify => {
-                // Header is ready to be verified.
-                // We continue accepting blocks, knowing that the next block should return
-                // `Err(AlreadyInChain)`.
-            }
-            HeaderFromSourceOutcome::TooOld { .. } => {
-                // Block is below the finalized block number.
-                // Ancestry searches never request any block earlier than the finalized block
-                // number. `TooOld` can happen if the source is misbehaving, but also if the
-                // finalized block has been updated between the moment the request was emitted
-                // and the moment the response is received.
-                debug_assert_eq!(self.index_in_response, 0);
-                return Err((AncestrySearchResponseError::TooOld, self.finish()));
-            }
-            HeaderFromSourceOutcome::NotFinalizedChain => {
                 // Block isn't part of the finalized chain.
                 // This doesn't necessarily mean that the source and the local node disagree
                 // on the finalized chain. It is possible that the finalized block has been
@@ -1100,17 +1071,7 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
                 };
                 return Err((error, self.finish()));
             }
-            HeaderFromSourceOutcome::AlreadyInChain => {
-                // Block is already in chain. Can happen if a different response or
-                // announcement has arrived and been processed between the moment the request
-                // was emitted and the moment the response is received.
-                debug_assert_eq!(self.index_in_response, 0);
-                return Err((AncestrySearchResponseError::AlreadyInChain, self.finish()));
-            }
-            HeaderFromSourceOutcome::Disjoint => {
-                // Block of unknown ancestry. Continue accepting blocks.
-            }
-        }
+        };
 
         // Update the state machine for the next iteration.
         // Note: this can't be reached if `expected_next_height` is 0, because that should have
