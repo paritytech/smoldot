@@ -1,0 +1,17 @@
+[package]
+name = "webrtc-server"
+version = "0.1.0"
+authors = ["Parity Technologies <admin@parity.io>", "Pierre Krieger <pierre.krieger1708@gmail.com>"]
+description = "webRTC server"
+repository = "https://github.com/paritytech/smoldot"
+license = "GPL-3.0-or-later WITH Classpath-exception-2.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1.0.56"
+async-std = { version = "1.10.0", features = ["attributes"] }
+clap = { version = "3.1.6", features = ["derive"] }
+futures = "0.3.17"
+rcgen = "0.8.14"
+webrtc = "0.4.0"

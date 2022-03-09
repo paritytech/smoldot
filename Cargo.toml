@@ -17,6 +17,7 @@ members = [
     "bin/full-node",
     "bin/light-base",
     "bin/wasm-node/rust",
+    "bin/webrtc-server",
 ]
 
 [features]
