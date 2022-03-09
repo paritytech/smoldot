@@ -966,22 +966,6 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             return Err((AncestrySearchResponseError::TooOld, self.finish()));
         }
 
-        // No matter what is done next, update the view the state machine maintains for this
-        // source.
-        self.inner.inner.blocks.add_known_block_to_source(
-            self.source_id,
-            decoded_header.number,
-            self.expected_next_hash,
-        );
-
-        // Source also knows the parent of the announced block.
-        // TODO: do this for the entire chain of blocks if it is known locally?
-        self.inner.inner.blocks.add_known_block_to_source(
-            self.source_id,
-            decoded_header.number - 1,
-            *decoded_header.parent_hash,
-        );
-
         // If the block is already part of the local tree of blocks, nothing more to do.
         if self
             .inner
@@ -1076,6 +1060,21 @@ pub struct AddBlockOccupied<TBl, TRq, TSrc> {
 impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
     // TODO: return old user data
     pub fn replace(mut self, user_data: TBl) -> FinishAncestrySearch<TBl, TRq, TSrc> {
+        // Update the view the state machine maintains for this source.
+        self.inner.inner.inner.blocks.add_known_block_to_source(
+            self.inner.source_id,
+            self.decoded_header.number,
+            self.inner.expected_next_hash,
+        );
+
+        // Source also knows the parent of the announced block.
+        // TODO: do this for the entire chain of blocks if it is known locally?
+        self.inner.inner.inner.blocks.add_known_block_to_source(
+            self.inner.source_id,
+            self.decoded_header.number - 1,
+            self.decoded_header.parent_hash,
+        );
+
         self.inner
             .inner
             .inner
@@ -1121,6 +1120,21 @@ pub struct AddBlockVacant<TBl, TRq, TSrc> {
 
 impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
     pub fn insert(mut self, user_data: TBl) -> FinishAncestrySearch<TBl, TRq, TSrc> {
+        // Update the view the state machine maintains for this source.
+        self.inner.inner.inner.blocks.add_known_block_to_source(
+            self.inner.source_id,
+            self.decoded_header.number,
+            self.inner.expected_next_hash,
+        );
+
+        // Source also knows the parent of the announced block.
+        // TODO: do this for the entire chain of blocks if it is known locally?
+        self.inner.inner.inner.blocks.add_known_block_to_source(
+            self.inner.source_id,
+            self.decoded_header.number - 1,
+            self.decoded_header.parent_hash,
+        );
+
         self.inner.inner.inner.blocks.insert_unverified_block(
             self.decoded_header.number,
             self.inner.expected_next_hash,
