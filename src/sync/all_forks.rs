@@ -1179,34 +1179,6 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
     }
 }
 
-/// Outcome of calling [`AllForksSync::block_from_source`].
-///
-/// Not public.
-enum HeaderFromSourceOutcome {
-    /// Header is ready to be verified.
-    HeaderVerify,
-
-    /// Announced block is too old to be part of the finalized chain.
-    ///
-    /// It is assumed that all sources will eventually agree on the same finalized chain. Blocks
-    /// whose height is inferior to the height of the latest known finalized block should simply
-    /// be ignored. Whether or not this old block is indeed part of the finalized block isn't
-    /// verified, and it is assumed that the source is simply late.
-    TooOld {
-        /// Height of the announced block.
-        announce_block_height: u64,
-        /// Height of the currently finalized block.
-        finalized_block_height: u64,
-    },
-    /// Announced block has already been successfully verified and is part of the non-finalized
-    /// chain.
-    AlreadyInChain,
-    /// Announced block is known to not be a descendant of the finalized block.
-    NotFinalizedChain,
-    /// Header cannot be verified now, and has been stored for later.
-    Disjoint,
-}
-
 /// Outcome of calling [`AllForksSync::block_announce`].
 pub enum BlockAnnounceOutcome {
     /// Header is ready to be verified.
