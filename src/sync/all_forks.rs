@@ -994,6 +994,23 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             return Err((AncestrySearchResponseError::AlreadyInChain, self.finish()));
         }
 
+        // Block is not part of the finalized chain.
+        // TODO: also give possibility to update user data
+        if decoded_header.number == self.inner.chain.finalized_block_header().number + 1
+            && *decoded_header.parent_hash != self.inner.chain.finalized_block_hash()
+        {
+            // TODO: remove_verify_failed
+            // Block isn't part of the finalized chain.
+            // This doesn't necessarily mean that the source and the local node disagree
+            // on the finalized chain. It is possible that the finalized block has been
+            // updated between the moment the request was emitted and the moment the
+            // response is received.
+            let error = AncestrySearchResponseError::NotFinalizedChain {
+                discarded_unverified_block_headers: Vec::new(), // TODO: not properly implemented /!\
+            };
+            return Err((error, self.finish()));
+        }
+
         // At this point, we have excluded blocks that are already part of the chain or too old.
         // We insert the block in the list of unverified blocks so as to treat all blocks the
         // same.
@@ -1084,22 +1101,6 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
         //       same as here? since justifications aren't immediately verified, it is possible
         //       for a malicious peer to send us bad justifications
 
-        // Block is not part of the finalized chain.
-        if self.decoded_header.number == self.inner.inner.chain.finalized_block_header().number + 1
-            && self.decoded_header.parent_hash != self.inner.inner.chain.finalized_block_hash()
-        {
-            // TODO: remove_verify_failed
-            // Block isn't part of the finalized chain.
-            // This doesn't necessarily mean that the source and the local node disagree
-            // on the finalized chain. It is possible that the finalized block has been
-            // updated between the moment the request was emitted and the moment the
-            // response is received.
-            let error = AncestrySearchResponseError::NotFinalizedChain {
-                discarded_unverified_block_headers: Vec::new(), // TODO: not properly implemented /!\
-            };
-            return Err((error, self.inner.finish()));
-        }
-
         // Update the state machine for the next iteration.
         // Note: this can't be reached if `expected_next_height` is 0, because that should have
         // resulted either in `NotFinalizedChain` or `AlreadyInChain`, both of which return early.
@@ -1176,22 +1177,6 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
         // TODO: what if the pending block already contains a justification and it is not the
         //       same as here? since justifications aren't immediately verified, it is possible
         //       for a malicious peer to send us bad justifications
-
-        // Block is not part of the finalized chain.
-        if self.decoded_header.number == self.inner.inner.chain.finalized_block_header().number + 1
-            && self.decoded_header.parent_hash != self.inner.inner.chain.finalized_block_hash()
-        {
-            // TODO: remove_verify_failed
-            // Block isn't part of the finalized chain.
-            // This doesn't necessarily mean that the source and the local node disagree
-            // on the finalized chain. It is possible that the finalized block has been
-            // updated between the moment the request was emitted and the moment the
-            // response is received.
-            let error = AncestrySearchResponseError::NotFinalizedChain {
-                discarded_unverified_block_headers: Vec::new(), // TODO: not properly implemented /!\
-            };
-            return Err((error, self.inner.finish()));
-        }
 
         // Update the state machine for the next iteration.
         // Note: this can't be reached if `expected_next_height` is 0, because that should have
