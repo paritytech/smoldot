@@ -29,12 +29,12 @@ use webrtc::peer_connection::certificate::RTCCertificate;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::math_rand_alpha;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use futures as _;
+use futures::{channel::oneshot, prelude::*};
 use anyhow::Result;
 use async_std::fs;
 use async_std::sync::Arc;
 use async_std::task;
+use async_std::channel as async_channel;
 
 const REMOTE_DESCRIPTION: &'static str = "v=0
 o=- 6920920643910646739 2 IN IP4 127.0.0.1
@@ -61,7 +61,21 @@ struct Cli {
 
 #[async_std::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let _cli = Cli::parse();
+
+    // Starting from here, a SIGINT (or equivalent) handler is setup. If the user does Ctrl+C,
+    // a message will be sent on `ctrlc_rx`.
+    let mut ctrlc_rx = {
+        let (tx, rx) = oneshot::channel();
+        let mut tx = Some(tx);
+        ctrlc::set_handler(move || {
+            if let Some(tx) = tx.take() {
+                let _ = tx.send(());
+            }
+        })
+        .expect("Error setting Ctrl-C handler");
+        rx.fuse()
+    };
 
     let api = APIBuilder::new().build();
     let certificate = load_certificate().await.expect("failed to load certificate");
@@ -71,6 +85,8 @@ async fn main() -> Result<()> {
     };
 
     let peer_connection = Arc::new(api.new_peer_connection(config).await?);
+
+    let (done_tx, done_rx) = async_channel::bounded(1);
     
     peer_connection
         .on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
@@ -83,7 +99,7 @@ async fn main() -> Result<()> {
                 // timeout. Note that the PeerConnection may come back from
                 // PeerConnectionStateDisconnected.
                 println!("Peer Connection has gone to failed exiting");
-                // let _ = done_tx.try_send(());
+                let _ = done_tx.try_send(());
             }
 
             Box::pin(async {})
@@ -126,11 +142,23 @@ async fn main() -> Result<()> {
         }))
         .await;
     
-    let offer = serde_json::from_str::<RTCSessionDescription>(REMOTE_DESCRIPTION)?;
+    let mut offer = peer_connection.create_offer(None).await?;
+    offer.sdp = REMOTE_DESCRIPTION.to_string();
     peer_connection.set_remote_description(offer).await?;
 
     let answer = peer_connection.create_answer(None).await?;
     peer_connection.set_local_description(answer).await?;
+
+    peer_connection.close().await?;
+
+    futures::select! {
+        _ = done_rx.recv().fuse() => {
+            println!("received done signal!");
+        }
+        _ = ctrlc_rx => {
+            println!("received interrupt signal!");
+        },
+    }
 
     Ok(())
 }

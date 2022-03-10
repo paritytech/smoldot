@@ -216,6 +216,7 @@ dependencies = [
  "futures-lite",
  "num_cpus",
  "once_cell",
+ "tokio",
 ]
 
 [[package]]
@@ -4272,9 +4273,9 @@ dependencies = [
  "anyhow",
  "async-std",
  "clap 3.1.6",
+ "ctrlc",
  "futures",
  "rcgen",
- "serde_json",
  "webrtc",
 ]
 
