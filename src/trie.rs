@@ -176,7 +176,7 @@ impl Trie {
                     return hash;
                 }
                 calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
-                    calculation = keys.inject(self.entries.keys().map(|k| k.iter().cloned()));
+                    calculation = keys.inject(self.entries.keys().map(|k| k.iter().copied()));
                 }
                 calculate_root::RootMerkleValueCalculation::StorageValue(value) => {
                     let key = value.key().collect::<Vec<u8>>();

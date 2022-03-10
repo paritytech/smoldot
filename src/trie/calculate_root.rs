@@ -108,7 +108,7 @@ impl CalculationCache {
         // possible to know which nodes' Merkle values need to be invalidated.
 
         let mut node_to_invalidate = match (
-            structure.node(bytes_to_nibbles(key.iter().cloned())),
+            structure.node(bytes_to_nibbles(key.iter().copied())),
             has_value,
         ) {
             (trie_structure::Entry::Vacant(entry), true) => {
@@ -174,10 +174,9 @@ impl CalculationCache {
             // we can stop there.
             if node.user_data().merkle_value.is_none() {
                 break;
-            } else {
-                node.user_data().merkle_value = None;
-                parent = node.into_parent();
             }
+            node.user_data().merkle_value = None;
+            parent = node.into_parent();
         }
     }
 
@@ -339,15 +338,14 @@ impl CalcInner {
                             self.current = Some(current.node_index());
                             self.coming_from_child = true;
                             continue;
-                        } else {
-                            // No next sibling nor parent. We have finished traversing the tree.
-                            let mut root_node = trie_structure.root_node().unwrap();
-                            let merkle_value = root_node.user_data().merkle_value.clone().unwrap();
-                            return RootMerkleValueCalculation::Finished {
-                                hash: merkle_value.into(),
-                                cache: self.cache,
-                            };
                         }
+                        // No next sibling nor parent. We have finished traversing the tree.
+                        let mut root_node = trie_structure.root_node().unwrap();
+                        let merkle_value = root_node.user_data().merkle_value.clone().unwrap();
+                        return RootMerkleValueCalculation::Finished {
+                            hash: merkle_value.into(),
+                            cache: self.cache,
+                        };
                     }
                 }
             }
@@ -557,7 +555,7 @@ mod tests {
         trie.insert([0x48, 0x19].to_vec(), [0xfe].to_vec());
         trie.insert([0x13, 0x14].to_vec(), [0xff].to_vec());
 
-        let mut ex = Vec::<u8>::new();
+        let mut ex = vec![];
         ex.push(0x80); // branch, no value (0b_10..) no nibble
         ex.push(0x12); // slots 1 & 4 are taken from 0-7
         ex.push(0x00); // no slots from 8-15

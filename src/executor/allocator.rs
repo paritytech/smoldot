@@ -556,7 +556,7 @@ struct PoisonBomb<'a> {
 
 impl<'a> PoisonBomb<'a> {
     fn disarm(self) {
-        mem::forget(self)
+        mem::forget(self);
     }
 }
 

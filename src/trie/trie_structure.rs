@@ -607,8 +607,7 @@ impl<TUd> TrieStructure<TUd> {
                 .unwrap()
                 .children
                 .iter()
-                .filter_map(|c| *c)
-                .next();
+                .find_map(|c| *c);
             if let Some(first_child) = first_child {
                 Some(first_child)
             } else {
@@ -870,8 +869,7 @@ impl<'a, TUd> StorageNodeAccess<'a, TUd> {
             .unwrap()
             .children
             .iter()
-            .filter_map(|c| *c)
-            .next();
+            .find_map(|c| *c);
 
         let first_child_idx = match first_child_idx {
             Some(fc) => fc,
@@ -971,8 +969,7 @@ impl<'a, TUd> StorageNodeAccess<'a, TUd> {
 
         // We already know from above that the removed node has only 0 or 1 children. Let's
         // determine which.
-        let child_node_index: Option<usize> =
-            removed_node.children.iter().filter_map(|c| *c).next();
+        let child_node_index: Option<usize> = removed_node.children.iter().find_map(|c| *c);
 
         // If relevant, update our single child's parent to point to `removed_node`'s parent.
         if let Some(child_node_index) = child_node_index {
@@ -1049,12 +1046,7 @@ impl<'a, TUd> StorageNodeAccess<'a, TUd> {
                 .count(),
             1
         );
-        let sibling_node_index: usize = removed_branch
-            .children
-            .iter()
-            .filter_map(|c| *c)
-            .next()
-            .unwrap();
+        let sibling_node_index: usize = removed_branch.children.iter().find_map(|c| *c).unwrap();
 
         // Update the sibling to point to the parent's parent.
         {
@@ -1247,8 +1239,7 @@ impl<'a, TUd> BranchNodeAccess<'a, TUd> {
             .unwrap()
             .children
             .iter()
-            .filter_map(|c| *c)
-            .next();
+            .find_map(|c| *c);
 
         let first_child_idx = match first_child_idx {
             Some(fc) => fc,
@@ -1321,7 +1312,7 @@ impl<'a, TUd> BranchNodeAccess<'a, TUd> {
             .unwrap()
             .partial_key
             .iter()
-            .cloned()
+            .copied()
     }
 
     /// Adds a storage value to this node, turning it into a [`StorageNodeAccess`].

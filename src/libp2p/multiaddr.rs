@@ -45,7 +45,7 @@ impl Multiaddr {
 
     /// Shrinks the memory used by the underlying container to its size.
     pub fn shrink_to_fit(&mut self) {
-        self.bytes.shrink_to_fit()
+        self.bytes.shrink_to_fit();
     }
 
     /// Returns the serialized version of this multiaddr.
@@ -286,25 +286,10 @@ impl<'a> ProtocolRef<'a> {
 
         // TODO: optimize by not allocating a Vec
         let extra = match self {
-            ProtocolRef::Dns(addr) => {
-                let mut out = Vec::with_capacity(addr.as_ref().len() + 4);
-                out.extend(crate::util::leb128::encode_usize(addr.as_ref().len()));
-                out.extend_from_slice(addr.as_ref());
-                out
-            }
-            ProtocolRef::Dns4(addr) => {
-                let mut out = Vec::with_capacity(addr.as_ref().len() + 4);
-                out.extend(crate::util::leb128::encode_usize(addr.as_ref().len()));
-                out.extend_from_slice(addr.as_ref());
-                out
-            }
-            ProtocolRef::Dns6(addr) => {
-                let mut out = Vec::with_capacity(addr.as_ref().len() + 4);
-                out.extend(crate::util::leb128::encode_usize(addr.as_ref().len()));
-                out.extend_from_slice(addr.as_ref());
-                out
-            }
-            ProtocolRef::DnsAddr(addr) => {
+            ProtocolRef::Dns(addr)
+            | ProtocolRef::Dns4(addr)
+            | ProtocolRef::Dns6(addr)
+            | ProtocolRef::DnsAddr(addr) => {
                 let mut out = Vec::with_capacity(addr.as_ref().len() + 4);
                 out.extend(crate::util::leb128::encode_usize(addr.as_ref().len()));
                 out.extend_from_slice(addr.as_ref());
@@ -319,8 +304,7 @@ impl<'a> ProtocolRef<'a> {
                 out.extend_from_slice(multihash);
                 out
             }
-            ProtocolRef::Tcp(port) => port.to_be_bytes().to_vec(),
-            ProtocolRef::Udp(port) => port.to_be_bytes().to_vec(),
+            ProtocolRef::Tcp(port) | ProtocolRef::Udp(port) => port.to_be_bytes().to_vec(),
             _ => Vec::new(),
         };
 

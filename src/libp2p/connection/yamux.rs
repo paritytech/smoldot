@@ -550,7 +550,7 @@ impl<T> Yamux<T> {
                                 .ok_or(Error::LocalCreditsOverflow)?;
                         }
                     } else {
-                        unreachable!()
+                        unreachable!();
                     }
                 }
             }

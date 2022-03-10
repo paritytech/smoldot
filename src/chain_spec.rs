@@ -249,8 +249,7 @@ impl ChainSpec {
         self.client_spec
             .properties
             .as_ref()
-            .map(|p| p.get())
-            .unwrap_or("{}")
+            .map_or("{}", |p| p.get())
     }
 
     pub fn light_sync_state(&self) -> Option<LightSyncState> {
@@ -335,7 +334,7 @@ impl LightSyncState {
             .epochs
             .iter()
             .filter(|((_, block_num), _)| {
-                *block_num as u64 <= self.inner.finalized_block_header.number
+                u64::from(*block_num) <= self.inner.finalized_block_header.number
             })
             .filter_map(|((_, block_num), epoch)| match epoch {
                 light_sync_state::PersistedEpoch::Regular(epoch) => Some((block_num, epoch)),
@@ -412,5 +411,9 @@ mod tests {
         let spec = &include_bytes!("chain_spec/example.json")[..];
         let specs = ChainSpec::from_json_bytes(&spec).unwrap();
         assert_eq!(specs.id(), "polkadot");
+
+        // code_substitutes field
+        assert_eq!(specs.client_spec.code_substitutes.get(&1), None);
+        assert!(specs.client_spec.code_substitutes.get(&5203203).is_some());
     }
 }

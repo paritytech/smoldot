@@ -493,7 +493,7 @@ fn serialize_bytes<S: serde::Serializer>(data: &[u8], serializer: S) -> Result<S
     impl<'a> fmt::Display for Writer<'a> {
         fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
             for byte in self.0 {
-                write!(f, "{:02x}", byte)?
+                write!(f, "{:02x}", byte)?;
             }
             Ok(())
         }

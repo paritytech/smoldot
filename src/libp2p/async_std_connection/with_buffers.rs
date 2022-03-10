@@ -256,7 +256,7 @@ where
                 Poll::Pending => Poll::Pending,
             }
         })
-        .await
+        .await;
     }
 }
 
@@ -367,7 +367,7 @@ where
                     match write_result {
                         Poll::Ready(Ok(0)) => {
                             // It is not legal for `poll_write` to return 0 bytes written.
-                            unreachable!()
+                            unreachable!();
                         }
                         Poll::Ready(Ok(n)) => {
                             pending = false;
@@ -419,7 +419,7 @@ where
                 Poll::Pending
             }
         })
-        .await
+        .await;
     }
 }
 

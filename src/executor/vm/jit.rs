@@ -779,7 +779,7 @@ impl Jit {
                             waker.wake();
                         }
 
-                        *shared_lock = Shared::AbortRequired
+                        *shared_lock = Shared::AbortRequired;
                     }
                     _ => unreachable!(),
                 }

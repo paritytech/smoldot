@@ -36,20 +36,15 @@ pub(super) struct ClientSpec {
     #[serde(default)]
     pub(super) chain_type: ChainType,
 
-    /// Each key is a block hash. Values are a hex-encoded runtime code (normally found in the
-    /// `:code` storage key). The descendants of the block with the given hash that share the same
-    /// [`crate::executor::CoreVersionRef::spec_version`] as the Wasm runtime code in the value
-    /// should instead use that Wasm runtime code. In other words, the substitution stops when
-    /// the `spec_version` is modified.
-    /// The block with that hash uses its unmodified runtime code. Only its children can be
-    /// affected.
+    /// Mapping from a block number to a hex-encoded wasm runtime code (normally found in the
+    /// `:code` storage key).
     ///
-    /// This can be used in order to substitute faulty runtimes with functioning ones.
-    ///
-    /// See also <https://github.com/paritytech/substrate/pull/8898>.
+    /// The given runtime code will be used to substitute the on-chain runtime code starting with
+    /// the given block number until the `spec_version`
+    /// ([`crate::executor::CoreVersionRef::spec_version`]) on chain changes.
     #[serde(default)]
     // TODO: make use of this
-    pub(super) code_substitutes: HashMap<NumberAsString, HexString, fnv::FnvBuildHasher>,
+    pub(super) code_substitutes: HashMap<u64, HexString, fnv::FnvBuildHasher>,
     pub(super) boot_nodes: Vec<String>,
     pub(super) telemetry_endpoints: Option<Vec<(String, u8)>>,
     pub(super) protocol_id: Option<String>,
@@ -132,47 +127,14 @@ impl<'a> serde::Deserialize<'a> for HexString {
     {
         let string = String::deserialize(deserializer)?;
 
-        if !string.starts_with("0x") {
-            return Err(serde::de::Error::custom(
-                "hexadecimal string doesn't start with 0x",
-            ));
+        if let Some(hex) = string.strip_prefix("0x") {
+            let bytes = hex::decode(&hex).map_err(serde::de::Error::custom)?;
+            return Ok(HexString(bytes));
         }
 
-        let bytes = hex::decode(&string[2..]).map_err(serde::de::Error::custom)?;
-        Ok(HexString(bytes))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(super) struct NumberAsString(pub(super) u64);
-
-impl serde::Serialize for NumberAsString {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.0.serialize(serializer)
-    }
-}
-
-impl<'a> serde::Deserialize<'a> for NumberAsString {
-    fn deserialize<D>(deserializer: D) -> Result<NumberAsString, D::Error>
-    where
-        D: serde::Deserializer<'a>,
-    {
-        let string = String::deserialize(deserializer)?;
-
-        if string.starts_with("0x") {
-            // TODO: the hexadecimal format support is just a complete hack during a transition period for https://github.com/paritytech/substrate/pull/10600 ; must be removed before we actually make use of the code substitutes
-            let _bytes = hex::decode(&string[2..]).map_err(serde::de::Error::custom)?;
-            Ok(NumberAsString(0))
-        } else if let Ok(num) = string.parse() {
-            Ok(NumberAsString(num))
-        } else {
-            Err(serde::de::Error::custom(
-                "block number is neither hexadecimal nor decimal",
-            ))
-        }
+        Err(serde::de::Error::custom(
+            "hexadecimal string doesn't start with 0x",
+        ))
     }
 }
 

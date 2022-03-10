@@ -162,7 +162,7 @@ impl Verifier {
             .map_err(Error::InvalidHeader)?
             .digest
             .logs()
-            .filter_map(|log_item| match log_item {
+            .find_map(|log_item| match log_item {
                 DigestItemRef::GrandpaConsensus(grandpa_log_item) => match grandpa_log_item {
                     GrandpaConsensusLogRef::ScheduledChange(change)
                     | GrandpaConsensusLogRef::ForcedChange { change, .. } => {
@@ -172,7 +172,6 @@ impl Verifier {
                 },
                 _ => None,
             })
-            .next()
             .map(|next_authorities| next_authorities.map(GrandpaAuthority::from).collect());
 
         self.index += 1;

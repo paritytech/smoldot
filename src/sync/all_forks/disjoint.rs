@@ -219,6 +219,8 @@ impl<TBl> DisjointBlocks<TBl> {
     /// # Panic
     ///
     /// Panics if the block with the given height and hash hasn't been inserted before.
+    /// Panics if the parent hash of that block was already known, and is different from the one
+    /// passed as parameter.
     ///
     #[track_caller]
     pub fn set_parent_hash(&mut self, height: u64, hash: &[u8; 32], parent_hash: [u8; 32]) {
@@ -233,12 +235,12 @@ impl<TBl> DisjointBlocks<TBl> {
         let block = self.blocks.get_mut(&(height, *hash)).unwrap();
 
         match &mut block.parent_hash {
-            &mut Some(ph) => debug_assert_eq!(ph, parent_hash),
+            &mut Some(ph) => assert_eq!(ph, parent_hash),
             ph @ &mut None => *ph = Some(parent_hash),
         }
 
         if parent_is_bad {
-            block.bad = true;
+            self.set_block_bad(height, hash);
         }
     }
 
@@ -349,6 +351,29 @@ impl<TBl> DisjointBlocks<TBl> {
             (None, None) => None,
         })
     }
+
+    /// Returns whether a block is marked as bad.
+    ///
+    /// Returns `None` if the block isn't known.
+    pub fn is_bad(&self, height: u64, hash: &[u8; 32]) -> Option<bool> {
+        Some(self.blocks.get(&(height, *hash))?.bad)
+    }
+
+    /// Returns whether the parent of a block is bad.
+    ///
+    /// Returns `None` if either the block or its parent isn't known.
+    pub fn is_parent_bad(&self, height: u64, hash: &[u8; 32]) -> Option<bool> {
+        let parent_hash = self.blocks.get(&(height, *hash))?.parent_hash?;
+        let parent_height = match height.checked_sub(1) {
+            Some(h) => h,
+            None => return Some(false), // Parent is known and isn't present in the data structure.
+        };
+        Some(
+            self.blocks
+                .get(&(parent_height, parent_hash))
+                .map_or(false, |parent| parent.bad),
+        )
+    }
 }
 
 impl<TBl: fmt::Debug> fmt::Debug for DisjointBlocks<TBl> {
@@ -407,8 +432,8 @@ mod tests {
 
     #[test]
     fn set_parent_hash_updates_bad() {
-        // Calling `set_parent_hash` where the parent is a known a bad block marks the block as
-        // bad as well.
+        // Calling `set_parent_hash` where the parent is a known a bad block marks the block and
+        // its children as bad as well.
 
         let mut collection = super::DisjointBlocks::new();
 
@@ -418,10 +443,21 @@ mod tests {
         assert_eq!(collection.unknown_blocks().count(), 0);
 
         collection.insert(2, [2; 32], None, ());
+        assert!(!collection.is_bad(2, &[2; 32]).unwrap());
+        collection.insert(3, [3; 32], Some([2; 32]), ());
+        assert!(!collection.is_bad(3, &[3; 32]).unwrap());
+        collection.insert(3, [31; 32], Some([2; 32]), ());
+        assert!(!collection.is_bad(3, &[31; 32]).unwrap());
+        collection.insert(4, [4; 32], Some([3; 32]), ());
+        assert!(!collection.is_bad(4, &[4; 32]).unwrap());
         assert_eq!(collection.unknown_blocks().count(), 1);
 
         collection.set_parent_hash(2, &[2; 32], [1; 32]);
         assert_eq!(collection.unknown_blocks().count(), 0);
+        assert!(collection.is_bad(2, &[2; 32]).unwrap());
+        assert!(collection.is_bad(3, &[3; 32]).unwrap());
+        assert!(collection.is_bad(3, &[31; 32]).unwrap());
+        assert!(collection.is_bad(4, &[4; 32]).unwrap());
     }
 
     #[test]
