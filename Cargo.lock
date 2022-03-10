@@ -4274,6 +4274,7 @@ dependencies = [
  "clap 3.1.6",
  "futures",
  "rcgen",
+ "serde_json",
  "webrtc",
 ]
 
