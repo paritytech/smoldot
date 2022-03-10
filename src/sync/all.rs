@@ -1138,7 +1138,22 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             &block.scale_encoded_header,
                             block.scale_encoded_justifications.into_iter(),
                         ) {
-                            Ok(ba) => blocks_append = ba,
+                            Ok(all_forks::AddBlock::UnknownBlock(ba)) => {
+                                blocks_append = ba.insert(block.user_data)
+                            }
+                            Ok(all_forks::AddBlock::AlreadyPending(ba)) => {
+                                blocks_append = ba.replace(block.user_data)
+                            }
+                            Ok(all_forks::AddBlock::AlreadyInChain(ba)) if block_index == 0 => {
+                                break (
+                                    ba.cancel(),
+                                    request_user_data,
+                                    ResponseOutcome::AllAlreadyInChain,
+                                )
+                            }
+                            Ok(all_forks::AddBlock::AlreadyInChain(ba)) => {
+                                break (ba.cancel(), request_user_data, ResponseOutcome::Queued)
+                            }
                             Err((
                                 all_forks::AncestrySearchResponseError::NotFinalizedChain {
                                     discarded_unverified_block_headers,
@@ -1152,11 +1167,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                                         discarded_unverified_block_headers,
                                     },
                                 )
-                            }
-                            Err((all_forks::AncestrySearchResponseError::AlreadyInChain, sync))
-                                if block_index == 0 =>
-                            {
-                                break (sync, request_user_data, ResponseOutcome::AllAlreadyInChain)
                             }
                             Err((_, sync)) => {
                                 break (sync, request_user_data, ResponseOutcome::Queued);
