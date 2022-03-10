@@ -562,10 +562,24 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
         let announced_header_hash = announced_header.hash();
 
-        // Code below does `header.number - 1`. Make sure that `header.number` isn't 0.
-        if announced_header.number == 0 {
+        // It is assumed that all sources will eventually agree on the same finalized chain. If
+        // the block number is lower or equal than the locally-finalized block number, it is
+        // assumed that this source is simply late compared to the local node, and that the block
+        // that has been received is either part of the finalized chain or belongs to a fork that
+        // will get discarded by this source in the future.
+        if announced_header.number <= self.chain.finalized_block_header().number {
+            // Even if the block is below the finalized block, we still need to set it as the
+            // best block of this source, if anything for API consistency purposes.
+            if is_best {
+                self.inner.blocks.add_known_block_to_source_and_set_best(
+                    source_id,
+                    announced_header.number,
+                    announced_header_hash,
+                );
+            }
+
             return BlockAnnounceOutcome::TooOld {
-                announce_block_height: 0,
+                announce_block_height: announced_header.number,
                 finalized_block_height: self.chain.finalized_block_header().number,
             };
         }
@@ -593,17 +607,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             *announced_header.parent_hash,
         );
 
-        // It is assumed that all sources will eventually agree on the same finalized chain. If
-        // the block number is lower or equal than the locally-finalized block number, it is
-        // assumed that this source is simply late compared to the local node, and that the block
-        // that has been received is either part of the finalized chain or belongs to a fork that
-        // will get discarded by this source in the future.
-        if announced_header.number <= self.chain.finalized_block_header().number {
-            return BlockAnnounceOutcome::TooOld {
-                announce_block_height: announced_header.number,
-                finalized_block_height: self.chain.finalized_block_header().number,
-            };
-        }
 
         // If the block is already part of the local tree of blocks, nothing more to do.
         if self
