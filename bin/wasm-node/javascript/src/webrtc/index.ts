@@ -175,9 +175,12 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
             // Indicates that the remote DTLS server will only listen for incoming
             // connections. (RFC5763)
             "a=setup:passive" + "\n" +
-            // TODO: doc
+            // The SCTP port (RFC8841)
+            // Note it's different from the "m=" line port value, which
+            // indicates the port of the underlying transport-layer protocol
+            // (UDP or TCP)
             "a=sctp-port:5000" + "\n" +
-            // TODO: doc
+            // The maximum SCTP user message size (in bytes) (RFC8841)
             "a=max-message-size:100000" + "\n" +
             // TODO: doc
             "a=candidate:0 1 " + (protocol == 'tcp' ? "TCP" : "UDP") + " 2113667327 " + targetIp + " " + targetPort + " typ host" + "\n";

@@ -36,19 +36,42 @@ use async_std::sync::Arc;
 use async_std::task;
 use async_std::channel as async_channel;
 
-const REMOTE_DESCRIPTION: &'static str = "v=0
-o=- 6920920643910646739 2 IN IP4 127.0.0.1
+/// An SDP message that constitutes the offer.
+/// Main RFC: <https://datatracker.ietf.org/doc/html/rfc8866>
+/// `sctp-port` and `max-message-size` attrs RFC: <https://datatracker.ietf.org/doc/html/rfc8841>
+/// `group` and `mid` attrs RFC: <https://datatracker.ietf.org/doc/html/rfc9143>
+/// `ice-ufrag`, `ice-pwd` and `ice-options` attrs RFC: <https://datatracker.ietf.org/doc/html/rfc8839>
+///
+/// Short description:
+///     v=<protocol-version>
+///     o=<username> <sess-id> <sess-version> <nettype> <addrtype> <unicast-address>
+///     s=<session name>
+///     c=<nettype> <addrtype> <connection-address>
+///     t=<start-time> <stop-time>
+///     a=group:BUNDLE <name>, ...
+///
+///     m=<media> <port> <proto> <fmt> ...
+///     a=mid:<MID>
+///     a=ice-ufrag:<user>
+///     a=ice-pwd:<passwd>
+///     a=sctp-port:<value>
+///     a=max-message-size:<value>
+const CLIENT_SESSION_DESCRIPTION: &'static str = "v=0
+o=- 0 0 IN IP4 127.0.0.1
 s=-
+c=IN IP4 0.0.0.0
 t=0 0
 a=group:BUNDLE 0
-m=application 9 UDP/DTLS/SCTP webrtc-datachannel
-c=IN IP4 0.0.0.0
+
+m=application 9090 UDP/DTLS/SCTP webrtc-datachannel
+a=mid:0
+a=ice-options:ice2
 a=ice-ufrag:V6j+
 a=ice-pwd:OEKutPgoHVk/99FfqPOf444w
 a=fingerprint:sha-256 invalidFingerprint
 a=setup:actpass
-a=mid:0
 a=sctp-port:5000
+a=max-message-size:100000
 ";
 
 #[derive(Parser, Debug)]
@@ -142,11 +165,14 @@ async fn main() -> Result<()> {
         }))
         .await;
     
+    // Set the remote description to the predefined SDP
     let mut offer = peer_connection.create_offer(None).await?;
-    offer.sdp = REMOTE_DESCRIPTION.to_string();
+    offer.sdp = CLIENT_SESSION_DESCRIPTION.to_string();
     peer_connection.set_remote_description(offer).await?;
 
     let answer = peer_connection.create_answer(None).await?;
+    // Set the local description and start UDP listeners
+    // Note: this will start the gathering of ICE candidates
     peer_connection.set_local_description(answer).await?;
 
     peer_connection.close().await?;
