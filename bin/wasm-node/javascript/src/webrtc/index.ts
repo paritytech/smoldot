@@ -150,8 +150,6 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
             "c=IN IP4 " + targetIp + "\n" +
             // TODO: remove eventually; goes together with `mid:0`
             "a=mid:0" + "\n" +
-            // Indicates bidirectional mode for the data channel. (RFC8866)
-            "a=sendrecv" + "\n" +
             // Indicates that we are complying with RFC8839 (as oppposed to the legacy RFC5245).
             "a=ice-options:ice2" + "\n" +
             // Randomly-generated username and password (the line after). Used only for
