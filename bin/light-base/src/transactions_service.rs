@@ -168,7 +168,6 @@ impl<TPlat: Platform> TransactionsService<TPlat> {
     /// If this exact same transaction has already been submitted before, the transaction isn't
     /// added a second time. Instead, a second channel is created pointing to the already-existing
     /// transaction.
-    #[must_use = "Use `submit_transaction` instead if you don't need the return value"]
     pub async fn submit_and_watch_transaction(
         &self,
         transaction_bytes: Vec<u8>,
