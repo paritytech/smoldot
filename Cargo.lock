@@ -2440,7 +2440,6 @@ dependencies = [
  "hashbrown 0.12.0",
  "hex",
  "mick-jaeger",
- "num_cpus",
  "rand",
  "smoldot",
  "terminal_size",
