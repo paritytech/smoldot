@@ -135,6 +135,9 @@ codegen-units = 1
 inherits = "release"
 lto = true
 opt-level = "z"
+# https://github.com/rust-lang/rust/issues/47745
+# https://doc.rust-lang.org/rustc/codegen-options/index.html#codegen-units
+codegen-units = 1
 
 [[bench]]
 name = "header"
