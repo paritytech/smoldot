@@ -1203,24 +1203,10 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
                 && self.announced_header_parent_hash != self.inner.chain.finalized_block_hash()
             {
                 // TODO: remove_verify_failed
-                return BlockAnnounceOutcome::NotFinalizedChain;
-            }
-
-            if self.announced_header_parent_hash == self.inner.chain.finalized_block_hash()
-                || self
-                    .inner
-                    .chain
-                    .non_finalized_block_by_hash(&self.announced_header_parent_hash)
-                    .is_some()
-            {
-                // TODO: ambiguous naming
-                return BlockAnnounceOutcome::HeaderVerify;
             }
         }
 
         // TODO: if pending_blocks.num_blocks() > some_max { remove uninteresting block }
-
-        BlockAnnounceOutcome::Disjoint
     }
 }
 
@@ -1321,23 +1307,9 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
             && self.announced_header_parent_hash != self.inner.chain.finalized_block_hash()
         {
             // TODO: remove_verify_failed
-            return BlockAnnounceOutcome::NotFinalizedChain;
-        }
-
-        if self.announced_header_parent_hash == self.inner.chain.finalized_block_hash()
-            || self
-                .inner
-                .chain
-                .non_finalized_block_by_hash(&self.announced_header_parent_hash)
-                .is_some()
-        {
-            // TODO: ambiguous naming
-            return BlockAnnounceOutcome::HeaderVerify;
         }
 
         // TODO: if pending_blocks.num_blocks() > some_max { remove uninteresting block }
-
-        BlockAnnounceOutcome::Disjoint
     }
 }
 
