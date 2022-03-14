@@ -1261,11 +1261,13 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
             },
         );
 
+        // Make sure that block isn't banned and that it is part of the finalized chain.
         if self
             .inner
             .inner
             .banned_blocks
-            .contains(&self.announced_header_hash)
+            .contains(&self.announced_header_hash) || self.announced_header_number == self.inner.chain.finalized_block_header().number + 1
+            && self.announced_header_parent_hash != self.inner.chain.finalized_block_hash()
         {
             self.inner.inner.blocks.mark_unverified_block_as_bad(
                 self.announced_header_number,
@@ -1301,14 +1303,7 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
 
         // TODO: what if the pending block already contains a justification and it is not the
         //       same as here? since justifications aren't immediately verified, it is possible
-        //       for a malicious peer to send us bad justifications
-
-        // Block is not part of the finalized chain.
-        if self.announced_header_number == self.inner.chain.finalized_block_header().number + 1
-            && self.announced_header_parent_hash != self.inner.chain.finalized_block_hash()
-        {
-            // TODO: remove_verify_failed
-        }
+        //       for a malicious peer to send us bad justificationsu
 
         // TODO: if pending_blocks.num_blocks() > some_max { remove uninteresting block }
     }
