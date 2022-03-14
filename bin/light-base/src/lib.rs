@@ -670,6 +670,19 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
             }
         };
 
+        // Print a warning if the list of bootnodes is empty, as this is a common mistake.
+        if bootstrap_nodes.is_empty() {
+            // Note the usage of the word "likely", because another chain with the same key might
+            // have been added earlier and contains bootnodes, or we might receive an incoming
+            // substream on a connection normally used for a different chain.
+            log::warn!(
+                target: "smoldot",
+                "Newly-added chain {} has an empty list of bootnodes. Smoldot will likely fail \
+                to connect to its peer-to-peer network.",
+                log_name
+            );
+        }
+
         // Apart from its services, each chain also has an entry in `public_api_chains`.
         let public_api_chains_entry = self.public_api_chains.vacant_entry();
         let new_chain_id = ChainId(public_api_chains_entry.key());
