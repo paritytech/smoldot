@@ -1221,7 +1221,8 @@ pub struct AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
 }
 
 impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
-    pub fn insert(self, user_data: TBl) {
+    pub fn insert(self) {
+        // TODO: ^ add user_data: TBl parameter
         // No matter what is done below, start by updating the view the state machine maintains
         // for this source.
         if self.is_best {
