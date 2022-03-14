@@ -598,6 +598,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 announced_header_parent_hash,
                 announced_header_encoded: announced_header.into(),
                 source_id,
+                is_in_chain: true,
                 is_best,
             });
         }
@@ -626,6 +627,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 announced_header_number,
                 announced_header_parent_hash,
                 announced_header_encoded: announced_header.into(),
+                is_in_chain: false,
                 source_id,
                 is_best,
             });
@@ -1144,6 +1146,7 @@ pub struct AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
     announced_header_parent_hash: [u8; 32],
     announced_header_number: u64,
     announced_header_encoded: header::Header,
+    is_in_chain: bool,
     is_best: bool,
     source_id: SourceId,
 }
@@ -1176,41 +1179,43 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
             self.announced_header_parent_hash,
         );
 
-        self.inner.inner.blocks.set_unverified_block_header_known(
-            self.announced_header_number,
-            &self.announced_header_hash,
-            self.announced_header_parent_hash,
-        );
+        if !self.is_in_chain {
+            self.inner.inner.blocks.set_unverified_block_header_known(
+                self.announced_header_number,
+                &self.announced_header_hash,
+                self.announced_header_parent_hash,
+            );
 
-        let block_user_data = self.inner.inner.blocks.unverified_block_user_data_mut(
-            self.announced_header_number,
-            &self.announced_header_hash,
-        );
-        if block_user_data.header.is_none() {
-            block_user_data.header = Some(self.announced_header_encoded);
-        }
+            let block_user_data = self.inner.inner.blocks.unverified_block_user_data_mut(
+                self.announced_header_number,
+                &self.announced_header_hash,
+            );
+            if block_user_data.header.is_none() {
+                block_user_data.header = Some(self.announced_header_encoded);
+            }
 
-        // TODO: what if the pending block already contains a justification and it is not the
-        //       same as here? since justifications aren't immediately verified, it is possible
-        //       for a malicious peer to send us bad justifications
+            // TODO: what if the pending block already contains a justification and it is not the
+            //       same as here? since justifications aren't immediately verified, it is possible
+            //       for a malicious peer to send us bad justifications
 
-        // Block is not part of the finalized chain.
-        if self.announced_header_number == self.inner.chain.finalized_block_header().number + 1
-            && self.announced_header_parent_hash != self.inner.chain.finalized_block_hash()
-        {
-            // TODO: remove_verify_failed
-            return BlockAnnounceOutcome::NotFinalizedChain;
-        }
+            // Block is not part of the finalized chain.
+            if self.announced_header_number == self.inner.chain.finalized_block_header().number + 1
+                && self.announced_header_parent_hash != self.inner.chain.finalized_block_hash()
+            {
+                // TODO: remove_verify_failed
+                return BlockAnnounceOutcome::NotFinalizedChain;
+            }
 
-        if self.announced_header_parent_hash == self.inner.chain.finalized_block_hash()
-            || self
-                .inner
-                .chain
-                .non_finalized_block_by_hash(&self.announced_header_parent_hash)
-                .is_some()
-        {
-            // TODO: ambiguous naming
-            return BlockAnnounceOutcome::HeaderVerify;
+            if self.announced_header_parent_hash == self.inner.chain.finalized_block_hash()
+                || self
+                    .inner
+                    .chain
+                    .non_finalized_block_by_hash(&self.announced_header_parent_hash)
+                    .is_some()
+            {
+                // TODO: ambiguous naming
+                return BlockAnnounceOutcome::HeaderVerify;
+            }
         }
 
         // TODO: if pending_blocks.num_blocks() > some_max { remove uninteresting block }
