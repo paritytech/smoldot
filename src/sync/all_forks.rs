@@ -554,7 +554,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         source_id: SourceId,
         announced_scale_encoded_header: Vec<u8>,
         is_best: bool,
-    ) -> BlockAnnounceOutcome {
+    ) -> BlockAnnounceOutcome<TBl, TRq, TSrc> {
         let announced_header = match header::decode(&announced_scale_encoded_header) {
             Ok(h) => h,
             Err(error) => return BlockAnnounceOutcome::InvalidHeader(error),
@@ -612,7 +612,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             .chain
             .contains_non_finalized_block(&announced_header_hash)
         {
-            return BlockAnnounceOutcome::AlreadyInChain;
+            return BlockAnnounceOutcome::AlreadyInChain(AnnouncedBlockKnown { inner: self });
         }
 
         // At this point, we have excluded blocks that are already part of the chain or too old.
@@ -623,7 +623,9 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             .blocks
             .contains_unverified_block(announced_header.number, &announced_header_hash)
         {
+            return BlockAnnounceOutcome::Unknown(AnnouncedBlockUnknown { inner: self });
         } else {
+            return BlockAnnounceOutcome::Known(AnnouncedBlockKnown { inner: self });
         }
     }
 
@@ -1109,10 +1111,7 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
 }
 
 /// Outcome of calling [`AllForksSync::block_announce`].
-pub enum BlockAnnounceOutcome {
-    /// Header is ready to be verified.
-    HeaderVerify,
-
+pub enum BlockAnnounceOutcome<'a, TBl, TRq, TSrc> {
     /// Announced block is too old to be part of the finalized chain.
     ///
     /// It is assumed that all sources will eventually agree on the same finalized chain. Blocks
@@ -1127,11 +1126,11 @@ pub enum BlockAnnounceOutcome {
     },
     /// Announced block has already been successfully verified and is part of the non-finalized
     /// chain.
-    AlreadyInChain,
+    AlreadyInChain(AnnouncedBlockKnown<'a, TBl, TRq, TSrc>),
+    Known(AnnouncedBlockKnown<'a, TBl, TRq, TSrc>),
+    Unknown(AnnouncedBlockUnknown<'a, TBl, TRq, TSrc>),
     /// Announced block is known to not be a descendant of the finalized block.
     NotFinalizedChain,
-    /// Header cannot be verified now, and has been stored for later.
-    Disjoint,
     /// Failed to decode announce header.
     InvalidHeader(header::Error),
 }
