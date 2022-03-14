@@ -1007,16 +1007,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         finalized_block_height,
                     },
                     all_forks::BlockAnnounceOutcome::Unknown(source_update) => {
-                        source_update.insert();
+                        source_update.insert_and_update_source();
                         BlockAnnounceOutcome::Disjoint // TODO: arbitrary
                     }
                     all_forks::BlockAnnounceOutcome::AlreadyInChain(source_update)
                     | all_forks::BlockAnnounceOutcome::Known(source_update) => {
-                        source_update.update_source();
+                        source_update.update_source_and_block();
                         BlockAnnounceOutcome::Disjoint // TODO: arbitrary
-                    }
-                    all_forks::BlockAnnounceOutcome::NotFinalizedChain => {
-                        BlockAnnounceOutcome::NotFinalizedChain
                     }
                     all_forks::BlockAnnounceOutcome::InvalidHeader(error) => {
                         BlockAnnounceOutcome::InvalidHeader(error)

@@ -1123,23 +1123,32 @@ pub enum BlockAnnounceOutcome<'a, TBl, TRq, TSrc> {
     /// whose height is inferior to the height of the latest known finalized block should simply
     /// be ignored. Whether or not this old block is indeed part of the finalized block isn't
     /// verified, and it is assumed that the source is simply late.
+    ///
+    /// If the announced block was the source's best block, the state machine has been updated to
+    /// take this information into account.
     TooOld {
         /// Height of the announced block.
         announce_block_height: u64,
         /// Height of the currently finalized block.
         finalized_block_height: u64,
     },
+
     /// Announced block has already been successfully verified and is part of the non-finalized
     /// chain.
     AlreadyInChain(AnnouncedBlockKnown<'a, TBl, TRq, TSrc>),
+
+    /// Announced block is already known by the state machine but hasn't been verified yet.
     Known(AnnouncedBlockKnown<'a, TBl, TRq, TSrc>),
+
+    /// Announced block isn't in the state machine.
     Unknown(AnnouncedBlockUnknown<'a, TBl, TRq, TSrc>),
-    /// Announced block is known to not be a descendant of the finalized block.
-    NotFinalizedChain,
+
     /// Failed to decode announce header.
     InvalidHeader(header::Error),
 }
 
+/// See [`BlockAnnounceOutcome`] and [`AllForksSync::block_announce`].
+#[must_use]
 pub struct AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
     inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
     announced_header_hash: [u8; 32],
@@ -1152,7 +1161,11 @@ pub struct AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
 }
 
 impl<'a, TBl, TRq, TSrc> AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
-    pub fn update_source(self) {
+    // TODO: give access to the user data of the block
+
+    /// Updates the state machine to keep track of the fact that this source knows this block.
+    /// If the announced block is the source's best block, also updates this information.
+    pub fn update_source_and_block(self) {
         // No matter what is done below, start by updating the view the state machine maintains
         // for this source.
         if self.is_best {
@@ -1210,6 +1223,8 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
     }
 }
 
+/// See [`BlockAnnounceOutcome`] and [`AllForksSync::block_announce`].
+#[must_use]
 pub struct AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
     inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
     announced_header_hash: [u8; 32],
@@ -1221,7 +1236,11 @@ pub struct AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
 }
 
 impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
-    pub fn insert(self) {
+    /// Inserts the block in the state machine and keeps track of the fact that this source knows
+    /// this block.
+    ///
+    /// If the announced block is the source's best block, also updates this information.
+    pub fn insert_and_update_source(self) {
         // TODO: ^ add user_data: TBl parameter
         // No matter what is done below, start by updating the view the state machine maintains
         // for this source.
