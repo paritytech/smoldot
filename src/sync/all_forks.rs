@@ -560,6 +560,8 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             Err(error) => return BlockAnnounceOutcome::InvalidHeader(error),
         };
 
+        let announced_header_number = announced_header.number;
+        let announced_header_parent_hash = *announced_header.parent_hash;
         let announced_header_hash = announced_header.hash();
 
         // It is assumed that all sources will eventually agree on the same finalized chain. If
@@ -567,19 +569,19 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         // assumed that this source is simply late compared to the local node, and that the block
         // that has been received is either part of the finalized chain or belongs to a fork that
         // will get discarded by this source in the future.
-        if announced_header.number <= self.chain.finalized_block_header().number {
+        if announced_header_number <= self.chain.finalized_block_header().number {
             // Even if the block is below the finalized block, we still need to set it as the
             // best block of this source, if anything for API consistency purposes.
             if is_best {
                 self.inner.blocks.add_known_block_to_source_and_set_best(
                     source_id,
-                    announced_header.number,
+                    announced_header_number,
                     announced_header_hash,
                 );
             }
 
             return BlockAnnounceOutcome::TooOld {
-                announce_block_height: announced_header.number,
+                announce_block_height: announced_header_number,
                 finalized_block_height: self.chain.finalized_block_header().number,
             };
         }
@@ -589,13 +591,13 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         if is_best {
             self.inner.blocks.add_known_block_to_source_and_set_best(
                 source_id,
-                announced_header.number,
+                announced_header_number,
                 announced_header_hash,
             );
         } else {
             self.inner.blocks.add_known_block_to_source(
                 source_id,
-                announced_header.number,
+                announced_header_number,
                 announced_header_hash,
             );
         }
@@ -603,8 +605,8 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         // Source also knows the parent of the announced block.
         self.inner.blocks.add_known_block_to_source(
             source_id,
-            announced_header.number - 1,
-            *announced_header.parent_hash,
+            announced_header_number - 1,
+            announced_header_parent_hash,
         );
 
         // If the block is already part of the local tree of blocks, nothing more to do.
@@ -612,7 +614,13 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             .chain
             .contains_non_finalized_block(&announced_header_hash)
         {
-            return BlockAnnounceOutcome::AlreadyInChain(AnnouncedBlockKnown { inner: self });
+            return BlockAnnounceOutcome::AlreadyInChain(AnnouncedBlockKnown {
+                inner: self,
+                announced_header_hash,
+                announced_header_number,
+                announced_header_parent_hash,
+                announced_header_encoded: announced_header.into(),
+            });
         }
 
         // At this point, we have excluded blocks that are already part of the chain or too old.
@@ -621,11 +629,23 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         if !self
             .inner
             .blocks
-            .contains_unverified_block(announced_header.number, &announced_header_hash)
+            .contains_unverified_block(announced_header_number, &announced_header_hash)
         {
-            return BlockAnnounceOutcome::Unknown(AnnouncedBlockUnknown { inner: self });
+            return BlockAnnounceOutcome::Unknown(AnnouncedBlockUnknown {
+                inner: self,
+                announced_header_hash,
+                announced_header_number,
+                announced_header_parent_hash,
+                announced_header_encoded: announced_header.into(),
+            });
         } else {
-            return BlockAnnounceOutcome::Known(AnnouncedBlockKnown { inner: self });
+            return BlockAnnounceOutcome::Known(AnnouncedBlockKnown {
+                inner: self,
+                announced_header_hash,
+                announced_header_number,
+                announced_header_parent_hash,
+                announced_header_encoded: announced_header.into(),
+            });
         }
     }
 
@@ -1137,22 +1157,26 @@ pub enum BlockAnnounceOutcome<'a, TBl, TRq, TSrc> {
 
 pub struct AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
     inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
+    announced_header_hash: [u8; 32],
+    announced_header_parent_hash: [u8; 32],
+    announced_header_number: u64,
+    announced_header_encoded: header::Header,
 }
 
 impl<'a, TBl, TRq, TSrc> AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
     pub fn update_source(self) {
-        self.inner.blocks.set_unverified_block_header_known(
-            announced_header.number,
-            &announced_header_hash,
-            *announced_header.parent_hash,
+        self.inner.inner.blocks.set_unverified_block_header_known(
+            self.announced_header_number,
+            &self.announced_header_hash,
+            self.announced_header_parent_hash,
         );
 
-        let block_user_data = self
-            .inner
-            .blocks
-            .unverified_block_user_data_mut(announced_header.number, &announced_header_hash);
+        let block_user_data = self.inner.inner.blocks.unverified_block_user_data_mut(
+            self.announced_header_number,
+            &self.announced_header_hash,
+        );
         if block_user_data.header.is_none() {
-            block_user_data.header = Some(announced_header.clone().into()); // TODO: copying bytes :-/
+            block_user_data.header = Some(self.announced_header_encoded);
         }
 
         // TODO: what if the pending block already contains a justification and it is not the
@@ -1160,17 +1184,18 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
         //       for a malicious peer to send us bad justifications
 
         // Block is not part of the finalized chain.
-        if announced_header.number == self.chain.finalized_block_header().number + 1
-            && *announced_header.parent_hash != self.chain.finalized_block_hash()
+        if self.announced_header_number == self.inner.chain.finalized_block_header().number + 1
+            && self.announced_header_parent_hash != self.inner.chain.finalized_block_hash()
         {
             // TODO: remove_verify_failed
             return BlockAnnounceOutcome::NotFinalizedChain;
         }
 
-        if *announced_header.parent_hash == self.chain.finalized_block_hash()
+        if self.announced_header_parent_hash == self.inner.chain.finalized_block_hash()
             || self
+                .inner
                 .chain
-                .non_finalized_block_by_hash(announced_header.parent_hash)
+                .non_finalized_block_by_hash(&self.announced_header_parent_hash)
                 .is_some()
         {
             // TODO: ambiguous naming
@@ -1185,40 +1210,62 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
 
 pub struct AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
     inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
+    announced_header_hash: [u8; 32],
+    announced_header_parent_hash: [u8; 32],
+    announced_header_number: u64,
+    announced_header_encoded: header::Header,
 }
 
 impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
     pub fn insert(self, user_data: TBl) {
-        self.inner.blocks.insert_unverified_block(
-            announced_header.number,
-            announced_header_hash,
+        self.inner.inner.blocks.insert_unverified_block(
+            self.announced_header_number,
+            self.announced_header_hash,
             pending_blocks::UnverifiedBlockState::HeaderKnown {
-                parent_hash: *announced_header.parent_hash,
+                parent_hash: self.announced_header_parent_hash,
             },
             PendingBlock {
-                header: Some(announced_header.clone().into()),
+                header: Some(self.announced_header_encoded),
                 justifications: Vec::new(),
             },
         );
 
-        if self.inner.banned_blocks.contains(&announced_header_hash) {
-            self.inner
-                .blocks
-                .mark_unverified_block_as_bad(announced_header.number, &announced_header_hash);
+        if self
+            .inner
+            .inner
+            .banned_blocks
+            .contains(&self.announced_header_hash)
+        {
+            self.inner.inner.blocks.mark_unverified_block_as_bad(
+                self.announced_header_number,
+                &self.announced_header_hash,
+            );
         }
 
         // If there are too many blocks stored in the blocks list, remove unnecessary ones.
         // Not doing this could lead to an explosion of the size of the collections.
         // TODO: removing blocks should only be done explicitly through an API endpoint, because we want to store user datas in unverified blocks too; see https://github.com/paritytech/smoldot/issues/1572
-        while self.inner.blocks.num_unverified_blocks() >= 100 {
+        while self.inner.inner.blocks.num_unverified_blocks() >= 100 {
             // TODO: arbitrary constant
-            let (height, hash) = match self.inner.blocks.unnecessary_unverified_blocks().next() {
+            let (height, hash) = match self
+                .inner
+                .inner
+                .blocks
+                .unnecessary_unverified_blocks()
+                .next()
+            {
                 Some((n, h)) => (n, *h),
                 None => break,
             };
 
-            self.inner.blocks.remove_sources_known_block(height, &hash);
-            self.inner.blocks.remove_unverified_block(height, &hash);
+            self.inner
+                .inner
+                .blocks
+                .remove_sources_known_block(height, &hash);
+            self.inner
+                .inner
+                .blocks
+                .remove_unverified_block(height, &hash);
         }
 
         // TODO: what if the pending block already contains a justification and it is not the
@@ -1226,17 +1273,18 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
         //       for a malicious peer to send us bad justifications
 
         // Block is not part of the finalized chain.
-        if announced_header.number == self.chain.finalized_block_header().number + 1
-            && *announced_header.parent_hash != self.chain.finalized_block_hash()
+        if self.announced_header_number == self.inner.chain.finalized_block_header().number + 1
+            && self.announced_header_parent_hash != self.inner.chain.finalized_block_hash()
         {
             // TODO: remove_verify_failed
             return BlockAnnounceOutcome::NotFinalizedChain;
         }
 
-        if *announced_header.parent_hash == self.chain.finalized_block_hash()
+        if self.announced_header_parent_hash == self.inner.chain.finalized_block_hash()
             || self
+                .inner
                 .chain
-                .non_finalized_block_by_hash(announced_header.parent_hash)
+                .non_finalized_block_by_hash(&self.announced_header_parent_hash)
                 .is_some()
         {
             // TODO: ambiguous naming
