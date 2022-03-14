@@ -586,29 +586,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             };
         }
 
-        // No matter what is done below, start by updating the view the state machine maintains
-        // for this source.
-        if is_best {
-            self.inner.blocks.add_known_block_to_source_and_set_best(
-                source_id,
-                announced_header_number,
-                announced_header_hash,
-            );
-        } else {
-            self.inner.blocks.add_known_block_to_source(
-                source_id,
-                announced_header_number,
-                announced_header_hash,
-            );
-        }
-
-        // Source also knows the parent of the announced block.
-        self.inner.blocks.add_known_block_to_source(
-            source_id,
-            announced_header_number - 1,
-            announced_header_parent_hash,
-        );
-
         // If the block is already part of the local tree of blocks, nothing more to do.
         if self
             .chain
@@ -620,6 +597,8 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 announced_header_number,
                 announced_header_parent_hash,
                 announced_header_encoded: announced_header.into(),
+                source_id,
+                is_best,
             });
         }
 
@@ -637,6 +616,8 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 announced_header_number,
                 announced_header_parent_hash,
                 announced_header_encoded: announced_header.into(),
+                source_id,
+                is_best,
             });
         } else {
             return BlockAnnounceOutcome::Known(AnnouncedBlockKnown {
@@ -645,6 +626,8 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 announced_header_number,
                 announced_header_parent_hash,
                 announced_header_encoded: announced_header.into(),
+                source_id,
+                is_best,
             });
         }
     }
@@ -1161,10 +1144,38 @@ pub struct AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
     announced_header_parent_hash: [u8; 32],
     announced_header_number: u64,
     announced_header_encoded: header::Header,
+    is_best: bool,
+    source_id: SourceId,
 }
 
 impl<'a, TBl, TRq, TSrc> AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
     pub fn update_source(self) {
+        // No matter what is done below, start by updating the view the state machine maintains
+        // for this source.
+        if self.is_best {
+            self.inner
+                .inner
+                .blocks
+                .add_known_block_to_source_and_set_best(
+                    self.source_id,
+                    self.announced_header_number,
+                    self.announced_header_hash,
+                );
+        } else {
+            self.inner.inner.blocks.add_known_block_to_source(
+                self.source_id,
+                self.announced_header_number,
+                self.announced_header_hash,
+            );
+        }
+
+        // Source also knows the parent of the announced block.
+        self.inner.inner.blocks.add_known_block_to_source(
+            self.source_id,
+            self.announced_header_number - 1,
+            self.announced_header_parent_hash,
+        );
+
         self.inner.inner.blocks.set_unverified_block_header_known(
             self.announced_header_number,
             &self.announced_header_hash,
@@ -1214,10 +1225,38 @@ pub struct AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
     announced_header_parent_hash: [u8; 32],
     announced_header_number: u64,
     announced_header_encoded: header::Header,
+    is_best: bool,
+    source_id: SourceId,
 }
 
 impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
     pub fn insert(self, user_data: TBl) {
+        // No matter what is done below, start by updating the view the state machine maintains
+        // for this source.
+        if self.is_best {
+            self.inner
+                .inner
+                .blocks
+                .add_known_block_to_source_and_set_best(
+                    self.source_id,
+                    self.announced_header_number,
+                    self.announced_header_hash,
+                );
+        } else {
+            self.inner.inner.blocks.add_known_block_to_source(
+                self.source_id,
+                self.announced_header_number,
+                self.announced_header_hash,
+            );
+        }
+
+        // Source also knows the parent of the announced block.
+        self.inner.inner.blocks.add_known_block_to_source(
+            self.source_id,
+            self.announced_header_number - 1,
+            self.announced_header_parent_hash,
+        );
+
         self.inner.inner.blocks.insert_unverified_block(
             self.announced_header_number,
             self.announced_header_hash,
