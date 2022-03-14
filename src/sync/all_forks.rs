@@ -1285,8 +1285,9 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
             .inner
             .inner
             .banned_blocks
-            .contains(&self.announced_header_hash) || self.announced_header_number == self.inner.chain.finalized_block_header().number + 1
-            && self.announced_header_parent_hash != self.inner.chain.finalized_block_hash()
+            .contains(&self.announced_header_hash)
+            || self.announced_header_number == self.inner.chain.finalized_block_header().number + 1
+                && self.announced_header_parent_hash != self.inner.chain.finalized_block_hash()
         {
             self.inner.inner.blocks.mark_unverified_block_as_bad(
                 self.announced_header_number,
