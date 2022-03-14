@@ -623,104 +623,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             .blocks
             .contains_unverified_block(announced_header.number, &announced_header_hash)
         {
-            self.inner.blocks.insert_unverified_block(
-                announced_header.number,
-                announced_header_hash,
-                pending_blocks::UnverifiedBlockState::HeaderKnown {
-                    parent_hash: *announced_header.parent_hash,
-                },
-                PendingBlock {
-                    header: Some(announced_header.clone().into()),
-                    justifications: Vec::new(),
-                },
-            );
-
-            if self.inner.banned_blocks.contains(&announced_header_hash) {
-                self.inner
-                    .blocks
-                    .mark_unverified_block_as_bad(announced_header.number, &announced_header_hash);
-            }
-
-            // If there are too many blocks stored in the blocks list, remove unnecessary ones.
-            // Not doing this could lead to an explosion of the size of the collections.
-            // TODO: removing blocks should only be done explicitly through an API endpoint, because we want to store user datas in unverified blocks too; see https://github.com/paritytech/smoldot/issues/1572
-            while self.inner.blocks.num_unverified_blocks() >= 100 {
-                // TODO: arbitrary constant
-                let (height, hash) = match self.inner.blocks.unnecessary_unverified_blocks().next()
-                {
-                    Some((n, h)) => (n, *h),
-                    None => break,
-                };
-
-                self.inner.blocks.remove_sources_known_block(height, &hash);
-                self.inner.blocks.remove_unverified_block(height, &hash);
-            }
-
-            // TODO: what if the pending block already contains a justification and it is not the
-            //       same as here? since justifications aren't immediately verified, it is possible
-            //       for a malicious peer to send us bad justifications
-
-            // Block is not part of the finalized chain.
-            if announced_header.number == self.chain.finalized_block_header().number + 1
-                && *announced_header.parent_hash != self.chain.finalized_block_hash()
-            {
-                // TODO: remove_verify_failed
-                return BlockAnnounceOutcome::NotFinalizedChain;
-            }
-
-            if *announced_header.parent_hash == self.chain.finalized_block_hash()
-                || self
-                    .chain
-                    .non_finalized_block_by_hash(announced_header.parent_hash)
-                    .is_some()
-            {
-                // TODO: ambiguous naming
-                return BlockAnnounceOutcome::HeaderVerify;
-            }
-
-            // TODO: if pending_blocks.num_blocks() > some_max { remove uninteresting block }
-
-            BlockAnnounceOutcome::Disjoint
         } else {
-            self.inner.blocks.set_unverified_block_header_known(
-                announced_header.number,
-                &announced_header_hash,
-                *announced_header.parent_hash,
-            );
-
-            let block_user_data = self
-                .inner
-                .blocks
-                .unverified_block_user_data_mut(announced_header.number, &announced_header_hash);
-            if block_user_data.header.is_none() {
-                block_user_data.header = Some(announced_header.clone().into()); // TODO: copying bytes :-/
-            }
-
-            // TODO: what if the pending block already contains a justification and it is not the
-            //       same as here? since justifications aren't immediately verified, it is possible
-            //       for a malicious peer to send us bad justifications
-
-            // Block is not part of the finalized chain.
-            if announced_header.number == self.chain.finalized_block_header().number + 1
-                && *announced_header.parent_hash != self.chain.finalized_block_hash()
-            {
-                // TODO: remove_verify_failed
-                return BlockAnnounceOutcome::NotFinalizedChain;
-            }
-
-            if *announced_header.parent_hash == self.chain.finalized_block_hash()
-                || self
-                    .chain
-                    .non_finalized_block_by_hash(announced_header.parent_hash)
-                    .is_some()
-            {
-                // TODO: ambiguous naming
-                return BlockAnnounceOutcome::HeaderVerify;
-            }
-
-            // TODO: if pending_blocks.num_blocks() > some_max { remove uninteresting block }
-
-            BlockAnnounceOutcome::Disjoint
         }
     }
 
@@ -1231,6 +1134,120 @@ pub enum BlockAnnounceOutcome {
     Disjoint,
     /// Failed to decode announce header.
     InvalidHeader(header::Error),
+}
+
+pub struct AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
+    inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
+}
+
+impl<'a, TBl, TRq, TSrc> AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
+    pub fn update_source(self) {
+        self.inner.blocks.set_unverified_block_header_known(
+            announced_header.number,
+            &announced_header_hash,
+            *announced_header.parent_hash,
+        );
+
+        let block_user_data = self
+            .inner
+            .blocks
+            .unverified_block_user_data_mut(announced_header.number, &announced_header_hash);
+        if block_user_data.header.is_none() {
+            block_user_data.header = Some(announced_header.clone().into()); // TODO: copying bytes :-/
+        }
+
+        // TODO: what if the pending block already contains a justification and it is not the
+        //       same as here? since justifications aren't immediately verified, it is possible
+        //       for a malicious peer to send us bad justifications
+
+        // Block is not part of the finalized chain.
+        if announced_header.number == self.chain.finalized_block_header().number + 1
+            && *announced_header.parent_hash != self.chain.finalized_block_hash()
+        {
+            // TODO: remove_verify_failed
+            return BlockAnnounceOutcome::NotFinalizedChain;
+        }
+
+        if *announced_header.parent_hash == self.chain.finalized_block_hash()
+            || self
+                .chain
+                .non_finalized_block_by_hash(announced_header.parent_hash)
+                .is_some()
+        {
+            // TODO: ambiguous naming
+            return BlockAnnounceOutcome::HeaderVerify;
+        }
+
+        // TODO: if pending_blocks.num_blocks() > some_max { remove uninteresting block }
+
+        BlockAnnounceOutcome::Disjoint
+    }
+}
+
+pub struct AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
+    inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
+}
+
+impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
+    pub fn insert(self, user_data: TBl) {
+        self.inner.blocks.insert_unverified_block(
+            announced_header.number,
+            announced_header_hash,
+            pending_blocks::UnverifiedBlockState::HeaderKnown {
+                parent_hash: *announced_header.parent_hash,
+            },
+            PendingBlock {
+                header: Some(announced_header.clone().into()),
+                justifications: Vec::new(),
+            },
+        );
+
+        if self.inner.banned_blocks.contains(&announced_header_hash) {
+            self.inner
+                .blocks
+                .mark_unverified_block_as_bad(announced_header.number, &announced_header_hash);
+        }
+
+        // If there are too many blocks stored in the blocks list, remove unnecessary ones.
+        // Not doing this could lead to an explosion of the size of the collections.
+        // TODO: removing blocks should only be done explicitly through an API endpoint, because we want to store user datas in unverified blocks too; see https://github.com/paritytech/smoldot/issues/1572
+        while self.inner.blocks.num_unverified_blocks() >= 100 {
+            // TODO: arbitrary constant
+            let (height, hash) = match self.inner.blocks.unnecessary_unverified_blocks().next() {
+                Some((n, h)) => (n, *h),
+                None => break,
+            };
+
+            self.inner.blocks.remove_sources_known_block(height, &hash);
+            self.inner.blocks.remove_unverified_block(height, &hash);
+        }
+
+        // TODO: what if the pending block already contains a justification and it is not the
+        //       same as here? since justifications aren't immediately verified, it is possible
+        //       for a malicious peer to send us bad justifications
+
+        // Block is not part of the finalized chain.
+        if announced_header.number == self.chain.finalized_block_header().number + 1
+            && *announced_header.parent_hash != self.chain.finalized_block_hash()
+        {
+            // TODO: remove_verify_failed
+            return BlockAnnounceOutcome::NotFinalizedChain;
+        }
+
+        if *announced_header.parent_hash == self.chain.finalized_block_hash()
+            || self
+                .chain
+                .non_finalized_block_by_hash(announced_header.parent_hash)
+                .is_some()
+        {
+            // TODO: ambiguous naming
+            return BlockAnnounceOutcome::HeaderVerify;
+        }
+
+        // TODO: if pending_blocks.num_blocks() > some_max { remove uninteresting block }
+
+        BlockAnnounceOutcome::Disjoint
+    }
 }
 
 /// Error when adding a block using [`FinishAncestrySearch::add_block`].
