@@ -607,7 +607,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             *announced_header.parent_hash,
         );
 
-
         // If the block is already part of the local tree of blocks, nothing more to do.
         if self
             .chain
@@ -627,14 +626,8 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             self.inner.blocks.insert_unverified_block(
                 announced_header.number,
                 announced_header_hash,
-                if false {
-                    pending_blocks::UnverifiedBlockState::HeaderBodyKnown {
-                        parent_hash: *announced_header.parent_hash,
-                    }
-                } else {
-                    pending_blocks::UnverifiedBlockState::HeaderKnown {
-                        parent_hash: *announced_header.parent_hash,
-                    }
+                pending_blocks::UnverifiedBlockState::HeaderKnown {
+                    parent_hash: *announced_header.parent_hash,
                 },
                 PendingBlock {
                     header: Some(announced_header.clone().into()),
@@ -663,19 +656,11 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 self.inner.blocks.remove_unverified_block(height, &hash);
             }
         } else {
-            if false {
-                self.inner.blocks.set_unverified_block_header_body_known(
-                    announced_header.number,
-                    &announced_header_hash,
-                    *announced_header.parent_hash,
-                );
-            } else {
-                self.inner.blocks.set_unverified_block_header_known(
-                    announced_header.number,
-                    &announced_header_hash,
-                    *announced_header.parent_hash,
-                );
-            }
+            self.inner.blocks.set_unverified_block_header_known(
+                announced_header.number,
+                &announced_header_hash,
+                *announced_header.parent_hash,
+            );
 
             let block_user_data = self
                 .inner
