@@ -655,6 +655,32 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 self.inner.blocks.remove_sources_known_block(height, &hash);
                 self.inner.blocks.remove_unverified_block(height, &hash);
             }
+
+            // TODO: what if the pending block already contains a justification and it is not the
+            //       same as here? since justifications aren't immediately verified, it is possible
+            //       for a malicious peer to send us bad justifications
+
+            // Block is not part of the finalized chain.
+            if announced_header.number == self.chain.finalized_block_header().number + 1
+                && *announced_header.parent_hash != self.chain.finalized_block_hash()
+            {
+                // TODO: remove_verify_failed
+                return BlockAnnounceOutcome::NotFinalizedChain;
+            }
+
+            if *announced_header.parent_hash == self.chain.finalized_block_hash()
+                || self
+                    .chain
+                    .non_finalized_block_by_hash(announced_header.parent_hash)
+                    .is_some()
+            {
+                // TODO: ambiguous naming
+                return BlockAnnounceOutcome::HeaderVerify;
+            }
+
+            // TODO: if pending_blocks.num_blocks() > some_max { remove uninteresting block }
+
+            BlockAnnounceOutcome::Disjoint
         } else {
             self.inner.blocks.set_unverified_block_header_known(
                 announced_header.number,
@@ -669,33 +695,33 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             if block_user_data.header.is_none() {
                 block_user_data.header = Some(announced_header.clone().into()); // TODO: copying bytes :-/
             }
+
+            // TODO: what if the pending block already contains a justification and it is not the
+            //       same as here? since justifications aren't immediately verified, it is possible
+            //       for a malicious peer to send us bad justifications
+
+            // Block is not part of the finalized chain.
+            if announced_header.number == self.chain.finalized_block_header().number + 1
+                && *announced_header.parent_hash != self.chain.finalized_block_hash()
+            {
+                // TODO: remove_verify_failed
+                return BlockAnnounceOutcome::NotFinalizedChain;
+            }
+
+            if *announced_header.parent_hash == self.chain.finalized_block_hash()
+                || self
+                    .chain
+                    .non_finalized_block_by_hash(announced_header.parent_hash)
+                    .is_some()
+            {
+                // TODO: ambiguous naming
+                return BlockAnnounceOutcome::HeaderVerify;
+            }
+
+            // TODO: if pending_blocks.num_blocks() > some_max { remove uninteresting block }
+
+            BlockAnnounceOutcome::Disjoint
         }
-
-        // TODO: what if the pending block already contains a justification and it is not the
-        //       same as here? since justifications aren't immediately verified, it is possible
-        //       for a malicious peer to send us bad justifications
-
-        // Block is not part of the finalized chain.
-        if announced_header.number == self.chain.finalized_block_header().number + 1
-            && *announced_header.parent_hash != self.chain.finalized_block_hash()
-        {
-            // TODO: remove_verify_failed
-            return BlockAnnounceOutcome::NotFinalizedChain;
-        }
-
-        if *announced_header.parent_hash == self.chain.finalized_block_hash()
-            || self
-                .chain
-                .non_finalized_block_by_hash(announced_header.parent_hash)
-                .is_some()
-        {
-            // TODO: ambiguous naming
-            return BlockAnnounceOutcome::HeaderVerify;
-        }
-
-        // TODO: if pending_blocks.num_blocks() > some_max { remove uninteresting block }
-
-        BlockAnnounceOutcome::Disjoint
     }
 
     /// Update the state machine with a Grandpa commit message received from the network.
