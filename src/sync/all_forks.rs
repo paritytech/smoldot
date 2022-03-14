@@ -1194,11 +1194,15 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
                 block_user_data.header = Some(self.announced_header_encoded);
             }
 
-            // Block is not part of the finalized chain.
+            // Mark block as bad if it is not part of the finalized chain.
+            // This might not have been known before, as the header might not have been known.
             if self.announced_header_number == self.inner.chain.finalized_block_header().number + 1
                 && self.announced_header_parent_hash != self.inner.chain.finalized_block_hash()
             {
-                // TODO: remove_verify_failed
+                self.inner.inner.blocks.mark_unverified_block_as_bad(
+                    self.announced_header_number,
+                    &self.announced_header_hash,
+                );
             }
         }
 
