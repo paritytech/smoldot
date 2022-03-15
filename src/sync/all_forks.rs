@@ -294,11 +294,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         best_block_number: u64,
         best_block_hash: [u8; 32],
     ) -> AddSource<TBl, TRq, TSrc> {
-        let source_id = self
-            .inner
-            .blocks
-            .add_source(user_data, best_block_number, best_block_hash);
-
         let best_block_too_old = best_block_number <= self.chain.finalized_block_header().number;
         let best_block_already_verified = self
             .chain
@@ -316,20 +311,29 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         ) {
             (false, false, false) => AddSource::UnknownBestBlock(AddSourceUnknown {
                 inner: self,
+                new_source_user_data: user_data,
                 best_block_hash,
                 best_block_number,
             }),
             (false, true, false) => AddSource::BestBlockAlreadyVerified(AddSourceKnown {
                 inner: self,
+                new_source_user_data: user_data,
                 best_block_hash,
                 best_block_number,
             }),
             (false, false, true) => AddSource::BestBlockPendingVerification(AddSourceKnown {
                 inner: self,
+                new_source_user_data: user_data,
                 best_block_hash,
                 best_block_number,
             }),
-            (true, false, false) => AddSource::OldBestBlock { source_id: todo!() },
+            (true, false, false) => {
+                let source_id =
+                    self.inner
+                        .blocks
+                        .add_source(user_data, best_block_number, best_block_hash);
+                AddSource::OldBestBlock { source_id }
+            }
             (false, true, true) => unreachable!(),
             (true, _, _) => unreachable!(),
         }
@@ -1378,22 +1382,38 @@ pub enum AddSource<'a, TBl, TRq, TSrc> {
 #[must_use]
 pub struct AddSourceKnown<'a, TBl, TRq, TSrc> {
     inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
+    new_source_user_data: TSrc,
     best_block_number: u64,
     best_block_hash: [u8; 32],
 }
 
-impl<'a, TBl, TRq, TSrc> AddSourceKnown<'a, TBl, TRq, TSrc> {}
+impl<'a, TBl, TRq, TSrc> AddSourceKnown<'a, TBl, TRq, TSrc> {
+    pub fn add_source(self) -> SourceId {
+        self.inner.inner.blocks.add_source(
+            self.new_source_user_data,
+            self.best_block_number,
+            self.best_block_hash,
+        )
+    }
+}
 
 /// See [`AddSource`] and [`AllForksSync::add_source`].
 #[must_use]
 pub struct AddSourceUnknown<'a, TBl, TRq, TSrc> {
     inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
+    new_source_user_data: TSrc,
     best_block_number: u64,
     best_block_hash: [u8; 32],
 }
 
 impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
     pub fn add_source_and_insert_block(self) -> SourceId {
+        let source_id = self.inner.inner.blocks.add_source(
+            self.new_source_user_data,
+            self.best_block_number,
+            self.best_block_hash,
+        );
+
         self.inner.inner.blocks.insert_unverified_block(
             self.best_block_number,
             self.best_block_hash,
@@ -1415,6 +1435,8 @@ impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
                 .blocks
                 .mark_unverified_block_as_bad(self.best_block_number, &self.best_block_hash);
         }
+
+        source_id
     }
 }
 
