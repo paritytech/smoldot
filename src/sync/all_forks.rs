@@ -293,7 +293,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         user_data: TSrc,
         best_block_number: u64,
         best_block_hash: [u8; 32],
-    ) -> SourceId {
+    ) -> AddSource<TBl, TRq, TSrc> {
         let source_id = self
             .inner
             .blocks
@@ -309,25 +309,22 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             .blocks
             .contains_unverified_block(best_block_number, &best_block_hash);
 
-        if !best_block_too_old && !best_block_already_verified && !best_block_in_disjoints_list {
-            self.inner.blocks.insert_unverified_block(
-                best_block_number,
-                best_block_hash,
-                pending_blocks::UnverifiedBlockState::HeightHashKnown,
-                PendingBlock {
-                    header: None,
-                    justifications: Vec::new(),
-                },
-            );
-
-            if self.inner.banned_blocks.contains(&best_block_hash) {
-                self.inner
-                    .blocks
-                    .mark_unverified_block_as_bad(best_block_number, &best_block_hash);
+        match (
+            best_block_too_old,
+            best_block_already_verified,
+            best_block_in_disjoints_list,
+        ) {
+            (false, false, false) => AddSource::UnknownBestBlock(AddSourceUnknown { inner: self }),
+            (false, true, false) => {
+                AddSource::BestBlockAlreadyVerified(AddSourceKnown { inner: self })
             }
+            (false, false, true) => {
+                AddSource::BestBlockPendingVerification(AddSourceKnown { inner: self })
+            }
+            (true, false, false) => AddSource::OldBestBlock { source_id: todo!() },
+            (false, true, true) => unreachable!(),
+            (true, _, _) => unreachable!(),
         }
-
-        source_id
     }
 
     /// Removes the source from the [`AllForksSync`].
@@ -1375,8 +1372,7 @@ pub struct AddSourceKnown<'a, TBl, TRq, TSrc> {
     inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
 }
 
-impl<'a, TBl, TRq, TSrc> AddSourceKnown<'a, TBl, TRq, TSrc> {
-}
+impl<'a, TBl, TRq, TSrc> AddSourceKnown<'a, TBl, TRq, TSrc> {}
 
 /// See [`AddSource`] and [`AllForksSync::add_source`].
 #[must_use]
@@ -1385,6 +1381,23 @@ pub struct AddSourceUnknown<'a, TBl, TRq, TSrc> {
 }
 
 impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
+    pub fn add_source_and_insert_block(self) -> SourceId {
+        self.inner.blocks.insert_unverified_block(
+            best_block_number,
+            best_block_hash,
+            pending_blocks::UnverifiedBlockState::HeightHashKnown,
+            PendingBlock {
+                header: None,
+                justifications: Vec::new(),
+            },
+        );
+
+        if self.inner.banned_blocks.contains(&best_block_hash) {
+            self.inner
+                .blocks
+                .mark_unverified_block_as_bad(best_block_number, &best_block_hash);
+        }
+    }
 }
 
 /// Header verification to be performed.
