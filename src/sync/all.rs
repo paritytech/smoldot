@@ -999,9 +999,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         match (&mut self.inner, source_id) {
             (AllSyncInner::AllForks(sync), &SourceMapping::AllForks(source_id)) => {
                 match sync.block_announce(source_id, announced_scale_encoded_header, is_best) {
-                    all_forks::BlockAnnounceOutcome::HeaderVerify => {
-                        BlockAnnounceOutcome::HeaderVerify
-                    }
                     all_forks::BlockAnnounceOutcome::TooOld {
                         announce_block_height,
                         finalized_block_height,
@@ -1009,13 +1006,15 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         announce_block_height,
                         finalized_block_height,
                     },
-                    all_forks::BlockAnnounceOutcome::AlreadyInChain => {
-                        BlockAnnounceOutcome::AlreadyInChain
+                    all_forks::BlockAnnounceOutcome::Unknown(source_update) => {
+                        source_update.insert_and_update_source();
+                        BlockAnnounceOutcome::Disjoint // TODO: arbitrary
                     }
-                    all_forks::BlockAnnounceOutcome::NotFinalizedChain => {
-                        BlockAnnounceOutcome::NotFinalizedChain
+                    all_forks::BlockAnnounceOutcome::AlreadyInChain(source_update)
+                    | all_forks::BlockAnnounceOutcome::Known(source_update) => {
+                        source_update.update_source_and_block();
+                        BlockAnnounceOutcome::Disjoint // TODO: arbitrary
                     }
-                    all_forks::BlockAnnounceOutcome::Disjoint => BlockAnnounceOutcome::Disjoint,
                     all_forks::BlockAnnounceOutcome::InvalidHeader(error) => {
                         BlockAnnounceOutcome::InvalidHeader(error)
                     }
@@ -1105,33 +1104,82 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         match (&mut self.inner, request) {
             (_, RequestMapping::Inline(_, _, user_data)) => (user_data, ResponseOutcome::Outdated),
             (AllSyncInner::GrandpaWarpSync { .. }, _) => panic!(), // Grandpa warp sync never starts block requests.
-            (AllSyncInner::AllForks(sync), RequestMapping::AllForks(inner_request_id)) => {
-                let (request_user_data, outcome) = sync.finish_ancestry_search(
-                    inner_request_id,
-                    blocks.map(|iter| {
-                        iter.map(|block| all_forks::RequestSuccessBlock {
-                            scale_encoded_header: block.scale_encoded_header,
-                            scale_encoded_justifications: block
-                                .scale_encoded_justifications
-                                .into_iter(),
-                        })
-                    }),
-                );
-
-                let outcome = match outcome {
-                    all_forks::AncestrySearchResponseOutcome::Verify => ResponseOutcome::Queued,
-                    all_forks::AncestrySearchResponseOutcome::NotFinalizedChain {
-                        discarded_unverified_block_headers,
-                    } => ResponseOutcome::NotFinalizedChain {
-                        discarded_unverified_block_headers,
-                    },
-                    all_forks::AncestrySearchResponseOutcome::Inconclusive => {
-                        ResponseOutcome::Queued
-                    }
-                    all_forks::AncestrySearchResponseOutcome::AllAlreadyInChain => {
-                        ResponseOutcome::AllAlreadyInChain
-                    }
+            (
+                sync_container @ AllSyncInner::AllForks(_),
+                RequestMapping::AllForks(inner_request_id),
+            ) => {
+                // We need to extract the `AllForksSync` object in order to inject the
+                // response.
+                let sync = match mem::replace(sync_container, AllSyncInner::Poisoned) {
+                    AllSyncInner::AllForks(sync) => sync,
+                    _ => unreachable!(),
                 };
+
+                let (sync, request_user_data, outcome) = if let Ok(blocks) = blocks {
+                    let (request_user_data, mut blocks_append) =
+                        sync.finish_ancestry_search(inner_request_id);
+                    let mut blocks_iter = blocks.into_iter().enumerate();
+
+                    loop {
+                        let (block_index, block) = match blocks_iter.next() {
+                            Some(v) => v,
+                            None => {
+                                break (
+                                    blocks_append.finish(),
+                                    request_user_data,
+                                    ResponseOutcome::Queued,
+                                );
+                            }
+                        };
+
+                        // TODO: many of the errors don't properly translate here, needs some refactoring
+                        match blocks_append.add_block(
+                            &block.scale_encoded_header,
+                            block.scale_encoded_justifications.into_iter(),
+                        ) {
+                            Ok(all_forks::AddBlock::UnknownBlock(ba)) => {
+                                blocks_append = ba.insert(block.user_data)
+                            }
+                            Ok(all_forks::AddBlock::AlreadyPending(ba)) => {
+                                blocks_append = ba.replace(block.user_data)
+                            }
+                            Ok(all_forks::AddBlock::AlreadyInChain(ba)) if block_index == 0 => {
+                                break (
+                                    ba.cancel(),
+                                    request_user_data,
+                                    ResponseOutcome::AllAlreadyInChain,
+                                )
+                            }
+                            Ok(all_forks::AddBlock::AlreadyInChain(ba)) => {
+                                break (ba.cancel(), request_user_data, ResponseOutcome::Queued)
+                            }
+                            Err((
+                                all_forks::AncestrySearchResponseError::NotFinalizedChain {
+                                    discarded_unverified_block_headers,
+                                },
+                                sync,
+                            )) => {
+                                break (
+                                    sync,
+                                    request_user_data,
+                                    ResponseOutcome::NotFinalizedChain {
+                                        discarded_unverified_block_headers,
+                                    },
+                                )
+                            }
+                            Err((_, sync)) => {
+                                break (sync, request_user_data, ResponseOutcome::Queued);
+                            }
+                        }
+                    }
+                } else {
+                    let (ud, sync) = sync.ancestry_search_failed(inner_request_id);
+                    // TODO: `Queued`?! doesn't seem right
+                    (sync, ud, ResponseOutcome::Queued)
+                };
+
+                // Don't forget to re-insert the `AllForksSync`.
+                *sync_container = AllSyncInner::AllForks(sync);
 
                 debug_assert_eq!(request_user_data.outer_request_id, request_id);
                 (request_user_data.user_data.unwrap(), outcome)
@@ -2218,6 +2266,7 @@ impl<TRq> Shared<TRq> {
             max_disjoint_headers: self.max_disjoint_headers,
             max_requests_per_block: self.max_requests_per_block,
             full: false,
+            banned_blocks: iter::empty(), // TODO: not implemented, should be passed by config after the optimistic sync supports banned blocks too
         });
 
         debug_assert!(self

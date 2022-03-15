@@ -411,5 +411,9 @@ mod tests {
         let spec = &include_bytes!("chain_spec/example.json")[..];
         let specs = ChainSpec::from_json_bytes(&spec).unwrap();
         assert_eq!(specs.id(), "polkadot");
+
+        // code_substitutes field
+        assert_eq!(specs.client_spec.code_substitutes.get(&1), None);
+        assert!(specs.client_spec.code_substitutes.get(&5203203).is_some());
     }
 }

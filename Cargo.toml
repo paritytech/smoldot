@@ -57,8 +57,7 @@ hashbrown = { version = "0.12.0", default-features = false, features = ["serde"]
 hex = { version = "0.4.3", default-features = false }
 hmac = { version = "0.12.1", default-features = false }
 itertools = { version = "0.10.3", default-features = false }
-# TODO: don't activate `static-context` by default; see https://github.com/paritytech/libsecp256k1/issues/77
-libsecp256k1 = { version = "0.7.0", default-features = false, features = ["static-context"] }
+libsecp256k1 = { version = "0.7.0", default-features = false, features = ["static-context", "hmac"] }
 # Reminder: `log` is forbidden
 merlin = { version = "3.0", default-features = false }
 nom = { version = "7.1.0", default-features = false, features = ["alloc"] }
@@ -76,7 +75,7 @@ schnorrkel = { version = "0.10.2", default-features = false, features = ["preaud
 serde = { version = "1.0.136", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.79", default-features = false, features = ["alloc", "raw_value"] }
 sha2 = { version = "0.10.2", default-features = false }
-siphasher = { version = "0.3.9", default-features = false }
+siphasher = { version = "0.3.10", default-features = false }
 slab = { version = "0.4.5", default-features = false }
 smallvec = "1.8.0"
 snow = { version = "0.9.0", default-features = false, features = ["default-resolver"] }
@@ -99,7 +98,7 @@ parity-scale-codec = { version = "2.3.1", features = ["derive"] } # TODO: a lot 
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # `std` feature
-wasmtime = { version = "0.34.1", default-features = false, features = ["async", "cranelift"], optional = true }
+wasmtime = { version = "0.35.1", default-features = false, features = ["async", "cranelift"], optional = true }
 
 [build-dependencies]
 prost-build = "0.9.0"
@@ -127,11 +126,14 @@ opt-level = 3
 [profile.release]
 panic = "abort"
 lto = true
+# codegen-units set to 1 to avoid performance regressions when combined with LTO
+# See https://github.com/rust-lang/rust/issues/47745
+# https://doc.rust-lang.org/rustc/codegen-options/index.html#codegen-units
+codegen-units = 1
 #strip = "symbols"      # TODO: uncomment once stable
 
 [profile.min-size-release]
 inherits = "release"
-lto = true
 opt-level = "z"
 
 [[bench]]
