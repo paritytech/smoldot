@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use webrtc::api::APIBuilder;
+use webrtc::api::setting_engine::SettingEngine;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::peer_connection::certificate::RTCCertificate;
@@ -41,6 +42,7 @@ use async_std::channel as async_channel;
 /// `sctp-port` and `max-message-size` attrs RFC: <https://datatracker.ietf.org/doc/html/rfc8841>
 /// `group` and `mid` attrs RFC: <https://datatracker.ietf.org/doc/html/rfc9143>
 /// `ice-ufrag`, `ice-pwd` and `ice-options` attrs RFC: <https://datatracker.ietf.org/doc/html/rfc8839>
+/// `setup` attr RFC: <https://datatracker.ietf.org/doc/html/rfc8122>
 ///
 /// Short description:
 ///     v=<protocol-version>
@@ -52,18 +54,20 @@ use async_std::channel as async_channel;
 ///
 ///     m=<media> <port> <proto> <fmt> ...
 ///     a=mid:<MID>
-///     a=ice-ufrag:<user>
-///     a=ice-pwd:<passwd>
+///     a=ice-options:ice2
+///     a=ice-ufrag:<ICE user>
+///     a=ice-pwd:<ICE password>
+///     a=setup:<setup>
 ///     a=sctp-port:<value>
 ///     a=max-message-size:<value>
 const CLIENT_SESSION_DESCRIPTION: &'static str = "v=0
-o=- 0 0 IN IP4 127.0.0.1
+o=- 0 0 IN IP4 0.0.0.0
 s=-
 c=IN IP4 0.0.0.0
 t=0 0
 a=group:BUNDLE 0
 
-m=application 9090 UDP/DTLS/SCTP webrtc-datachannel
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel
 a=mid:0
 a=ice-options:ice2
 a=ice-ufrag:V6j+
@@ -78,7 +82,7 @@ a=max-message-size:100000
 #[clap(author, version, about, long_about = None)]
 struct Cli {
     /// Listen address to bind to
-    #[clap(short, long, default_value = "localhost:19302")]
+    #[clap(short, long, default_value = "localhost:41000")]
     listen_addr: String,
 }
 
@@ -100,7 +104,11 @@ async fn main() -> Result<()> {
         rx.fuse()
     };
 
-    let api = APIBuilder::new().build();
+    let mut se = SettingEngine::default();
+    se.disable_certificate_fingerprint_verification(true);
+    // XXX: could we leave server credentials empty here?
+    // se.set_ice_credentials("aIGX".to_string(), "ndajecaXt6vPIt6VYcUL8wpW".to_string());
+    let api = APIBuilder::new().with_setting_engine(se).build();
     let certificate = load_certificate().await.expect("failed to load certificate");
     let config = RTCConfiguration {
         certificates: vec![certificate],
@@ -175,8 +183,6 @@ async fn main() -> Result<()> {
     // Note: this will start the gathering of ICE candidates
     peer_connection.set_local_description(answer).await?;
 
-    peer_connection.close().await?;
-
     futures::select! {
         _ = done_rx.recv().fuse() => {
             println!("received done signal!");
@@ -185,6 +191,8 @@ async fn main() -> Result<()> {
             println!("received interrupt signal!");
         },
     }
+
+    peer_connection.close().await?;
 
     Ok(())
 }
