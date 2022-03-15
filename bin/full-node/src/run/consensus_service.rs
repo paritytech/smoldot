@@ -1033,7 +1033,15 @@ impl SyncBackground {
                                         .await
                                         .is_ok()
                                     {
-                                        // TODO: add_source_known_block
+                                        // Note that `try_add_known_block_to_source` might have
+                                        // no effect, which is not a problem considering that this
+                                        // block tracking is mostly about optimizations and
+                                        // politeness.
+                                        self.sync.try_add_known_block_to_source(
+                                            source_id,
+                                            height_to_verify,
+                                            hash_to_verify,
+                                        );
                                     }
                                 }
 

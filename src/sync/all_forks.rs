@@ -401,6 +401,26 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         self.inner.blocks.knows_non_finalized_block(height, hash)
     }
 
+    /// Registers a new block that the source is aware of.
+    ///
+    /// Has no effect if `height` is inferior or equal to the finalized block height, or if the
+    /// source was already known to know this block.
+    ///
+    /// The block does not need to be known by the data structure.
+    ///
+    /// This is automatically done for the blocks added through [`AllForksSync::block_announce`],
+    /// [`AllForksSync::add_source`] or [`FinishAncestrySearch::add_block`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    pub fn add_known_block_to_source(&mut self, source_id: SourceId, height: u64, hash: [u8; 32]) {
+        self.inner
+            .blocks
+            .add_known_block_to_source(source_id, height, hash);
+    }
+
     /// Returns the current best block of the given source.
     ///
     /// This corresponds either the latest call to [`AllForksSync::block_announce`] where
