@@ -957,39 +957,35 @@ impl SyncBackground {
                                 break;
                             }
                             all::BlockVerification::Success {
-                                is_new_best: true,
+                                is_new_best,
                                 sync: sync_out,
                                 ..
                             } => {
                                 span.record("outcome", &"success");
-                                span.record("is_new_best", &true);
+                                span.record("is_new_best", &is_new_best);
 
                                 // Processing has made a step forward.
 
-                                // Update the networking.
-                                let fut = self.network_service.set_local_best_block(
-                                    self.network_chain_index,
-                                    sync_out.best_block_hash(),
-                                    sync_out.best_block_number(),
-                                );
-                                fut.await;
+                                if is_new_best {
+                                    // Update the networking.
+                                    let fut = self.network_service.set_local_best_block(
+                                        self.network_chain_index,
+                                        sync_out.best_block_hash(),
+                                        sync_out.best_block_number(),
+                                    );
+                                    fut.await;
 
-                                // Reset the block authoring, in order to potentially build a
-                                // block on top of this new best.
-                                self.block_authoring = None;
+                                    // Reset the block authoring, in order to potentially build a
+                                    // block on top of this new best.
+                                    self.block_authoring = None;
 
-                                // Update the externally visible best block state.
-                                let mut lock = self.sync_state.lock().await;
-                                lock.best_block_hash = sync_out.best_block_hash();
-                                lock.best_block_number = sync_out.best_block_number();
-                                drop(lock);
+                                    // Update the externally visible best block state.
+                                    let mut lock = self.sync_state.lock().await;
+                                    lock.best_block_hash = sync_out.best_block_hash();
+                                    lock.best_block_number = sync_out.best_block_number();
+                                    drop(lock);
+                                }
 
-                                self.sync = sync_out;
-                                break;
-                            }
-                            all::BlockVerification::Success { sync: sync_out, .. } => {
-                                span.record("outcome", &"success");
-                                span.record("is_new_best", &false);
                                 self.sync = sync_out;
                                 break;
                             }
