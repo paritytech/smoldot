@@ -97,34 +97,47 @@
 // See also https://github.com/w3c/webrtc-extensions/issues/64
 //
 
-import * as sdp from './sdp-parse.js';
-
 export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: number) {
-    const webrtc = new RTCPeerConnection();
+    // Create a new peer connection.
+    const pc = new RTCPeerConnection();
 
-    const dataChannel = webrtc.createDataChannel("data", { ordered: true, negotiated: true, id: 0 });
-    dataChannel.binaryType = 'arraybuffer';
+    // Create a new data channel. This will trigger a new negotiation (see
+    // `negotiationneeded` handler below).
+    const dataChannel = pc.createDataChannel("data");
 
-    webrtc.addEventListener("negotiationneeded", async (_event) => {
-        const sdpOffer = (await webrtc.createOffer()).sdp!;
-        sdp.parseSdp(sdpOffer);
-        // TODO: just for testing; this substitution must be done properly
-        //const tweaked = offer.sdp?.replace('UDP', 'TCP');
-        await webrtc.setLocalDescription({ type: 'offer', sdp: sdpOffer });
+    // Log any connection state changes.
+    pc.addEventListener("onconnectionstatechange", async (_event) => {
+        console.log("webrtc conn state: " + pc.connectionState);
+    });
 
-        // TODO: remove
-        console.log(webrtc.localDescription!.sdp);
+    // Log any ICE connection state changes.
+    pc.addEventListener("oniceconnectionstatechange", async (_event) => {
+        console.log("webrtc ICE conn state: " + pc.iceConnectionState);
+    });
 
-        // Generate the fake SDP response.
-        // Note that the trailing line feed is important, as otherwise Chrome fails to parse
-        // the payload.
+    // When a new negotion is triggered, set both local and remote descriptions.
+    pc.addEventListener("negotiationneeded", async (_event) => {
+        // Create a new offer and set it as local description.
+        var sdpOffer = (await pc.createOffer()).sdp!;
+        // Replace ICE user and password with ones expected by the server.
+        sdpOffer = sdpOffer.replace(/^a=ice-ufrag.*$/m, 'a=ice-ufrag:V6j+')
+        sdpOffer = sdpOffer.replace(/^a=ice-pwd.*$/m, 'a=ice-pwd:OEKutPgoHVk/99FfqPOf444w');
+        sdpOffer = sdpOffer.replace(/^a=ice-options:.*$/m, 'a=ice-options:ice2');
+        await pc.setLocalDescription({ type: 'offer', sdp: sdpOffer });
+
+        console.log(pc.localDescription!.sdp);
+
+        // Use the fake SDP response, which normally the client would've
+        // received through the STUN server.
+        //
+        // Note that the trailing line feed is important, as otherwise Chrome
+        // fails to parse the payload.
         const remoteSdp =
             // Version of the SDP protocol. Always 0. (RFC8866)
             "v=0" + "\n" +
             // Identifies the creator of the SDP document. We are allowed to use dummy values
             // (`-` and `0.0.0.0`) to remain anonymous, which we do. Note that "IN" means
             // "Internet". (RFC8866)
-            // TODO: is that true that we're allowed to set 0.0.0.0?
             // TODO: handle IPv6
             "o=- " + (Date.now() / 1000).toFixed() + " 0 IN IP4 0.0.0.0" + "\n" +
             // Name for the session. We are allowed to pass a dummy `-`. (RFC8866)
@@ -135,17 +148,18 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
             // TODO: remove eventually; this was added just for testing because things didn't seem to work
             "a=group:BUNDLE 0" + "\n" +
 
+            "a=ice-lite" + "\n" +
+
             // A `m=` line describes a request to establish a certain protocol.
             // The protocol in this line (i.e. `TCP/DTLS/SCTP` or `UDP/DTLS/SCTP`) must always be
             // the same as the one in the offer. We know that this is true because we tweak the
             // offer to match the protocol.
-            // The `<fmt>` component must always be `webrtc-datachannel` for WebRTC.
+            // The `<fmt>` component must always be `pc-datachannel` for WebRTC.
             // The rest of the SDP payload adds attributes to this specific media stream.
             // RFCs: 8839, 8866, 8841
             "m=application " + targetPort + " " + (protocol == 'tcp' ? "TCP" : "UDP") + "/DTLS/SCTP webrtc-datachannel" + "\n" +
             // Indicates the IP address of the remote.
             // Note that "IN" means "Internet".
-            // TODO: precise format? note that domain names are also acceptable
             // TODO: handle IPv6
             "c=IN IP4 " + targetIp + "\n" +
             // TODO: remove eventually; goes together with `mid:0`
@@ -174,7 +188,7 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
             // TODO: right now browsers don't send it "a=tls-id:" + genRandomPayload(120) + "\n" +
             // Indicates that the remote DTLS server will only listen for incoming
             // connections. (RFC5763)
-            "a=setup:passive" + "\n" +
+            "a=setup:active" + "\n" +
             // The SCTP port (RFC8841)
             // Note it's different from the "m=" line port value, which
             // indicates the port of the underlying transport-layer protocol
