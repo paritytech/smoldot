@@ -299,18 +299,17 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             .blocks
             .add_source(user_data, best_block_number, best_block_hash);
 
-        let needs_verification = best_block_number > self.chain.finalized_block_header().number
-            && self
-                .chain
-                .non_finalized_block_by_hash(&best_block_hash)
-                .is_none();
-        let is_in_disjoints_list = self
+        let best_block_too_old = best_block_number <= self.chain.finalized_block_header().number;
+        let best_block_already_verified = self
+            .chain
+            .non_finalized_block_by_hash(&best_block_hash)
+            .is_some();
+        let best_block_in_disjoints_list = self
             .inner
             .blocks
             .contains_unverified_block(best_block_number, &best_block_hash);
-        debug_assert!(!(!needs_verification && is_in_disjoints_list));
 
-        if needs_verification && !is_in_disjoints_list {
+        if !best_block_too_old && !best_block_already_verified && !best_block_in_disjoints_list {
             self.inner.blocks.insert_unverified_block(
                 best_block_number,
                 best_block_hash,
