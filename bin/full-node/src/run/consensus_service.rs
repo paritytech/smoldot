@@ -28,6 +28,7 @@ use crate::run::{database_thread, jaeger_service, network_service};
 
 use core::num::NonZeroU32;
 use futures::{lock::Mutex, prelude::*};
+use hashbrown::HashSet;
 use smoldot::{
     author,
     chain::chain_information,
@@ -989,12 +990,31 @@ impl SyncBackground {
 
                                 self.sync = sync_out;
 
-                                // Announce the block to all the sources that aren't aware of it.
-                                // TODO: sources that do *not* know the block
-                                let sources_to_announce_to = self
-                                    .sync
-                                    .knows_non_finalized_block(height_to_verify, &hash_to_verify)
-                                    .collect::<Vec<_>>();
+                                // Announce the newly-verified block to all the sources that might
+                                // not be aware of it. We can never be guaranteed that a certain
+                                // source does *not* know about a block, however it is not a big
+                                // problem to send a block announce to a source that already knows
+                                // about that block. For this reason, the list of sources we send
+                                // the block announce to is `all_sources - sources_that_know_it`.
+                                //
+                                // Note that not sending block announces to sources that already
+                                // know that block means that these sources might also miss the
+                                // fact that our local best block has been updated. This is in
+                                // practice not a problem either.
+                                let sources_to_announce_to = {
+                                    let mut all_sources =
+                                        self.sync
+                                            .sources()
+                                            .collect::<HashSet<_, fnv::FnvBuildHasher>>();
+                                    for knows in self.sync.knows_non_finalized_block(
+                                        height_to_verify,
+                                        &hash_to_verify,
+                                    ) {
+                                        all_sources.remove(&knows);
+                                    }
+                                    all_sources
+                                };
+
                                 for source_id in sources_to_announce_to {
                                     let peer_id = match &self.sync[source_id] {
                                         Some(pid) => pid,
