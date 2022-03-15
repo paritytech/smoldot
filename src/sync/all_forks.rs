@@ -1359,6 +1359,34 @@ pub enum AncestrySearchResponseError {
     TooOld,
 }
 
+pub enum AddSource<'a, TBl, TRq, TSrc> {
+    /// Source has been added.
+    OldBestBlock {
+        source_id: SourceId,
+    },
+    BestBlockAlreadyVerified(AddSourceKnown<'a, TBl, TRq, TSrc>),
+    BestBlockPendingVerification(AddSourceKnown<'a, TBl, TRq, TSrc>),
+    UnknownBestBlock(AddSourceUnknown<'a, TBl, TRq, TSrc>),
+}
+
+/// See [`AddSource`] and [`AllForksSync::add_source`].
+#[must_use]
+pub struct AddSourceKnown<'a, TBl, TRq, TSrc> {
+    inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
+}
+
+impl<'a, TBl, TRq, TSrc> AddSourceKnown<'a, TBl, TRq, TSrc> {
+}
+
+/// See [`AddSource`] and [`AllForksSync::add_source`].
+#[must_use]
+pub struct AddSourceUnknown<'a, TBl, TRq, TSrc> {
+    inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
+}
+
+impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
+}
+
 /// Header verification to be performed.
 ///
 /// Internally holds the [`AllForksSync`].
