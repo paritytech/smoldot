@@ -314,13 +314,21 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             best_block_already_verified,
             best_block_in_disjoints_list,
         ) {
-            (false, false, false) => AddSource::UnknownBestBlock(AddSourceUnknown { inner: self }),
-            (false, true, false) => {
-                AddSource::BestBlockAlreadyVerified(AddSourceKnown { inner: self })
-            }
-            (false, false, true) => {
-                AddSource::BestBlockPendingVerification(AddSourceKnown { inner: self })
-            }
+            (false, false, false) => AddSource::UnknownBestBlock(AddSourceUnknown {
+                inner: self,
+                best_block_hash,
+                best_block_number,
+            }),
+            (false, true, false) => AddSource::BestBlockAlreadyVerified(AddSourceKnown {
+                inner: self,
+                best_block_hash,
+                best_block_number,
+            }),
+            (false, false, true) => AddSource::BestBlockPendingVerification(AddSourceKnown {
+                inner: self,
+                best_block_hash,
+                best_block_number,
+            }),
             (true, false, false) => AddSource::OldBestBlock { source_id: todo!() },
             (false, true, true) => unreachable!(),
             (true, _, _) => unreachable!(),
@@ -1370,6 +1378,8 @@ pub enum AddSource<'a, TBl, TRq, TSrc> {
 #[must_use]
 pub struct AddSourceKnown<'a, TBl, TRq, TSrc> {
     inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
+    best_block_number: u64,
+    best_block_hash: [u8; 32],
 }
 
 impl<'a, TBl, TRq, TSrc> AddSourceKnown<'a, TBl, TRq, TSrc> {}
@@ -1378,13 +1388,15 @@ impl<'a, TBl, TRq, TSrc> AddSourceKnown<'a, TBl, TRq, TSrc> {}
 #[must_use]
 pub struct AddSourceUnknown<'a, TBl, TRq, TSrc> {
     inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
+    best_block_number: u64,
+    best_block_hash: [u8; 32],
 }
 
 impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
     pub fn add_source_and_insert_block(self) -> SourceId {
-        self.inner.blocks.insert_unverified_block(
-            best_block_number,
-            best_block_hash,
+        self.inner.inner.blocks.insert_unverified_block(
+            self.best_block_number,
+            self.best_block_hash,
             pending_blocks::UnverifiedBlockState::HeightHashKnown,
             PendingBlock {
                 header: None,
@@ -1392,10 +1404,16 @@ impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
             },
         );
 
-        if self.inner.banned_blocks.contains(&best_block_hash) {
+        if self
+            .inner
+            .inner
+            .banned_blocks
+            .contains(&self.best_block_hash)
+        {
             self.inner
+                .inner
                 .blocks
-                .mark_unverified_block_as_bad(best_block_number, &best_block_hash);
+                .mark_unverified_block_as_bad(self.best_block_number, &self.best_block_hash);
         }
     }
 }
