@@ -60,6 +60,7 @@ impl Role {
 }
 
 /// Decoded block announcement notification.
+// TODO: this has both the scale_encoded and decoded header, which makes it weird if you want to build the struct manually
 #[derive(Debug)]
 pub struct BlockAnnounceRef<'a> {
     /// SCALE-encoded header in the announce. Same as [`BlockAnnounceRef::header`].
@@ -84,6 +85,7 @@ pub fn encode_block_announce(
         .scale_encoding()
         .map(either::Left)
         .chain(iter::once(either::Right(is_best)))
+        .chain(iter::once(either::Right([0u8])))
 }
 
 /// Decodes a block announcement.
