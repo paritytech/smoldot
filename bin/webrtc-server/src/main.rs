@@ -30,12 +30,18 @@ use webrtc::peer_connection::certificate::RTCCertificate;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::math_rand_alpha;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc_ice::udp_network::UDPNetwork;
+use webrtc_ice::udp_mux::UDPMuxParams;
+use webrtc_ice::udp_mux::UDPMuxDefault;
 use futures::{channel::oneshot, prelude::*};
 use anyhow::Result;
 use async_std::fs;
 use async_std::sync::Arc;
 use async_std::task;
 use async_std::channel as async_channel;
+// webrtc_util::conn::Conn is not implemented for UdpSocket
+// use async_std::net::UdpSocket;
+use tokio::net::UdpSocket;
 
 /// An SDP message that constitutes the offer.
 /// Main RFC: <https://datatracker.ietf.org/doc/html/rfc8866>
@@ -78,17 +84,23 @@ a=sctp-port:5000
 a=max-message-size:100000
 ";
 
+const ICE_USER: &str = "aIGX";
+const ICE_PASSWD: &str = "ndajecaXt6vPIt6VYcUL8wpW";
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Cli {
     /// Listen address to bind to
-    #[clap(short, long, default_value = "localhost:41000")]
+    #[clap(short, long, default_value = "127.0.0.1:41000")]
     listen_addr: String,
 }
 
 #[async_std::main]
 async fn main() -> Result<()> {
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
+
+    // TODO: async_std UdpSocket
+    let socket = UdpSocket::bind(cli.listen_addr).await?;
 
     // Starting from here, a SIGINT (or equivalent) handler is setup. If the user does Ctrl+C,
     // a message will be sent on `ctrlc_rx`.
@@ -106,8 +118,8 @@ async fn main() -> Result<()> {
 
     let mut se = SettingEngine::default();
     se.disable_certificate_fingerprint_verification(true);
-    // XXX: could we leave server credentials empty here?
-    // se.set_ice_credentials("aIGX".to_string(), "ndajecaXt6vPIt6VYcUL8wpW".to_string());
+    se.set_udp_network(UDPNetwork::Muxed(UDPMuxDefault::new(UDPMuxParams::new(socket))));
+    se.set_ice_credentials(ICE_USER.to_string(), ICE_PASSWD.to_string());
     let api = APIBuilder::new().with_setting_engine(se).build();
     let certificate = load_certificate().await.expect("failed to load certificate");
     let config = RTCConfiguration {
