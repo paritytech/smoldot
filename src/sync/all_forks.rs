@@ -294,7 +294,15 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         best_block_number: u64,
         best_block_hash: [u8; 32],
     ) -> AddSource<TBl, TRq, TSrc> {
-        let best_block_too_old = best_block_number <= self.chain.finalized_block_header().number;
+        if best_block_number <= self.chain.finalized_block_header().number {
+            return AddSource::OldBestBlock(AddSourceOldBlock {
+                inner: self,
+                new_source_user_data: user_data,
+                best_block_hash,
+                best_block_number,
+            });
+        }
+
         let best_block_already_verified = self
             .chain
             .non_finalized_block_by_hash(&best_block_hash)
@@ -304,39 +312,26 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             .blocks
             .contains_unverified_block(best_block_number, &best_block_hash);
 
-        match (
-            best_block_too_old,
-            best_block_already_verified,
-            best_block_in_disjoints_list,
-        ) {
-            (false, false, false) => AddSource::UnknownBestBlock(AddSourceUnknown {
+        match (best_block_already_verified, best_block_in_disjoints_list) {
+            (false, false) => AddSource::UnknownBestBlock(AddSourceUnknown {
                 inner: self,
                 new_source_user_data: user_data,
                 best_block_hash,
                 best_block_number,
             }),
-            (false, true, false) => AddSource::BestBlockAlreadyVerified(AddSourceKnown {
+            (true, false) => AddSource::BestBlockAlreadyVerified(AddSourceKnown {
                 inner: self,
                 new_source_user_data: user_data,
                 best_block_hash,
                 best_block_number,
             }),
-            (false, false, true) => AddSource::BestBlockPendingVerification(AddSourceKnown {
+            (false, true) => AddSource::BestBlockPendingVerification(AddSourceKnown {
                 inner: self,
                 new_source_user_data: user_data,
                 best_block_hash,
                 best_block_number,
             }),
-            (true, false, false) => {
-                AddSource::OldBestBlock(AddSourceOldBlock {
-                    inner: self,
-                    new_source_user_data: user_data,
-                    best_block_hash,
-                    best_block_number,
-                })
-            }
-            (false, true, true) => unreachable!(),
-            (true, _, _) => unreachable!(),
+            (true, true) => unreachable!(),
         }
     }
 
