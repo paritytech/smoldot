@@ -372,7 +372,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let outer_source_id_entry = self.shared.sources.vacant_entry();
                 let outer_source_id = SourceId(outer_source_id_entry.key());
 
-                let source_id = all_forks.add_source(
+                let source_id = all_forks.prepare_add_source(
                     AllForksSourceExtra {
                         user_data,
                         outer_source_id,
@@ -2275,7 +2275,7 @@ impl<TRq> Shared<TRq> {
             .all(|(_, s)| matches!(s, SourceMapping::GrandpaWarpSync(_))));
 
         for source in grandpa.sources {
-            let updated_source_id = all_forks.add_source(
+            let updated_source_id = all_forks.prepare_add_source(
                 AllForksSourceExtra {
                     user_data: source.user_data,
                     outer_source_id: source.outer_source_id,

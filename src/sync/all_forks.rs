@@ -288,7 +288,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// Returns the newly-created source entry, plus optionally a request that should be started
     /// towards this source.
-    pub fn add_source(
+    pub fn prepare_add_source(
         &mut self,
         user_data: TSrc,
         best_block_number: u64,
