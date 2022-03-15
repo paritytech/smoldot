@@ -163,7 +163,7 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
             // handshake. (RFC8122)
             // As explained at the top-level documentation, we use a hardcoded certificate.
             // TODO: proper certificate and fingerprint
-            "a=fingerprint:sha-256 3A:30:CE:4D:FE:21:BB:84:1A:37:58:87:96:44:47:B8:88:3E:EB:D5:A5:18:B5:D5:F2:BD:B7:AA:10:D4:BE:70" + "\n" +
+            "a=fingerprint:sha-256 13:41:2A:D7:2A:53:9E:6D:6F:A0:55:05:C0:5E:3F:39:67:C9:66:46:F8:26:2A:A1:D2:35:3E:54:32:91:11:2C" + "\n" +
             // The ICE protocol uses a "TLS ID" system to indicate whether a fresh DTLS connection
             // must be reopened in case of ICE renegotiation. Considering that ICE renegotiations
             // never happen in our use case, we can simply put a random value and not care about
