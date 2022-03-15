@@ -328,10 +328,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 best_block_number,
             }),
             (true, false, false) => {
-                let source_id =
-                    self.inner
-                        .blocks
-                        .add_source(user_data, best_block_number, best_block_hash);
                 AddSource::OldBestBlock(AddSourceOldBlock {
                     inner: self,
                     new_source_user_data: user_data,
