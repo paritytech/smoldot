@@ -796,6 +796,34 @@ where
         protocol::decode_call_proof_response(&response).map_err(CallProofRequestError::Decode)
     }
 
+    // TODO: there this extra parameter in block announces that is unused on many chains but not always
+    pub async fn send_block_announce(
+        &self,
+        target: &peer_id::PeerId,
+        chain_index: usize,
+        scale_encoded_header: &[u8],
+        is_best: bool,
+    ) -> Result<(), QueueNotificationError> {
+        let buffers_to_send = protocol::encode_block_announce(protocol::BlockAnnounceRef {
+            scale_encoded_header,
+            is_best,
+            header: header::decode(scale_encoded_header).unwrap(), // TODO: hack
+        });
+
+        let notification = buffers_to_send.fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        });
+
+        self.inner
+            .queue_notification(
+                target,
+                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
+                notification,
+            )
+            .await
+    }
+
     ///
     ///
     /// Must be passed the SCALE-encoded transaction.

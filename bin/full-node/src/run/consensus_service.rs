@@ -925,6 +925,7 @@ impl SyncBackground {
                 all::ProcessOne::VerifyBodyHeader(verify) => {
                     let hash_to_verify = verify.hash();
                     let height_to_verify = verify.height();
+                    let scale_encoded_header_to_verify = verify.scale_encoded_header().to_owned(); // TODO: copy :-/
 
                     let span = tracing::debug_span!(
                         "block-verification",
@@ -995,8 +996,25 @@ impl SyncBackground {
                                     .knows_non_finalized_block(height_to_verify, &hash_to_verify)
                                     .collect::<Vec<_>>();
                                 for source_id in sources_to_announce_to {
-                                    // TODO: self.network_service.send_block_announce();
-                                    // TODO: add_source_known_block
+                                    let peer_id = match &self.sync[source_id] {
+                                        Some(pid) => pid,
+                                        None => continue,
+                                    };
+
+                                    if self
+                                        .network_service
+                                        .clone()
+                                        .send_block_announce(
+                                            peer_id,
+                                            0,
+                                            &scale_encoded_header_to_verify,
+                                            is_new_best,
+                                        )
+                                        .await
+                                        .is_ok()
+                                    {
+                                        // TODO: add_source_known_block
+                                    }
                                 }
 
                                 break;

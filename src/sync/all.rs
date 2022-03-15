@@ -1976,6 +1976,13 @@ impl<TRq, TSrc, TBl> HeaderBodyVerify<TRq, TSrc, TBl> {
         }
     }
 
+    /// Returns the SCALE-encoded header of the block about to be verified.
+    pub fn scale_encoded_header(&self) -> &[u8] {
+        match &self.inner {
+            HeaderBodyVerifyInner::Optimistic(verify) => verify.scale_encoded_header(),
+        }
+    }
+
     /// Start the verification process.
     pub fn start(
         self,
