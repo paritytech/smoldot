@@ -987,6 +987,18 @@ impl SyncBackground {
                                 }
 
                                 self.sync = sync_out;
+
+                                // Announce the block to all the sources that aren't aware of it.
+                                // TODO: sources that do *not* know the block
+                                let sources_to_announce_to = self
+                                    .sync
+                                    .knows_non_finalized_block(height_to_verify, &hash_to_verify)
+                                    .collect::<Vec<_>>();
+                                for source_id in sources_to_announce_to {
+                                    // TODO: self.network_service.send_block_announce();
+                                    // TODO: add_source_known_block
+                                }
+
                                 break;
                             }
 
