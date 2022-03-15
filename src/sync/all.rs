@@ -999,9 +999,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         match (&mut self.inner, source_id) {
             (AllSyncInner::AllForks(sync), &SourceMapping::AllForks(source_id)) => {
                 match sync.block_announce(source_id, announced_scale_encoded_header, is_best) {
-                    all_forks::BlockAnnounceOutcome::HeaderVerify => {
-                        BlockAnnounceOutcome::HeaderVerify
-                    }
                     all_forks::BlockAnnounceOutcome::TooOld {
                         announce_block_height,
                         finalized_block_height,
@@ -1009,13 +1006,15 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         announce_block_height,
                         finalized_block_height,
                     },
-                    all_forks::BlockAnnounceOutcome::AlreadyInChain => {
-                        BlockAnnounceOutcome::AlreadyInChain
+                    all_forks::BlockAnnounceOutcome::Unknown(source_update) => {
+                        source_update.insert_and_update_source();
+                        BlockAnnounceOutcome::Disjoint // TODO: arbitrary
                     }
-                    all_forks::BlockAnnounceOutcome::NotFinalizedChain => {
-                        BlockAnnounceOutcome::NotFinalizedChain
+                    all_forks::BlockAnnounceOutcome::AlreadyInChain(source_update)
+                    | all_forks::BlockAnnounceOutcome::Known(source_update) => {
+                        source_update.update_source_and_block();
+                        BlockAnnounceOutcome::Disjoint // TODO: arbitrary
                     }
-                    all_forks::BlockAnnounceOutcome::Disjoint => BlockAnnounceOutcome::Disjoint,
                     all_forks::BlockAnnounceOutcome::InvalidHeader(error) => {
                         BlockAnnounceOutcome::InvalidHeader(error)
                     }
