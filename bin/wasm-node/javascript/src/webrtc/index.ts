@@ -182,10 +182,12 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
             "a=sctp-port:5000" + "\n" +
             // The maximum SCTP user message size (in bytes) (RFC8841)
             "a=max-message-size:100000" + "\n" +
-            // TODO: doc
+            // A transport address for a candidate that can be used for connectivity checks (RFC8839).
             "a=candidate:0 1 " + (protocol == 'tcp' ? "TCP" : "UDP") + " 2113667327 " + targetIp + " " + targetPort + " typ host" + "\n";
 
         await webrtc.setRemoteDescription({ type: "answer", sdp: remoteSdp });
+
+        console.log(webrtc.remoteDescription!.sdp);
     });
 
     dataChannel.onopen = () => {
