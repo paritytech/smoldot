@@ -332,7 +332,12 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     self.inner
                         .blocks
                         .add_source(user_data, best_block_number, best_block_hash);
-                AddSource::OldBestBlock { source_id }
+                AddSource::OldBestBlock(AddSourceOldBlock {
+                    inner: self,
+                    new_source_user_data: user_data,
+                    best_block_hash,
+                    best_block_number,
+                })
             }
             (false, true, true) => unreachable!(),
             (true, _, _) => unreachable!(),
@@ -1369,13 +1374,29 @@ pub enum AncestrySearchResponseError {
 }
 
 pub enum AddSource<'a, TBl, TRq, TSrc> {
-    /// Source has been added.
-    OldBestBlock {
-        source_id: SourceId,
-    },
+    OldBestBlock(AddSourceOldBlock<'a, TBl, TRq, TSrc>),
     BestBlockAlreadyVerified(AddSourceKnown<'a, TBl, TRq, TSrc>),
     BestBlockPendingVerification(AddSourceKnown<'a, TBl, TRq, TSrc>),
     UnknownBestBlock(AddSourceUnknown<'a, TBl, TRq, TSrc>),
+}
+
+/// See [`AddSource`] and [`AllForksSync::add_source`].
+#[must_use]
+pub struct AddSourceOldBlock<'a, TBl, TRq, TSrc> {
+    inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
+    new_source_user_data: TSrc,
+    best_block_number: u64,
+    best_block_hash: [u8; 32],
+}
+
+impl<'a, TBl, TRq, TSrc> AddSourceOldBlock<'a, TBl, TRq, TSrc> {
+    pub fn add_source(self) -> SourceId {
+        self.inner.inner.blocks.add_source(
+            self.new_source_user_data,
+            self.best_block_number,
+            self.best_block_hash,
+        )
+    }
 }
 
 /// See [`AddSource`] and [`AllForksSync::add_source`].
