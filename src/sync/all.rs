@@ -372,14 +372,19 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let outer_source_id_entry = self.shared.sources.vacant_entry();
                 let outer_source_id = SourceId(outer_source_id_entry.key());
 
-                let source_id = all_forks.prepare_add_source(
+                let source_id = match all_forks.prepare_add_source(
                     AllForksSourceExtra {
                         user_data,
                         outer_source_id,
                     },
                     best_block_number,
                     best_block_hash,
-                );
+                ) {
+                    all_forks::AddSource::BestBlockAlreadyVerified(b) => b.add_source(),
+                    all_forks::AddSource::BestBlockPendingVerification(b) => b.add_source(),
+                    all_forks::AddSource::OldBestBlock(b) => b.add_source(),
+                    all_forks::AddSource::UnknownBestBlock(b) => b.add_source_and_insert_block(),
+                };
                 outer_source_id_entry.insert(SourceMapping::AllForks(source_id));
 
                 self.inner = AllSyncInner::AllForks(all_forks);
@@ -2275,14 +2280,19 @@ impl<TRq> Shared<TRq> {
             .all(|(_, s)| matches!(s, SourceMapping::GrandpaWarpSync(_))));
 
         for source in grandpa.sources {
-            let updated_source_id = all_forks.prepare_add_source(
+            let updated_source_id = match all_forks.prepare_add_source(
                 AllForksSourceExtra {
                     user_data: source.user_data,
                     outer_source_id: source.outer_source_id,
                 },
                 source.best_block_number,
                 source.best_block_hash,
-            );
+            ) {
+                all_forks::AddSource::BestBlockAlreadyVerified(b) => b.add_source(),
+                all_forks::AddSource::BestBlockPendingVerification(b) => b.add_source(),
+                all_forks::AddSource::OldBestBlock(b) => b.add_source(),
+                all_forks::AddSource::UnknownBestBlock(b) => b.add_source_and_insert_block(),
+            };
 
             self.sources[source.outer_source_id.0] = SourceMapping::AllForks(updated_source_id);
         }
