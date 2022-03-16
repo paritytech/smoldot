@@ -18,27 +18,27 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
-
 use std::time::Duration;
 
+use anyhow::Result;
+use async_std::channel as async_channel;
+use async_std::fs;
+use async_std::sync::Arc;
+use async_std::task;
 use clap::Parser;
-use webrtc::api::APIBuilder;
+use futures::{channel::oneshot, prelude::*};
 use webrtc::api::setting_engine::SettingEngine;
-use webrtc::data_channel::RTCDataChannel;
+use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
+use webrtc::data_channel::RTCDataChannel;
 use webrtc::peer_connection::certificate::RTCCertificate;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::math_rand_alpha;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-use webrtc_ice::udp_network::UDPNetwork;
-use webrtc_ice::udp_mux::UDPMuxParams;
+use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc_ice::udp_mux::UDPMuxDefault;
-use futures::{channel::oneshot, prelude::*};
-use anyhow::Result;
-use async_std::fs;
-use async_std::sync::Arc;
-use async_std::task;
-use async_std::channel as async_channel;
+use webrtc_ice::udp_mux::UDPMuxParams;
+use webrtc_ice::udp_network::UDPNetwork;
 // webrtc_util::conn::Conn is not implemented for UdpSocket
 // use async_std::net::UdpSocket;
 use tokio::net::UdpSocket;
@@ -118,10 +118,14 @@ async fn main() -> Result<()> {
 
     let mut se = SettingEngine::default();
     se.disable_certificate_fingerprint_verification(true);
-    se.set_udp_network(UDPNetwork::Muxed(UDPMuxDefault::new(UDPMuxParams::new(socket))));
+    se.set_udp_network(UDPNetwork::Muxed(UDPMuxDefault::new(UDPMuxParams::new(
+        socket,
+    ))));
     se.set_ice_credentials(ICE_USER.to_string(), ICE_PASSWD.to_string());
     let api = APIBuilder::new().with_setting_engine(se).build();
-    let certificate = load_certificate().await.expect("failed to load certificate");
+    let certificate = load_certificate()
+        .await
+        .expect("failed to load certificate");
     let config = RTCConfiguration {
         certificates: vec![certificate],
         ..Default::default()
@@ -130,25 +134,33 @@ async fn main() -> Result<()> {
     let peer_connection = Arc::new(api.new_peer_connection(config).await?);
 
     let (done_tx, done_rx) = async_channel::bounded(1);
-    
+
     peer_connection
         .on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
-            println!("Peer Connection State has changed: {}", s);
-
-            if s == RTCPeerConnectionState::Failed {
+            if s != RTCPeerConnectionState::Failed {
+                println!("Peer Connection State has changed: {}", s);
+            } else {
                 // Wait until PeerConnection has had no network activity for 30 seconds or another
                 // failure. It may be reconnected using an ICE Restart. Use
                 // webrtc.PeerConnectionStateDisconnected if you are interested in detecting faster
                 // timeout. Note that the PeerConnection may come back from
                 // PeerConnectionStateDisconnected.
-                println!("Peer Connection has gone to failed exiting");
+                println!("Peer Connection has gone to failed => exiting");
                 let _ = done_tx.try_send(());
             }
 
             Box::pin(async {})
         }))
         .await;
-    
+
+    peer_connection
+        .on_ice_connection_state_change(Box::new(move |s: RTCIceConnectionState| {
+            println!("Peer ICE Connection State has changed: {}", s);
+
+            Box::pin(async {})
+        }))
+        .await;
+
     peer_connection
         .on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
             let d_label = d.label().to_owned();
@@ -184,7 +196,7 @@ async fn main() -> Result<()> {
             })
         }))
         .await;
-    
+
     // Set the remote description to the predefined SDP
     let mut offer = peer_connection.create_offer(None).await?;
     offer.sdp = CLIENT_SESSION_DESCRIPTION.to_string();
@@ -213,5 +225,8 @@ async fn load_certificate() -> Result<RTCCertificate> {
     let pk = fs::read_to_string("./static/privateKey.key").await?;
     let cert = fs::read_to_string("./static/certificate.crt").await?;
 
-    Ok(RTCCertificate::from_pem(&cert, rcgen::KeyPair::from_pem(&pk)?)?)
+    Ok(RTCCertificate::from_pem(
+        &cert,
+        rcgen::KeyPair::from_pem(&pk)?,
+    )?)
 }
