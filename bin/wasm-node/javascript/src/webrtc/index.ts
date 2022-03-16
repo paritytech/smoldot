@@ -106,17 +106,17 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
     const dataChannel = pc.createDataChannel("data");
 
     // Log any connection state changes.
-    pc.addEventListener("onconnectionstatechange", async (_event) => {
-        console.log("webrtc conn state: " + pc.connectionState);
-    });
+    pc.onconnectionstatechange = (_event) => {
+        console.log("conn state: " + pc.connectionState);
+    };
 
     // Log any ICE connection state changes.
-    pc.addEventListener("oniceconnectionstatechange", async (_event) => {
-        console.log("webrtc ICE conn state: " + pc.iceConnectionState);
-    });
+    pc.oniceconnectionstatechange = (_event) => {
+        console.log("ICE conn state: " + pc.iceConnectionState);
+    };
 
     // When a new negotion is triggered, set both local and remote descriptions.
-    pc.addEventListener("negotiationneeded", async (_event) => {
+    pc.onnegotiationneeded = async (_event) => {
         // Create a new offer and set it as local description.
         var sdpOffer = (await pc.createOffer()).sdp!;
         // Replace ICE user and password with ones expected by the server.
