@@ -38,6 +38,7 @@ export type FromWorker = FromWorkerChainAddedOk | FromWorkerChainAddedError | Fr
 export interface ToWorkerConfig {
   maxLogLevel: number;
   enableCurrentTask: boolean;
+  cpuRateLimit: number,
   forbidTcp: boolean;
   forbidWs: boolean;
   forbidNonLocalWs: boolean;

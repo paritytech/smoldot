@@ -148,6 +148,7 @@ compat.setOnMessage((message: messages.ToWorker) => {
       currentTaskCallback: (taskName) => {
         postMessage({ kind: 'currentTask', taskName });
       },
+      cpuRateLimit: configMessage.cpuRateLimit,
       forbidTcp: configMessage.forbidTcp,
       forbidWs: configMessage.forbidWs,
       forbidNonLocalWs: configMessage.forbidNonLocalWs,
@@ -155,9 +156,18 @@ compat.setOnMessage((message: messages.ToWorker) => {
     };
 
     instance.startInstance(config).then((instance) => {
+      // `config.cpuRateLimit` is a floating point that should be between 0 and 1, while the value
+      // to pass as parameter must be between `0` and `2^32-1`.
+      // The few lines of code below should handle all possible values of `number`, including
+      // infinites and NaN.
+      let cpuRateLimit = Math.round(config.cpuRateLimit * 4294967295);  // `2^32 - 1`
+      if (cpuRateLimit < 0) cpuRateLimit = 0;
+      if (cpuRateLimit > 4294967295) cpuRateLimit = 4294967295;
+      if (!Number.isFinite(cpuRateLimit)) cpuRateLimit = 4294967295; // User might have passed NaN
+
       // Smoldot requires an initial call to the `init` function in order to do its internal
       // configuration.
-      instance.exports.init(configMessage.maxLogLevel, configMessage.enableCurrentTask ? 1 : 0);
+      instance.exports.init(configMessage.maxLogLevel, configMessage.enableCurrentTask ? 1 : 0, cpuRateLimit);
 
       // Smoldot has finished initializing.
       // Since this function is an asynchronous function, it is possible that messages have been

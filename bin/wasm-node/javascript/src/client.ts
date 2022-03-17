@@ -202,6 +202,19 @@ export interface ClientOptions {
   maxLogLevel?: number;
 
   /**
+   * Maximum amount of CPU that the client should consume on average.
+   *
+   * This must be a number between `0.0` and `1.0`. For example, passing `0.25` bounds the client
+   * to 25% of CPU power.
+   * Defaults to `1.0` if no value is provided.
+   *
+   * Note that this is implemented by sleeping for certain amounts of time in order for the average
+   * CPU consumption to not go beyond the given limit. It is therefore still possible for the
+   * client to use high amounts of CPU for short amounts of time.
+   */
+  cpuRateLimit?: number;
+
+  /**
    * If `true`, then the client will never open any TCP connection.
    * Defaults to `false`.
    *
@@ -552,6 +565,7 @@ export function start(options?: ClientOptions): Client {
     // 0 = Logging disabled, 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
     maxLogLevel: options.maxLogLevel || 3,
     enableCurrentTask: true, // TODO: make this configurable? `true` slows things down but makes it easily debuggable
+    cpuRateLimit: options.cpuRateLimit || 1.0,
     forbidTcp: options.forbidTcp || false,
     forbidWs: options.forbidWs || false,
     forbidNonLocalWs: options.forbidNonLocalWs || false,

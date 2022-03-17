@@ -244,9 +244,13 @@ extern "C" {
 /// If `enbable_current_task` is non-zero, smoldot will call the [`current_task_entered`] and
 /// [`current_task_exit`] functions to report when it enters and leaves tasks. This slightly
 /// slows everything down, but is useful for debugging purposes.
+///
+/// `cpu_rate_limit` can be used to limit the amount of CPU that smoldot will use on average.
+/// `u32::max_value()` represents "one CPU". For example passing `rate_limit / 2` represents
+/// "50% of one CPU".
 #[no_mangle]
-pub extern "C" fn init(max_log_level: u32, enable_current_task: u32) {
-    crate::init(max_log_level, enable_current_task)
+pub extern "C" fn init(max_log_level: u32, enable_current_task: u32, cpu_rate_limit: u32) {
+    crate::init(max_log_level, enable_current_task, cpu_rate_limit)
 }
 
 /// Allocates a buffer of the given length, with an alignment of 1.

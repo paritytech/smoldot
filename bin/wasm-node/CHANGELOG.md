@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add `ClientOptions.cpuRateLimit`, which lets the user put an upper bound on the amount of CPU that the client uses on average.
+
 ## 0.6.5 - 2022-17-03
 
 ### Changed
