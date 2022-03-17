@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.5 - 2022-17-03
+
 ### Changed
 
 - Chain specifications with a `codeSubstitutes` field containing a block hash are no longer supported ([#2127](https://github.com/paritytech/smoldot/pull/2127)).
