@@ -187,7 +187,7 @@ struct PendingBlock {
     header: Option<header::Header>,
     // TODO: add body: Option<Vec<Vec<u8>>>, when adding full node support
     justifications: Vec<([u8; 4], Vec<u8>)>,
-    // TODO: add user_data as soon as block announces and add_source APIs support passing a user data
+    // TODO: add user_data as soon as block announces and prepare_add_source APIs support passing a user data
 }
 
 struct Block<TBl> {
@@ -281,62 +281,59 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         self.chain.iter_ancestry_order()
     }
 
-    /// Inform the [`AllForksSync`] of a new potential source of blocks.
+    /// Starts the process of inserting a new source in the [`AllForksSync`].
     ///
-    /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
-    /// retrieved using the `Index` trait implementation of this container.
-    ///
-    /// Returns the newly-created source entry, plus optionally a request that should be started
-    /// towards this source.
-    pub fn add_source(
+    /// This function doesn't modify the state machine, but only looks at the current state of the
+    /// block referenced by `best_block_number` and `best_block_hash`. It returns an enum that
+    /// allows performing the actual insertion.
+    pub fn prepare_add_source(
         &mut self,
-        user_data: TSrc,
         best_block_number: u64,
         best_block_hash: [u8; 32],
-    ) -> SourceId {
-        let source_id = self
-            .inner
-            .blocks
-            .add_source(user_data, best_block_number, best_block_hash);
+    ) -> AddSource<TBl, TRq, TSrc> {
+        if best_block_number <= self.chain.finalized_block_header().number {
+            return AddSource::OldBestBlock(AddSourceOldBlock {
+                inner: self,
+                best_block_hash,
+                best_block_number,
+            });
+        }
 
-        let needs_verification = best_block_number > self.chain.finalized_block_header().number
-            && self
-                .chain
-                .non_finalized_block_by_hash(&best_block_hash)
-                .is_none();
-        let is_in_disjoints_list = self
+        let best_block_already_verified = self
+            .chain
+            .non_finalized_block_by_hash(&best_block_hash)
+            .is_some();
+        let best_block_in_disjoints_list = self
             .inner
             .blocks
             .contains_unverified_block(best_block_number, &best_block_hash);
-        debug_assert!(!(!needs_verification && is_in_disjoints_list));
 
-        if needs_verification && !is_in_disjoints_list {
-            self.inner.blocks.insert_unverified_block(
-                best_block_number,
+        match (best_block_already_verified, best_block_in_disjoints_list) {
+            (false, false) => AddSource::UnknownBestBlock(AddSourceUnknown {
+                inner: self,
                 best_block_hash,
-                pending_blocks::UnverifiedBlockState::HeightHashKnown,
-                PendingBlock {
-                    header: None,
-                    justifications: Vec::new(),
-                },
-            );
-
-            if self.inner.banned_blocks.contains(&best_block_hash) {
-                self.inner
-                    .blocks
-                    .mark_unverified_block_as_bad(best_block_number, &best_block_hash);
-            }
+                best_block_number,
+            }),
+            (true, false) => AddSource::BestBlockAlreadyVerified(AddSourceKnown {
+                inner: self,
+                best_block_hash,
+                best_block_number,
+            }),
+            (false, true) => AddSource::BestBlockPendingVerification(AddSourceKnown {
+                inner: self,
+                best_block_hash,
+                best_block_number,
+            }),
+            (true, true) => unreachable!(),
         }
-
-        source_id
     }
 
     /// Removes the source from the [`AllForksSync`].
     ///
     /// Removing the source implicitly cancels the request that is associated to it (if any).
     ///
-    /// Returns the user data that was originally passed to [`AllForksSync::add_source`], plus
-    /// an `Option`.
+    /// Returns the user data that was originally passed when inserting the source, plus an
+    /// `Option`.
     /// If this `Option` is `Some`, it contains a request that must be started towards the source
     /// indicated by the [`SourceId`].
     ///
@@ -404,7 +401,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Returns the current best block of the given source.
     ///
     /// This corresponds either the latest call to [`AllForksSync::block_announce`] where
-    /// `is_best` was `true`, or to the parameter passed to [`AllForksSync::add_source`].
+    /// `is_best` was `true`, or to the parameter passed to [`AllForksSync::prepare_add_source`].
     ///
     /// # Panic
     ///
@@ -1358,6 +1355,120 @@ pub enum AncestrySearchResponseError {
     /// situations, such as an update to the finalized block height above the first block of the
     /// request.
     TooOld,
+}
+
+/// Outcome of calling [`AllForksSync::prepare_add_source`].
+#[must_use]
+pub enum AddSource<'a, TBl, TRq, TSrc> {
+    /// The best block of the source is older or equal to the local latest finalized block. This
+    /// block isn't tracked by the state machine.
+    OldBestBlock(AddSourceOldBlock<'a, TBl, TRq, TSrc>),
+
+    /// The best block of the source has already been verified by this state machine.
+    BestBlockAlreadyVerified(AddSourceKnown<'a, TBl, TRq, TSrc>),
+
+    /// The best block of the source is already known to this state machine but hasn't been
+    /// verified yet.
+    BestBlockPendingVerification(AddSourceKnown<'a, TBl, TRq, TSrc>),
+
+    /// The best block of the source isn't in this state machine yet and needs to be inserted.
+    UnknownBestBlock(AddSourceUnknown<'a, TBl, TRq, TSrc>),
+}
+
+/// See [`AddSource`] and [`AllForksSync::prepare_add_source`].
+#[must_use]
+pub struct AddSourceOldBlock<'a, TBl, TRq, TSrc> {
+    inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
+    best_block_number: u64,
+    best_block_hash: [u8; 32],
+}
+
+impl<'a, TBl, TRq, TSrc> AddSourceOldBlock<'a, TBl, TRq, TSrc> {
+    /// Inserts a new source in the state machine.
+    ///
+    /// Returns the newly-allocated identifier for that source.
+    ///
+    /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
+    /// retrieved using the `Index` trait implementation of the [`AllForksSync`].
+    pub fn add_source(self, source_user_data: TSrc) -> SourceId {
+        self.inner.inner.blocks.add_source(
+            source_user_data,
+            self.best_block_number,
+            self.best_block_hash,
+        )
+    }
+}
+
+/// See [`AddSource`] and [`AllForksSync::prepare_add_source`].
+#[must_use]
+pub struct AddSourceKnown<'a, TBl, TRq, TSrc> {
+    inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
+    best_block_number: u64,
+    best_block_hash: [u8; 32],
+}
+
+impl<'a, TBl, TRq, TSrc> AddSourceKnown<'a, TBl, TRq, TSrc> {
+    /// Inserts a new source in the state machine.
+    ///
+    /// Returns the newly-allocated identifier for that source.
+    ///
+    /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
+    /// retrieved using the `Index` trait implementation of the [`AllForksSync`].
+    pub fn add_source(self, source_user_data: TSrc) -> SourceId {
+        self.inner.inner.blocks.add_source(
+            source_user_data,
+            self.best_block_number,
+            self.best_block_hash,
+        )
+    }
+}
+
+/// See [`AddSource`] and [`AllForksSync::prepare_add_source`].
+#[must_use]
+pub struct AddSourceUnknown<'a, TBl, TRq, TSrc> {
+    inner: &'a mut AllForksSync<TBl, TRq, TSrc>,
+    best_block_number: u64,
+    best_block_hash: [u8; 32],
+}
+
+impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
+    /// Inserts a new source in the state machine, plus the best block of that source.
+    ///
+    /// Returns the newly-allocated identifier for that source.
+    ///
+    /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
+    /// retrieved using the `Index` trait implementation of the [`AllForksSync`].
+    pub fn add_source_and_insert_block(self, source_user_data: TSrc) -> SourceId {
+        let source_id = self.inner.inner.blocks.add_source(
+            source_user_data,
+            self.best_block_number,
+            self.best_block_hash,
+        );
+
+        self.inner.inner.blocks.insert_unverified_block(
+            self.best_block_number,
+            self.best_block_hash,
+            pending_blocks::UnverifiedBlockState::HeightHashKnown,
+            PendingBlock {
+                header: None,
+                justifications: Vec::new(),
+            },
+        );
+
+        if self
+            .inner
+            .inner
+            .banned_blocks
+            .contains(&self.best_block_hash)
+        {
+            self.inner
+                .inner
+                .blocks
+                .mark_unverified_block_as_bad(self.best_block_number, &self.best_block_hash);
+        }
+
+        source_id
+    }
 }
 
 /// Header verification to be performed.
