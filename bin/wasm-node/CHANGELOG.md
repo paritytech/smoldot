@@ -4,7 +4,7 @@
 
 ### Added
 
-- Add `ClientOptions.cpuRateLimit`, which lets the user put an upper bound on the amount of CPU that the client uses on average.
+- Add `ClientOptions.cpuRateLimit`, which lets the user put an upper bound on the amount of CPU that the client uses on average ([#2151](https://github.com/paritytech/smoldot/pull/2151)).
 
 ## 0.6.5 - 2022-17-03
 
