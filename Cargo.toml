@@ -46,7 +46,7 @@ atomic = { version = "0.5.1", default-features = false }
 bip39 = { version = "1.0.1", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
 bs58 = { version = "0.4.0", default-features = false, features = ["alloc"] }
-crossbeam-queue = { version = "0.3.4", default-features = false, features = ["alloc"] }
+crossbeam-queue = { version = "0.3.5", default-features = false, features = ["alloc"] }
 derive_more = "0.99.17"
 ed25519-zebra = { version = "3.0.0", default-features = false }
 either = { version = "1.6.1", default-features = false }
@@ -60,7 +60,7 @@ itertools = { version = "0.10.3", default-features = false }
 libsecp256k1 = { version = "0.7.0", default-features = false, features = ["static-context", "hmac"] }
 # Reminder: `log` is forbidden
 merlin = { version = "3.0", default-features = false }
-nom = { version = "7.1.0", default-features = false, features = ["alloc"] }
+nom = { version = "7.1.1", default-features = false, features = ["alloc"] }
 no-std-net = { version = "0.6.0", default-features = false }
 num-bigint = { version = "0.4.3", default-features = false }
 num-rational = { version = "0.4.0", default-features = false, features = ["num-bigint"] }
