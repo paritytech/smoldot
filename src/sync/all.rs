@@ -379,10 +379,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 let source_id =
                     match all_forks.prepare_add_source(best_block_number, best_block_hash) {
-                        all_forks::AddSource::BestBlockAlreadyVerified(b) => {
-                            b.add_source(source_user_data)
-                        }
-                        all_forks::AddSource::BestBlockPendingVerification(b) => {
+                        all_forks::AddSource::BestBlockAlreadyVerified(b)
+                        | all_forks::AddSource::BestBlockPendingVerification(b) => {
                             b.add_source(source_user_data)
                         }
                         all_forks::AddSource::OldBestBlock(b) => b.add_source(source_user_data),
@@ -2294,8 +2292,8 @@ impl<TRq> Shared<TRq> {
             let updated_source_id = match all_forks
                 .prepare_add_source(source.best_block_number, source.best_block_hash)
             {
-                all_forks::AddSource::BestBlockAlreadyVerified(b) => b.add_source(source_user_data),
-                all_forks::AddSource::BestBlockPendingVerification(b) => {
+                all_forks::AddSource::BestBlockAlreadyVerified(b)
+                | all_forks::AddSource::BestBlockPendingVerification(b) => {
                     b.add_source(source_user_data)
                 }
                 all_forks::AddSource::OldBestBlock(b) => b.add_source(source_user_data),
