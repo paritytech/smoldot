@@ -634,7 +634,9 @@ impl<'a> DigestRef<'a> {
                     has_runtime_environment_updated = true;
                 }
                 DigestItem::BabeSeal(_) => return Err(Error::SealIsntLastItem),
-                DigestItem::Beefy { .. } | DigestItem::PolkadotParachain { .. } => {}
+                DigestItem::Beefy { .. }
+                | DigestItem::PolkadotParachain { .. }
+                | DigestItem::Frontier { .. } => {}
             }
         }
 
@@ -724,7 +726,9 @@ impl<'a> DigestRef<'a> {
                     has_runtime_environment_updated = true;
                 }
                 DigestItemRef::BabeSeal(_) => return Err(Error::SealIsntLastItem),
-                DigestItemRef::Beefy { .. } | DigestItemRef::PolkadotParachain { .. } => {}
+                DigestItemRef::Beefy { .. }
+                | DigestItemRef::PolkadotParachain { .. }
+                | DigestItemRef::Frontier { .. } => {}
             }
         }
 
@@ -968,6 +972,12 @@ pub enum DigestItemRef<'a> {
         opaque: &'a [u8],
     },
 
+    /// Item related to the Frontier consensus engine.
+    Frontier {
+        /// Smoldot doesn't interpret the content of the log item at the moment.
+        opaque: &'a [u8],
+    },
+
     /// Runtime of the chain has been updated in this block. This can include the runtime code or
     /// the heap pages.
     RuntimeEnvironmentUpdated,
@@ -1101,6 +1111,13 @@ impl<'a> DigestItemRef<'a> {
                 ret.extend_from_slice(opaque);
                 iter::once(ret)
             }
+            DigestItemRef::Frontier { opaque } => {
+                let mut ret = vec![4];
+                ret.extend_from_slice(b"fron");
+                ret.extend_from_slice(util::encode_scale_compact_usize(opaque.len()).as_ref());
+                ret.extend_from_slice(opaque);
+                iter::once(ret)
+            }
             DigestItemRef::RuntimeEnvironmentUpdated => iter::once(vec![8]),
         }
     }
@@ -1120,6 +1137,7 @@ impl<'a> From<&'a DigestItem> for DigestItemRef<'a> {
             DigestItem::PolkadotParachain { opaque } => {
                 DigestItemRef::PolkadotParachain { opaque: &*opaque }
             }
+            DigestItem::Frontier { opaque } => DigestItemRef::Frontier { opaque: &*opaque },
             DigestItem::RuntimeEnvironmentUpdated => DigestItemRef::RuntimeEnvironmentUpdated,
         }
     }
@@ -1152,6 +1170,12 @@ pub enum DigestItem {
         opaque: Vec<u8>,
     },
 
+    /// See [`DigestItemRef::Frontier`].
+    Frontier {
+        /// Smoldot doesn't interpret the content of the log item at the moment.
+        opaque: Vec<u8>,
+    },
+
     /// Runtime of the chain has been updated in this block. This can include the runtime code or
     /// the heap pages.
     RuntimeEnvironmentUpdated,
@@ -1179,6 +1203,9 @@ impl<'a> From<DigestItemRef<'a>> for DigestItem {
                 opaque: opaque.to_vec(),
             },
             DigestItemRef::PolkadotParachain { opaque } => DigestItem::PolkadotParachain {
+                opaque: opaque.to_vec(),
+            },
+            DigestItemRef::Frontier { opaque } => DigestItem::Frontier {
                 opaque: opaque.to_vec(),
             },
             DigestItemRef::RuntimeEnvironmentUpdated => DigestItem::RuntimeEnvironmentUpdated,
@@ -1236,6 +1263,7 @@ fn decode_item_from_parts<'a>(
         }
         (4, b"BEEF") => DigestItemRef::Beefy { opaque: content },
         (4, b"POL1") => DigestItemRef::PolkadotParachain { opaque: content },
+        (4, b"fron") => DigestItemRef::Frontier { opaque: content },
         (4, e) => return Err(Error::UnknownConsensusEngine(*e)),
         // 5 = Seal
         (5, b"aura") => DigestItemRef::AuraSeal({
