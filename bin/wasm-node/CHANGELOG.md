@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add support for parsing the "fron" (Frontier) consensus log items in headers. The content of these log items is ignored by the client.
+
 ## 0.6.5 - 2022-17-03
 
 ### Changed
