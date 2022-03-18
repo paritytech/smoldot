@@ -148,6 +148,11 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
             // TODO: remove eventually; this was added just for testing because things didn't seem to work
             "a=group:BUNDLE 0" + "\n" +
 
+            // A lite implementation is only appropriate for devices that will
+            // *always* be connected to the public Internet and have a public
+            // IP address at which it can receive packets from any
+            // correspondent.  ICE will not function when a lite implementation
+            // is placed behind a NAT (RFC8445).
             "a=ice-lite" + "\n" +
 
             // A `m=` line describes a request to establish a certain protocol.
