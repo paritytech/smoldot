@@ -31,6 +31,7 @@ export interface Config {
     jsonRpcCallback: (response: string, chainId: number) => void,
     databaseContentCallback: (data: string, chainId: number) => void,
     currentTaskCallback?: (taskName: string | null) => void,
+    cpuRateLimit: number,
     forbidTcp: boolean,
     forbidWs: boolean,
     forbidNonLocalWs: boolean,
