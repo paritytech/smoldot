@@ -184,7 +184,7 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
             // handshake. (RFC8122)
             // As explained at the top-level documentation, we use a hardcoded certificate.
             // TODO: proper certificate and fingerprint
-            "a=fingerprint:sha-256 AE:C2:39:3B:3E:68:7D:D3:48:11:13:B7:9B:38:12:72:29:21:78:16:88:0F:84:76:F4:A2:2B:63:93:88:96:A1" + "\n" +
+            "a=fingerprint:sha-256 51:3C:68:8D:CD:62:7C:0B:CC:B7:C9:E2:EB:6C:13:98:9A:C9:82:75:5A:3B:40:BC:4E:42:DE:B5:5A:D0:09:B2" + "\n" +
 
             // "TLS ID" uniquely identifies a TLS association.
             // The ICE protocol uses a "TLS ID" system to indicate whether a fresh DTLS connection

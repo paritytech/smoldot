@@ -18,8 +18,8 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
-use std::time::Duration;
 use std::io::Write;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_std::channel as async_channel;
@@ -32,12 +32,12 @@ use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
+use webrtc::dtls_transport::dtls_role::DTLSRole;
+use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::peer_connection::certificate::RTCCertificate;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::math_rand_alpha;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
-use webrtc::dtls_transport::dtls_role::DTLSRole;
 use webrtc_ice::udp_mux::UDPMuxDefault;
 use webrtc_ice::udp_mux::UDPMuxParams;
 use webrtc_ice::udp_network::UDPNetwork;
@@ -110,9 +110,7 @@ async fn main() -> Result<()> {
             .format(|buf, record| {
                 writeln!(
                     buf,
-                    "{}:{} [{}] {} - {}",
-                    record.file().unwrap_or("unknown"),
-                    record.line().unwrap_or(0),
+                    "[{}] {} - {}",
                     record.level(),
                     chrono::Local::now().format("%H:%M:%S.%6f"),
                     record.args()
@@ -121,7 +119,7 @@ async fn main() -> Result<()> {
             .filter(None, log::LevelFilter::Trace)
             .init();
     }
-    
+
     // TODO: async_std UdpSocket
     let socket = UdpSocket::bind(cli.listen_addr).await?;
 
