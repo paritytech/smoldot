@@ -65,9 +65,8 @@ impl<T: Future> Future for CpuRateLimiter<T> {
         // We add a small zero-cost shim to ensure at compile time that this is indeed the case.
         fn enforce_fused<T: futures::future::FusedFuture>(_: &T) {}
         enforce_fused(&this.prevent_poll_until);
-        match Future::poll(this.prevent_poll_until.as_mut(), cx) {
-            Poll::Ready(()) => {}
-            Poll::Pending => return Poll::Pending,
+        if let Poll::Pending = Future::poll(this.prevent_poll_until.as_mut(), cx) {
+            return Poll::Pending;
         }
 
         let before_polling = crate::Instant::now();
