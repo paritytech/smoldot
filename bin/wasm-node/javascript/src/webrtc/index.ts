@@ -122,6 +122,8 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
         // Replace ICE user and password with ones expected by the server.
         sdpOffer = sdpOffer.replace(/^a=ice-ufrag.*$/m, 'a=ice-ufrag:V6j+')
         sdpOffer = sdpOffer.replace(/^a=ice-pwd.*$/m, 'a=ice-pwd:OEKutPgoHVk/99FfqPOf444w');
+        // Replace trickle option with ice2 since we won't be sending any
+        // additional candidates.
         sdpOffer = sdpOffer.replace(/^a=ice-options:.*$/m, 'a=ice-options:ice2');
         await pc.setLocalDescription({ type: 'offer', sdp: sdpOffer });
 
@@ -139,7 +141,7 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
             // (`-` and `0.0.0.0`) to remain anonymous, which we do. Note that "IN" means
             // "Internet". (RFC8866)
             // TODO: handle IPv6
-            "o=- " + (Date.now() / 1000).toFixed() + " 0 IN IP4 0.0.0.0" + "\n" +
+            "o=- " + (Date.now() / 1000).toFixed() + " 0 IN IP4 " + targetIp + "\n" +
             // Name for the session. We are allowed to pass a dummy `-`. (RFC8866)
             "s=-" + "\n" +
             // Start and end of the validity of the session. `0 0` means that the session never
@@ -182,7 +184,9 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
             // handshake. (RFC8122)
             // As explained at the top-level documentation, we use a hardcoded certificate.
             // TODO: proper certificate and fingerprint
-            "a=fingerprint:sha-256 13:41:2A:D7:2A:53:9E:6D:6F:A0:55:05:C0:5E:3F:39:67:C9:66:46:F8:26:2A:A1:D2:35:3E:54:32:91:11:2C" + "\n" +
+            "a=fingerprint:sha-256 AE:C2:39:3B:3E:68:7D:D3:48:11:13:B7:9B:38:12:72:29:21:78:16:88:0F:84:76:F4:A2:2B:63:93:88:96:A1" + "\n" +
+
+            // "TLS ID" uniquely identifies a TLS association.
             // The ICE protocol uses a "TLS ID" system to indicate whether a fresh DTLS connection
             // must be reopened in case of ICE renegotiation. Considering that ICE renegotiations
             // never happen in our use case, we can simply put a random value and not care about
@@ -191,9 +195,13 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
             // TODO: is it true that renegotiations never happen? what about a connection closing?
             // TODO: If the answerer receives an offer that does not contain an SDP "tls-id" attribute, the answerer MUST NOT insert a "tls-id" attribute in the answer.
             // TODO: right now browsers don't send it "a=tls-id:" + genRandomPayload(120) + "\n" +
+            // "tls-id" attribute MUST be present in the initial offer and respective answer (RFC8839).
+            // "a=tls-id:abc3de65cddef001be82" + "\n" +
+
             // Indicates that the remote DTLS server will only listen for incoming
             // connections. (RFC5763)
-            "a=setup:active" + "\n" +
+            // The answerer (server) must not be located behind a NAT (RFC6135).
+            "a=setup:passive" + "\n" +
             // The SCTP port (RFC8841)
             // Note it's different from the "m=" line port value, which
             // indicates the port of the underlying transport-layer protocol
