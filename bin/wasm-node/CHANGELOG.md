@@ -2,12 +2,14 @@
 
 ## Unreleased
 
+## 0.6.6 - 2022-03-18
+
 ### Added
 
 - Add `ClientOptions.cpuRateLimit`, which lets the user put an upper bound on the amount of CPU that the client uses on average ([#2151](https://github.com/paritytech/smoldot/pull/2151)).
-- Add support for parsing the "fron" (Frontier) consensus log items in headers. The content of these log items is ignored by the client.
+- Add support for parsing the "fron" (Frontier) consensus log items in headers. The content of these log items is ignored by the client. ([#2150](https://github.com/paritytech/smoldot/pull/2150))
 
-## 0.6.5 - 2022-17-03
+## 0.6.5 - 2022-03-17
 
 ### Changed
 
