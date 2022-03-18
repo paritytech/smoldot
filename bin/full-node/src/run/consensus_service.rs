@@ -28,6 +28,7 @@ use crate::run::{database_thread, jaeger_service, network_service};
 
 use core::num::NonZeroU32;
 use futures::{lock::Mutex, prelude::*};
+use hashbrown::HashSet;
 use smoldot::{
     author,
     chain::chain_information,
@@ -925,6 +926,7 @@ impl SyncBackground {
                 all::ProcessOne::VerifyBodyHeader(verify) => {
                     let hash_to_verify = verify.hash();
                     let height_to_verify = verify.height();
+                    let scale_encoded_header_to_verify = verify.scale_encoded_header().to_owned(); // TODO: copy :-/
 
                     let span = tracing::debug_span!(
                         "block-verification",
@@ -957,40 +959,92 @@ impl SyncBackground {
                                 break;
                             }
                             all::BlockVerification::Success {
-                                is_new_best: true,
+                                is_new_best,
                                 sync: sync_out,
                                 ..
                             } => {
                                 span.record("outcome", &"success");
-                                span.record("is_new_best", &true);
+                                span.record("is_new_best", &is_new_best);
 
                                 // Processing has made a step forward.
 
-                                // Update the networking.
-                                let fut = self.network_service.set_local_best_block(
-                                    self.network_chain_index,
-                                    sync_out.best_block_hash(),
-                                    sync_out.best_block_number(),
-                                );
-                                fut.await;
+                                if is_new_best {
+                                    // Update the networking.
+                                    let fut = self.network_service.set_local_best_block(
+                                        self.network_chain_index,
+                                        sync_out.best_block_hash(),
+                                        sync_out.best_block_number(),
+                                    );
+                                    fut.await;
 
-                                // Reset the block authoring, in order to potentially build a
-                                // block on top of this new best.
-                                self.block_authoring = None;
+                                    // Reset the block authoring, in order to potentially build a
+                                    // block on top of this new best.
+                                    self.block_authoring = None;
 
-                                // Update the externally visible best block state.
-                                let mut lock = self.sync_state.lock().await;
-                                lock.best_block_hash = sync_out.best_block_hash();
-                                lock.best_block_number = sync_out.best_block_number();
-                                drop(lock);
+                                    // Update the externally visible best block state.
+                                    let mut lock = self.sync_state.lock().await;
+                                    lock.best_block_hash = sync_out.best_block_hash();
+                                    lock.best_block_number = sync_out.best_block_number();
+                                    drop(lock);
+                                }
 
                                 self.sync = sync_out;
-                                break;
-                            }
-                            all::BlockVerification::Success { sync: sync_out, .. } => {
-                                span.record("outcome", &"success");
-                                span.record("is_new_best", &false);
-                                self.sync = sync_out;
+
+                                // Announce the newly-verified block to all the sources that might
+                                // not be aware of it. We can never be guaranteed that a certain
+                                // source does *not* know about a block, however it is not a big
+                                // problem to send a block announce to a source that already knows
+                                // about that block. For this reason, the list of sources we send
+                                // the block announce to is `all_sources - sources_that_know_it`.
+                                //
+                                // Note that not sending block announces to sources that already
+                                // know that block means that these sources might also miss the
+                                // fact that our local best block has been updated. This is in
+                                // practice not a problem either.
+                                let sources_to_announce_to = {
+                                    let mut all_sources =
+                                        self.sync
+                                            .sources()
+                                            .collect::<HashSet<_, fnv::FnvBuildHasher>>();
+                                    for knows in self.sync.knows_non_finalized_block(
+                                        height_to_verify,
+                                        &hash_to_verify,
+                                    ) {
+                                        all_sources.remove(&knows);
+                                    }
+                                    all_sources
+                                };
+
+                                for source_id in sources_to_announce_to {
+                                    let peer_id = match &self.sync[source_id] {
+                                        Some(pid) => pid,
+                                        None => continue,
+                                    };
+
+                                    if self
+                                        .network_service
+                                        .clone()
+                                        .send_block_announce(
+                                            peer_id,
+                                            0,
+                                            &scale_encoded_header_to_verify,
+                                            is_new_best,
+                                        )
+                                        .await
+                                        .is_ok()
+                                    {
+                                        // Note that `try_add_known_block_to_source` might have
+                                        // no effect, which is not a problem considering that this
+                                        // block tracking is mostly about optimizations and
+                                        // politeness.
+                                        self.sync.try_add_known_block_to_source(
+                                            source_id,
+                                            height_to_verify,
+                                            hash_to_verify,
+                                        );
+                                    }
+                                }
+
                                 break;
                             }
 

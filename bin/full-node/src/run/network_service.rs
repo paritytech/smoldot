@@ -40,6 +40,7 @@ use smoldot::{
         async_std_connection, connection,
         multiaddr::{Multiaddr, ProtocolRef},
         peer_id::{self, PeerId},
+        peers,
     },
     network::{protocol, service},
 };
@@ -702,6 +703,19 @@ impl NetworkService {
         self.inner
             .network
             .set_local_best_block(chain_index, best_hash, best_number)
+            .await
+    }
+
+    pub async fn send_block_announce(
+        self: Arc<Self>,
+        target: &PeerId,
+        chain_index: usize,
+        scale_encoded_header: &[u8],
+        is_best: bool,
+    ) -> Result<(), peers::QueueNotificationError> {
+        self.inner
+            .network
+            .send_block_announce(&target, chain_index, scale_encoded_header, is_best)
             .await
     }
 
