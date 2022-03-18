@@ -140,7 +140,12 @@ async fn main() -> Result<()> {
     };
 
     let mut se = SettingEngine::default();
+    // Disable fingerprint verification so `invalidFingerprint` above is okay.
     se.disable_certificate_fingerprint_verification(true);
+    // Act as a lite ICE (ICE which does not send additional candidates).
+    se.set_lite(true);
+    // Act as a DTLS server (wait for ClientHello message from the client).
+    se.set_answering_dtls_role(DTLSRole::Server)?;
     se.set_udp_network(UDPNetwork::Muxed(UDPMuxDefault::new(UDPMuxParams::new(
         socket,
     ))));
