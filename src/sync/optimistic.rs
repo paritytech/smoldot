@@ -723,12 +723,12 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     /// Returns the height of the block about to be verified.
     pub fn height(&self) -> u64 {
         // TODO: unwrap?
-        header::decode(self.header()).unwrap().number
+        header::decode(self.scale_encoded_header()).unwrap().number
     }
 
     /// Returns the hash of the block about to be verified.
     pub fn hash(&self) -> [u8; 32] {
-        header::hash_from_scale_encoded_header(self.header())
+        header::hash_from_scale_encoded_header(self.scale_encoded_header())
     }
 
     /// Returns true if [`Config::full`] was `Some` at initialization.
@@ -737,7 +737,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     }
 
     /// Returns the SCALE-encoded header of the block about to be verified.
-    fn header(&self) -> &[u8] {
+    pub fn scale_encoded_header(&self) -> &[u8] {
         &self
             .inner
             .verification_queue

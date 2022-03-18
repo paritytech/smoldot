@@ -724,6 +724,40 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         }
     }
 
+    /// Try register a new block that the source is aware of.
+    ///
+    /// Some syncing strategies do not track blocks known to sources, in which case this function
+    /// has no effect
+    ///
+    /// Has no effect if `height` is inferior or equal to the finalized block height, or if the
+    /// source was already known to know this block.
+    ///
+    /// The block does not need to be known by the data structure.
+    ///
+    /// This is automatically done for the blocks added through block announces or block requests..
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    pub fn try_add_known_block_to_source(
+        &mut self,
+        source_id: SourceId,
+        height: u64,
+        hash: [u8; 32],
+    ) {
+        debug_assert!(self.shared.sources.contains(source_id.0));
+        match (
+            &mut self.inner,
+            self.shared.sources.get(source_id.0).unwrap(),
+        ) {
+            (AllSyncInner::AllForks(sync), SourceMapping::AllForks(src)) => {
+                sync.add_known_block_to_source(*src, height, hash)
+            }
+            _ => {}
+        }
+    }
+
     /// Returns the details of a request to start towards a source.
     ///
     /// This method doesn't modify the state machine in any way. [`AllSync::add_request`] must be
@@ -1982,6 +2016,13 @@ impl<TRq, TSrc, TBl> HeaderBodyVerify<TRq, TSrc, TBl> {
     pub fn hash(&self) -> [u8; 32] {
         match &self.inner {
             HeaderBodyVerifyInner::Optimistic(verify) => verify.hash(),
+        }
+    }
+
+    /// Returns the SCALE-encoded header of the block about to be verified.
+    pub fn scale_encoded_header(&self) -> &[u8] {
+        match &self.inner {
+            HeaderBodyVerifyInner::Optimistic(verify) => verify.scale_encoded_header(),
         }
     }
 
