@@ -33,7 +33,6 @@ use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::dtls_transport::dtls_role::DTLSRole;
-use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::peer_connection::certificate::RTCCertificate;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::math_rand_alpha;
@@ -43,6 +42,7 @@ use webrtc_ice::udp_mux::UDPMuxParams;
 use webrtc_ice::udp_network::UDPNetwork;
 // webrtc_util::conn::Conn is not implemented for UdpSocket
 // use async_std::net::UdpSocket;
+use log::{debug, error};
 use tokio::net::UdpSocket;
 
 /// An SDP message that constitutes the offer.
@@ -164,24 +164,16 @@ async fn main() -> Result<()> {
     peer_connection
         .on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
             if s != RTCPeerConnectionState::Failed {
-                println!("Peer Connection State has changed: {}", s);
+                debug!("Peer Connection State has changed: {}", s);
             } else {
                 // Wait until PeerConnection has had no network activity for 30 seconds or another
                 // failure. It may be reconnected using an ICE Restart. Use
                 // webrtc.PeerConnectionStateDisconnected if you are interested in detecting faster
                 // timeout. Note that the PeerConnection may come back from
                 // PeerConnectionStateDisconnected.
-                println!("Peer Connection has gone to failed => exiting");
+                error!("Peer Connection has gone to failed => exiting");
                 let _ = done_tx.try_send(());
             }
-
-            Box::pin(async {})
-        }))
-        .await;
-
-    peer_connection
-        .on_ice_connection_state_change(Box::new(move |s: RTCIceConnectionState| {
-            println!("Peer ICE Connection State has changed: {}", s);
 
             Box::pin(async {})
         }))
@@ -191,7 +183,7 @@ async fn main() -> Result<()> {
         .on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
             let d_label = d.label().to_owned();
             let d_id = d.id();
-            println!("New DataChannel {} {}", d_label, d_id);
+            debug!("New DataChannel {} {}", d_label, d_id);
 
             // Register channel opening handling
             Box::pin(async move {
@@ -199,7 +191,7 @@ async fn main() -> Result<()> {
                 let d_label2 = d_label.clone();
                 let d_id2 = d_id;
                 d.on_open(Box::new(move || {
-                    println!("Data channel '{}'-'{}' open. Random messages will now be sent to any connected DataChannels every 5 seconds", d_label2, d_id2);
+                    debug!("Data channel '{}'-'{}' open. Random messages will now be sent to any connected DataChannels every 5 seconds", d_label2, d_id2);
 
                     Box::pin(async move {
                         let mut result = Result::<usize>::Ok(0);
@@ -207,7 +199,7 @@ async fn main() -> Result<()> {
                             task::sleep(Duration::from_secs(5)).await;
 
                             let message = math_rand_alpha(15);
-                            println!("Sending '{}'", message);
+                            debug!("Sending '{}'", message);
                             result = d2.send_text(message).await.map_err(Into::into);
                         }
                     })
@@ -216,7 +208,7 @@ async fn main() -> Result<()> {
                 // Register text message handling
                 d.on_message(Box::new(move |msg: DataChannelMessage| {
                     let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
-                    println!("Message from DataChannel '{}': '{}'", d_label, msg_str);
+                    debug!("Message from DataChannel '{}': '{}'", d_label, msg_str);
                     Box::pin(async {})
                 })).await;
             })
