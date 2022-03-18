@@ -406,7 +406,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// The block does not need to be known by the data structure.
     ///
     /// This is automatically done for the blocks added through [`AllForksSync::block_announce`],
-    /// [`AllForksSync::add_source`] or [`FinishAncestrySearch::add_block`].
+    /// [`AllForksSync::prepare_add_source`] or [`FinishAncestrySearch::add_block`].
     ///
     /// # Panic
     ///
