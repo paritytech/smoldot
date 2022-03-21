@@ -2907,6 +2907,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustls-pemfile"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ee86d63972a7c661d1536fefe8c3c8407321c3df668891286de28abcd087360"
+dependencies = [
+ "base64",
+]
+
+[[package]]
 name = "rustversion"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4172,8 +4181,7 @@ dependencies = [
 [[package]]
 name = "webrtc"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27d31ce825629e0a7b91c881d6b0a911cd65a7ebb6325fa94fbbddf1c7486f33"
+source = "git+https://github.com/melekes/webrtc?branch=anton/168-allow-persistent-certificates#04acecb68ccb813ca7caf4e30fc3affb6314e834"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4341,8 +4349,11 @@ dependencies = [
  "futures",
  "log",
  "rcgen",
+ "rustls",
+ "rustls-pemfile",
  "tokio",
  "webrtc",
+ "webrtc-dtls",
  "webrtc-ice",
 ]
 

@@ -18,12 +18,15 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
+use std::fs;
+use std::fs::File;
+use std::io::BufReader;
 use std::io::Write;
 use std::time::Duration;
+use std::time::SystemTime;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_std::channel as async_channel;
-use async_std::fs;
 use async_std::sync::Arc;
 use async_std::task;
 use clap::Parser;
@@ -149,9 +152,8 @@ async fn main() -> Result<()> {
     ))));
     se.set_ice_credentials(ICE_USER.to_string(), ICE_PASSWD.to_string());
     let api = APIBuilder::new().with_setting_engine(se).build();
-    let certificate = load_certificate()
-        .await
-        .expect("failed to load certificate");
+    let certificate = load_certificate().expect("failed to load certificate");
+    debug!("EXPIRES {:?}", certificate.get_fingerprints());
     let config = RTCConfiguration {
         certificates: vec![certificate],
         ..Default::default()
@@ -218,11 +220,13 @@ async fn main() -> Result<()> {
     // Set the remote description to the predefined SDP
     let mut offer = peer_connection.create_offer(None).await?;
     offer.sdp = CLIENT_SESSION_DESCRIPTION.to_string();
+    debug!("OFFER: {:?}", offer);
     peer_connection.set_remote_description(offer).await?;
 
     let answer = peer_connection.create_answer(None).await?;
     // Set the local description and start UDP listeners
     // Note: this will start the gathering of ICE candidates
+    debug!("ANSWER: {:?}", answer);
     peer_connection.set_local_description(answer).await?;
 
     futures::select! {
@@ -239,12 +243,27 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn load_certificate() -> Result<RTCCertificate> {
-    let pk = fs::read_to_string("./static/server.pem").await?;
-    let cert = fs::read_to_string("./static/server.pub.pem").await?;
+fn load_certificate() -> Result<RTCCertificate> {
+    let pk = fs::read_to_string("./static/smoldot.key")?;
+    let cert_file = File::open("./static/smoldot.crt")?;
 
-    Ok(RTCCertificate::from_pem(
-        &cert,
-        rcgen::KeyPair::from_pem(&pk)?,
-    )?)
+    let key_pair = rcgen::KeyPair::from_pem(&pk)?;
+    let private_key = webrtc_dtls::crypto::CryptoPrivateKey::from_key_pair(&key_pair)?;
+
+    let cert = rustls_pemfile::read_one(&mut BufReader::new(cert_file))?;
+    match cert {
+        Some(rustls_pemfile::Item::X509Certificate(cert)) => Ok(RTCCertificate::new(
+            webrtc_dtls::crypto::Certificate {
+                certificate: vec![rustls::Certificate(cert)],
+                private_key,
+            },
+            // TODO: proper values
+            "",
+            SystemTime::now()
+                .checked_add(Duration::from_secs(31536000))
+                .unwrap(),
+        )),
+        Some(o) => Err(anyhow!("expected certificate, but got {:?}", o)),
+        None => Err(anyhow!("failed to parse certificate")),
+    }
 }
