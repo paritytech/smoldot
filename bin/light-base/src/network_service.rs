@@ -42,6 +42,7 @@ use core::{cmp, num::NonZeroUsize, task::Poll, time::Duration};
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use itertools::Itertools as _;
 use smoldot::{
+    header,
     informant::{BytesDisplay, HashDisplay},
     libp2p::{
         collection::{ConnectionError, HandshakeError},
@@ -50,7 +51,7 @@ use smoldot::{
         peer_id::PeerId,
         read_write::ReadWrite,
     },
-    network::{protocol, service}, header,
+    network::{protocol, service},
 };
 use std::{collections::HashSet, sync::Arc};
 
