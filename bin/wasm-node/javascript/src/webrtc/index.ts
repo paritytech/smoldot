@@ -124,7 +124,7 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
         sdpOffer = sdpOffer.replace(/^a=ice-pwd.*$/m, 'a=ice-pwd:OEKutPgoHVk/99FfqPOf444w');
         await pc.setLocalDescription({ type: 'offer', sdp: sdpOffer });
 
-        console.log("LOCAL: " + pc.localDescription!.sdp);
+        console.log("LOCAL OFFER: " + pc.localDescription!.sdp);
 
         // Note that the trailing line feed is important, as otherwise Chrome
         // fails to parse the payload.
@@ -201,7 +201,7 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
 
         await pc.setRemoteDescription({ type: "answer", sdp: remoteSdp });
 
-        console.log(pc.remoteDescription!.sdp);
+        console.log("REMOTE ANSWER: " + pc.remoteDescription!.sdp);
     };
 
     dataChannel.onopen = () => {

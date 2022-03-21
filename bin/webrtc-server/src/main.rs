@@ -61,7 +61,6 @@ use tokio::net::UdpSocket;
 ///     s=<session name>
 ///     c=<nettype> <addrtype> <connection-address>
 ///     t=<start-time> <stop-time>
-///     a=group:BUNDLE <name>, ...
 ///
 ///     m=<media> <port> <proto> <fmt> ...
 ///     a=mid:<MID>
@@ -74,7 +73,7 @@ use tokio::net::UdpSocket;
 const CLIENT_SESSION_DESCRIPTION: &'static str = "v=0
 o=- 0 0 IN IP4 0.0.0.0
 s=-
-c=IN IP4 127.0.0.1
+c=IN IP4 0.0.0.0
 t=0 0
 
 m=application 9 UDP/DTLS/SCTP webrtc-datachannel
@@ -218,13 +217,13 @@ async fn main() -> Result<()> {
     // Set the remote description to the predefined SDP
     let mut offer = peer_connection.create_offer(None).await?;
     offer.sdp = CLIENT_SESSION_DESCRIPTION.to_string();
-    debug!("OFFER: {:?}", offer);
+    debug!("REMOTE OFFER: {:?}", offer);
     peer_connection.set_remote_description(offer).await?;
 
     let answer = peer_connection.create_answer(None).await?;
     // Set the local description and start UDP listeners
     // Note: this will start the gathering of ICE candidates
-    debug!("ANSWER: {:?}", answer);
+    debug!("LOCAL ANSWER: {:?}", answer);
     peer_connection.set_local_description(answer).await?;
 
     futures::select! {
