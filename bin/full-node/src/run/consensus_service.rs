@@ -476,18 +476,16 @@ impl SyncBackground {
                                 abort.abort();
                             }
                         },
-                        network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
+                        network_service::Event::BlockAnnounce { chain_index, peer_id, header, is_best }
                             if chain_index == self.network_chain_index =>
                         {
-                            let decoded = announce.decode();
-
                             let _jaeger_span = self
                                 .jaeger_service
-                                .block_announce_process_span(&decoded.header.hash());
+                                .block_announce_process_span(&header.hash());
 
                             let id = *self.peers_source_id_map.get(&peer_id).unwrap();
                             // TODO: log the outcome
-                            match self.sync.block_announce(id, decoded.scale_encoded_header.to_owned(), decoded.is_best) {
+                            match self.sync.block_announce(id, header.scale_encoding_vec(), is_best) {
                                 all::BlockAnnounceOutcome::HeaderVerify => {},
                                 all::BlockAnnounceOutcome::TooOld { .. } => {},
                                 all::BlockAnnounceOutcome::AlreadyInChain => {},
