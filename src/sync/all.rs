@@ -1780,34 +1780,45 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
         user_data: TBl,
     ) -> HeaderVerifyOutcome<TRq, TSrc, TBl> {
         match self.inner {
-            HeaderVerifyInner::AllForks(verify) => match verify.perform(now_from_unix_epoch) {
-                all_forks::HeaderVerifyOutcome::Success { is_new_best, sync } => {
-                    HeaderVerifyOutcome::Success {
+            HeaderVerifyInner::AllForks(verify) => {
+                let verified_block_height = verify.height();
+                let verified_block_hash = *verify.hash();
+
+                match verify.perform(now_from_unix_epoch) {
+                    all_forks::HeaderVerifyOutcome::Success {
                         is_new_best,
-                        sync: AllSync {
-                            inner: AllSyncInner::AllForks(sync),
-                            shared: self.shared,
-                        },
+                        mut sync,
+                    } => {
+                        *sync.block_user_data_mut(verified_block_height, &verified_block_hash) =
+                            Some(user_data);
+
+                        HeaderVerifyOutcome::Success {
+                            is_new_best,
+                            sync: AllSync {
+                                inner: AllSyncInner::AllForks(sync),
+                                shared: self.shared,
+                            },
+                        }
+                    }
+                    all_forks::HeaderVerifyOutcome::Error { sync, error } => {
+                        HeaderVerifyOutcome::Error {
+                            sync: AllSync {
+                                inner: AllSyncInner::AllForks(sync),
+                                shared: self.shared,
+                            },
+                            error: match error {
+                                all_forks::HeaderVerifyError::VerificationFailed(error) => {
+                                    HeaderVerifyError::VerificationFailed(error)
+                                }
+                                all_forks::HeaderVerifyError::ConsensusMismatch => {
+                                    HeaderVerifyError::ConsensusMismatch
+                                }
+                            },
+                            user_data,
+                        }
                     }
                 }
-                all_forks::HeaderVerifyOutcome::Error { sync, error } => {
-                    HeaderVerifyOutcome::Error {
-                        sync: AllSync {
-                            inner: AllSyncInner::AllForks(sync),
-                            shared: self.shared,
-                        },
-                        error: match error {
-                            all_forks::HeaderVerifyError::VerificationFailed(error) => {
-                                HeaderVerifyError::VerificationFailed(error)
-                            }
-                            all_forks::HeaderVerifyError::ConsensusMismatch => {
-                                HeaderVerifyError::ConsensusMismatch
-                            }
-                        },
-                        user_data,
-                    }
-                }
-            },
+            }
         }
     }
 }

@@ -281,6 +281,42 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         self.chain.iter_ancestry_order()
     }
 
+    /// Gives access to the user data stored for a block of the data structure.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the block wasn't present in the data structure.
+    ///
+    pub fn block_user_data(&self, height: u64, hash: &[u8; 32]) -> &TBl {
+        if let Some(block) = self.chain.non_finalized_block_user_data(hash) {
+            return &block.user_data;
+        }
+
+        &self
+            .inner
+            .blocks
+            .unverified_block_user_data(height, hash)
+            .user_data
+    }
+
+    /// Gives access to the user data stored for a block of the data structure.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the block wasn't present in the data structure.
+    ///
+    pub fn block_user_data_mut(&mut self, height: u64, hash: &[u8; 32]) -> &mut TBl {
+        if let Some(block) = self.chain.non_finalized_block_by_hash(hash) {
+            return &mut block.into_user_data().user_data;
+        }
+
+        &mut self
+            .inner
+            .blocks
+            .unverified_block_user_data_mut(height, hash)
+            .user_data
+    }
+
     /// Starts the process of inserting a new source in the [`AllForksSync`].
     ///
     /// This function doesn't modify the state machine, but only looks at the current state of the
