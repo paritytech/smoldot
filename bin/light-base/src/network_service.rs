@@ -50,7 +50,7 @@ use smoldot::{
         peer_id::PeerId,
         read_write::ReadWrite,
     },
-    network::{protocol, service},
+    network::{protocol, service}, header,
 };
 use std::{collections::HashSet, sync::Arc};
 
@@ -227,7 +227,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                         "Connection({}, {}) => BlockAnnounce(best_hash={}, is_best={})",
                                         peer_id,
                                         &network_service.log_chain_names[chain_index],
-                                        HashDisplay(&announce.decode().header.hash()),
+                                        HashDisplay(&header::hash_from_scale_encoded_header(&announce.decode().scale_encoded_header)),
                                         announce.decode().is_best
                                     );
                                     break Event::BlockAnnounce {

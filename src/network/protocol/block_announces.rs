@@ -60,13 +60,14 @@ impl Role {
 }
 
 /// Decoded block announcement notification.
-// TODO: this has both the scale_encoded and decoded header, which makes it weird if you want to build the struct manually
 #[derive(Debug)]
 pub struct BlockAnnounceRef<'a> {
-    /// SCALE-encoded header in the announce. Same as [`BlockAnnounceRef::header`].
+    /// SCALE-encoded header in the announce.
+    ///
+    /// > **Note**: Due to the way block announces are encoded, the header is always guaranteed to
+    /// >           decode correctly. However this shouldn't be relied upon.
     pub scale_encoded_header: &'a [u8],
-    /// Header of the announced block. Same as [`BlockAnnounceRef::scale_encoded_header`].
-    pub header: header::HeaderRef<'a>,
+
     /// True if the block is the new best block of the announcer.
     pub is_best: bool,
     // TODO: missing a `Vec<u8>` field that SCALE-decodes into this type: https://github.com/paritytech/polkadot/blob/fff4635925c12c80717a524367687fcc304bcb13/node%2Fprimitives%2Fsrc%2Flib.rs#L87
@@ -80,12 +81,13 @@ pub fn encode_block_announce(
     announce: BlockAnnounceRef<'_>,
 ) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
     let is_best = if announce.is_best { [1u8] } else { [0u8] };
-    announce
-        .header
-        .scale_encoding()
-        .map(either::Left)
-        .chain(iter::once(either::Right(is_best)))
-        .chain(iter::once(either::Right([0u8])))
+
+    [
+        either::Left(announce.scale_encoded_header),
+        either::Right(is_best),
+        either::Right([0u8]),
+    ]
+    .into_iter()
 }
 
 /// Decodes a block announcement.
@@ -93,22 +95,21 @@ pub fn decode_block_announce(bytes: &[u8]) -> Result<BlockAnnounceRef, DecodeBlo
     let result: Result<_, nom::error::Error<_>> =
         nom::combinator::all_consuming(nom::combinator::map(
             nom::sequence::tuple((
-                |enc_hdr| match header::decode_partial(enc_hdr) {
-                    Ok((hdr, rest)) => Ok((rest, (hdr, &enc_hdr[..(enc_hdr.len() - rest.len())]))),
+                nom::combinator::recognize(|enc_hdr| match header::decode_partial(enc_hdr) {
+                    Ok((hdr, rest)) => Ok((rest, hdr)),
                     Err(_) => Err(nom::Err::Failure(nom::error::make_error(
                         enc_hdr,
                         nom::error::ErrorKind::Verify,
                     ))),
-                },
+                }),
                 nom::branch::alt((
                     nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| false),
                     nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| true),
                 )),
                 crate::util::nom_bytes_decode,
             )),
-            |((header, scale_encoded_header), is_best, _)| BlockAnnounceRef {
+            |(scale_encoded_header, is_best, _)| BlockAnnounceRef {
                 scale_encoded_header,
-                header,
                 is_best,
             },
         ))(bytes)

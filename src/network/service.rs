@@ -807,7 +807,6 @@ where
         let buffers_to_send = protocol::encode_block_announce(protocol::BlockAnnounceRef {
             scale_encoded_header,
             is_best,
-            header: header::decode(scale_encoded_header).unwrap(), // TODO: hack
         });
 
         let notification = buffers_to_send.fold(Vec::new(), |mut a, b| {

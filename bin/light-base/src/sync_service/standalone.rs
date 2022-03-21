@@ -799,14 +799,39 @@ impl<TPlat: Platform> Task<TPlat> {
                 let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
                 let decoded = announce.decode();
 
-                log::debug!(
-                    target: &self.log_target,
-                    "Sync <= BlockAnnounce(sender={}, hash={}, is_best={}, parent_hash={})",
-                    peer_id,
-                    HashDisplay(&header::hash_from_scale_encoded_header(&decoded.scale_encoded_header)),
-                    decoded.is_best,
-                    HashDisplay(decoded.header.parent_hash)
-                );
+                match header::decode(&decoded.scale_encoded_header) {
+                    Ok(decoded_header) => {
+                        log::debug!(
+                            target: &self.log_target,
+                            "Sync <= BlockAnnounce(sender={}, hash={}, is_best={}, parent_hash={})",
+                            peer_id,
+                            HashDisplay(&header::hash_from_scale_encoded_header(&decoded.scale_encoded_header)),
+                            decoded.is_best,
+                            HashDisplay(decoded_header.parent_hash)
+                        );
+                    }
+                    Err(error) => {
+                        log::debug!(
+                            target: &self.log_target,
+                            "Sync <= BlockAnnounce(sender={}, hash={}, is_best={}, parent_hash=<unknown>)",
+                            peer_id,
+                            HashDisplay(&header::hash_from_scale_encoded_header(&decoded.scale_encoded_header)),
+                            decoded.is_best,
+                        );
+
+                        log::debug!(
+                            target: &self.log_target,
+                            "Sync => InvalidBlockHeader(error={})",
+                            error
+                        );
+
+                        log::warn!(
+                            target: &self.log_target,
+                            "Failed to decode header in block announce received from {}. Error: {}",
+                            peer_id, error,
+                        )
+                    }
+                }
 
                 match self.sync.block_announce(
                     sync_source_id,
@@ -861,8 +886,7 @@ impl<TPlat: Platform> Task<TPlat> {
                         );
                     }
                     all::BlockAnnounceOutcome::InvalidHeader(_) => {
-                        // The block announce is verified.
-                        unreachable!()
+                        // Log messages are already printed above.
                     }
                 }
             }
