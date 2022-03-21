@@ -4181,7 +4181,7 @@ dependencies = [
 [[package]]
 name = "webrtc"
 version = "0.4.0"
-source = "git+https://github.com/melekes/webrtc?branch=anton/168-allow-persistent-certificates#04acecb68ccb813ca7caf4e30fc3affb6314e834"
+source = "git+https://github.com/melekes/webrtc?branch=anton/168-allow-persistent-certificates#b193ddcea3b3b5aa6e5eeb6219be1db33d22406f"
 dependencies = [
  "async-trait",
  "bytes",

@@ -76,7 +76,6 @@ o=- 0 0 IN IP4 0.0.0.0
 s=-
 c=IN IP4 127.0.0.1
 t=0 0
-a=group:BUNDLE 0
 
 m=application 9 UDP/DTLS/SCTP webrtc-datachannel
 a=mid:0
