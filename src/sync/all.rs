@@ -385,7 +385,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         }
                         all_forks::AddSource::OldBestBlock(b) => b.add_source(source_user_data),
                         all_forks::AddSource::UnknownBestBlock(b) => {
-                            b.add_source_and_insert_block(source_user_data)
+                            b.add_source_and_insert_block(source_user_data, None)
                         }
                     };
 
@@ -1050,7 +1050,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         finalized_block_height,
                     },
                     all_forks::BlockAnnounceOutcome::Unknown(source_update) => {
-                        source_update.insert_and_update_source();
+                        source_update.insert_and_update_source(None);
                         BlockAnnounceOutcome::Disjoint // TODO: arbitrary
                     }
                     all_forks::BlockAnnounceOutcome::AlreadyInChain(source_update)
@@ -1181,10 +1181,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             block.scale_encoded_justifications.into_iter(),
                         ) {
                             Ok(all_forks::AddBlock::UnknownBlock(ba)) => {
-                                blocks_append = ba.insert(block.user_data)
+                                blocks_append = ba.insert(Some(block.user_data))
                             }
                             Ok(all_forks::AddBlock::AlreadyPending(ba)) => {
-                                blocks_append = ba.replace(block.user_data)
+                                // TODO: replacing the user data entirely is very opinionated, instead the API of the AllSync should be changed
+                                blocks_append = ba.replace(Some(block.user_data))
                             }
                             Ok(all_forks::AddBlock::AlreadyInChain(ba)) if block_index == 0 => {
                                 break (
@@ -1752,7 +1753,9 @@ pub struct HeaderVerify<TRq, TSrc, TBl> {
 }
 
 enum HeaderVerifyInner<TRq, TSrc, TBl> {
-    AllForks(all_forks::HeaderVerify<TBl, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>),
+    AllForks(
+        all_forks::HeaderVerify<Option<TBl>, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
+    ),
 }
 
 impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
@@ -1777,22 +1780,18 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
         user_data: TBl,
     ) -> HeaderVerifyOutcome<TRq, TSrc, TBl> {
         match self.inner {
-            HeaderVerifyInner::AllForks(verify) => {
-                match verify.perform(now_from_unix_epoch, user_data) {
-                    all_forks::HeaderVerifyOutcome::Success { is_new_best, sync } => {
-                        HeaderVerifyOutcome::Success {
-                            is_new_best,
-                            sync: AllSync {
-                                inner: AllSyncInner::AllForks(sync),
-                                shared: self.shared,
-                            },
-                        }
+            HeaderVerifyInner::AllForks(verify) => match verify.perform(now_from_unix_epoch) {
+                all_forks::HeaderVerifyOutcome::Success { is_new_best, sync } => {
+                    HeaderVerifyOutcome::Success {
+                        is_new_best,
+                        sync: AllSync {
+                            inner: AllSyncInner::AllForks(sync),
+                            shared: self.shared,
+                        },
                     }
-                    all_forks::HeaderVerifyOutcome::Error {
-                        sync,
-                        error,
-                        user_data,
-                    } => HeaderVerifyOutcome::Error {
+                }
+                all_forks::HeaderVerifyOutcome::Error { sync, error } => {
+                    HeaderVerifyOutcome::Error {
                         sync: AllSync {
                             inner: AllSyncInner::AllForks(sync),
                             shared: self.shared,
@@ -1806,9 +1805,9 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                             }
                         },
                         user_data,
-                    },
+                    }
                 }
-            }
+            },
         }
     }
 }
@@ -1851,7 +1850,11 @@ pub struct JustificationVerify<TRq, TSrc, TBl> {
 
 enum JustificationVerifyInner<TRq, TSrc, TBl> {
     AllForks(
-        all_forks::JustificationVerify<TBl, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
+        all_forks::JustificationVerify<
+            Option<TBl>,
+            AllForksRequestExtra<TRq>,
+            AllForksSourceExtra<TSrc>,
+        >,
     ),
     Optimistic(
         optimistic::JustificationVerify<
@@ -1885,7 +1888,7 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
                                 full: None, // TODO: wrong
                                 header: b.0,
                                 justifications: Vec::new(), // TODO: wrong
-                                user_data: b.1,
+                                user_data: b.1.unwrap(),
                             })
                             .collect(),
                         updates_best_block,
@@ -2248,7 +2251,10 @@ enum AllSyncInner<TRq, TSrc, TBl> {
             TBl,
         >,
     },
-    AllForks(all_forks::AllForksSync<TBl, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>),
+    // TODO: we store an `Option<TBl>` instead of `TBl` due to API issues; the all.rs doesn't let you insert user datas for pending blocks while the AllForksSync lets you; `None` is stored while a block is pending
+    AllForks(
+        all_forks::AllForksSync<Option<TBl>, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
+    ),
     Poisoned,
 }
 
@@ -2304,7 +2310,7 @@ impl<TRq> Shared<TRq> {
         &mut self,
         grandpa: warp_sync::Success<GrandpaWarpSyncSourceExtra<TSrc>>,
     ) -> (
-        all_forks::AllForksSync<TBl, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
+        all_forks::AllForksSync<Option<TBl>, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
         host::HostVmPrototype,
         Option<Vec<u8>>,
         Option<Vec<u8>>,
@@ -2339,7 +2345,7 @@ impl<TRq> Shared<TRq> {
                 }
                 all_forks::AddSource::OldBestBlock(b) => b.add_source(source_user_data),
                 all_forks::AddSource::UnknownBestBlock(b) => {
-                    b.add_source_and_insert_block(source_user_data)
+                    b.add_source_and_insert_block(source_user_data, None)
                 }
             };
 
