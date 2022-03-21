@@ -153,13 +153,12 @@ async fn main() -> Result<()> {
     se.set_ice_credentials(ICE_USER.to_string(), ICE_PASSWD.to_string());
     let api = APIBuilder::new().with_setting_engine(se).build();
     let certificate = load_certificate().expect("failed to load certificate");
-    debug!("EXPIRES {:?}", certificate.get_fingerprints());
     let config = RTCConfiguration {
         certificates: vec![certificate],
         ..Default::default()
     };
 
-    let peer_connection = Arc::new(api.new_peer_connection(config).await?);
+    let peer_connection = api.new_peer_connection(config).await?;
 
     let (done_tx, done_rx) = async_channel::bounded(1);
 

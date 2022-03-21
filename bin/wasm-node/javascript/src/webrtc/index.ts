@@ -210,20 +210,30 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
             // The maximum SCTP user message size (in bytes) (RFC8841)
             "a=max-message-size:100000" + "\n" +
             // A transport address for a candidate that can be used for connectivity checks (RFC8839).
-            "a=candidate:0 1 " + (protocol == 'tcp' ? "TCP" : "UDP") + " 2113667327 " + targetIp + " " + targetPort + " typ host" + "\n";
+            "a=candidate:1 1 " + (protocol == 'tcp' ? "TCP" : "UDP") + " 2113667327 " + targetIp + " " + targetPort + " typ host" + "\n" +
+            // Indicate that there will be no further candidates.
+            "a=end-of-candidates" + "\n";
 
-        await webrtc.setRemoteDescription({ type: "answer", sdp: remoteSdp });
+        await pc.setRemoteDescription({ type: "answer", sdp: remoteSdp });
 
-        console.log(webrtc.remoteDescription!.sdp);
-    });
+        console.log(pc.remoteDescription!.sdp);
+    };
 
     dataChannel.onopen = () => {
-        console.log('open!');
+        console.log(`'${dataChannel.label}' opened`);
     };
 
     dataChannel.onerror = (error) => {
-        console.log('error! ' + error);
+        console.log(`'${dataChannel.label}' errored: ${error}`);
     };
+
+    dataChannel.onclose = () => {
+        console.log(`'${dataChannel.label}' closed`);
+    };
+
+    dataChannel.onmessage = (m) => {
+        console.log(`new message on '${dataChannel.label}': '${m.data}'`);
+    }
 }
 
 /**
