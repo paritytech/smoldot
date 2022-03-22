@@ -82,7 +82,7 @@ function injectMessage(instance: SmoldotWasmInstance, message: messages.ToWorker
         const errorMsg = Buffer.from(instance.exports.memory.buffer)
           .toString('utf8', errorMsgPtr, errorMsgPtr + errorMsgLen);
         instance.exports.remove_chain(chainId);
-        postMessage({ kind: 'chainAddedErr', error: new Error(errorMsg) });
+        postMessage({ kind: 'chainAddedErr', error: errorMsg });
       }
 
       break;
