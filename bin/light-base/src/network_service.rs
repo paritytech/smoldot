@@ -269,7 +269,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                 } => {
                                     log::debug!(
                                         target: "network",
-                                        "Connection({}, {}) => ChainConnectAttemptFailed(error={})",
+                                        "Connection({}, {}) => ChainConnectAttemptFailed(error={:?})",
                                         &network_service.log_chain_names[chain_index],
                                         peer_id, error,
                                     );
@@ -349,7 +349,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                     // TODO: handle properly?
                                     log::warn!(
                                         target: "network",
-                                        "Connection({}) => ProtocolError(error={})",
+                                        "Connection({}) => ProtocolError(error={:?})",
                                         peer_id,
                                         error,
                                     );
@@ -691,7 +691,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             Err(err) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) => BlocksRequest(chain={}, error={})",
+                    "Connection({}) => BlocksRequest(chain={}, error={:?})",
                     target,
                     self.inner.log_chain_names[chain_index],
                     err
@@ -751,7 +751,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             Err(err) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) => GrandpaWarpSyncRequest(chain={}, error={})",
+                    "Connection({}) => GrandpaWarpSyncRequest(chain={}, error={:?})",
                     target,
                     self.inner.log_chain_names[chain_index],
                     err,
@@ -832,7 +832,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             Err(err) => {
                 log::debug!(
                     target: "network",
-                    "Connection({}) => StorageProofRequest(chain={}, error={})",
+                    "Connection({}) => StorageProofRequest(chain={}, error={:?})",
                     target,
                     self.inner.log_chain_names[chain_index],
                     err
