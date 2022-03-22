@@ -119,7 +119,8 @@ pub enum Event {
     BlockAnnounce {
         chain_index: usize,
         peer_id: PeerId,
-        announce: service::EncodedBlockAnnounce,
+        header: header::Header,
+        is_best: bool,
     },
 }
 
@@ -248,28 +249,44 @@ impl NetworkService {
                                 announce,
                             } => {
                                 let decoded = announce.decode();
-
-                                let mut _jaeger_span =
-                                    inner.jaeger_service.block_announce_receive_span(
-                                        &inner.local_peer_id,
-                                        &peer_id,
-                                        decoded.header.number,
-                                        &decoded.header.hash(),
-                                    );
-
-                                tracing::debug!(
-                                    %chain_index, %peer_id,
-                                    hash = %HashDisplay(&decoded.header.hash()),
-                                    number = decoded.header.number,
-                                    is_best = ?decoded.is_best,
-                                    "block-announce"
+                                let header_hash = header::hash_from_scale_encoded_header(
+                                    &decoded.scale_encoded_header,
                                 );
+                                match header::decode(&decoded.scale_encoded_header) {
+                                    Ok(decoded_header) => {
+                                        let mut _jaeger_span =
+                                            inner.jaeger_service.block_announce_receive_span(
+                                                &inner.local_peer_id,
+                                                &peer_id,
+                                                decoded_header.number,
+                                                &decoded_header.hash(),
+                                            );
 
-                                break Event::BlockAnnounce {
-                                    chain_index,
-                                    peer_id,
-                                    announce,
-                                };
+                                        tracing::debug!(
+                                            %chain_index, %peer_id,
+                                            hash = %HashDisplay(&header_hash),
+                                            number = decoded_header.number,
+                                            is_best = ?decoded.is_best,
+                                            "block-announce"
+                                        );
+
+                                        break Event::BlockAnnounce {
+                                            chain_index,
+                                            peer_id,
+                                            is_best: decoded.is_best,
+                                            header: decoded_header.into(), // TODO: somewhat wasteful allocation here
+                                        };
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            %chain_index, %peer_id,
+                                            hash = %HashDisplay(&header_hash),
+                                            is_best = ?decoded.is_best,
+                                            %error,
+                                            "block-announce-bad-header"
+                                        );
+                                    }
+                                }
                             }
                             service::Event::ChainConnected {
                                 peer_id,

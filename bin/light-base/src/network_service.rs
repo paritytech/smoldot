@@ -42,6 +42,7 @@ use core::{cmp, num::NonZeroUsize, task::Poll, time::Duration};
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use itertools::Itertools as _;
 use smoldot::{
+    header,
     informant::{BytesDisplay, HashDisplay},
     libp2p::{
         collection::{ConnectionError, HandshakeError},
@@ -227,7 +228,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                                         "Connection({}, {}) => BlockAnnounce(best_hash={}, is_best={})",
                                         peer_id,
                                         &network_service.log_chain_names[chain_index],
-                                        HashDisplay(&announce.decode().header.hash()),
+                                        HashDisplay(&header::hash_from_scale_encoded_header(&announce.decode().scale_encoded_header)),
                                         announce.decode().is_best
                                     );
                                     break Event::BlockAnnounce {
