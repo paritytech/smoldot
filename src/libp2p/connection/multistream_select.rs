@@ -169,7 +169,7 @@ where
         // legitimately requests a protocol that the listener doesn't support. In order to prevent
         // confusion, a minimum length is applied to the protocol name length. Any protocol name
         // smaller than this will never trigger a protocol error, even if it isn't supported.
-        const MIN_PROTO_LEN_NO_ERR: usize = 48;
+        const MIN_PROTO_LEN_NO_ERR: usize = 512;
         let max_frame_len = cmp::max(
             cmp::max(max_proto_name_len, MIN_PROTO_LEN_NO_ERR),
             HANDSHAKE.len(),
