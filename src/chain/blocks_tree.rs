@@ -367,6 +367,16 @@ impl<T> NonFinalizedTree<T> {
             .contains_key(hash)
     }
 
+    /// Gives access to the user data of a block stored by the [`NonFinalizedTree`], identified
+    /// by its hash.
+    ///
+    /// Returns `None` if the block can't be found.
+    pub fn non_finalized_block_user_data(&self, hash: &[u8; 32]) -> Option<&T> {
+        let inner = self.inner.as_ref().unwrap();
+        let node_index = *inner.blocks_by_hash.get(hash)?;
+        Some(&inner.blocks.get(node_index).unwrap().user_data)
+    }
+
     /// Gives access to a block stored by the [`NonFinalizedTree`], identified by its hash.
     pub fn non_finalized_block_by_hash(&mut self, hash: &[u8; 32]) -> Option<BlockAccess<T>> {
         let inner = self.inner.as_mut().unwrap();
