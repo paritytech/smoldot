@@ -171,7 +171,7 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
             // As explained at the top-level documentation, we use a hardcoded certificate.
             // MUST be derived from the certificate used by the answerer (server).
             // TODO: proper certificate and fingerprint
-            "a=fingerprint:sha-256 0B:0D:39:5C:85:07:8C:E3:A7:76:E9:CD:21:90:64:F0:88:FE:A4:9F:AA:6F:AD:A4:5A:50:0B:14:C7:03:8D:5D" + "\n" +
+            "a=fingerprint:sha-256 AC:D1:E5:33:EC:27:1F:CD:E0:27:59:47:F4:D6:2A:2B:23:31:FF:10:C9:DD:E0:29:8E:B7:B3:99:B4:BF:F6:0B" + "\n" +
 
             // "TLS ID" uniquely identifies a TLS association.
             // The ICE protocol uses a "TLS ID" system to indicate whether a fresh DTLS connection
