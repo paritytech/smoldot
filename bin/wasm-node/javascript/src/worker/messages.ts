@@ -95,7 +95,7 @@ export interface FromWorkerChainAddedOk {
 
 export interface FromWorkerChainAddedError {
   kind: 'chainAddedErr',
-  error: Error,
+  error: string,
 }
 
 export interface FromWorkerLog {
