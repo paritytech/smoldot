@@ -596,7 +596,7 @@ impl<TPlat: Platform> Task<TPlat> {
                             // TODO: print which peer sent the header
                             log::debug!(
                                 target: &self.log_target,
-                                "Sync => HeaderVerifyError(hash={}, error={})",
+                                "Sync => HeaderVerifyError(hash={}, error={:?})",
                                 HashDisplay(&verified_hash),
                                 error
                             );
@@ -644,7 +644,7 @@ impl<TPlat: Platform> Task<TPlat> {
                             // TODO: print which peer sent the justification
                             log::debug!(
                                 target: &self.log_target,
-                                "Sync => JustificationVerificationError(error={})",
+                                "Sync => JustificationVerificationError(error={:?})",
                                 error,
                             );
 

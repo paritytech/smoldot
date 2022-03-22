@@ -1676,7 +1676,7 @@ async fn run_background<TPlat: Platform>(
                         Err(error) => {
                             log::debug!(
                                 target: &log_target,
-                                "Worker <= FailedDownload(blocks=[{}], error={})",
+                                "Worker <= FailedDownload(blocks=[{}], error={:?})",
                                 concerned_blocks,
                                 error
                             );
