@@ -91,7 +91,7 @@ use alloc::{
     borrow::ToOwned as _,
     vec::{self, Vec},
 };
-use core::{num::NonZeroU32, ops, time::Duration};
+use core::{mem, num::NonZeroU32, ops, time::Duration};
 
 mod disjoint;
 mod pending_blocks;
@@ -995,9 +995,36 @@ pub struct AddBlockOccupied<TBl, TRq, TSrc> {
 }
 
 impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
+    /// Gives access to the user data of the block.
+    pub fn user_data_mut(&mut self) -> &mut TBl {
+        if self.is_verified {
+            &mut self
+                .inner
+                .inner
+                .chain
+                .non_finalized_block_by_hash(&self.inner.expected_next_hash)
+                .unwrap()
+                .into_user_data()
+                .user_data
+        } else {
+            &mut self
+                .inner
+                .inner
+                .inner
+                .blocks
+                .unverified_block_user_data_mut(
+                    self.decoded_header.number,
+                    &self.inner.expected_next_hash,
+                )
+                .user_data
+        }
+    }
+
     /// Replace the existing user data of the block.
-    // TODO: return old user data
-    pub fn replace(mut self, user_data: TBl) -> FinishAncestrySearch<TBl, TRq, TSrc> {
+    ///
+    /// Returns an object that allows continuing inserting blocks, plus the former user data that
+    /// was overwritten by the new one.
+    pub fn replace(mut self, user_data: TBl) -> (FinishAncestrySearch<TBl, TRq, TSrc>, TBl) {
         // Update the view the state machine maintains for this source.
         self.inner.inner.inner.blocks.add_known_block_to_source(
             self.inner.source_id,
@@ -1013,14 +1040,18 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
             self.decoded_header.parent_hash,
         );
 
-        if self.is_verified {
-            self.inner
-                .inner
-                .chain
-                .non_finalized_block_by_hash(&self.inner.expected_next_hash)
-                .unwrap()
-                .into_user_data()
-                .user_data = user_data;
+        let former_user_data = if self.is_verified {
+            mem::replace(
+                &mut self
+                    .inner
+                    .inner
+                    .chain
+                    .non_finalized_block_by_hash(&self.inner.expected_next_hash)
+                    .unwrap()
+                    .into_user_data()
+                    .user_data,
+                user_data,
+            )
         } else {
             self.inner
                 .inner
@@ -1046,8 +1077,8 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
                 // TODO: copying bytes :-/
             }
 
-            // TODO: update user_data here
-        }
+            mem::replace(&mut block_user_data.user_data, user_data)
+        };
 
         // TODO: what if the pending block already contains a justification and it is not the
         //       same as here? since justifications aren't immediately verified, it is possible
@@ -1059,7 +1090,7 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
         self.inner.expected_next_hash = self.decoded_header.parent_hash;
         self.inner.expected_next_height -= 1;
         self.inner.index_in_response += 1;
-        self.inner
+        (self.inner, former_user_data)
     }
 
     /// Do not update the state machine with this block. Equivalent to calling
@@ -1215,7 +1246,28 @@ pub struct AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
 }
 
 impl<'a, TBl, TRq, TSrc> AnnouncedBlockKnown<'a, TBl, TRq, TSrc> {
-    // TODO: give access to the user data of the block
+    /// Gives access to the user data of the block.
+    pub fn user_data_mut(&mut self) -> &mut TBl {
+        if self.is_in_chain {
+            &mut self
+                .inner
+                .chain
+                .non_finalized_block_by_hash(&self.announced_header_hash)
+                .unwrap()
+                .into_user_data()
+                .user_data
+        } else {
+            &mut self
+                .inner
+                .inner
+                .blocks
+                .unverified_block_user_data_mut(
+                    self.announced_header_number,
+                    &self.announced_header_hash,
+                )
+                .user_data
+        }
+    }
 
     /// Updates the state machine to keep track of the fact that this source knows this block.
     /// If the announced block is the source's best block, also updates this information.
@@ -1465,6 +1517,24 @@ pub struct AddSourceKnown<'a, TBl, TRq, TSrc> {
 }
 
 impl<'a, TBl, TRq, TSrc> AddSourceKnown<'a, TBl, TRq, TSrc> {
+    /// Gives access to the user data of the block.
+    pub fn user_data_mut(&mut self) -> &mut TBl {
+        if let Some(block_access) = self
+            .inner
+            .chain
+            .non_finalized_block_by_hash(&self.best_block_hash)
+        {
+            &mut block_access.into_user_data().user_data
+        } else {
+            &mut self
+                .inner
+                .inner
+                .blocks
+                .unverified_block_user_data_mut(self.best_block_number, &self.best_block_hash)
+                .user_data
+        }
+    }
+
     /// Inserts a new source in the state machine.
     ///
     /// Returns the newly-allocated identifier for that source.
