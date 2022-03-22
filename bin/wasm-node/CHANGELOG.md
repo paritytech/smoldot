@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.7 - 2022-03-22
+
 ### Changed
 
 - Add more details to the debug and trace logs that happen in case of errors such as networking errors or block verification failures ([#2161](https://github.com/paritytech/smoldot/pull/2161)).
