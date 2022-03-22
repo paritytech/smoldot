@@ -166,12 +166,12 @@ pub struct AllForksSync<TBl, TRq, TSrc> {
     chain: blocks_tree::NonFinalizedTree<Block<TBl>>,
 
     /// Extra fields. In a separate structure in order to be moved around.
-    inner: Inner<TRq, TSrc>,
+    inner: Inner<TBl, TRq, TSrc>,
 }
 
 /// Extra fields. In a separate structure in order to be moved around.
-struct Inner<TRq, TSrc> {
-    blocks: pending_blocks::PendingBlocks<PendingBlock, TRq, TSrc>,
+struct Inner<TBl, TRq, TSrc> {
+    blocks: pending_blocks::PendingBlocks<PendingBlock<TBl>, TRq, TSrc>,
 
     /// Justifications waiting to be verified.
     ///
@@ -183,11 +183,11 @@ struct Inner<TRq, TSrc> {
     banned_blocks: hashbrown::HashSet<[u8; 32], fnv::FnvBuildHasher>,
 }
 
-struct PendingBlock {
+struct PendingBlock<TBl> {
     header: Option<header::Header>,
     // TODO: add body: Option<Vec<Vec<u8>>>, when adding full node support
     justifications: Vec<([u8; 4], Vec<u8>)>,
-    // TODO: add user_data as soon as block announces and prepare_add_source APIs support passing a user data
+    user_data: TBl,
 }
 
 struct Block<TBl> {
@@ -279,6 +279,42 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         &'_ self,
     ) -> impl Iterator<Item = header::HeaderRef<'_>> + '_ {
         self.chain.iter_ancestry_order()
+    }
+
+    /// Gives access to the user data stored for a block of the data structure.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the block wasn't present in the data structure.
+    ///
+    pub fn block_user_data(&self, height: u64, hash: &[u8; 32]) -> &TBl {
+        if let Some(block) = self.chain.non_finalized_block_user_data(hash) {
+            return &block.user_data;
+        }
+
+        &self
+            .inner
+            .blocks
+            .unverified_block_user_data(height, hash)
+            .user_data
+    }
+
+    /// Gives access to the user data stored for a block of the data structure.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the block wasn't present in the data structure.
+    ///
+    pub fn block_user_data_mut(&mut self, height: u64, hash: &[u8; 32]) -> &mut TBl {
+        if let Some(block) = self.chain.non_finalized_block_by_hash(hash) {
+            return &mut block.into_user_data().user_data;
+        }
+
+        &mut self
+            .inner
+            .blocks
+            .unverified_block_user_data_mut(height, hash)
+            .user_data
     }
 
     /// Starts the process of inserting a new source in the [`AllForksSync`].
@@ -1042,7 +1078,7 @@ pub struct AddBlockVacant<TBl, TRq, TSrc> {
 
 impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
     /// Insert the block in the state machine, with the given user data.
-    pub fn insert(mut self, _user_data: TBl) -> FinishAncestrySearch<TBl, TRq, TSrc> {
+    pub fn insert(mut self, user_data: TBl) -> FinishAncestrySearch<TBl, TRq, TSrc> {
         // Update the view the state machine maintains for this source.
         self.inner.inner.inner.blocks.add_known_block_to_source(
             self.inner.source_id,
@@ -1067,6 +1103,7 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
             PendingBlock {
                 header: Some(self.decoded_header.clone().into()),
                 justifications: self.justifications,
+                user_data,
             },
         );
 
@@ -1257,8 +1294,7 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
     /// this block.
     ///
     /// If the announced block is the source's best block, also updates this information.
-    pub fn insert_and_update_source(self) {
-        // TODO: ^ add user_data: TBl parameter
+    pub fn insert_and_update_source(self, user_data: TBl) {
         // No matter what is done below, start by updating the view the state machine maintains
         // for this source.
         if self.is_best {
@@ -1294,6 +1330,7 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
             PendingBlock {
                 header: Some(self.announced_header_encoded),
                 justifications: Vec::new(),
+                user_data,
             },
         );
 
@@ -1456,9 +1493,16 @@ impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
     ///
     /// Returns the newly-allocated identifier for that source.
     ///
-    /// The `user_data` parameter is opaque and decided entirely by the user. It can later be
-    /// retrieved using the `Index` trait implementation of the [`AllForksSync`].
-    pub fn add_source_and_insert_block(self, source_user_data: TSrc) -> SourceId {
+    /// The `source_user_data` parameter is opaque and decided entirely by the user. It can later
+    /// be retrieved using the `Index` trait implementation of the [`AllForksSync`].
+    ///
+    /// The `best_block_user_data` parameter is opaque and decided entirely by the user and is
+    /// associated with the best block of the newly-added source.
+    pub fn add_source_and_insert_block(
+        self,
+        source_user_data: TSrc,
+        best_block_user_data: TBl,
+    ) -> SourceId {
         let source_id = self.inner.inner.blocks.add_source(
             source_user_data,
             self.best_block_number,
@@ -1472,6 +1516,7 @@ impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
             PendingBlock {
                 header: None,
                 justifications: Vec::new(),
+                user_data: best_block_user_data,
             },
         );
 
@@ -1512,11 +1557,7 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
     }
 
     /// Perform the verification.
-    pub fn perform(
-        mut self,
-        now_from_unix_epoch: Duration,
-        user_data: TBl,
-    ) -> HeaderVerifyOutcome<TBl, TRq, TSrc> {
+    pub fn perform(mut self, now_from_unix_epoch: Duration) -> HeaderVerifyOutcome<TBl, TRq, TSrc> {
         let to_verify_scale_encoded_header = self
             .parent
             .inner
@@ -1540,19 +1581,57 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
                 is_new_best,
                 ..
             }) => {
+                // Block is valid!
+
+                // Remove the block from `pending_blocks`.
+                self.parent.inner.blocks.remove_sources_known_block(
+                    self.block_to_verify.block_number,
+                    &self.block_to_verify.block_hash,
+                );
+                let pending_block = self.parent.inner.blocks.remove_unverified_block(
+                    self.block_to_verify.block_number,
+                    &self.block_to_verify.block_hash,
+                );
+
+                // Now insert the block in `chain`.
                 // TODO: cloning the header :-/
                 let block = Block {
                     header: insert.header().into(),
-                    user_data,
+                    user_data: pending_block.user_data,
                 };
                 insert.insert(block);
+
+                // Store the justification in `pending_justification_verify`.
+                // A `HeaderVerify` can only exist if `pending_justification_verify` is `None`,
+                // meaning that there's no risk of accidental overwrite.
+                debug_assert!(self
+                    .parent
+                    .inner
+                    .pending_justifications_verify
+                    .as_slice()
+                    .is_empty());
+                self.parent.inner.pending_justifications_verify =
+                    pending_block.justifications.into_iter();
+
                 Ok(is_new_best)
             }
             Err(blocks_tree::HeaderVerifyError::VerificationFailed(error)) => {
-                Err((HeaderVerifyError::VerificationFailed(error), user_data))
+                // Remove the block from `pending_blocks`.
+                self.parent.inner.blocks.mark_unverified_block_as_bad(
+                    self.block_to_verify.block_number,
+                    &self.block_to_verify.block_hash,
+                );
+
+                Err(HeaderVerifyError::VerificationFailed(error))
             }
             Err(blocks_tree::HeaderVerifyError::ConsensusMismatch) => {
-                Err((HeaderVerifyError::ConsensusMismatch, user_data))
+                // Remove the block from `pending_blocks`.
+                self.parent.inner.blocks.mark_unverified_block_as_bad(
+                    self.block_to_verify.block_number,
+                    &self.block_to_verify.block_hash,
+                );
+
+                Err(HeaderVerifyError::ConsensusMismatch)
             }
             Ok(blocks_tree::HeaderVerifySuccess::Duplicate)
             | Err(
@@ -1561,45 +1640,14 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
             ) => unreachable!(),
         };
 
-        // Remove the verified block from `pending_blocks`.
-        let justifications = if result.is_ok() {
-            self.parent.inner.blocks.remove_sources_known_block(
-                self.block_to_verify.block_number,
-                &self.block_to_verify.block_hash,
-            );
-            let outcome = self.parent.inner.blocks.remove_unverified_block(
-                self.block_to_verify.block_number,
-                &self.block_to_verify.block_hash,
-            );
-            outcome.justifications
-        } else {
-            self.parent.inner.blocks.mark_unverified_block_as_bad(
-                self.block_to_verify.block_number,
-                &self.block_to_verify.block_hash,
-            );
-            Vec::new()
-        };
-
-        // Store the justification in `pending_justification_verify`.
-        // A `HeaderVerify` can only exist if `pending_justification_verify` is `None`, meaning
-        // that there's no risk of accidental overwrite.
-        debug_assert!(self
-            .parent
-            .inner
-            .pending_justifications_verify
-            .as_slice()
-            .is_empty());
-        self.parent.inner.pending_justifications_verify = justifications.into_iter();
-
         match result {
             Ok(is_new_best) => HeaderVerifyOutcome::Success {
                 is_new_best,
                 sync: self.parent,
             },
-            Err((error, user_data)) => HeaderVerifyOutcome::Error {
+            Err(error) => HeaderVerifyOutcome::Error {
                 sync: self.parent,
                 error,
-                user_data,
             },
         }
     }
@@ -1693,8 +1741,6 @@ pub enum HeaderVerifyOutcome<TBl, TRq, TSrc> {
         sync: AllForksSync<TBl, TRq, TSrc>,
         /// Error that happened.
         error: HeaderVerifyError,
-        /// User data that was passed to [`HeaderVerify::perform`] and is unused.
-        user_data: TBl,
     },
 }
 

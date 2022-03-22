@@ -497,7 +497,7 @@ export function start(options?: ClientOptions): Client {
         const expected = pendingConfirmations.shift()!;
         // `expected` was pushed by the `addChain` method.
         // Reject the promise that `addChain` returned to the user.
-        expected.reject(message.error as AddChainError);
+        expected.reject(new AddChainError(message.error));
         break;
       }
 
