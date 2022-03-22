@@ -96,7 +96,7 @@
 //
 // See also https://github.com/w3c/webrtc-extensions/issues/64
 
-export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: number) {
+export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: number, ipVersion: '4' | '6') {
     // Create a new peer connection.
     const pc = new RTCPeerConnection();
 
@@ -134,8 +134,7 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
             // Identifies the creator of the SDP document. We are allowed to use dummy values
             // (`-` and `0.0.0.0`) to remain anonymous, which we do. Note that "IN" means
             // "Internet". (RFC8866)
-            // TODO: handle IPv6
-            "o=- " + (Date.now() / 1000).toFixed() + " 0 IN IP4 " + targetIp + "\n" +
+            "o=- " + (Date.now() / 1000).toFixed() + " 0 IN IP" + ipVersion  + " " + targetIp + "\n" +
             // Name for the session. We are allowed to pass a dummy `-`. (RFC8866)
             "s=-" + "\n" +
             // Start and end of the validity of the session. `0 0` means that the session never
@@ -157,8 +156,7 @@ export default function(targetIp: string, protocol: 'tcp' | 'udp', targetPort: n
             "m=application " + targetPort + " " + (protocol == 'tcp' ? "TCP" : "UDP") + "/DTLS/SCTP webrtc-datachannel" + "\n" +
             // Indicates the IP address of the remote.
             // Note that "IN" means "Internet".
-            // TODO: handle IPv6
-            "c=IN IP4 " + targetIp + "\n" +
+            "c=IN IP" + ipVersion + " " + targetIp + "\n" +
             // Media ID - uniquely identifies this media stream (RFC9143).
             "a=mid:0" + "\n" +
             // Indicates that we are complying with RFC8839 (as oppposed to the legacy RFC5245).

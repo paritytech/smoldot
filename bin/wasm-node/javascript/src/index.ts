@@ -20,4 +20,4 @@ export * from './client.js'; // TODO: precise exports
 
 // TODO: remove this, just for prototyping
 import connect from './webrtc/index.js';
-connect('127.0.0.1', 'udp', 41000);
+connect('::1', 'udp', 41000, '4');
