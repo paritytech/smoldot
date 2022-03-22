@@ -374,7 +374,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
                             log::debug!(
                                 target: &log_target,
-                                "ParaheadFetchOperations => Error(relay_blocks={}, error={})",
+                                "ParaheadFetchOperations => Error(relay_blocks={}, error={:?})",
                                 async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(","),
                                 error
                             );
@@ -594,7 +594,7 @@ async fn parahead<TPlat: Platform>(
     }
 }
 
-#[derive(derive_more::Display)]
+#[derive(Debug, derive_more::Display)]
 enum ParaheadError {
     Call(runtime_service::RuntimeCallError),
     StartError(host::StartErr),
