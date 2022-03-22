@@ -483,16 +483,15 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                 let decoded_header_hash = header::hash_from_scale_encoded_header(
                                     &decoded.scale_encoded_header
                                 );
-                                let decoded_header_number = decoded_header.number;
                                 sync_sources.add_known_block(
                                     local_id,
-                                    decoded_header_number,
+                                    decoded_header.number,
                                     decoded_header_hash
                                 );
                                 if decoded.is_best {
                                     sync_sources.add_known_block_and_set_best(
                                         local_id,
-                                        decoded_header_number,
+                                        decoded_header.number,
                                         decoded_header_hash
                                     );
                                 }
