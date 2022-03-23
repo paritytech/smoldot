@@ -14,7 +14,7 @@ name = "full-node"
 path = "src/main.rs"
 
 [dependencies]
-async-std = "1.10.0"
+async-std = "1.11.0"
 atty = "0.2.14"
 blake2-rfc = { version = "0.2.18", default-features = false }
 clap = { version = "3.1", default-features = false, features = ["color", "derive", "std", "suggestions"] }
