@@ -1584,10 +1584,6 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
                 // Block is valid!
 
                 // Remove the block from `pending_blocks`.
-                self.parent.inner.blocks.remove_sources_known_block(
-                    self.block_to_verify.block_number,
-                    &self.block_to_verify.block_hash,
-                );
                 let pending_block = self.parent.inner.blocks.remove_unverified_block(
                     self.block_to_verify.block_number,
                     &self.block_to_verify.block_hash,

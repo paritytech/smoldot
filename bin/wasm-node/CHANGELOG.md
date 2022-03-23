@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix regression introduced in version 0.6.5 where we erroneously removed entries in the mapping of which peer knows which blocks, leading to failures to request data. ([#2168](https://github.com/paritytech/smoldot/pull/2168))
+
 ## 0.6.7 - 2022-03-22
 
 ### Changed
