@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Properly display error messages when smoldot crashes when in a browser, instead of showing `[object ErrorEvent]`. ([#2171](https://github.com/paritytech/smoldot/pull/2171))
+
 ## 0.6.8 - 2022-03-23
 
 ### Fixed
