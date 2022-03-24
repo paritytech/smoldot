@@ -78,6 +78,10 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
         pending_block_requests: stream::FuturesUnordered::new(),
         pending_grandpa_requests: stream::FuturesUnordered::new(),
         pending_storage_requests: stream::FuturesUnordered::new(),
+        warp_sync_taking_long_time_warning: future::Either::Left(TPlat::sleep(
+            Duration::from_secs(15),
+        ))
+        .fuse(),
         all_notifications: Vec::<mpsc::Sender<Notification>>::new(),
         log_target,
         network_service,
@@ -245,6 +249,17 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                     continue;
                 }
             },
+
+            () = &mut task.warp_sync_taking_long_time_warning => {
+                log::warn!(
+                    target: &task.log_target,
+                    "GrandPa warp sync still in progress and taking a long time"
+                );
+
+                task.warp_sync_taking_long_time_warning =
+                    future::Either::Left(TPlat::sleep(Duration::from_secs(15))).fuse();
+                continue;
+            },
         };
 
         // `response_outcome` represents the way the state machine has changed as a
@@ -273,6 +288,9 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                     finalized_header.number,
                     HashDisplay(&finalized_header.hash())
                 );
+
+                task.warp_sync_taking_long_time_warning =
+                    future::Either::Right(future::pending()).fuse();
 
                 debug_assert!(task.known_finalized_runtime.is_none());
                 task.known_finalized_runtime = Some(FinalizedBlockRuntime {
@@ -317,6 +335,12 @@ struct Task<TPlat: Platform> {
 
     /// All event subscribers that are interested in events about the chain.
     all_notifications: Vec<mpsc::Sender<Notification>>,
+
+    /// Contains a `Delay` after which we print a warning about GrandPa warp sync taking a long
+    /// time. Set to `Pending` after the warp sync has finished, so that future remains pending
+    /// forever.
+    warp_sync_taking_long_time_warning:
+        future::Fuse<future::Either<TPlat::Delay, future::Pending<()>>>,
 
     /// Network service. Used to send out requests to peers.
     network_service: Arc<network_service::NetworkService<TPlat>>,
