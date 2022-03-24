@@ -22,8 +22,18 @@ export function workerOnMessage(worker, callback) {
 }
 
 export function workerOnError(worker, callback) {
-    // TODO: unclear if the parameter of the callback is same as with NodeJS
-    worker.onerror = callback;
+  worker.onerror = (event) => {
+    // For reference:
+    // https://html.spec.whatwg.org/multipage/indices.html#event-error
+    // https://html.spec.whatwg.org/multipage/webappapis.html#errorevent
+
+    // If `event.error` exists, then it will likely be an instance of `Error`.
+    // However, that's not guaranteed by the spec and it could also be
+    // something else. So, our second best try is the `event.message`
+    // property. Finally, our last resort is to create an Error from the event.
+    if (event.error instanceof Error) callback(event.error);
+    else callback(new Error(event.message || event));
+  }
 }
 
 export function workerTerminate(worker) {
