@@ -12,7 +12,7 @@
   "protocolId": null,
   "forkId": null,
   "properties": null,
-  "relay_chain": "rococo_v2",
+  "relay_chain": "rococo_v2_1",
   "para_id": 2200,
   "consensusEngine": null,
   "codeSubstitutes": {},
