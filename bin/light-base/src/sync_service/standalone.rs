@@ -126,11 +126,6 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
         if task.finalized_block_updated {
             task.finalized_block_updated = false;
 
-            task.dispatch_all_subscribers(Notification::Finalized {
-                hash: task.sync.finalized_block_header().hash(),
-                best_block_hash: task.sync.best_block_hash(),
-            });
-
             // If the chain uses GrandPa, the networking has to be kept up-to-date with the
             // state of finalization for other peers to send back relevant gossip messages.
             // (code style) `grandpa_set_id` is extracted first in order to avoid borrowing
@@ -659,6 +654,10 @@ impl<TPlat: Platform> Task<TPlat> {
                             self.best_block_updated |= updates_best_block;
                             self.finalized_block_updated = true;
                             self.known_finalized_runtime = None; // TODO: only do if there was no RuntimeUpdated log item
+                            self.dispatch_all_subscribers(Notification::Finalized {
+                                hash: self.sync.finalized_block_header().hash(),
+                                best_block_hash: self.sync.best_block_hash(),
+                            });
                             continue;
                         }
 
