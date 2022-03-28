@@ -221,133 +221,126 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         };
         let mut guarded_lock = &mut *guarded_lock;
 
+        // Extract the components of the `FinalizedBlockRuntimeKnown`. We are guaranteed by the
+        // block above to be in this state.
+        let (tree, finalized_block, pinned_blocks, all_blocks_subscriptions) =
+            match &mut guarded_lock.tree {
+                GuardedInner::FinalizedBlockRuntimeKnown {
+                    tree,
+                    finalized_block,
+                    pinned_blocks,
+                    all_blocks_subscriptions,
+                } => (
+                    tree,
+                    finalized_block,
+                    pinned_blocks,
+                    all_blocks_subscriptions,
+                ),
+                _ => unreachable!(),
+            };
+
         let (mut tx, new_blocks_channel) = mpsc::channel(buffer_size);
         let subscription_id = guarded_lock.next_subscription_id;
         guarded_lock.next_subscription_id += 1;
 
-        let non_finalized_blocks_ancestry_order = match &mut guarded_lock.tree {
-            GuardedInner::FinalizedBlockRuntimeKnown {
-                tree,
-                finalized_block,
-                pinned_blocks,
-                all_blocks_subscriptions,
-            } => {
-                let decoded_finalized_block =
-                    header::decode(&finalized_block.scale_encoded_header).unwrap();
+        let decoded_finalized_block =
+            header::decode(&finalized_block.scale_encoded_header).unwrap();
+        pinned_blocks.insert(
+            (subscription_id, finalized_block.hash),
+            (
+                tree.finalized_async_user_data().clone(),
+                *decoded_finalized_block.state_root,
+                decoded_finalized_block.number,
+            ),
+        );
 
+        let non_finalized_blocks_ancestry_order: Vec<_> = tree
+            .input_iter_ancestry_order()
+            .filter_map(|block| {
+                let runtime = block.async_op_user_data?.clone();
+                let block_hash = block.user_data.hash;
+                let parent_runtime = tree
+                    .parent(block.id)
+                    .map_or(tree.finalized_async_user_data().clone(), |parent_idx| {
+                        tree.block_async_user_data(parent_idx).unwrap().clone()
+                    });
+
+                let parent_hash = *header::decode(&block.user_data.scale_encoded_header)
+                    .unwrap()
+                    .parent_hash; // TODO: correct? if yes, document
+                debug_assert!(
+                    parent_hash == finalized_block.hash
+                        || tree
+                            .input_iter_ancestry_order()
+                            .any(|b| parent_hash == b.user_data.hash
+                                && b.async_op_user_data.is_some())
+                );
+
+                let decoded_header = header::decode(&block.user_data.scale_encoded_header).unwrap();
                 pinned_blocks.insert(
-                    (subscription_id, finalized_block.hash),
+                    (subscription_id, block_hash),
                     (
-                        tree.finalized_async_user_data().clone(),
-                        *decoded_finalized_block.state_root,
-                        decoded_finalized_block.number,
+                        runtime.clone(),
+                        *decoded_header.state_root,
+                        decoded_header.number,
                     ),
                 );
 
-                let non_finalized_blocks_ancestry_order: Vec<_> = tree
-                    .input_iter_ancestry_order()
-                    .filter_map(|block| {
-                        let runtime = block.async_op_user_data?.clone();
-                        let block_hash = block.user_data.hash;
-                        let parent_runtime = tree
-                            .parent(block.id)
-                            .map_or(tree.finalized_async_user_data().clone(), |parent_idx| {
-                                tree.block_async_user_data(parent_idx).unwrap().clone()
-                            });
-
-                        let parent_hash = *header::decode(&block.user_data.scale_encoded_header)
-                            .unwrap()
-                            .parent_hash; // TODO: correct? if yes, document
-                        debug_assert!(
-                            parent_hash == finalized_block.hash
-                                || tree
-                                    .input_iter_ancestry_order()
-                                    .any(|b| parent_hash == b.user_data.hash
-                                        && b.async_op_user_data.is_some())
-                        );
-
-                        let decoded_header =
-                            header::decode(&block.user_data.scale_encoded_header).unwrap();
-                        pinned_blocks.insert(
-                            (subscription_id, block_hash),
-                            (
-                                runtime.clone(),
-                                *decoded_header.state_root,
-                                decoded_header.number,
-                            ),
-                        );
-
-                        Some(BlockNotification {
-                            is_new_best: block.is_output_best,
-                            parent_hash,
-                            scale_encoded_header: block.user_data.scale_encoded_header.clone(),
-                            new_runtime: if !Arc::ptr_eq(&runtime, &parent_runtime) {
-                                Some(
-                                    runtime
-                                        .runtime
-                                        .as_ref()
-                                        .map(|rt| rt.runtime_spec.clone())
-                                        .map_err(|err| err.clone()),
-                                )
-                            } else {
-                                None
-                            },
-                        })
-                    })
-                    .collect();
-
-                debug_assert!(matches!(
-                    non_finalized_blocks_ancestry_order
-                        .iter()
-                        .filter(|b| b.is_new_best)
-                        .count(),
-                    0 | 1
-                ));
-
-                // If the requested maximum number of pinned blocks is too low, we pretend that this
-                // maximum number was just enough by insert `0` remaining pinned blocks, but we also close
-                // the subscription immediately to mimic the effects of not having enough pinned blocks
-                // remaining.
-                //
-                // It could also in principle be possible to not insert in `all_blocks_subscriptions` at,
-                // all but this would require cleaning up all the other modifications we've done to
-                // guarded`. By inserting a closed channel, we reuse the same code as the one that purges
-                // closed channels.
-                all_blocks_subscriptions.insert(subscription_id, {
-                    if let Some(pinned_remaining) =
-                        max_pinned_blocks.checked_sub(1 + non_finalized_blocks_ancestry_order.len())
-                    {
-                        (tx, pinned_remaining)
+                Some(BlockNotification {
+                    is_new_best: block.is_output_best,
+                    parent_hash,
+                    scale_encoded_header: block.user_data.scale_encoded_header.clone(),
+                    new_runtime: if !Arc::ptr_eq(&runtime, &parent_runtime) {
+                        Some(
+                            runtime
+                                .runtime
+                                .as_ref()
+                                .map(|rt| rt.runtime_spec.clone())
+                                .map_err(|err| err.clone()),
+                        )
                     } else {
-                        tx.close_channel();
-                        (tx, 0)
-                    }
-                });
+                        None
+                    },
+                })
+            })
+            .collect();
 
-                non_finalized_blocks_ancestry_order
+        debug_assert!(matches!(
+            non_finalized_blocks_ancestry_order
+                .iter()
+                .filter(|b| b.is_new_best)
+                .count(),
+            0 | 1
+        ));
+
+        // If the requested maximum number of pinned blocks is too low, we pretend that this
+        // maximum number was just enough by insert `0` remaining pinned blocks, but we also close
+        // the subscription immediately to mimic the effects of not having enough pinned blocks
+        // remaining.
+        //
+        // It could also in principle be possible to not insert in `all_blocks_subscriptions` at,
+        // all but this would require cleaning up all the other modifications we've done to
+        // guarded`. By inserting a closed channel, we reuse the same code as the one that purges
+        // closed channels.
+        all_blocks_subscriptions.insert(subscription_id, {
+            if let Some(pinned_remaining) =
+                max_pinned_blocks.checked_sub(1 + non_finalized_blocks_ancestry_order.len())
+            {
+                (tx, pinned_remaining)
+            } else {
+                tx.close_channel();
+                (tx, 0)
             }
-            _ => unreachable!(),
-        };
+        });
 
         SubscribeAll {
-            finalized_block_scale_encoded_header: match &guarded_lock.tree {
-                GuardedInner::FinalizedBlockRuntimeKnown {
-                    finalized_block, ..
-                } => finalized_block.scale_encoded_header.clone(),
-                _ => unreachable!(),
-            },
-            finalized_block_runtime: if let GuardedInner::FinalizedBlockRuntimeKnown {
-                tree, ..
-            } = &guarded_lock.tree
-            {
-                tree.finalized_async_user_data()
-                    .runtime
-                    .as_ref()
-                    .map(|rt| rt.runtime_spec.clone())
-                    .map_err(|err| err.clone())
-            } else {
-                unreachable!()
-            },
+            finalized_block_scale_encoded_header: finalized_block.scale_encoded_header.clone(),
+            finalized_block_runtime: tree
+                .finalized_async_user_data()
+                .runtime
+                .as_ref()
+                .map(|rt| rt.runtime_spec.clone())
+                .map_err(|err| err.clone()),
             non_finalized_blocks_ancestry_order,
             new_blocks: Subscription {
                 subscription_id,
