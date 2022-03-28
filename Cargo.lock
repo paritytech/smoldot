@@ -2453,6 +2453,7 @@ dependencies = [
  "blake2-rfc",
  "derive_more",
  "either",
+ "event-listener",
  "fnv",
  "futures",
  "hashbrown 0.12.0",
