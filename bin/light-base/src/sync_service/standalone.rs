@@ -72,8 +72,8 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
             },
             full: None,
         }),
-        best_block_updated: false,
-        finalized_block_updated: false,
+        network_up_to_date_best: true,
+        network_up_to_date_finalized: true,
         known_finalized_runtime: None,
         pending_block_requests: stream::FuturesUnordered::new(),
         pending_grandpa_requests: stream::FuturesUnordered::new(),
@@ -106,9 +106,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
         task = task.process_verification_queue().await;
 
         // Processing the queue might have updated the best block of the syncing state machine.
-        if task.best_block_updated {
-            task.best_block_updated = false;
-
+        if !task.network_up_to_date_best {
             // The networking service needs to be kept up to date with what the local node
             // considers as the best block.
             // For some reason, first building the future then executing it solves a borrow
@@ -119,18 +117,13 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                 task.sync.best_block_number(),
             );
             fut.await;
+
+            task.network_up_to_date_best = true;
         }
 
         // Processing the queue might have updated the finalized block of the syncing state
         // machine.
-        if task.finalized_block_updated {
-            task.finalized_block_updated = false;
-
-            task.dispatch_all_subscribers(Notification::Finalized {
-                hash: task.sync.finalized_block_header().hash(),
-                best_block_hash: task.sync.best_block_hash(),
-            });
-
+        if !task.network_up_to_date_finalized {
             // If the chain uses GrandPa, the networking has to be kept up-to-date with the
             // state of finalization for other peers to send back relevant gossip messages.
             // (code style) `grandpa_set_id` is extracted first in order to avoid borrowing
@@ -160,6 +153,8 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                     )
                     .await;
             }
+
+            task.network_up_to_date_finalized = true;
         }
 
         // Now waiting for some event to happen: a network event, a request from the frontend
@@ -299,8 +294,8 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                     storage_heap_pages: finalized_storage_heap_pages,
                 });
 
-                task.finalized_block_updated = true;
-                task.best_block_updated = true;
+                task.network_up_to_date_finalized = false;
+                task.network_up_to_date_best = false;
                 // Since there is a gap in the blocks, all active notifications to all blocks
                 // must be cleared.
                 task.all_notifications.clear();
@@ -326,12 +321,12 @@ struct Task<TPlat: Platform> {
     /// For each networking peer, the index of the corresponding peer within the [`Task::sync`].
     peers_source_id_map: HashMap<libp2p::PeerId, all::SourceId>,
 
-    /// `true` after the best block in the [`Task::sync`] has changed. Reset to `false` after all
-    /// the corresponding state updates have been performed.
-    best_block_updated: bool,
-    /// `true` after the finalized block in the [`Task::sync`] has changed. Reset to `false` after
-    /// all the corresponding state updates have been performed.
-    finalized_block_updated: bool,
+    /// `false` after the best block in the [`Task::sync`] has changed. Set back to `true`
+    /// after the networking has been notified of this change.
+    network_up_to_date_best: bool,
+    /// `false` after the finalized block in the [`Task::sync`] has changed. Set back to `true`
+    /// after the networking has been notified of this change.
+    network_up_to_date_finalized: bool,
 
     /// All event subscribers that are interested in events about the chain.
     all_notifications: Vec<mpsc::Sender<Notification>>,
@@ -594,7 +589,9 @@ impl<TPlat: Platform> Task<TPlat> {
                                 if is_new_best { "yes" } else { "no" }
                             );
 
-                            self.best_block_updated |= is_new_best;
+                            if is_new_best {
+                                self.network_up_to_date_best = false;
+                            }
 
                             // Notify of the new block.
                             self.dispatch_all_subscribers({
@@ -656,9 +653,15 @@ impl<TPlat: Platform> Task<TPlat> {
                                 finalized_blocks.len(),
                             );
 
-                            self.best_block_updated |= updates_best_block;
-                            self.finalized_block_updated = true;
+                            if updates_best_block {
+                                self.network_up_to_date_best = false;
+                            }
+                            self.network_up_to_date_finalized = false;
                             self.known_finalized_runtime = None; // TODO: only do if there was no RuntimeUpdated log item
+                            self.dispatch_all_subscribers(Notification::Finalized {
+                                hash: self.sync.finalized_block_header().hash(),
+                                best_block_hash: self.sync.best_block_hash(),
+                            });
                             continue;
                         }
 
@@ -927,9 +930,9 @@ impl<TPlat: Platform> Task<TPlat> {
                             "Sync => GrandpaCommitVerified"
                         );
 
-                        self.finalized_block_updated = true; // TODO: only do if commit message has been processed
+                        self.network_up_to_date_finalized = false; // TODO: only do if commit message has been processed
                         self.known_finalized_runtime = None; // TODO: only do if commit message has been processed and if there was no RuntimeUpdated log item in the finalized blocks
-                        self.best_block_updated = true; // TODO: done in case finality changes the best block; make this clearer in the sync layer
+                        self.network_up_to_date_best = false; // TODO: done in case finality changes the best block; make this clearer in the sync layer
                         self.dispatch_all_subscribers(Notification::Finalized {
                             hash: self.sync.finalized_block_header().hash(),
                             best_block_hash: self.sync.best_block_hash(),
