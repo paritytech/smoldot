@@ -35,6 +35,7 @@
 //! let mut tree = async_tree::AsyncTree::new(async_tree::Config {
 //!     finalized_async_user_data: "hello",
 //!     retry_after_failed: Duration::from_secs(5),
+//!     blocks_capacity: 32,
 //! });
 //!
 //! // Insert a new best block, parent of the finalized block.
