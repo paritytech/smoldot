@@ -932,7 +932,11 @@ pub enum RuntimeError {
 }
 
 struct Guarded<TPlat: Platform> {
-    /// Identifier of the next subscription for [`Guarded::all_blocks_subscriptions`].
+    /// Identifier of the next subscription for
+    /// [`GuardedInner::FinalizedBlockRuntimeKnown::all_blocks_subscriptions`].
+    ///
+    /// To avoid race conditions, subscription IDs are never used, even if we switch back to
+    /// [`GuardedInner::FinalizedBlockRuntimeUnknown`].
     next_subscription_id: u64,
 
     /// Return value of calling [`sync_service::SyncService::is_near_head_of_chain_heuristic`]
@@ -940,12 +944,12 @@ struct Guarded<TPlat: Platform> {
     best_near_head_of_chain: bool,
 
     /// List of runtimes referenced by the tree in [`GuardedInner`] and by
-    /// [`Guarded::pinned_blocks`].
+    /// [`GuardedInner::FinalizedBlockRuntimeKnown::pinned_blocks`].
     ///
     /// Might contains obsolete values (i.e. stale `Weak`s) and thus must be cleaned from time to
     /// time.
     ///
-    /// Because this list shouldn't contain many entries, it is acceptable to iterator over all
+    /// Because this list shouldn't contain many entries, it is acceptable to iterate over all
     /// the elements.
     runtimes: slab::Slab<Weak<Runtime>>,
 
