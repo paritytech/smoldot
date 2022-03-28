@@ -114,6 +114,17 @@ pub struct Config<TAsync> {
 
     /// After an asynchronous operation fails, retry after this given duration.
     pub retry_after_failed: Duration,
+
+    /// Number of elements to initially allocate to store blocks.
+    ///
+    /// This is not a cap to the number of blocks, but merely the amount of memory to initially
+    /// reserve.
+    ///
+    /// This covers all blocks from the moment they're added as input to the moment they're
+    /// finalized in the output.
+    ///
+    /// It is legal to pass 0, in which case no memory is pre-allocated.
+    pub blocks_capacity: usize,
 }
 
 pub struct AsyncTree<TNow, TBl, TAsync> {
@@ -160,7 +171,7 @@ where
         AsyncTree {
             best_block_index: None,
             finalized_async_user_data: config.finalized_async_user_data,
-            non_finalized_blocks: fork_tree::ForkTree::with_capacity(32),
+            non_finalized_blocks: fork_tree::ForkTree::with_capacity(config.blocks_capacity),
             input_finalized_index: None,
             input_best_block_next_weight: 2,
             finalized_block_weight: 1, // `0` is reserved for blocks who are never best.

@@ -97,6 +97,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                 async_tree::AsyncTree::<TPlat::Instant, [u8; 32], _>::new(async_tree::Config {
                     finalized_async_user_data: None,
                     retry_after_failed: Duration::from_secs(5),
+                    blocks_capacity: 32,
                 });
             let finalized_hash = header::hash_from_scale_encoded_header(
                 &relay_chain_subscribe_all.finalized_block_scale_encoded_header,
