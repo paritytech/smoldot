@@ -1503,8 +1503,6 @@ impl<TPlat: Platform> Background<TPlat> {
                                 pinned_blocks.remove(&(to_remove, block));
                             }
                         }
-
-                        continue;
                     }
                     Some(async_tree::OutputUpdate::Block(block)) => {
                         let block_index = block.index;
@@ -1579,8 +1577,6 @@ impl<TPlat: Platform> Background<TPlat> {
                                 pinned_blocks.remove(&(to_remove, block));
                             }
                         }
-
-                        continue;
                     }
                 },
                 GuardedInner::FinalizedBlockRuntimeUnknown { tree, when_known } => match tree
@@ -1594,36 +1590,41 @@ impl<TPlat: Platform> Background<TPlat> {
                         best_block_index,
                         ..
                     }) => {
+                        // Make sure that this is the first finalized block whose runtime is
+                        // known, otherwise there's a pretty big bug somewhere.
                         debug_assert!(former_finalized_async_op_user_data.is_none());
 
                         let best_block_hash = best_block_index
                             .map_or(new_finalized.hash, |idx| tree.block_user_data(idx).hash);
-                        let new_finalized_hash = new_finalized.hash;
-
                         log::debug!(
                             target: &self.log_target,
                             "Worker => OutputFinalized(hash={}, best={})",
-                            HashDisplay(&new_finalized_hash), HashDisplay(&best_block_hash)
+                            HashDisplay(&new_finalized.hash), HashDisplay(&best_block_hash)
                         );
 
-                        when_known.notify(usize::max_value());
+                        // Substitute `tree` with a dummy empty tree just in order to extract
+                        // the value. The `tree` only contains "async op user datas" equal
+                        // to `Some` (they're inserted manually when a download finishes)
+                        // except for the finalized block which has now just been extracted.
+                        // We can safely unwrap() all these user datas.
+                        let new_tree = mem::replace(
+                            tree,
+                            async_tree::AsyncTree::new(async_tree::Config {
+                                finalized_async_user_data: None,
+                                retry_after_failed: Duration::new(0, 0),
+                            }),
+                        )
+                        .map_async_op_user_data(|runtime_index| runtime_index.unwrap());
 
+                        // Change the state of `guarded` to the "finalized runtime known" state.
+                        when_known.notify(usize::max_value());
                         guarded.tree = GuardedInner::FinalizedBlockRuntimeKnown {
                             all_blocks_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
                                 32,
                                 Default::default(),
                             ), // TODO: capacity?
                             pinned_blocks: BTreeMap::new(),
-                            // Substitute `tree` with a dummy empty tree just in order to extract
-                            // the value.
-                            tree: mem::replace(
-                                tree,
-                                async_tree::AsyncTree::new(async_tree::Config {
-                                    finalized_async_user_data: None,
-                                    retry_after_failed: Duration::new(0, 0),
-                                }),
-                            )
-                            .map_async_op_user_data(|runtime_index| runtime_index.unwrap()),
+                            tree: new_tree,
                             finalized_block: new_finalized,
                         };
                     }
