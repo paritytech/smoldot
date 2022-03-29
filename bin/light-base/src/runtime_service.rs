@@ -254,56 +254,58 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             ),
         );
 
-        let non_finalized_blocks_ancestry_order: Vec<_> = tree
-            .input_iter_ancestry_order()
-            .filter_map(|block| {
-                let runtime = block.async_op_user_data?.clone();
-                let block_hash = block.user_data.hash;
-                let parent_runtime = tree
-                    .parent(block.id)
-                    .map_or(tree.finalized_async_user_data().clone(), |parent_idx| {
-                        tree.block_async_user_data(parent_idx).unwrap().clone()
-                    });
+        let mut non_finalized_blocks_ancestry_order =
+            Vec::with_capacity(tree.num_input_non_finalized_blocks());
+        for block in tree.input_iter_ancestry_order() {
+            let runtime = match block.async_op_user_data {
+                Some(rt) => rt.clone(),
+                None => continue, // Runtime of that block not known yet, so it shouldn't be reported.
+            };
 
-                let parent_hash = *header::decode(&block.user_data.scale_encoded_header)
-                    .unwrap()
-                    .parent_hash; // TODO: correct? if yes, document
-                debug_assert!(
-                    parent_hash == finalized_block.hash
-                        || tree
-                            .input_iter_ancestry_order()
-                            .any(|b| parent_hash == b.user_data.hash
-                                && b.async_op_user_data.is_some())
-                );
+            let block_hash = block.user_data.hash;
+            let parent_runtime = tree
+                .parent(block.id)
+                .map_or(tree.finalized_async_user_data().clone(), |parent_idx| {
+                    tree.block_async_user_data(parent_idx).unwrap().clone()
+                });
 
-                let decoded_header = header::decode(&block.user_data.scale_encoded_header).unwrap();
-                pinned_blocks.insert(
-                    (subscription_id, block_hash),
-                    (
-                        runtime.clone(),
-                        *decoded_header.state_root,
-                        decoded_header.number,
-                    ),
-                );
+            let parent_hash = *header::decode(&block.user_data.scale_encoded_header)
+                .unwrap()
+                .parent_hash; // TODO: correct? if yes, document
+            debug_assert!(
+                parent_hash == finalized_block.hash
+                    || tree
+                        .input_iter_ancestry_order()
+                        .any(|b| parent_hash == b.user_data.hash && b.async_op_user_data.is_some())
+            );
 
-                Some(BlockNotification {
-                    is_new_best: block.is_output_best,
-                    parent_hash,
-                    scale_encoded_header: block.user_data.scale_encoded_header.clone(),
-                    new_runtime: if !Arc::ptr_eq(&runtime, &parent_runtime) {
-                        Some(
-                            runtime
-                                .runtime
-                                .as_ref()
-                                .map(|rt| rt.runtime_spec.clone())
-                                .map_err(|err| err.clone()),
-                        )
-                    } else {
-                        None
-                    },
-                })
-            })
-            .collect();
+            let decoded_header = header::decode(&block.user_data.scale_encoded_header).unwrap();
+            pinned_blocks.insert(
+                (subscription_id, block_hash),
+                (
+                    runtime.clone(),
+                    *decoded_header.state_root,
+                    decoded_header.number,
+                ),
+            );
+
+            non_finalized_blocks_ancestry_order.push(BlockNotification {
+                is_new_best: block.is_output_best,
+                parent_hash,
+                scale_encoded_header: block.user_data.scale_encoded_header.clone(),
+                new_runtime: if !Arc::ptr_eq(&runtime, &parent_runtime) {
+                    Some(
+                        runtime
+                            .runtime
+                            .as_ref()
+                            .map(|rt| rt.runtime_spec.clone())
+                            .map_err(|err| err.clone()),
+                    )
+                } else {
+                    None
+                },
+            });
+        }
 
         debug_assert!(matches!(
             non_finalized_blocks_ancestry_order
