@@ -1185,7 +1185,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             }
                             Ok(all_forks::AddBlock::AlreadyPending(ba)) => {
                                 // TODO: replacing the user data entirely is very opinionated, instead the API of the AllSync should be changed
-                                blocks_append = ba.replace(Some(block.user_data))
+                                blocks_append = ba.replace(Some(block.user_data)).0
                             }
                             Ok(all_forks::AddBlock::AlreadyInChain(ba)) if block_index == 0 => {
                                 break (
