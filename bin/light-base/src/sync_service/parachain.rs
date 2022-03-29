@@ -247,11 +247,12 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         // past. This covers situations where the parahead is identical to the
                         // relay chain's parent's parahead, but also situations where multiple
                         // sibling relay chain blocks have the same parahead.
-                        if async_tree
-                            .input_iter_unordered()
-                            .filter(|item| item.id != block_index)
-                            .filter_map(|item| item.async_op_user_data)
-                            .any(|item| item.as_ref() == Some(&scale_encoded_header))
+                        if finalized_parahead == scale_encoded_header
+                            || async_tree
+                                .input_iter_unordered()
+                                .filter(|item| item.id != block_index)
+                                .filter_map(|item| item.async_op_user_data)
+                                .any(|item| item.as_ref() == Some(&scale_encoded_header))
                         {
                             continue;
                         }
