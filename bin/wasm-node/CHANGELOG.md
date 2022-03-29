@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.6.10 - 2022-03-29
+
+### Fixed
+
+- Fix parachain blocks being reported multiple times in case they have been finalized in-between ([#2182](https://github.com/paritytech/smoldot/pull/2182)).
+
 ## 0.6.9 - 2022-03-25
 
 ### Fixed
