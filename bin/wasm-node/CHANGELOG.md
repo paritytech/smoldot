@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.6.10 - 2022-03-29
+
+### Fixed
+
+- Fix parachain blocks being reported multiple times in case they have been finalized in-between ([#2182](https://github.com/paritytech/smoldot/pull/2182)).
+
+## 0.6.9 - 2022-03-25
+
+### Fixed
+
+- Properly display error messages when smoldot crashes when in a browser, instead of showing `[object ErrorEvent]`. ([#2171](https://github.com/paritytech/smoldot/pull/2171))
+
+## 0.6.8 - 2022-03-23
+
+### Fixed
+
+- Fix regression introduced in version 0.6.5 where we erroneously removed entries in the mapping of which peer knows which blocks, leading to failures to request data. ([#2168](https://github.com/paritytech/smoldot/pull/2168))
+
 ## 0.6.7 - 2022-03-22
 
 ### Changed
