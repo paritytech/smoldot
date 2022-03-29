@@ -34,16 +34,17 @@ pub(super) struct LightSyncState {
 
 impl LightSyncState {
     pub(super) fn decode(&self) -> Result<DecodedLightSyncState, ParseError> {
-        let grandpa_authority_set_slice = &self.grandpa_authority_set.0[..];
-        let babe_epoch_changes_slice = &self.babe_epoch_changes.0[..];
+        let mut grandpa_authority_set_slice = &self.grandpa_authority_set.0[..];
+        let mut babe_epoch_changes_slice = &self.babe_epoch_changes.0[..];
 
         let decoded = DecodedLightSyncState {
             finalized_block_header: crate::header::decode(&self.finalized_block_header.0[..])
                 .map_err(|_| ParseError(ParseErrorInner::Other))?
                 .into(),
-            grandpa_authority_set: AuthoritySet::decode_all(grandpa_authority_set_slice)
+            // Note that for some reason `decode_all` accepts a `&mut &[u8]` and makes it empty.
+            grandpa_authority_set: AuthoritySet::decode_all(&mut grandpa_authority_set_slice)
                 .map_err(|_| ParseError(ParseErrorInner::Other))?,
-            babe_epoch_changes: EpochChanges::decode_all(babe_epoch_changes_slice)
+            babe_epoch_changes: EpochChanges::decode_all(&mut babe_epoch_changes_slice)
                 .map_err(|_| ParseError(ParseErrorInner::Other))?,
         };
 
