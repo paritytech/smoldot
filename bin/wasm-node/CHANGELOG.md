@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed a `TimeoutOverflowWarning` caused by calling `setTimeout` with a value that is too large.
+- Fixed a `TimeoutOverflowWarning` caused by calling `setTimeout` with a value that is too large. ([#2188](https://github.com/paritytech/smoldot/pull/2188))
 
 ## 0.6.10 - 2022-03-29
 
