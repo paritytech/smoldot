@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fixed a `TimeoutOverflowWarning` caused by calling `setTimeout` with a value that is too large.
+
 ## 0.6.10 - 2022-03-29
 
 ### Fixed
