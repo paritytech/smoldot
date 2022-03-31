@@ -32,7 +32,7 @@ use core::{
 pub struct CpuRateLimiter<T> {
     #[pin]
     inner: T,
-    max_divided_by_rate_limit: u32,
+    max_divided_by_rate_limit_minus_one: f64,
 
     /// Prevent `self.inner.poll` from being called before this `Delay` is ready.
     #[pin]
@@ -44,11 +44,16 @@ impl<T> CpuRateLimiter<T> {
     /// `u32::max_value()` represents "one CPU". For example passing `rate_limit / 2` represents
     /// "50% of one CPU".
     pub fn new(inner: T, rate_limit: u32) -> Self {
+        let max_divided_by_rate_limit_minus_one =
+            (f64::from(u32::max_value()) / f64::from(rate_limit)) - 1.0;
+        debug_assert!(
+            max_divided_by_rate_limit_minus_one.is_finite()
+                && max_divided_by_rate_limit_minus_one >= 0.0
+        );
+
         CpuRateLimiter {
             inner,
-            max_divided_by_rate_limit: u32::max_value()
-                .checked_sub(rate_limit)
-                .unwrap_or(u32::max_value()),
+            max_divided_by_rate_limit_minus_one,
             prevent_poll_until: crate::timers::Delay::new(Duration::new(0, 0)),
         }
     }
@@ -81,13 +86,19 @@ impl<T: Future> Future for CpuRateLimiter<T> {
 
                 // In order to enforce the rate limiting, we prevent `poll` from executing
                 // for a certain amount of time.
-                // The base equation here is: `(after_poll_sleep + poll_duration) * rate_limit == poll_duration * u32::max_value()`
-                let after_poll_sleep = (poll_duration
-                    .saturating_mul(*this.max_divided_by_rate_limit))
-                .saturating_sub(poll_duration);
+                // The base equation here is: `(after_poll_sleep + poll_duration) * rate_limit == poll_duration * u32::max_value()`.
+                // Because `Duration::mul_f64` panics in case of overflow, we need to do the
+                // operation of multiplying and checking the bounds manually.
+                let mut after_poll_sleep =
+                    poll_duration.as_secs_f64() * *this.max_divided_by_rate_limit_minus_one;
+                let max_duration_float: f64 = Duration::MAX.as_secs_f64();  // TODO: turn this into a `const` once `as_secs_f64` is `const`
+                if !(after_poll_sleep < max_duration_float) {
+                    after_poll_sleep = max_duration_float;
+                }
+                // TODO: use try_from_secs_f64 when it's stable https://github.com/rust-lang/rust/issues/83400
 
                 this.prevent_poll_until.set(crate::timers::Delay::new_at(
-                    after_polling + after_poll_sleep,
+                    after_polling + Duration::from_secs_f64(after_poll_sleep),
                 ));
                 Poll::Pending
             }

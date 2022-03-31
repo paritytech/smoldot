@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix the `ClientOptions.cpuRateLimit` feature being misimplemented and treating any value other than 1.0 as extremely low.
+
 ## 0.6.10 - 2022-03-29
 
 ### Fixed
