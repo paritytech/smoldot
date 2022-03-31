@@ -167,7 +167,7 @@ impl Sender {
         if log::log_enabled!(log::Level::Debug) {
             log::debug!(
                 target: &self.log_target,
-                "JSON-RPC => {}",
+                "PendingRequestsQueue <= {}",
                 crate::util::truncate_str_iter(
                     json_rpc_request.chars().filter(|c| !c.is_control()),
                     100,
@@ -671,13 +671,15 @@ impl<TPlat: Platform> Background<TPlat> {
     async fn handle_request(self: &Arc<Self>) {
         let (json_rpc_request, state_machine_request_id) =
             self.requests_subscriptions.next_request().await;
+        log::debug!(target: &self.log_target, "PendingRequestsQueue => {}", 
+            crate::util::truncate_str_iter(
+                json_rpc_request.chars().filter(|c| !c.is_control()),
+                100,
+            ).collect::<String>());
 
         // Check whether the JSON-RPC request is correct, and bail out if it isn't.
         let (request_id, call) = match methods::parse_json_call(&json_rpc_request) {
-            Ok((request_id, call)) => {
-                log::debug!(target: &self.log_target, "Handler <= Request(id_json={:?}, method={})", request_id, call.name());
-                (request_id, call)
-            }
+            Ok((request_id, call)) => (request_id, call),
             Err(methods::ParseError::Method { request_id, error }) => {
                 log::warn!(
                     target: &self.log_target,
