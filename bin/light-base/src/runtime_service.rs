@@ -129,6 +129,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             let mut tree = async_tree::AsyncTree::new(async_tree::Config {
                 finalized_async_user_data: None,
                 retry_after_failed: Duration::from_secs(10),
+                blocks_capacity: 32,
             });
             let node_index = tree.input_insert_block(
                 Block {
@@ -1114,6 +1115,7 @@ async fn run_background<TPlat: Platform>(
                             async_tree::AsyncTree::<_, Block, _>::new(async_tree::Config {
                                 finalized_async_user_data: runtime,
                                 retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
+                                blocks_capacity: 32,
                             });
 
                         for block in subscription.non_finalized_blocks_ancestry_order {
@@ -1153,6 +1155,7 @@ async fn run_background<TPlat: Platform>(
                         let mut tree = async_tree::AsyncTree::new(async_tree::Config {
                             finalized_async_user_data: None,
                             retry_after_failed: Duration::from_secs(10), // TODO: hardcoded
+                            blocks_capacity: 32,
                         });
                         let node_index = tree.input_insert_block(
                             Block {
@@ -1611,6 +1614,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             async_tree::AsyncTree::new(async_tree::Config {
                                 finalized_async_user_data: None,
                                 retry_after_failed: Duration::new(0, 0),
+                                blocks_capacity: 0,
                             }),
                         )
                         .map_async_op_user_data(|runtime_index| runtime_index.unwrap());
