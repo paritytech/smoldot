@@ -46,8 +46,9 @@ impl<T> CpuRateLimiter<T> {
     pub fn new(inner: T, rate_limit: u32) -> Self {
         let max_divided_by_rate_limit_minus_one =
             (f64::from(u32::max_value()) / f64::from(rate_limit)) - 1.0;
+        // Note that it is legal for `max_divided_by_rate_limit_minus_one` to be +infinite
         debug_assert!(
-            max_divided_by_rate_limit_minus_one.is_finite()
+            !max_divided_by_rate_limit_minus_one.is_nan()
                 && max_divided_by_rate_limit_minus_one >= 0.0
         );
 
@@ -91,7 +92,7 @@ impl<T: Future> Future for CpuRateLimiter<T> {
                 // operation of multiplying and checking the bounds manually.
                 let mut after_poll_sleep =
                     poll_duration.as_secs_f64() * *this.max_divided_by_rate_limit_minus_one;
-                let max_duration_float: f64 = Duration::MAX.as_secs_f64();  // TODO: turn this into a `const` once `as_secs_f64` is `const`
+                let max_duration_float: f64 = Duration::MAX.as_secs_f64(); // TODO: turn this into a `const` once `as_secs_f64` is `const`
                 if !(after_poll_sleep < max_duration_float) {
                     after_poll_sleep = max_duration_float;
                 }
