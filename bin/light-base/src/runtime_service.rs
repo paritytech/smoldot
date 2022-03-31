@@ -1614,6 +1614,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             async_tree::AsyncTree::new(async_tree::Config {
                                 finalized_async_user_data: None,
                                 retry_after_failed: Duration::new(0, 0),
+                                blocks_capacity: 0,
                             }),
                         )
                         .map_async_op_user_data(|runtime_index| runtime_index.unwrap());
