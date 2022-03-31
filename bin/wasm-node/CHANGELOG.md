@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fix the `ClientOptions.cpuRateLimit` feature being misimplemented and treating any value other than 1.0 as extremely low.
+- Fix the `ClientOptions.cpuRateLimit` feature being misimplemented and treating any value other than 1.0 as extremely low. ([#2189](https://github.com/paritytech/smoldot/pull/2189))
 
 ## 0.6.10 - 2022-03-29
 
