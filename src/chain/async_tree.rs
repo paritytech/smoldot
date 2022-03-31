@@ -181,6 +181,13 @@ where
         }
     }
 
+    /// Returns the number of non-finalized blocks.
+    ///
+    /// This is equal to the number of items yielded by [`AsyncTree::input_iter_unordered`].
+    pub fn num_input_non_finalized_blocks(&self) -> usize {
+        self.non_finalized_blocks.len()
+    }
+
     /// Replaces all asynchronous operation user data with new values.
     ///
     /// The returned tree keeps the same [`NodeIndex`]es as `self`.
