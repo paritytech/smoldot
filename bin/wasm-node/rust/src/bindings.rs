@@ -144,6 +144,10 @@ extern "C" {
     /// After at least `milliseconds` milliseconds have passed, must call [`timer_finished`] with
     /// the `id` passed as parameter.
     ///
+    /// It is not a logic error to call [`timer_finished`] *before* `milliseconds` milliseconds
+    /// have passed, and this will likely cause smoldot to restart a new timer for the remainder
+    /// of the duration.
+    ///
     /// When [`timer_finished`] is called, the value of [`monotonic_clock_ms`] must have increased
     /// by at least the given number of `milliseconds`.
     ///

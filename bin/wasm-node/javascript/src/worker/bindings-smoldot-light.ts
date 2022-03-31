@@ -110,6 +110,13 @@ export default function (config: Config): compat.WasmModuleImports {
         start_timer: (id: number, ms: number) => {
             const instance = config.instance!;
 
+            // In both NodeJS and browsers, if `setTimeout` is called with a value larger than
+            // 2147483647, the delay is for some reason instead set to 1.
+            // As mentioned in the documentation of `start_timer`, it is acceptable to end the
+            // timer before the given number of milliseconds has passed.
+            if (ms > 2147483647)
+                ms = 2147483647;
+
             // In browsers, `setTimeout` works as expected when `ms` equals 0. However, NodeJS
             // requires a minimum of 1 millisecond (if `0` is passed, it is automatically replaced
             // with `1`) and wants you to use `setImmediate` instead.
