@@ -725,46 +725,55 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
     ) -> Result<(RuntimeCallLock<'a>, executor::host::HostVmPrototype), RuntimeCallError> {
         // TODO: DRY :-/ this whole thing is messy
 
-        // Perform the call proof request.
-        // Note that `guarded` is not locked.
-        // TODO: there's no way to verify that the call proof is actually correct; we have to ban the peer and restart the whole call process if it turns out that it's not
-        // TODO: also, an empty proof will be reported as an error right now, which is weird
-        let call_proof = self
-            .service
-            .sync_service
-            .clone()
-            .call_proof_query(
-                self.block_number,
-                protocol::CallProofRequestConfig {
-                    block_hash: self.hash,
-                    method,
-                    parameter_vectored: parameter_vectored.clone(),
-                },
-                total_attempts,
-                timeout_per_request,
-                max_parallel,
-            )
-            .await
-            .map_err(RuntimeCallError::CallProof);
+        let mut attempts_remaining = total_attempts;
 
-        let (guarded, virtual_machine) = match self.runtime.runtime.as_ref() {
-            Ok(r) => {
-                let mut lock = r.virtual_machine.lock().await;
-                let vm = lock.take().unwrap();
-                (lock, vm)
-            }
-            Err(err) => {
-                return Err(RuntimeCallError::InvalidRuntime(err.clone()));
-            }
-        };
+        while attempts_remaining > 0 {
+            attempts_remaining -= 1;
 
-        let lock = RuntimeCallLock {
-            guarded,
-            block_state_root_hash: self.block_state_root_hash,
-            call_proof,
-        };
+            // Perform the call proof request.
+            // Note that `guarded` is not locked.
+            // TODO: there's no way to verify that the call proof is actually correct; we have to ban the peer and restart the whole call process if it turns out that it's not
+            // TODO: also, an empty proof will be reported as an error right now, which is weird
+            let call_proof = self
+                .service
+                .sync_service
+                .clone()
+                .call_proof_query(
+                    self.block_number,
+                    protocol::CallProofRequestConfig {
+                        block_hash: self.hash,
+                        method,
+                        parameter_vectored: parameter_vectored.clone(),
+                    },
+                    1, // TODO: we do this as `total_attempts` is enforced manually; this can only be done properly after a refactoring of `call_proof_query`
+                    timeout_per_request,
+                    max_parallel,
+                )
+                .await
+                .map_err(RuntimeCallError::CallProof);
 
-        Ok((lock, virtual_machine))
+            let (guarded, virtual_machine) = match self.runtime.runtime.as_ref() {
+                Ok(r) => {
+                    let mut lock = r.virtual_machine.lock().await;
+                    let vm = lock.take().unwrap();
+                    (lock, vm)
+                }
+                Err(err) => {
+                    return Err(RuntimeCallError::InvalidRuntime(err.clone()));
+                }
+            };
+
+            let lock = RuntimeCallLock {
+                guarded,
+                block_state_root_hash: self.block_state_root_hash,
+                call_proof,
+                attempts_remaining,
+            };
+
+            return Ok((lock, virtual_machine));
+        }
+
+        todo!() // Err(RuntimeCallError::)
     }
 }
 
@@ -774,6 +783,7 @@ pub struct RuntimeCallLock<'a> {
     guarded: MutexGuard<'a, Option<executor::host::HostVmPrototype>>,
     block_state_root_hash: [u8; 32],
     call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
+    attempts_remaining: u32,
 }
 
 impl<'a> RuntimeCallLock<'a> {
@@ -862,10 +872,34 @@ impl<'a> RuntimeCallLock<'a> {
         Ok(output.into_iter())
     }
 
-    /// End the runtime call.
+    /// End the runtime call, then .
+    ///
+    /// The provided runtime is put back into the state of the [`RuntimeService`] while the
+    /// networking request is in progress, then extracted again.
+    pub async fn unlock_retry(
+        mut self,
+        vm: executor::host::HostVmPrototype,
+    ) -> Result<(RuntimeCallLock<'a>, executor::host::HostVmPrototype), RuntimeCallError> {
+        // We're destroying `self` below. Let's first extract the fields we need.
+        let block_state_root_hash = self.block_state_root_hash;
+        let attempts_remaining = self.attempts_remaining;
+
+        // Unlock everything.
+        debug_assert!(self.guarded.is_none());
+        *self.guarded = Some(vm);
+        drop(self);
+
+        if attempts_remaining == 0 {
+            // TODO: return Err()
+        }
+
+        todo!()
+    }
+
+    /// End the runtime call, either after a success or because we are giving up.
     ///
     /// This method **must** be called.
-    pub fn unlock(mut self, vm: executor::host::HostVmPrototype) {
+    pub fn unlock_finish(mut self, vm: executor::host::HostVmPrototype) {
         debug_assert!(self.guarded.is_none());
         *self.guarded = Some(vm);
     }

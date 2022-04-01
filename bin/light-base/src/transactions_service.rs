@@ -1079,7 +1079,7 @@ async fn validate_transaction<TPlat: Platform>(
     );
 
     let block_hash = *runtime_lock.block_hash();
-    let (runtime_call_lock, runtime) = runtime_lock
+    let (mut runtime_call_lock, mut runtime) = runtime_lock
         .start(
             validate::VALIDATION_FUNCTION_NAME,
             // TODO: don't hardcode v3 but determine parameters dynamically from the runtime
@@ -1096,72 +1096,80 @@ async fn validate_transaction<TPlat: Platform>(
         .map_err(ValidateTransactionError::Call)
         .map_err(InvalidOrError::ValidateError)?;
 
-    let mut validation_in_progress = validate::validate_transaction(validate::Config {
-        runtime,
-        scale_encoded_header: block_scale_encoded_header,
-        scale_encoded_transaction: iter::once(scale_encoded_transaction),
-        source,
-    });
-
     loop {
-        match validation_in_progress {
-            validate::Query::Finished {
-                result: Ok(Ok(success)),
-                virtual_machine,
-            } => {
-                runtime_call_lock.unlock(virtual_machine);
-                break Ok(success);
-            }
-            validate::Query::Finished {
-                result: Ok(Err(invalid)),
-                virtual_machine,
-            } => {
-                runtime_call_lock.unlock(virtual_machine);
-                break Err(InvalidOrError::Invalid(invalid));
-            }
-            validate::Query::Finished {
-                result: Err(error),
-                virtual_machine,
-            } => {
-                runtime_call_lock.unlock(virtual_machine);
-                break Err(InvalidOrError::ValidateError(
-                    ValidateTransactionError::Validation(error),
-                ));
-            }
-            validate::Query::StorageGet(get) => {
-                let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
-                    Ok(v) => v,
-                    Err(err) => {
-                        runtime_call_lock.unlock(validate::Query::StorageGet(get).into_prototype());
-                        return Err(InvalidOrError::ValidateError(
-                            ValidateTransactionError::Call(err),
-                        ));
+        let mut validation_in_progress = validate::validate_transaction(validate::Config {
+            runtime,
+            scale_encoded_header: block_scale_encoded_header,
+            scale_encoded_transaction: iter::once(scale_encoded_transaction.as_ref()),
+            source,
+        });
+
+        loop {
+            match validation_in_progress {
+                validate::Query::Finished {
+                    result: Ok(Ok(success)),
+                    virtual_machine,
+                } => {
+                    runtime_call_lock.unlock_finish(virtual_machine);
+                    return Ok(success);
+                }
+                validate::Query::Finished {
+                    result: Ok(Err(invalid)),
+                    virtual_machine,
+                } => {
+                    runtime_call_lock.unlock_finish(virtual_machine);
+                    return Err(InvalidOrError::Invalid(invalid));
+                }
+                validate::Query::Finished {
+                    result: Err(error),
+                    virtual_machine,
+                } => {
+                    runtime_call_lock.unlock_finish(virtual_machine);
+                    return Err(InvalidOrError::ValidateError(
+                        ValidateTransactionError::Validation(error),
+                    ));
+                }
+                validate::Query::StorageGet(get) => {
+                    if let Ok(storage_value) = runtime_call_lock.storage_entry(&get.key_as_vec()) {
+                        validation_in_progress = get.inject_value(storage_value.map(iter::once));
+                        continue;
                     }
-                };
-                validation_in_progress = get.inject_value(storage_value.map(iter::once));
-            }
-            validate::Query::NextKey(nk) => {
-                // TODO:
-                runtime_call_lock.unlock(validate::Query::NextKey(nk).into_prototype());
-                break Err(InvalidOrError::ValidateError(
-                    ValidateTransactionError::NextKeyForbidden,
-                ));
-            }
-            validate::Query::PrefixKeys(prefix) => {
-                // TODO: lots of allocations because I couldn't figure how to make this annoying borrow checker happy
-                let rq_prefix = prefix.prefix().as_ref().to_owned();
-                let result = runtime_call_lock
-                    .storage_prefix_keys_ordered(&rq_prefix)
-                    .map(|i| i.map(|v| v.as_ref().to_owned()).collect::<Vec<_>>());
-                match result {
-                    Ok(v) => validation_in_progress = prefix.inject_keys_ordered(v.into_iter()),
-                    Err(err) => {
-                        runtime_call_lock
-                            .unlock(validate::Query::PrefixKeys(prefix).into_prototype());
-                        return Err(InvalidOrError::ValidateError(
-                            ValidateTransactionError::Call(err),
-                        ));
+
+                    let (new_lock, new_vm) = runtime_call_lock
+                        .unlock_retry(validate::Query::StorageGet(get).into_prototype())
+                        .await
+                        .map_err(ValidateTransactionError::Call)
+                        .map_err(InvalidOrError::ValidateError)?;
+                    runtime_call_lock = new_lock;
+                    runtime = new_vm;
+                    break;
+                }
+                validate::Query::NextKey(nk) => {
+                    // TODO:
+                    runtime_call_lock.unlock_finish(validate::Query::NextKey(nk).into_prototype());
+                    return Err(InvalidOrError::ValidateError(
+                        ValidateTransactionError::NextKeyForbidden,
+                    ));
+                }
+                validate::Query::PrefixKeys(prefix) => {
+                    // TODO: lots of allocations because I couldn't figure how to make this annoying borrow checker happy
+                    let rq_prefix = prefix.prefix().as_ref().to_owned();
+                    let result = runtime_call_lock
+                        .storage_prefix_keys_ordered(&rq_prefix)
+                        .map(|i| i.map(|v| v.as_ref().to_owned()).collect::<Vec<_>>());
+                    if let Ok(v) = result {
+                        validation_in_progress = prefix.inject_keys_ordered(v.into_iter());
+                        continue;
                     }
+
+                    let (new_lock, new_vm) = runtime_call_lock
+                        .unlock_retry(validate::Query::PrefixKeys(prefix).into_prototype())
+                        .await
+                        .map_err(ValidateTransactionError::Call)
+                        .map_err(InvalidOrError::ValidateError)?;
+                    runtime_call_lock = new_lock;
+                    runtime = new_vm;
+                    break;
                 }
             }
         }

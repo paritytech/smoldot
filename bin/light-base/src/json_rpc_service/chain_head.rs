@@ -188,7 +188,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             storage_top_trie_changes: Default::default(),
                         }) {
                             Err((error, prototype)) => {
-                                runtime_call_lock.unlock(prototype);
+                                runtime_call_lock.unlock_finish(prototype);
                                 methods::ServerToClient::chainHead_unstable_callEvent {
                                     subscription: (&subscription_id).into(),
                                     result: methods::ChainHeadCallEvent::Error {
@@ -203,8 +203,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                         runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
                                             let output =
                                                 success.virtual_machine.value().as_ref().to_owned();
-                                            runtime_call_lock
-                                                .unlock(success.virtual_machine.into_prototype());
+                                            runtime_call_lock.unlock_finish(
+                                                success.virtual_machine.into_prototype(),
+                                            );
                                             break methods::ServerToClient::chainHead_unstable_callEvent {
                                                     subscription: (&subscription_id).into(),
                                                     result: methods::ChainHeadCallEvent::Done {
@@ -214,7 +215,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                                 .to_json_call_object_parameters(None);
                                         }
                                         runtime_host::RuntimeHostVm::Finished(Err(error)) => {
-                                            runtime_call_lock.unlock(error.prototype);
+                                            runtime_call_lock.unlock_finish(error.prototype);
                                             break methods::ServerToClient::chainHead_unstable_callEvent {
                                                     subscription: (&subscription_id).into(),
                                                     result: methods::ChainHeadCallEvent::Error {
@@ -230,7 +231,8 @@ impl<TPlat: Platform> Background<TPlat> {
                                             {
                                                 Ok(v) => v,
                                                 Err(error) => {
-                                                    runtime_call_lock.unlock(
+                                                    // TODO: call unlock_retry instead of ending with error
+                                                    runtime_call_lock.unlock_finish(
                                                         runtime_host::RuntimeHostVm::StorageGet(
                                                             get,
                                                         )
@@ -250,7 +252,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                         }
                                         runtime_host::RuntimeHostVm::NextKey(nk) => {
                                             // TODO: implement somehow
-                                            runtime_call_lock.unlock(
+                                            runtime_call_lock.unlock_finish(
                                                 runtime_host::RuntimeHostVm::NextKey(nk)
                                                     .into_prototype(),
                                             );
@@ -264,7 +266,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                         }
                                         runtime_host::RuntimeHostVm::PrefixKeys(nk) => {
                                             // TODO: implement somehow
-                                            runtime_call_lock.unlock(
+                                            runtime_call_lock.unlock_finish(
                                                 runtime_host::RuntimeHostVm::PrefixKeys(nk)
                                                     .into_prototype(),
                                             );

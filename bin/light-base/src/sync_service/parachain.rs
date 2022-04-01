@@ -520,7 +520,7 @@ async fn parahead<TPlat: Platform>(
     let precall = relay_chain_sync
         .pinned_block_runtime_lock(subscription_id, block_hash)
         .await;
-    let (runtime_call_lock, virtual_machine) = precall
+    let (mut runtime_call_lock, mut virtual_machine) = precall
         .start(
             para::PERSISTED_VALIDATION_FUNCTION_NAME,
             para::persisted_validation_data_parameters(
@@ -536,52 +536,59 @@ async fn parahead<TPlat: Platform>(
 
     // TODO: move the logic below in the `para` module
 
-    let mut runtime_call = match read_only_runtime_host::run(read_only_runtime_host::Config {
-        virtual_machine,
-        function_to_call: para::PERSISTED_VALIDATION_FUNCTION_NAME,
-        parameter: para::persisted_validation_data_parameters(
-            parachain_id,
-            para::OccupiedCoreAssumption::TimedOut,
-        ),
-    }) {
-        Ok(vm) => vm,
-        Err((err, prototype)) => {
-            runtime_call_lock.unlock(prototype);
-            return Err(ParaheadError::StartError(err));
-        }
-    };
+    let output = 'outer: loop {
+        let mut runtime_call = match read_only_runtime_host::run(read_only_runtime_host::Config {
+            virtual_machine,
+            function_to_call: para::PERSISTED_VALIDATION_FUNCTION_NAME,
+            parameter: para::persisted_validation_data_parameters(
+                parachain_id,
+                para::OccupiedCoreAssumption::TimedOut,
+            ),
+        }) {
+            Ok(vm) => vm,
+            Err((err, prototype)) => {
+                runtime_call_lock.unlock_finish(prototype);
+                return Err(ParaheadError::StartError(err));
+            }
+        };
 
-    let output = loop {
-        match runtime_call {
-            read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                let output = success.virtual_machine.value().as_ref().to_owned();
-                runtime_call_lock.unlock(success.virtual_machine.into_prototype());
-                break output;
-            }
-            read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
-                runtime_call_lock.unlock(error.prototype);
-                return Err(ParaheadError::ReadOnlyRuntime(error.detail));
-            }
-            read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
-                let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
-                    Ok(v) => v,
-                    Err(err) => {
-                        runtime_call_lock.unlock(
-                            read_only_runtime_host::RuntimeHostVm::StorageGet(get).into_prototype(),
-                        );
-                        return Err(ParaheadError::Call(err));
+        loop {
+            match runtime_call {
+                read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                    let output = success.virtual_machine.value().as_ref().to_owned();
+                    runtime_call_lock.unlock_finish(success.virtual_machine.into_prototype());
+                    break 'outer output;
+                }
+                read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+                    runtime_call_lock.unlock_finish(error.prototype);
+                    return Err(ParaheadError::ReadOnlyRuntime(error.detail));
+                }
+                read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
+                    if let Ok(storage_value) = runtime_call_lock.storage_entry(&get.key_as_vec()) {
+                        runtime_call = get.inject_value(storage_value.map(iter::once));
+                        continue;
                     }
-                };
-                runtime_call = get.inject_value(storage_value.map(iter::once));
-            }
-            read_only_runtime_host::RuntimeHostVm::NextKey(nk) => {
-                // TODO:
-                runtime_call_lock
-                    .unlock(read_only_runtime_host::RuntimeHostVm::NextKey(nk).into_prototype());
-                return Err(ParaheadError::NextKeyForbidden);
-            }
-            read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
-                runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
+
+                    let (new_lock, new_vm) = runtime_call_lock
+                        .unlock_retry(
+                            read_only_runtime_host::RuntimeHostVm::StorageGet(get).into_prototype(),
+                        )
+                        .await
+                        .map_err(ParaheadError::Call)?;
+                    runtime_call_lock = new_lock;
+                    virtual_machine = new_vm;
+                    break;
+                }
+                read_only_runtime_host::RuntimeHostVm::NextKey(nk) => {
+                    // TODO:
+                    runtime_call_lock.unlock_finish(
+                        read_only_runtime_host::RuntimeHostVm::NextKey(nk).into_prototype(),
+                    );
+                    return Err(ParaheadError::NextKeyForbidden);
+                }
+                read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
+                    runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
+                }
             }
         }
     };
