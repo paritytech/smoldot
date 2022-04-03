@@ -708,10 +708,10 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
     }
 
     /// Returns the specification of the given runtime.
-    pub fn specification(&mut self) -> Result<executor::CoreVersion, RuntimeCallError> {
+    pub fn specification(&self) -> Result<executor::CoreVersion, RuntimeError> {
         match self.runtime.runtime.as_ref() {
             Ok(r) => Ok(r.runtime_spec.clone()),
-            Err(err) => Err(RuntimeCallError::InvalidRuntime(err.clone())),
+            Err(err) => Err(err.clone()),
         }
     }
 

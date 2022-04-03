@@ -985,7 +985,7 @@ impl<TPlat: Platform> Background<TPlat> {
             if cache_lock.recent_pinned_blocks.contains(&block_hash) {
                 // The runtime service has the block pinned, meaning that we can ask the runtime
                 // service for the specification.
-                let mut runtime_call_lock = self
+                let runtime_call_lock = self
                     .runtime_service
                     .pinned_block_runtime_lock(
                         cache_lock.subscription_id.clone().unwrap(),
@@ -1045,7 +1045,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .compile_and_pin_runtime(storage_code, storage_heap_pages)
                     .await;
 
-                let mut runtime = self
+                let runtime = self
                     .runtime_service
                     .pinned_runtime_lock(
                         pinned_runtime_id.clone(),
