@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix some JSON-RPC functions never producing a result if they were sent before the runtime of the chain has been downloaded.
+
 ## 0.6.11 - 2022-03-31
 
 ### Fixed
