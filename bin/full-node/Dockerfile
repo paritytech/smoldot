@@ -4,7 +4,7 @@ LABEL maintainer "Pierre Krieger <pierre.krieger1708@gmail.com>"
 COPY ./../.. /build
 WORKDIR /build
 
-RUN apt-get update && apt-get install -y musl-tools
+RUN apt-get update && apt-get install -y musl-tools cmake
 RUN rustup target add x86_64-unknown-linux-musl
 RUN cargo build --target x86_64-unknown-linux-musl --package smoldot-full-node --release --verbose
 
