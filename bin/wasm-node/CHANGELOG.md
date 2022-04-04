@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.12 - 2022-04-04
+
 ### Fixed
 
 - Fix regression introduced in version 0.6.11 causing some JSON-RPC functions to never produce a result if they were sent before the runtime of the chain has been downloaded. ([#2201](https://github.com/paritytech/smoldot/pull/2201))
