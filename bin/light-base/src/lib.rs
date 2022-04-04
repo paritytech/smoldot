@@ -107,6 +107,12 @@ pub trait Platform: Send + 'static {
 
     /// Returns the time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time)
     /// (i.e. 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the system time is configured to be below the UNIX epoch. This situation is a
+    /// very very niche edge case that isn't worth handling.
+    ///
     fn now_from_unix_epoch() -> Duration;
 
     /// Returns an object that represents "now".
