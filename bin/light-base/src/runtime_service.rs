@@ -1100,6 +1100,10 @@ async fn run_background<TPlat: Platform>(
                     }
                 }
 
+                if let GuardedInner::FinalizedBlockRuntimeUnknown { when_known, .. } = &lock.tree {
+                    when_known.notify(usize::max_value());
+                }
+
                 lock.tree = GuardedInner::FinalizedBlockRuntimeKnown {
                     all_blocks_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
                         32,
