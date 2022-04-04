@@ -265,9 +265,11 @@ impl<'a> ProtocolRef<'a> {
             "ws" => Ok(ProtocolRef::Ws),
             "wss" => Ok(ProtocolRef::Wss),
             "memory" => {
-                let port = iter.next().ok_or(ParseError::UnexpectedEof)?;
+                let payload = iter.next().ok_or(ParseError::UnexpectedEof)?;
                 Ok(ProtocolRef::Memory(
-                    port.parse().map_err(|_| ParseError::InvalidMemoryPayload)?,
+                    payload
+                        .parse()
+                        .map_err(|_| ParseError::InvalidMemoryPayload)?,
                 ))
             }
             _ => Err(ParseError::UnrecognizedProtocol),
