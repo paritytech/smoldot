@@ -668,15 +668,6 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                             );
                         }
 
-                        if !invalid_bootstrap_nodes_sanitized.is_empty() {
-                            log::warn!(
-                                target: "smoldot",
-                                "Failed to parse some of the bootnodes of {}. \
-                                These bootnodes have been ignored. List: {}",
-                                log_name, invalid_bootstrap_nodes_sanitized.join(", ")
-                            );
-                        }
-
                         running_chain
                     };
 
@@ -699,6 +690,15 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                 (&mut entry.services, &entry.log_name)
             }
         };
+
+        if !invalid_bootstrap_nodes_sanitized.is_empty() {
+            log::warn!(
+                target: "smoldot",
+                "Failed to parse some of the bootnodes of {}. \
+                These bootnodes have been ignored. List: {}",
+                log_name, invalid_bootstrap_nodes_sanitized.join(", ")
+            );
+        }
 
         // Print a warning if the list of bootnodes is empty, as this is a common mistake.
         if bootstrap_nodes.is_empty() {
