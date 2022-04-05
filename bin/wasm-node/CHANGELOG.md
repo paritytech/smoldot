@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Properly fix the regression that version 0.6.12 was supposed to fix. ([#2210](https://github.com/paritytech/smoldot/pull/2210))
+
 ## 0.6.12 - 2022-04-04
 
 ### Fixed

@@ -1159,6 +1159,10 @@ async fn run_background<TPlat: Platform>(
                     },
                 };
             } else {
+                if let GuardedInner::FinalizedBlockRuntimeUnknown { when_known, .. } = &lock.tree {
+                    when_known.notify(usize::max_value());
+                }
+
                 lock.tree = GuardedInner::FinalizedBlockRuntimeUnknown {
                     when_known: event_listener::Event::new(),
                     tree: {
