@@ -286,7 +286,7 @@ impl ChainSpec {
     }
 }
 
-/// See [`ChainSpec::bootnodes`].
+/// See [`ChainSpec::boot_nodes`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bootnode<'a> {
     /// The address of the bootnode is valid.
