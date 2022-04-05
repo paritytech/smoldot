@@ -673,7 +673,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                                 target: "smoldot",
                                 "Failed to parse some of the bootnodes of {}. \
                                 These bootnodes have been ignored. List: {}",
-                                log_name, invalid_bootstrap_nodes_sanitized.join(",")
+                                log_name, invalid_bootstrap_nodes_sanitized.join(", ")
                             );
                         }
 
