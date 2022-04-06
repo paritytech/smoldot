@@ -40,13 +40,13 @@ use std::{
     ///
     /// The stream is infinite. In other words it is guaranteed to never return `None`.
     pub async fn subscribe_runtime_version<TPlat: Platform>(
-        runtime_service: &RuntimeService<TPlat>
+        runtime_service: &Arc<RuntimeService<TPlat>>
     ) -> (
         Result<executor::CoreVersion, RuntimeError>,
         stream::BoxStream<'static, Result<executor::CoreVersion, RuntimeError>>,
     ) {
-        let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
-            let subscribe_all = Self::subscribe_all_inner(&guarded, 16, 32).await;
+        let mut master_stream = stream::unfold(runtime_service.clone(), |runtime_service| async move {
+            let subscribe_all = runtime_service.subscribe_all( 16, 32).await;
 
             // Map of runtimes by hash. Contains all non-finalized blocks runtimes.
             let mut non_finalized_headers =
@@ -188,7 +188,7 @@ use std::{
 
             // Prepend the current best block to the stream.
             let substream = stream::once(future::ready(current_best_runtime)).chain(substream);
-            Some((substream, guarded))
+            Some((substream, runtime_service))
         })
         .flatten()
         .boxed();
@@ -205,9 +205,9 @@ use std::{
     ///
     /// This function only returns once the runtime of the current finalized block is known. This
     /// might take a long time.
-    pub async fn subscribe_finalized<TPlat: Platform>(runtime_service: &RuntimeService<TPlat>) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
-        let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
-            let subscribe_all = Self::subscribe_all_inner(&guarded, 16, 48).await;
+    pub async fn subscribe_finalized<TPlat: Platform>(runtime_service: &Arc<RuntimeService<TPlat>>) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
+        let mut master_stream = stream::unfold(runtime_service.clone(), |runtime_service| async move {
+            let subscribe_all = runtime_service.subscribe_all(16, 48).await;
 
             // Map of block headers by hash. Contains all non-finalized blocks headers.
             let mut non_finalized_headers = hashbrown::HashMap::<
@@ -269,7 +269,7 @@ use std::{
             ))
             .chain(substream);
 
-            Some((substream, guarded))
+            Some((substream, runtime_service))
         })
         .flatten()
         .boxed();
@@ -286,9 +286,9 @@ use std::{
     ///
     /// This function only returns once the runtime of the current best block is known. This might
     /// take a long time.
-    pub async fn subscribe_best<TPlat: Platform>(runtime_service: &RuntimeService<TPlat>) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
-        let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
-            let subscribe_all = Self::subscribe_all_inner(&guarded, 16, 48).await;
+    pub async fn subscribe_best<TPlat: Platform>(runtime_service: &Arc<RuntimeService<TPlat>>) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
+        let mut master_stream = stream::unfold(runtime_service.clone(), |runtime_service| async move {
+            let subscribe_all = runtime_service.subscribe_all(16, 48).await;
 
             // Map of block headers by hash. Contains all non-finalized blocks headers.
             let mut non_finalized_headers = hashbrown::HashMap::<
@@ -403,7 +403,7 @@ use std::{
 
             // Prepend the current best block to the stream.
             let substream = stream::once(future::ready(current_best_header)).chain(substream);
-            Some((substream, guarded))
+            Some((substream, runtime_service))
         })
         .flatten()
         .boxed();
