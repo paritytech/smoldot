@@ -36,6 +36,8 @@ use std::{
     time::Duration,
 };
 
+mod sub_utils;
+
 impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::system_accountNextIndex`].
     pub(super) async fn account_next_index(

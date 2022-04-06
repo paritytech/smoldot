@@ -78,8 +78,6 @@ use std::{
     time::Duration,
 };
 
-mod sub_utils;
-
 /// Configuration for a runtime service.
 pub struct Config<TPlat: Platform> {
     /// Name of the chain, for logging purposes.
