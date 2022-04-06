@@ -591,9 +591,14 @@ impl<TPlat: Platform> Background<TPlat> {
 
                     // Subscribe to new runtime service blocks in order to push them in the
                     // cache as soon as they are available.
+                    // The buffer size should be large enough so that, if the CPU is busy, it
+                    // doesn't become full before the execution of this task resumes.
+                    // The maximum number of pinned block is ignored, as this maximum is a way to
+                    // avoid malicious behaviors. This code is by definition not considered
+                    // malicious.
                     let mut subscribe_all = me
                         .runtime_service
-                        .subscribe_all(8, cache.recent_pinned_blocks.cap())
+                        .subscribe_all(32, cache.recent_pinned_blocks.cap())
                         .await;
 
                     cache.subscription_id = Some(subscribe_all.new_blocks.id());

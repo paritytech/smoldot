@@ -1025,7 +1025,7 @@ async fn run_background<TPlat: Platform>(
     loop {
         // The buffer size should be large enough so that, if the CPU is busy, it doesn't
         // become full before the execution of the runtime service resumes.
-        let subscription = sync_service.subscribe_all(16, true).await;
+        let subscription = sync_service.subscribe_all(32, true).await;
 
         log::debug!(
             target: &log_target,
