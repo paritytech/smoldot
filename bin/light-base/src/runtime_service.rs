@@ -1100,6 +1100,12 @@ async fn run_background<TPlat: Platform>(
                     }
                 }
 
+                log::debug!(
+                    target: &log_target,
+                    "Worker => RuntimeKnown(finalized_hash={})",
+                    HashDisplay(&finalized_block_hash)
+                );
+
                 if let GuardedInner::FinalizedBlockRuntimeUnknown { when_known, .. } = &lock.tree {
                     when_known.notify(usize::max_value());
                 }
@@ -1153,6 +1159,10 @@ async fn run_background<TPlat: Platform>(
                     },
                 };
             } else {
+                if let GuardedInner::FinalizedBlockRuntimeUnknown { when_known, .. } = &lock.tree {
+                    when_known.notify(usize::max_value());
+                }
+
                 lock.tree = GuardedInner::FinalizedBlockRuntimeUnknown {
                     when_known: event_listener::Event::new(),
                     tree: {
@@ -1604,7 +1614,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             .map_or(new_finalized.hash, |idx| tree.block_user_data(idx).hash);
                         log::debug!(
                             target: &self.log_target,
-                            "Worker => OutputFinalized(hash={}, best={})",
+                            "Worker => RuntimeKnown(finalized_hash={}, best={})",
                             HashDisplay(&new_finalized.hash), HashDisplay(&best_block_hash)
                         );
 
