@@ -238,21 +238,33 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                     })
                     .await,
                 bootstrap_nodes: {
-                    let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
-                    for node in chain_spec
-                        .boot_nodes()
-                        .iter()
-                        .chain(cli_options.additional_bootnode.iter())
-                    {
-                        let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
-                        if let Some(multiaddr::ProtocolRef::P2p(peer_id)) = address.iter().last() {
-                            let peer_id = PeerId::from_bytes(peer_id.to_vec()).unwrap(); // TODO: don't unwrap
-                            address.pop();
-                            list.push((peer_id, address));
-                        } else {
-                            panic!() // TODO:
+                    let mut list = Vec::with_capacity(
+                        chain_spec.boot_nodes().len() + cli_options.additional_bootnode.len(),
+                    );
+
+                    for node in chain_spec.boot_nodes() {
+                        match node {
+                            chain_spec::Bootnode::UnrecognizedFormat(raw) => {
+                                panic!("Failed to parse bootnode in chain specification: {}", raw)
+                            }
+                            chain_spec::Bootnode::Parsed { multiaddr, peer_id } => {
+                                let multiaddr: multiaddr::Multiaddr = match multiaddr.parse() {
+                                    Ok(a) => a,
+                                    Err(_) => panic!(
+                                        "Failed to parse bootnode in chain specification: {}",
+                                        multiaddr
+                                    ),
+                                };
+                                let peer_id = PeerId::from_bytes(peer_id.to_vec()).unwrap();
+                                list.push((peer_id, multiaddr));
+                            }
                         }
                     }
+
+                    for bootnode in &cli_options.additional_bootnode {
+                        list.push((bootnode.peer_id.clone(), bootnode.address.clone()));
+                    }
+
                     list
                 },
             })
@@ -283,16 +295,22 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                         bootstrap_nodes: {
                             let mut list =
                                 Vec::with_capacity(relay_chains_specs.boot_nodes().len());
-                            for node in relay_chains_specs.boot_nodes().iter() {
-                                let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
-                                if let Some(multiaddr::ProtocolRef::P2p(peer_id)) =
-                                    address.iter().last()
-                                {
-                                    let peer_id = PeerId::from_bytes(peer_id.to_vec()).unwrap(); // TODO: don't unwrap
-                                    address.pop();
-                                    list.push((peer_id, address));
-                                } else {
-                                    panic!() // TODO:
+                            for node in relay_chains_specs.boot_nodes() {
+                                match node {
+                                    chain_spec::Bootnode::UnrecognizedFormat(raw) => {
+                                        panic!("Failed to parse bootnode in chain specification: {}", raw)
+                                    }
+                                    chain_spec::Bootnode::Parsed { multiaddr, peer_id } => {
+                                        let multiaddr: multiaddr::Multiaddr = match multiaddr.parse() {
+                                            Ok(a) => a,
+                                            Err(_) => panic!(
+                                                "Failed to parse bootnode in chain specification: {}",
+                                                multiaddr
+                                            ),
+                                        };
+                                        let peer_id = PeerId::from_bytes(peer_id.to_vec()).unwrap();
+                                        list.push((peer_id, multiaddr));
+                                    }
                                 }
                             }
                             list
