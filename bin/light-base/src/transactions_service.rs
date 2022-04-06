@@ -322,7 +322,10 @@ async fn background_task<TPlat: Platform>(
         // become full before the execution of the transactions service resumes.
         // The maximum number of pinned block is ignored, as this maximum is a way to avoid
         // malicious behaviors. This code is by definition not considered malicious.
-        let mut subscribe_all = worker.runtime_service.subscribe_all(32, usize::max_value()).await;
+        let mut subscribe_all = worker
+            .runtime_service
+            .subscribe_all(32, usize::max_value())
+            .await;
         let initial_finalized_block_hash = header::hash_from_scale_encoded_header(
             &subscribe_all.finalized_block_scale_encoded_header,
         );
