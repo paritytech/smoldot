@@ -598,7 +598,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     // malicious.
                     let mut subscribe_all = me
                         .runtime_service
-                        .subscribe_all(32, cache.recent_pinned_blocks.cap())
+                        .subscribe_all(32, usize::max_value())
                         .await;
 
                     cache.subscription_id = Some(subscribe_all.new_blocks.id());
