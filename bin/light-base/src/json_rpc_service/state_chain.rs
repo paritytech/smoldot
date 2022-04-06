@@ -46,8 +46,9 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         account: methods::AccountId,
     ) {
-        let block_hash =
-            header::hash_from_scale_encoded_header(&sub_utils::subscribe_best(&self.runtime_service).await.0);
+        let block_hash = header::hash_from_scale_encoded_header(
+            &sub_utils::subscribe_best(&self.runtime_service).await.0,
+        );
 
         let result = self
             .runtime_call(
@@ -618,7 +619,8 @@ impl<TPlat: Platform> Background<TPlat> {
             .await;
 
         let mut blocks_list = {
-            let (block_header, blocks_subscription) = sub_utils::subscribe_best(&self.runtime_service).await;
+            let (block_header, blocks_subscription) =
+                sub_utils::subscribe_best(&self.runtime_service).await;
             stream::once(future::ready(block_header)).chain(blocks_subscription)
         };
 
@@ -913,7 +915,9 @@ impl<TPlat: Platform> Background<TPlat> {
         let block_hash = if let Some(hash) = hash {
             hash.0
         } else {
-            header::hash_from_scale_encoded_header(&sub_utils::subscribe_best(&self.runtime_service).await.0)
+            header::hash_from_scale_encoded_header(
+                &sub_utils::subscribe_best(&self.runtime_service).await.0,
+            )
         };
 
         let result = self
@@ -1144,8 +1148,9 @@ impl<TPlat: Platform> Background<TPlat> {
         keys: Vec<methods::HexString>,
         at: Option<methods::HashHexString>,
     ) {
-        let best_block =
-            header::hash_from_scale_encoded_header(&sub_utils::subscribe_best(&self.runtime_service).await.0);
+        let best_block = header::hash_from_scale_encoded_header(
+            &sub_utils::subscribe_best(&self.runtime_service).await.0,
+        );
 
         let cache = self.cache.lock().await;
 
