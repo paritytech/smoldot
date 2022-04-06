@@ -196,18 +196,10 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         buffer_size: usize,
         max_pinned_blocks: usize,
     ) -> SubscribeAll<TPlat> {
-        Self::subscribe_all_inner(&self.guarded, buffer_size, max_pinned_blocks).await
-    }
-
-    async fn subscribe_all_inner(
-        guarded: &Arc<Mutex<Guarded<TPlat>>>,
-        buffer_size: usize,
-        max_pinned_blocks: usize,
-    ) -> SubscribeAll<TPlat> {
         // First, lock `guarded` and wait for the tree to be in `FinalizedBlockRuntimeKnown` mode.
         // This can take a long time.
         let mut guarded_lock = loop {
-            let guarded_lock = guarded.lock().await;
+            let guarded_lock = self.guarded.lock().await;
 
             match &guarded_lock.tree {
                 GuardedInner::FinalizedBlockRuntimeKnown { .. } => break guarded_lock,
@@ -346,7 +338,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             new_blocks: Subscription {
                 subscription_id,
                 channel: new_blocks_channel,
-                guarded: guarded.clone(),
+                guarded: self.guarded.clone(),
             },
         }
     }
