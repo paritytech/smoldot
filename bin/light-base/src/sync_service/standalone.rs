@@ -94,37 +94,47 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
     let mut from_network_service = from_network_service.fuse();
 
     // Main loop of the syncing logic.
+    //
+    // This loop contains some CPU-heavy operations (e.g. verifying justifications and warp sync
+    // proofs) but also responding to messages sent by the foreground sync service. In order to
+    // avoid long delays in responding to foreground messages, the CPU-heavy operations are split
+    // into small chunks, and each iteration of the loop processes at most one of these chunks and
+    // processes one foreground message.
     loop {
-        // Start all networking requests (block requests, warp sync requests, etc.) that the
-        // syncing state machine would like to start.
-        loop {
-            if !task.start_next_request() {
-                break;
+        // Try to perform CPU-heavy verifications.
+        // If any CPU-heavy verification was performed, then `queue_empty` will be `false`, in
+        // which case we will loop again as soon as possible.
+        let queue_empty = {
+            let mut queue_empty = true;
+
+            // Start a networking request (block requests, warp sync requests, etc.) that the
+            // syncing state machine would like to start.
+            if task.start_next_request() {
+                queue_empty = false;
             }
-        }
 
-        // TODO: handle obsolete requests
+            // TODO: handle obsolete requests
 
-        // The sync state machine can be in a few various states. At the time of writing:
-        // idle, verifying header, verifying block, verifying grandpa warp sync proof,
-        // verifying storage proof.
-        // If the state is one of the "verifying" states, perform the actual verification and
-        // loop again until the sync is in an idle state.
-        loop {
-            let (task_update, has_processed) = task.process_one_verification_queue().await;
+            // The sync state machine can be in a few various states. At the time of writing:
+            // idle, verifying header, verifying block, verifying grandpa warp sync proof,
+            // verifying storage proof.
+            // If the state is one of the "verifying" states, perform the actual verification and
+            // loop again until the sync is in an idle state.
+            let (task_update, has_done_verif) = task.process_one_verification_queue();
             task = task_update;
 
-            if !has_processed {
-                break;
+            if has_done_verif {
+                queue_empty = false;
+
+                // Since JavaScript/Wasm is single-threaded, executing many CPU-heavy operations
+                // in a row would prevent all the other tasks in the background from running.
+                // In order to provide a better granularity, we force a yield after each
+                // verification.
+                crate::util::yield_once().await;
             }
 
-            // Since this task is verifying blocks or warp sync fragments, which are heavy CPU-only
-            // operation, it is very much possible for it to take a long time before having to wait
-            // for some event. Since JavaScript/Wasm is single-threaded, this would prevent all
-            // the other tasks in the background from running.
-            // In order to provide a better granularity, we force a yield after each verification.
-            crate::util::yield_once().await;
-        }
+            queue_empty
+        };
 
         // Processing the queue might have updated the best block of the syncing state machine.
         if !task.network_up_to_date_best {
@@ -276,6 +286,19 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                     future::Either::Left(TPlat::sleep(Duration::from_secs(15))).fuse();
                 continue;
             },
+
+            // If the list of CPU-heavy operations to perform is potentially non-empty, then we
+            // wait for a future that is always instantly ready, in order to loop again and
+            // perform the next CPU-heavy operation.
+            // Note that if any of the other futures in that `select!` block is ready, then that
+            // other ready future might take precedence (or not, it is pseudo-random). This
+            // guarantees proper interleaving between CPU-heavy operations and responding to
+            // other kind of events.
+            () = if queue_empty { future::Either::Left(future::pending()) }
+                 else { future::Either::Right(future::ready(())) } =>
+            {
+                continue;
+            }
         };
 
         // `response_outcome` represents the way the state machine has changed as a
@@ -556,7 +579,7 @@ impl<TPlat: Platform> Task<TPlat> {
     /// verification.
     ///
     /// Returns ̀`self` and a boolean indicating whether something has been processed.
-    async fn process_one_verification_queue(mut self) -> (Self, bool) {
+    fn process_one_verification_queue(mut self) -> (Self, bool) {
         // Note that `process_one` moves out of `sync` and provides the value back in its
         // return value.
         match self.sync.process_one() {
