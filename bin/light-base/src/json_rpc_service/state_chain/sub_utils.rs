@@ -15,12 +15,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! This module contains additional useful public methods on [`RuntimeService`] that aren't part
-//! of the "core" functionnalities of the service.
+//! This module contains useful features built on top of the [`RuntimeService`] that are only used
+//! by the JSON-RPC service.
 
-use super::*;
+use crate::{Platform, runtime_service::RuntimeService};
 
-impl<TPlat: Platform> RuntimeService<TPlat> {
     /// Returns the current runtime version, plus an unlimited stream that produces one item every
     /// time the specs of the runtime of the best block are changed.
     ///
@@ -30,8 +29,8 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// The stream can generate an `Err` if the runtime in the best block is invalid.
     ///
     /// The stream is infinite. In other words it is guaranteed to never return `None`.
-    pub async fn subscribe_runtime_version(
-        &self,
+    pub async fn subscribe_runtime_version<TPlat: Platform>(
+        runtime_service: &RuntimeService<TPlat>
     ) -> (
         Result<executor::CoreVersion, RuntimeError>,
         stream::BoxStream<'static, Result<executor::CoreVersion, RuntimeError>>,
@@ -196,7 +195,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ///
     /// This function only returns once the runtime of the current finalized block is known. This
     /// might take a long time.
-    pub async fn subscribe_finalized(&self) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
+    pub async fn subscribe_finalized<TPlat: Platform>(runtime_service: &RuntimeService<TPlat>) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
         let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
             let subscribe_all = Self::subscribe_all_inner(&guarded, 16, 48).await;
 
@@ -277,7 +276,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ///
     /// This function only returns once the runtime of the current best block is known. This might
     /// take a long time.
-    pub async fn subscribe_best(&self) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
+    pub async fn subscribe_best<TPlat: Platform>(runtime_service: &RuntimeService<TPlat>) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
         let mut master_stream = stream::unfold(self.guarded.clone(), |guarded| async move {
             let subscribe_all = Self::subscribe_all_inner(&guarded, 16, 48).await;
 
@@ -405,4 +404,3 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         let first_value = master_stream.next().await.unwrap();
         (first_value, master_stream)
     }
-}
