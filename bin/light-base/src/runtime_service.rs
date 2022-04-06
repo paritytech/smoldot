@@ -179,9 +179,8 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// This function only returns once the runtime of the current finalized block is known. This
     /// might take a long time.
     ///
-    /// Contrary to [`RuntimeService::subscribe_best`], *all* new blocks are reported. Only up to
-    /// `buffer_size` block notifications are buffered in the channel. If the channel is full
-    /// when a new notification is attempted to be pushed, the channel gets closed.
+    /// Only up to `buffer_size` block notifications are buffered in the channel. If the channel
+    /// is full when a new notification is attempted to be pushed, the channel gets closed.
     ///
     /// A maximum number of pinned blocks must be passed, indicating the maximum number of blocks
     /// that the runtime service will pin at the same time for this subscription. If this maximum
