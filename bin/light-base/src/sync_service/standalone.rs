@@ -101,7 +101,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
     // into small chunks, and each iteration of the loop processes at most one of these chunks and
     // processes one foreground message.
     loop {
-        // Try to perform CPU-heavy verifications.
+        // Try to perform some CPU-heavy operations.
         // If any CPU-heavy verification was performed, then `queue_empty` will be `false`, in
         // which case we will loop again as soon as possible.
         let queue_empty = {
@@ -118,8 +118,8 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
             // The sync state machine can be in a few various states. At the time of writing:
             // idle, verifying header, verifying block, verifying grandpa warp sync proof,
             // verifying storage proof.
-            // If the state is one of the "verifying" states, perform the actual verification and
-            // loop again until the sync is in an idle state.
+            // If the state is one of the "verifying" states, perform the actual verification
+            // and set ̀`queue_empty` to `false`.
             let (task_update, has_done_verif) = task.process_one_verification_queue();
             task = task_update;
 
@@ -435,7 +435,7 @@ struct Task<TPlat: Platform> {
 impl<TPlat: Platform> Task<TPlat> {
     /// Starts one network request if any is necessary.
     ///
-    /// Returns ̀`true` if a request has been started.
+    /// Returns `true` if a request has been started.
     fn start_next_request(&mut self) -> bool {
         // `desired_requests()` returns, in decreasing order of priority, the requests
         // that should be started in order for the syncing to proceed. The fact that multiple
