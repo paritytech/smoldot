@@ -467,7 +467,6 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         if let Ok(multiaddr) = multiaddr.parse::<multiaddr::Multiaddr>() {
                             let peer_id = peer_id::PeerId::from_bytes(peer_id).unwrap();
                             valid_list.push((peer_id, vec![multiaddr]));
-                            continue;
                         } else {
                             invalid_list.push(multiaddr)
                         }
