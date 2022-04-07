@@ -184,7 +184,9 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ///
     /// A maximum number of pinned blocks must be passed, indicating the maximum number of blocks
     /// that the runtime service will pin at the same time for this subscription. If this maximum
-    /// is reached, the channel will get closed.
+    /// is reached, the channel will get closed. In situations where the subscriber is guaranteed
+    /// to always properly unpin blocks, a value of `usize::max_value()` can be passed in order
+    /// to ignore this maximum.
     ///
     /// The channel also gets closed if a gap in the finality happens, such as after a Grandpa
     /// warp syncing.
@@ -1014,7 +1016,7 @@ async fn run_background<TPlat: Platform>(
     loop {
         // The buffer size should be large enough so that, if the CPU is busy, it doesn't
         // become full before the execution of the runtime service resumes.
-        let subscription = sync_service.subscribe_all(16, true).await;
+        let subscription = sync_service.subscribe_all(32, true).await;
 
         log::debug!(
             target: &log_target,
