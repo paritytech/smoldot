@@ -36,6 +36,8 @@ use std::{
     time::Duration,
 };
 
+mod sub_utils;
+
 impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::system_accountNextIndex`].
     pub(super) async fn account_next_index(
@@ -44,8 +46,9 @@ impl<TPlat: Platform> Background<TPlat> {
         state_machine_request_id: &requests_subscriptions::RequestId,
         account: methods::AccountId,
     ) {
-        let block_hash =
-            header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
+        let block_hash = header::hash_from_scale_encoded_header(
+            &sub_utils::subscribe_best(&self.runtime_service).await.0,
+        );
 
         let result = self
             .runtime_call(
@@ -97,7 +100,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let hash = match hash {
             Some(h) => h.0,
             None => header::hash_from_scale_encoded_header(
-                &self.runtime_service.subscribe_best().await.0,
+                &sub_utils::subscribe_best(&self.runtime_service).await.0,
             ),
         };
 
@@ -200,7 +203,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 .to_json_response(request_id),
                 None => {
                     let best_block = header::hash_from_scale_encoded_header(
-                        &self.runtime_service.subscribe_best().await.0,
+                        &sub_utils::subscribe_best(&self.runtime_service).await.0,
                     );
                     methods::Response::chain_getBlockHash(methods::HashHexString(best_block))
                         .to_json_response(request_id)
@@ -231,7 +234,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let hash = match hash {
             Some(h) => h.0,
             None => header::hash_from_scale_encoded_header(
-                &self.runtime_service.subscribe_best().await.0,
+                &sub_utils::subscribe_best(&self.runtime_service).await.0,
             ),
         };
 
@@ -525,7 +528,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
         let mut blocks_list = {
             let (finalized_block_header, finalized_blocks_subscription) =
-                self.runtime_service.subscribe_finalized().await;
+                sub_utils::subscribe_finalized(&self.runtime_service).await;
             stream::once(future::ready(finalized_block_header)).chain(finalized_blocks_subscription)
         };
 
@@ -623,7 +626,8 @@ impl<TPlat: Platform> Background<TPlat> {
             .await;
 
         let mut blocks_list = {
-            let (block_header, blocks_subscription) = self.runtime_service.subscribe_best().await;
+            let (block_header, blocks_subscription) =
+                sub_utils::subscribe_best(&self.runtime_service).await;
             stream::once(future::ready(block_header)).chain(blocks_subscription)
         };
 
@@ -784,7 +788,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let block_hash = match block_hash {
             Some(h) => *h,
             None => header::hash_from_scale_encoded_header(
-                &self.runtime_service.subscribe_best().await.0,
+                &sub_utils::subscribe_best(&self.runtime_service).await.0,
             ),
         };
 
@@ -845,7 +849,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let hash = match hash {
             Some(h) => h.0,
             None => header::hash_from_scale_encoded_header(
-                &self.runtime_service.subscribe_best().await.0,
+                &sub_utils::subscribe_best(&self.runtime_service).await.0,
             ),
         };
 
@@ -918,7 +922,9 @@ impl<TPlat: Platform> Background<TPlat> {
         let block_hash = if let Some(hash) = hash {
             hash.0
         } else {
-            header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0)
+            header::hash_from_scale_encoded_header(
+                &sub_utils::subscribe_best(&self.runtime_service).await.0,
+            )
         };
 
         let result = self
@@ -978,7 +984,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let block_hash = match block_hash {
             Some(h) => *h,
             None => header::hash_from_scale_encoded_header(
-                &self.runtime_service.subscribe_best().await.0,
+                &sub_utils::subscribe_best(&self.runtime_service).await.0,
             ),
         };
 
@@ -1112,7 +1118,7 @@ impl<TPlat: Platform> Background<TPlat> {
             .as_ref()
             .map(|h| h.0)
             .unwrap_or(header::hash_from_scale_encoded_header(
-                &self.runtime_service.subscribe_best().await.0,
+                &sub_utils::subscribe_best(&self.runtime_service).await.0,
             ));
 
         let fut = self.storage_query(
@@ -1149,8 +1155,9 @@ impl<TPlat: Platform> Background<TPlat> {
         keys: Vec<methods::HexString>,
         at: Option<methods::HashHexString>,
     ) {
-        let best_block =
-            header::hash_from_scale_encoded_header(&self.runtime_service.subscribe_best().await.0);
+        let best_block = header::hash_from_scale_encoded_header(
+            &sub_utils::subscribe_best(&self.runtime_service).await.0,
+        );
 
         let cache = self.cache.lock().await;
 
@@ -1242,7 +1249,7 @@ impl<TPlat: Platform> Background<TPlat> {
             let me = self.clone();
             async move {
                 let (current_spec, spec_changes) =
-                    me.runtime_service.subscribe_runtime_version().await;
+                    sub_utils::subscribe_runtime_version(&me.runtime_service).await;
                 let spec_changes = stream::iter(iter::once(current_spec)).chain(spec_changes);
                 futures::pin_mut!(spec_changes);
 
@@ -1465,7 +1472,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             if blocks_stream.is_none() {
                                 // TODO: why is this done against the runtime_service and not the sync_service? clarify
                                 let (block_header, blocks_subscription) =
-                                    runtime_service.subscribe_best().await;
+                                    sub_utils::subscribe_best(&runtime_service).await;
                                 blocks_stream = Some(
                                     stream::once(future::ready(block_header))
                                         .chain(blocks_subscription),

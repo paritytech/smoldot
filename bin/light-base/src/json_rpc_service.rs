@@ -572,7 +572,11 @@ impl<TPlat: Platform> Background<TPlat> {
             tasks.push(
                 async move {
                     loop {
-                        me.handle_request().await
+                        me.handle_request().await;
+
+                        // We yield once between each request in order to politely let other tasks
+                        // do some work and not monopolize the CPU.
+                        crate::util::yield_once().await;
                     }
                 }
                 .boxed(),
