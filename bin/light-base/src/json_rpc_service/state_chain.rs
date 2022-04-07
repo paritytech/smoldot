@@ -394,7 +394,14 @@ impl<TPlat: Platform> Background<TPlat> {
             .await;
 
         let mut new_blocks = {
-            let subscribe_all = self.runtime_service.subscribe_all(16, 32).await;
+            // The buffer size should be large enough so that, if the CPU is busy, it doesn't
+            // become full before the execution of the runtime service resumes.
+            // The maximum number of pinned block is ignored, as this maximum is a way to avoid
+            // malicious behaviors. This code is by definition not considered malicious.
+            let subscribe_all = self
+                .runtime_service
+                .subscribe_all(32, usize::max_value())
+                .await;
 
             // The finalized and already-known blocks aren't reported to the user, but we need
             // unpin them on to the runtime service.
