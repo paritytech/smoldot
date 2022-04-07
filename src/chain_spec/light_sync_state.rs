@@ -75,8 +75,8 @@ pub(super) struct EpochChanges {
 #[allow(unused)]
 #[derive(Debug, Decode, Encode)]
 pub(super) struct GapEpochs {
-	current: ([u8; 32], u32, PersistedEpoch),
-	next: Option<([u8; 32], u32, BabeEpoch)>,
+    current: ([u8; 32], u32, PersistedEpoch),
+    next: Option<([u8; 32], u32, BabeEpoch)>,
 }
 
 #[derive(Debug, Decode, Encode)]
