@@ -78,8 +78,6 @@ use std::{
     time::Duration,
 };
 
-mod sub_utils;
-
 /// Configuration for a runtime service.
 pub struct Config<TPlat: Platform> {
     /// Name of the chain, for logging purposes.
@@ -181,9 +179,8 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// This function only returns once the runtime of the current finalized block is known. This
     /// might take a long time.
     ///
-    /// Contrary to [`RuntimeService::subscribe_best`], *all* new blocks are reported. Only up to
-    /// `buffer_size` block notifications are buffered in the channel. If the channel is full
-    /// when a new notification is attempted to be pushed, the channel gets closed.
+    /// Only up to `buffer_size` block notifications are buffered in the channel. If the channel
+    /// is full when a new notification is attempted to be pushed, the channel gets closed.
     ///
     /// A maximum number of pinned blocks must be passed, indicating the maximum number of blocks
     /// that the runtime service will pin at the same time for this subscription. If this maximum
@@ -200,18 +197,10 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         buffer_size: usize,
         max_pinned_blocks: usize,
     ) -> SubscribeAll<TPlat> {
-        Self::subscribe_all_inner(&self.guarded, buffer_size, max_pinned_blocks).await
-    }
-
-    async fn subscribe_all_inner(
-        guarded: &Arc<Mutex<Guarded<TPlat>>>,
-        buffer_size: usize,
-        max_pinned_blocks: usize,
-    ) -> SubscribeAll<TPlat> {
         // First, lock `guarded` and wait for the tree to be in `FinalizedBlockRuntimeKnown` mode.
         // This can take a long time.
         let mut guarded_lock = loop {
-            let guarded_lock = guarded.lock().await;
+            let guarded_lock = self.guarded.lock().await;
 
             match &guarded_lock.tree {
                 GuardedInner::FinalizedBlockRuntimeKnown { .. } => break guarded_lock,
@@ -350,7 +339,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             new_blocks: Subscription {
                 subscription_id,
                 channel: new_blocks_channel,
-                guarded: guarded.clone(),
+                guarded: self.guarded.clone(),
             },
         }
     }
