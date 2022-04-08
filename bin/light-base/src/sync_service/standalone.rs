@@ -649,7 +649,7 @@ impl<TPlat: Platform> Task<TPlat> {
                         // best block has been updated. This is in practice not a problem either.
                         //
                         // Block announces are intentionally sent only to light clients, and not
-                        // to full nodes. Block announces coming from light clients are useful to
+                        // to full nodes. Block announces coming from light clients are useless to
                         // full nodes, as they can't download the block body (which they need)
                         // from that light client.
                         //
