@@ -28,7 +28,7 @@ use smoldot::{
     trie::proof_verify,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     marker::PhantomData,
     num::{NonZeroU32, NonZeroU64},
     sync::Arc,
@@ -120,7 +120,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
             // verifying storage proof.
             // If the state is one of the "verifying" states, perform the actual verification
             // and set ̀`queue_empty` to `false`.
-            let (task_update, has_done_verif) = task.process_one_verification_queue();
+            let (task_update, has_done_verif) = task.process_one_verification_queue().await;
             task = task_update;
 
             if has_done_verif {
@@ -579,7 +579,7 @@ impl<TPlat: Platform> Task<TPlat> {
     /// verification.
     ///
     /// Returns ̀`self` and a boolean indicating whether something has been processed.
-    fn process_one_verification_queue(mut self) -> (Self, bool) {
+    async fn process_one_verification_queue(mut self) -> (Self, bool) {
         // Note that `process_one` moves out of `sync` and provides the value back in its
         // return value.
         match self.sync.process_one() {
@@ -609,6 +609,7 @@ impl<TPlat: Platform> Task<TPlat> {
             all::ProcessOne::VerifyHeader(verify) => {
                 // Header to verify.
                 let verified_hash = verify.hash();
+                let verified_height = verify.height();
                 match verify.perform(TPlat::now_from_unix_epoch(), ()) {
                     all::HeaderVerifyOutcome::Success {
                         sync, is_new_best, ..
@@ -626,18 +627,102 @@ impl<TPlat: Platform> Task<TPlat> {
                             self.network_up_to_date_best = false;
                         }
 
-                        // Notify of the new block.
-                        self.dispatch_all_subscribers({
+                        let (parent_hash, scale_encoded_header) = {
                             // TODO: the code below is `O(n)` complexity
                             let header = self
                                 .sync
                                 .non_finalized_blocks_unordered()
                                 .find(|h| h.hash() == verified_hash)
                                 .unwrap();
+                            (*header.parent_hash, header.scale_encoding_vec())
+                        };
+
+                        // Announce the newly-verified block to all the light client sources that
+                        // might not be aware of it. We can never be guaranteed that a certain
+                        // source does *not* know about a block, however it is not a big problem
+                        // to send a block announce to a source that already knows about that
+                        // block. For this reason, the list of sources we send the block announce
+                        // to is `all_sources - sources_that_know_it`.
+                        //
+                        // Note that not sending block announces to sources that already know that
+                        // block means that these sources might also miss the fact that our local
+                        // best block has been updated. This is in practice not a problem either.
+                        //
+                        // Block announces are intentionally sent only to light clients, and not
+                        // to full nodes. Block announces coming from light clients are useless to
+                        // full nodes, as they can't download the block body (which they need)
+                        // from that light client.
+                        //
+                        // Announcing blocks to other light clients increases the likelihood that
+                        // equivocations are detected by light clients. This is especially
+                        // important for light clients, as they try to connect to as few full
+                        // nodes as possible.
+                        let sources_to_announce_to = {
+                            let mut all_sources = self
+                                .sync
+                                .sources()
+                                .filter(|s| matches!(self.sync[*s].1, protocol::Role::Light))
+                                .collect::<HashSet<_, fnv::FnvBuildHasher>>();
+                            for knows in self
+                                .sync
+                                .knows_non_finalized_block(verified_height, &verified_hash)
+                            {
+                                all_sources.remove(&knows);
+                            }
+                            all_sources
+                        };
+
+                        for source_id in sources_to_announce_to {
+                            // The `PeerId` needs to be cloned, otherwise `self` would have to
+                            // stay borrowed accross an `await`, which isn't possible because it
+                            // doesn't implement `Sync`.
+                            let (source_peer_id, _source_role) = &self.sync[source_id].clone();
+                            debug_assert!(matches!(_source_role, protocol::Role::Light));
+
+                            if self
+                                .network_service
+                                .clone()
+                                .send_block_announce(
+                                    &source_peer_id,
+                                    self.network_chain_index,
+                                    &scale_encoded_header,
+                                    is_new_best,
+                                )
+                                .await
+                                .is_ok()
+                            {
+                                log::debug!(
+                                    target: &self.log_target,
+                                    "Network <= BlockAnnounce(peer_id={}, hash={})",
+                                    source_peer_id,
+                                    HashDisplay(&verified_hash)
+                                );
+
+                                // Update the sync state machine with the fact that the target of
+                                // the block announce now knows this block.
+                                //
+                                // This code is never called for full nodes. When it comes to full
+                                // nodes, we want track knowledge about block bodies and storage
+                                // rather than just headers.
+                                //
+                                // Note that `try_add_known_block_to_source` might have
+                                // no effect, which is not a problem considering that this
+                                // block tracking is mostly about optimizations and
+                                // politeness.
+                                self.sync.try_add_known_block_to_source(
+                                    source_id,
+                                    verified_height,
+                                    verified_hash,
+                                );
+                            }
+                        }
+
+                        // Notify of the new block.
+                        self.dispatch_all_subscribers({
                             Notification::Block(BlockNotification {
                                 is_new_best,
-                                scale_encoded_header: header.scale_encoding_vec(),
-                                parent_hash: *header.parent_hash,
+                                scale_encoded_header,
+                                parent_hash,
                             })
                         });
                     }
