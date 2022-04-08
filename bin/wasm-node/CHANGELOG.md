@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Block announces are now propagated to other peers that are also light clients. Light clients should try to connect to as few full nodes as possible (to save resources), but doing so can leave them vulnerable to eclipse attacks. By having light clients connect to other light clients and making them gossip block announces to each other, we increase the likelihood that they detect situations where a given validator generates two blocks during the same slot and is trying to show one of the block only to some peers and the other block to the rest.
+- Block announces are now propagated to other peers that are also light clients. Light clients should try to connect to as few full nodes as possible (to save resources), but doing so can leave them vulnerable to eclipse attacks. By having light clients connect to other light clients and making them gossip block announces to each other, we increase the likelihood that they detect situations where a given validator generates two blocks during the same slot and is trying to show one of the block only to some peers and the other block to the rest. ([#2226](https://github.com/paritytech/smoldot/pull/2226))
 
 ## 0.6.15 - 2022-04-07
 
