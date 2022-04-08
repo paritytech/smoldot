@@ -49,6 +49,7 @@ use smoldot::{
         connection::{self, handshake},
         multiaddr::Multiaddr,
         peer_id::PeerId,
+        peers,
         read_write::ReadWrite,
     },
     network::{protocol, service},
@@ -925,6 +926,20 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         }
 
         sent_peers
+    }
+
+    /// See [`service::ChainNetwork::send_block_announce`].
+    pub async fn send_block_announce(
+        self: Arc<Self>,
+        target: &PeerId,
+        chain_index: usize,
+        scale_encoded_header: &[u8],
+        is_best: bool,
+    ) -> Result<(), peers::QueueNotificationError> {
+        self.inner
+            .network
+            .send_block_announce(&target, chain_index, scale_encoded_header, is_best)
+            .await
     }
 
     /// See [`service::ChainNetwork::discover`].
