@@ -27,7 +27,7 @@ jobs:
   test-64bits:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.59
+      image: rust:1.60
     steps:
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
@@ -36,7 +36,7 @@ jobs:
   test-32bits:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.59
+      image: rust:1.60
     steps:
     - uses: actions/checkout@v3
     - run: apt-get update && apt-get install -y libc6-dev-i386
@@ -47,7 +47,7 @@ jobs:
   wasm-node-check:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.59
+      image: rust:1.60
     steps:
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
@@ -60,7 +60,7 @@ jobs:
   wasm-node-size-diff:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.59
+      image: rust:1.60
     steps:
     - uses: actions/checkout@v3
       with:
@@ -94,7 +94,7 @@ jobs:
   check-features:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.59
+      image: rust:1.60
     steps:
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
@@ -106,7 +106,7 @@ jobs:
   check-rustdoc-links:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.59
+      image: rust:1.60
     steps:
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
