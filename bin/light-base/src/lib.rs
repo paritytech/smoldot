@@ -107,6 +107,12 @@ pub trait Platform: Send + 'static {
 
     /// Returns the time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time)
     /// (i.e. 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the system time is configured to be below the UNIX epoch. This situation is a
+    /// very very niche edge case that isn't worth handling.
+    ///
     fn now_from_unix_epoch() -> Duration;
 
     /// Returns an object that represents "now".
@@ -446,20 +452,34 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
         };
 
         // Build the list of bootstrap nodes ahead of time.
-        // TODO: either leave this here if it's fallible, or move below if it's not fallible
-        let bootstrap_nodes = {
-            let mut list = Vec::with_capacity(chain_spec.boot_nodes().len());
+        // Because the specification of the format of a multiaddress is a bit flexible, it is
+        // not possible to firmly affirm that a multiaddress is invalid. For this reason, we
+        // simply ignore unparsable bootnode addresses rather than returning an error.
+        // A list of invalid bootstrap node addresses is kept in order to print a warning later
+        // in case it is non-empty. This list is sanitized in order to be safely printable as part
+        // of the logs.
+        let (bootstrap_nodes, invalid_bootstrap_nodes_sanitized) = {
+            let mut valid_list = Vec::with_capacity(chain_spec.boot_nodes().len());
+            let mut invalid_list = Vec::with_capacity(0);
             for node in chain_spec.boot_nodes() {
-                let mut address: multiaddr::Multiaddr = node.parse().unwrap(); // TODO: don't unwrap?
-                if let Some(multiaddr::ProtocolRef::P2p(peer_id)) = address.iter().last() {
-                    let peer_id = peer_id::PeerId::from_bytes(peer_id.to_vec()).unwrap(); // TODO: don't unwrap
-                    address.pop();
-                    list.push((peer_id, vec![address]));
-                } else {
-                    panic!() // TODO:
+                match node {
+                    chain_spec::Bootnode::Parsed { multiaddr, peer_id } => {
+                        if let Ok(multiaddr) = multiaddr.parse::<multiaddr::Multiaddr>() {
+                            let peer_id = peer_id::PeerId::from_bytes(peer_id).unwrap();
+                            valid_list.push((peer_id, vec![multiaddr]));
+                        } else {
+                            invalid_list.push(multiaddr)
+                        }
+                    }
+                    chain_spec::Bootnode::UnrecognizedFormat(unparsed) => invalid_list.push(
+                        unparsed
+                            .chars()
+                            .filter(|c| c.is_ascii())
+                            .collect::<String>(),
+                    ),
                 }
             }
-            list
+            (valid_list, invalid_list)
         };
 
         // All the checks are performed above. Adding the chain can't fail anymore at this point.
@@ -669,6 +689,15 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                 (&mut entry.services, &entry.log_name)
             }
         };
+
+        if !invalid_bootstrap_nodes_sanitized.is_empty() {
+            log::warn!(
+                target: "smoldot",
+                "Failed to parse some of the bootnodes of {}. \
+                These bootnodes have been ignored. List: {}",
+                log_name, invalid_bootstrap_nodes_sanitized.join(", ")
+            );
+        }
 
         // Print a warning if the list of bootnodes is empty, as this is a common mistake.
         if bootstrap_nodes.is_empty() {

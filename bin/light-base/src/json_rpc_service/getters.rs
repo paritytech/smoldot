@@ -36,7 +36,11 @@ impl<TPlat: Platform> Background<TPlat> {
         // TODO: maybe optimize?
         let response = methods::Response::chain_getFinalizedHead(methods::HashHexString(
             header::hash_from_scale_encoded_header(
-                &self.runtime_service.subscribe_finalized().await.0,
+                &self
+                    .runtime_service
+                    .subscribe_all(16, 32)
+                    .await
+                    .finalized_block_scale_encoded_header,
             ),
         ))
         .to_json_response(request_id);

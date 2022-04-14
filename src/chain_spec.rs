@@ -38,8 +38,13 @@ use crate::chain::chain_information::{
     aura_config, babe_genesis_config, grandpa_genesis_config, BabeEpochInformation,
     ChainInformation, ChainInformationConsensus, ChainInformationFinality,
 };
+use crate::libp2p;
 
-use alloc::{borrow::ToOwned as _, string::String, vec::Vec};
+use alloc::{
+    borrow::ToOwned as _,
+    string::{String, ToString as _},
+    vec::Vec,
+};
 use core::num::NonZeroU64;
 
 mod light_sync_state;
@@ -190,10 +195,28 @@ impl ChainSpec {
         }
     }
 
-    /// Returns the list of bootnode addresses in the chain specs.
-    // TODO: more strongly typed?
-    pub fn boot_nodes(&self) -> &[String] {
-        &self.client_spec.boot_nodes
+    /// Returns the list of bootnode addresses found in the chain spec.
+    ///
+    /// Bootnode addresses that have failed to be parsed are returned as well in the form of
+    /// a [`Bootnode::UnrecognizedFormat`].
+    pub fn boot_nodes(&'_ self) -> impl ExactSizeIterator<Item = Bootnode<'_>> + '_ {
+        // Note that we intentionally don't expose types found in the `libp2p` module in order to
+        // not tie the code that parses chain specifications to the libp2p code.
+        self.client_spec.boot_nodes.iter().map(|unparsed| {
+            if let Ok(mut addr) = unparsed.parse::<libp2p::Multiaddr>() {
+                if let Some(libp2p::multiaddr::ProtocolRef::P2p(peer_id)) = addr.iter().last() {
+                    if let Ok(peer_id) = libp2p::peer_id::PeerId::from_bytes(peer_id.to_vec()) {
+                        addr.pop();
+                        return Bootnode::Parsed {
+                            multiaddr: addr.to_string(),
+                            peer_id: peer_id.into_bytes(),
+                        };
+                    }
+                }
+            }
+
+            Bootnode::UnrecognizedFormat(unparsed)
+        })
     }
 
     /// Returns the list of libp2p multiaddresses of the default telemetry servers of the chain.
@@ -261,6 +284,30 @@ impl ChainSpec {
                 inner: state.decode().unwrap(),
             })
     }
+}
+
+/// See [`ChainSpec::boot_nodes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bootnode<'a> {
+    /// The address of the bootnode is valid.
+    Parsed {
+        /// String representation of the multiaddr that can be used to reach the bootnode.
+        ///
+        /// Does *not* contain the trailing `/p2p/...`.
+        multiaddr: String,
+
+        /// Bytes representation of the libp2p peer id of the bootnode.
+        ///
+        /// The format can be found in cthe libp2p specification:
+        /// <https://github.com/libp2p/specs/blob/master/peer-ids/peer-ids.md>
+        peer_id: Vec<u8>,
+    },
+
+    /// The address of the bootnode couldn't be parsed.
+    ///
+    /// This could be due to the format being invalid, or to smoldot not supporting one of the
+    /// multiaddress components that is being used.
+    UnrecognizedFormat(&'a str),
 }
 
 /// See [`ChainSpec::genesis_storage`].
@@ -404,7 +451,7 @@ pub enum FromGenesisStorageError {
 
 #[cfg(test)]
 mod tests {
-    use super::ChainSpec;
+    use super::{Bootnode, ChainSpec};
 
     #[test]
     fn can_decode_polkadot_genesis() {
@@ -415,5 +462,29 @@ mod tests {
         // code_substitutes field
         assert_eq!(specs.client_spec.code_substitutes.get(&1), None);
         assert!(specs.client_spec.code_substitutes.get(&5203203).is_some());
+
+        // bootnodes field
+        assert_eq!(
+            specs.boot_nodes().collect::<Vec<_>>(),
+            vec![
+                Bootnode::Parsed {
+                    multiaddr: "/dns4/p2p.cc1-0.polkadot.network/tcp/30100".into(),
+                    peer_id: vec![
+                        0, 36, 8, 1, 18, 32, 71, 154, 61, 188, 212, 39, 215, 192, 217, 22, 168, 87,
+                        162, 148, 234, 176, 0, 195, 4, 31, 109, 123, 175, 185, 26, 169, 218, 92,
+                        192, 0, 126, 111
+                    ]
+                },
+                Bootnode::Parsed {
+                    multiaddr: "/dns4/cc1-1.parity.tech/tcp/30333".into(),
+                    peer_id: vec![
+                        0, 36, 8, 1, 18, 32, 82, 103, 22, 131, 223, 29, 166, 147, 119, 199, 217,
+                        185, 69, 70, 87, 73, 165, 110, 224, 141, 138, 44, 217, 75, 191, 55, 156,
+                        212, 204, 41, 11, 59
+                    ]
+                },
+                Bootnode::UnrecognizedFormat("/some/wrong/multiaddress")
+            ]
+        );
     }
 }

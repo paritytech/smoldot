@@ -30,7 +30,13 @@
 //!
 // TODO: I believe this example isn't tested ^ which kills the point of having it
 
-use smoldot::{identity::seed_phrase, libp2p::multiaddr::Multiaddr};
+use smoldot::{
+    identity::seed_phrase,
+    libp2p::{
+        multiaddr::{Multiaddr, ProtocolRef},
+        PeerId,
+    },
+};
 use std::{net::SocketAddr, path::PathBuf};
 
 // Note: the doc-comments applied to this struct and its field are visible when the binary is
@@ -79,8 +85,8 @@ pub struct CliOptionsRun {
     #[structopt(long, parse(try_from_str = decode_multiaddr))]
     pub listen_addr: Vec<Multiaddr>,
     /// Multiaddr of an additional node to try to connect to on startup.
-    #[structopt(long)]
-    pub additional_bootnode: Vec<String>, // TODO: parse the value here
+    #[structopt(long, parse(try_from_str = parse_bootnode))]
+    pub additional_bootnode: Vec<Bootnode>,
     /// Bind point of the JSON-RPC server ("none" or <ip>:<port>).
     #[structopt(long, default_value = "127.0.0.1:9944", parse(try_from_str = parse_json_rpc_address))]
     pub json_rpc_address: JsonRpcAddress,
@@ -202,6 +208,24 @@ fn parse_json_rpc_address(string: &str) -> Result<JsonRpcAddress, String> {
     }
 
     Err("Failed to parse JSON-RPC server address".into())
+}
+
+#[derive(Debug)]
+pub struct Bootnode {
+    pub address: Multiaddr,
+    pub peer_id: PeerId,
+}
+
+fn parse_bootnode(string: &str) -> Result<Bootnode, String> {
+    let mut address = string.parse::<Multiaddr>().map_err(|err| err.to_string())?;
+    if let Some(ProtocolRef::P2p(peer_id)) = address.iter().last() {
+        let peer_id = PeerId::from_bytes(peer_id.to_vec())
+            .map_err(|(err, _)| format!("Failed to parse PeerId in bootnode: {}", err))?;
+        address.pop();
+        Ok(Bootnode { address, peer_id })
+    } else {
+        Err("Bootnode address must end with /p2p/...".into())
+    }
 }
 
 // `clap` requires error types to implement the `std::error::Error` trait.

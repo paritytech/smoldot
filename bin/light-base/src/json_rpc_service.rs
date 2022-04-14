@@ -572,7 +572,11 @@ impl<TPlat: Platform> Background<TPlat> {
             tasks.push(
                 async move {
                     loop {
-                        me.handle_request().await
+                        me.handle_request().await;
+
+                        // We yield once between each request in order to politely let other tasks
+                        // do some work and not monopolize the CPU.
+                        crate::util::yield_once().await;
                     }
                 }
                 .boxed(),
@@ -591,9 +595,14 @@ impl<TPlat: Platform> Background<TPlat> {
 
                     // Subscribe to new runtime service blocks in order to push them in the
                     // cache as soon as they are available.
+                    // The buffer size should be large enough so that, if the CPU is busy, it
+                    // doesn't become full before the execution of this task resumes.
+                    // The maximum number of pinned block is ignored, as this maximum is a way to
+                    // avoid malicious behaviors. This code is by definition not considered
+                    // malicious.
                     let mut subscribe_all = me
                         .runtime_service
-                        .subscribe_all(8, cache.recent_pinned_blocks.cap())
+                        .subscribe_all(32, usize::max_value())
                         .await;
 
                     cache.subscription_id = Some(subscribe_all.new_blocks.id());
