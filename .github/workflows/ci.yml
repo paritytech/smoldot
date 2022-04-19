@@ -86,7 +86,7 @@ jobs:
         mkdir -p ./pr
         echo ${{ github.event.pull_request.number }} > ./pr/number
         cp ./twiggy-diff ./pr
-    - uses: actions/upload-artifact@v2
+    - uses: actions/upload-artifact@v3
       with:
         name: pr
         path: pr/
