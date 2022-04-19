@@ -49,10 +49,10 @@ jobs:
   npm-publish:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.59
+      image: rust:1.60
     steps:
       - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3.0.0
+      - uses: actions/setup-node@v3.1.1
         with:
           node-version: 14
       - run: apt-get update && apt install -y binaryen # For `wasm-opt`
