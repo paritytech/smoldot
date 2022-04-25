@@ -67,7 +67,7 @@ num-rational = { version = "0.4.0", default-features = false, features = ["num-b
 num-traits = { version = "0.2.14", default-features = false }
 pbkdf2 = { version = "0.11.0", default-features = false }
 pin-project = "1.0.8"
-prost = { version = "0.10.0", default-features = false, features = ["prost-derive"] }
+prost = { version = "0.10.1", default-features = false, features = ["prost-derive"] }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }  # TODO: rand is used in hack-y ways at the moment ; these features should be removed
 rand_chacha = { version = "0.3.1", default-features = false }
 ruzstd = { version = "0.2.4" }  # TODO: doesn't support no_std :-/
@@ -98,7 +98,7 @@ parity-scale-codec = { version = "3.1.2", features = ["derive"], default-feature
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # `std` feature
-wasmtime = { version = "0.35.2", default-features = false, features = ["async", "cranelift"], optional = true }
+wasmtime = { version = "0.35.3", default-features = false, features = ["async", "cranelift"], optional = true }
 
 [build-dependencies]
 prost-build = "0.9.0"
