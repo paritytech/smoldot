@@ -504,7 +504,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     /// Updates the [`OptimisticSync`] with the fact that a request has been started.
     ///
     /// Returns the identifier for the request that must later be passed back to
-    /// [`OptimisticSync::finish_request`].
+    /// [`OptimisticSync::finish_request_success`] or [`OptimisticSync::finish_request_failed`].
     ///
     /// # Panic
     ///
