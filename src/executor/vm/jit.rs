@@ -203,7 +203,7 @@ impl JitPrototype {
                     }
                     wasmtime::ExternType::Global(_) | wasmtime::ExternType::Table(_) => {
                         return Err(NewErr::ModuleError(ModuleError(
-                            "global/table/instance/module imports not supported".to_string(),
+                            "global/table imports not supported".to_string(),
                         )));
                     }
                     wasmtime::ExternType::Memory(m) => {
