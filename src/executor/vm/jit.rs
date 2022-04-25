@@ -97,25 +97,15 @@ impl JitPrototype {
             for import in module.inner.imports() {
                 match import.ty() {
                     wasmtime::ExternType::Func(f) => {
-                        let name = match import.name() {
-                            Some(name) => name,
-                            None => {
-                                return Err(NewErr::ModuleError(ModuleError(format!(
-                                    "unresolved unnamed import in module `{}`",
-                                    import.module()
-                                ))))
-                            }
-                        };
-
                         let function_index =
-                            match symbols(import.module(), name, &TryFrom::try_from(&f).unwrap())
+                            match symbols(import.module(), import.name(), &TryFrom::try_from(&f).unwrap())
                                 .ok()
                             {
                                 Some(idx) => idx,
                                 None => {
                                     return Err(NewErr::UnresolvedFunctionImport {
                                         module_name: import.module().to_owned(),
-                                        function: name.to_owned(),
+                                        function: import.name().to_owned(),
                                     })
                                 }
                             };
@@ -209,15 +199,13 @@ impl JitPrototype {
                         )));
                     }
                     wasmtime::ExternType::Global(_)
-                    | wasmtime::ExternType::Table(_)
-                    | wasmtime::ExternType::Instance(_)
-                    | wasmtime::ExternType::Module(_) => {
+                    | wasmtime::ExternType::Table(_) => {
                         return Err(NewErr::ModuleError(ModuleError(
                             "global/table/instance/module imports not supported".to_string(),
                         )));
                     }
                     wasmtime::ExternType::Memory(m) => {
-                        if import.module() != "env" || import.name() != Some("memory") {
+                        if import.module() != "env" || import.name() != "memory" {
                             return Err(NewErr::MemoryNotNamedMemory);
                         }
 
