@@ -97,18 +97,21 @@ impl JitPrototype {
             for import in module.inner.imports() {
                 match import.ty() {
                     wasmtime::ExternType::Func(f) => {
-                        let function_index =
-                            match symbols(import.module(), import.name(), &TryFrom::try_from(&f).unwrap())
-                                .ok()
-                            {
-                                Some(idx) => idx,
-                                None => {
-                                    return Err(NewErr::UnresolvedFunctionImport {
-                                        module_name: import.module().to_owned(),
-                                        function: import.name().to_owned(),
-                                    })
-                                }
-                            };
+                        let function_index = match symbols(
+                            import.module(),
+                            import.name(),
+                            &TryFrom::try_from(&f).unwrap(),
+                        )
+                        .ok()
+                        {
+                            Some(idx) => idx,
+                            None => {
+                                return Err(NewErr::UnresolvedFunctionImport {
+                                    module_name: import.module().to_owned(),
+                                    function: import.name().to_owned(),
+                                })
+                            }
+                        };
 
                         let shared = shared.clone();
 
@@ -198,8 +201,7 @@ impl JitPrototype {
                             },
                         )));
                     }
-                    wasmtime::ExternType::Global(_)
-                    | wasmtime::ExternType::Table(_) => {
+                    wasmtime::ExternType::Global(_) | wasmtime::ExternType::Table(_) => {
                         return Err(NewErr::ModuleError(ModuleError(
                             "global/table/instance/module imports not supported".to_string(),
                         )));
