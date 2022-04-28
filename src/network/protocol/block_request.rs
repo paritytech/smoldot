@@ -321,7 +321,7 @@ pub struct BlockData {
 /// Error potentially returned by [`decode_block_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum DecodeBlockRequestError {
-    /// Error while decoding the protobuf encoding.
+    /// Error while decoding the Protobuf encoding.
     ProtobufDecode(ProtobufDecodeError),
     /// Zero blocks requested.
     ZeroBlocksRequested,
@@ -338,7 +338,7 @@ pub enum DecodeBlockRequestError {
 /// Error potentially returned by [`decode_block_response`].
 #[derive(Debug, derive_more::Display)]
 pub enum DecodeBlockResponseError {
-    /// Error while decoding the protobuf encoding.
+    /// Error while decoding the Protobuf encoding.
     ProtobufDecode(ProtobufDecodeError),
     /// Hash length isn't of the correct length.
     InvalidHashLength,

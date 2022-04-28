@@ -743,7 +743,7 @@ pub enum BodyVerifyStep2<T> {
         new_runtime: Option<host::HostVmPrototype>,
         /// List of changes to the storage top trie that the block performs.
         storage_top_trie_changes: storage_diff::StorageDiff,
-        /// List of changes to the offchain storage that this block performs.
+        /// List of changes to the off-chain storage that this block performs.
         offchain_storage_changes: storage_diff::StorageDiff,
         /// Cache of calculation for the storage trie of the best block.
         /// Pass this value to [`BodyVerifyRuntimeRequired::resume`] when verifying a children of
@@ -770,7 +770,7 @@ pub enum BodyVerifyStep2<T> {
     /// A new runtime must be compiled.
     ///
     /// This variant doesn't require any specific input from the user, but is provided in order to
-    /// make it possible to benchmBodyVerifyStep2<ark the time it takes to compile runtimes.
+    /// make it possible to `benchmBodyVerifyStep2<ark` the time it takes to compile runtimes.
     RuntimeCompilation(RuntimeCompilation<T>),
 }
 

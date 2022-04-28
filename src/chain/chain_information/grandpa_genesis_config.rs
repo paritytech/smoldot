@@ -28,9 +28,9 @@ use core::num::NonZeroU64;
 /// The way a chain configures Grandpa is either:
 ///
 /// - Stored at the predefined `:grandpa_authorities` key of the storage.
-/// - Retreived by calling the `GrandpaApi_grandpa_authorities` function of the runtime.
+/// - Retrieved by calling the `GrandpaApi_grandpa_authorities` function of the runtime.
 ///
-/// The latter method is soft-deprecated in favour of the former. Both methods are still
+/// The latter method is soft-deprecated in favor of the former. Both methods are still
 /// supported.
 ///
 /// > **Note**: Pragmatically speaking, Polkadot, Westend, and any newer chain use the former

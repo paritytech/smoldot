@@ -19,7 +19,7 @@
 //!
 //! Each block of a chain is composed of two parts: its header, and its body.
 //!
-//! The header of a block consists in a list of hardcoded fields such as the parent block's hash
+//! The header of a block consists in a list of hard coded fields such as the parent block's hash
 //! or the block number, and a variable-sized list of log items.
 //!
 //! The standard format of a block header is the
@@ -227,9 +227,9 @@ pub struct HeaderRef<'a> {
     pub parent_hash: &'a [u8; 32],
     /// Block number stored in the header.
     pub number: u64,
-    /// The state trie merkle root
+    /// The state trie Merkle root
     pub state_root: &'a [u8; 32],
-    /// The merkle root of the extrinsics.
+    /// The Merkle root of the extrinsics.
     ///
     /// You can use the [`extrinsics_root`] function to compute this value.
     pub extrinsics_root: &'a [u8; 32],
@@ -291,9 +291,9 @@ pub struct Header {
     pub parent_hash: [u8; 32],
     /// Block number stored in the header.
     pub number: u64,
-    /// The state trie merkle root
+    /// The state trie Merkle root
     pub state_root: [u8; 32],
-    /// The merkle root of the extrinsics.
+    /// The Merkle root of the extrinsics.
     ///
     /// You can use the [`extrinsics_root`] function to compute this value.
     pub extrinsics_root: [u8; 32],

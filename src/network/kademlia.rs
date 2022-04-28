@@ -96,7 +96,7 @@ pub fn decode_find_node_response(
 /// Error potentially returned by [`decode_find_node_response`].
 #[derive(Debug, derive_more::Display)]
 pub enum DecodeFindNodeResponseError {
-    /// Error while decoding the protobuf encoding.
+    /// Error while decoding the Protobuf encoding.
     ProtobufDecode(ProtobufDecodeError),
     /// Response isn't a response to a find node request.
     BadResponseTy,
@@ -106,7 +106,7 @@ pub enum DecodeFindNodeResponseError {
     BadMultiaddr(multiaddr::FromVecError),
 }
 
-/// Error while decoding the protobuf encoding.
+/// Error while decoding the Protobuf encoding.
 #[derive(Debug, derive_more::Display)]
 #[display(fmt = "{}", _0)]
 pub struct ProtobufDecodeError(prost::DecodeError);

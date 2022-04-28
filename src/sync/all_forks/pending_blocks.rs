@@ -81,7 +81,7 @@
 //!
 //! Call [`PendingBlocks::add_request`] to allocate a new [`RequestId`] and add a new request.
 //! Call [`PendingBlocks::finish_request`] to destroy a request after it has finished or been
-//! cancelled. Note that this method doesn't require to be passed the response to that request.
+//! canceled. Note that this method doesn't require to be passed the response to that request.
 //! The user is encouraged to update the state machine according to the response, but this must
 //! be done manually.
 //!
@@ -121,7 +121,7 @@ pub struct Config {
     /// Maximum number of simultaneous pending requests made towards the same block.
     ///
     /// Should be set according to the failure rate of requests. For example if requests have an
-    /// estimated 10% chance of failing, then setting to value to `2` gives a 1% chance that
+    /// estimated `10%` chance of failing, then setting to value to `2` gives a `1%` chance that
     /// downloading this block will overall fail and has to be attempted again.
     ///
     /// Also keep in mind that sources might maliciously take a long time to answer requests. A
@@ -265,7 +265,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Removes the source from the [`PendingBlocks`].
     ///
     /// Returns the user data that was originally passed to [`PendingBlocks::add_source`], plus
-    /// a list of all the requests that were targetting this source. These request are now
+    /// a list of all the requests that were targeting this source. These request are now
     /// invalid.
     ///
     /// # Panic

@@ -130,7 +130,7 @@ pub fn decode_identify_response(
 /// Error potentially returned by [`decode_identify_response`].
 #[derive(Debug, derive_more::Display)]
 pub enum DecodeIdentifyResponseError {
-    /// Error while decoding the protobuf encoding.
+    /// Error while decoding the Protobuf encoding.
     ProtobufDecode(ProtobufDecodeError),
     /// Couldn't decode one of the multiaddresses.
     InvalidMultiaddr,

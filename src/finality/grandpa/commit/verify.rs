@@ -185,8 +185,8 @@ struct Verification<C> {
 
     /// Verifying all the signatures together brings better performances than verifying them one
     /// by one.
-    /// Note that batched ed25519 verification has some issues. The code below uses a special
-    /// flavour of ed25519 where ambiguities are removed.
+    /// Note that batched Ed25519 verification has some issues. The code below uses a special
+    /// flavor of Ed25519 where ambiguities are removed.
     /// See <https://docs.rs/ed25519-zebra/2.2.0/ed25519_zebra/batch/index.html> and
     /// <https://github.com/zcash/zips/blob/master/zip-0215.rst>
     signatures_batch: ed25519_zebra::batch::Verifier,

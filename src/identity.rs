@@ -32,7 +32,7 @@
 //! - A human-readable format for private keys, named SS58.
 //!
 //! These formats unfortunately do not mention which asynchronous cryptographic algorithm (e.g.
-//! ed25519 or sr25519) is used for the public and private keys. This must be deduced from the
+//! Ed25519 or Sr25519) is used for the public and private keys. This must be deduced from the
 //! context.
 //!
 //! ## Public keys (SS58)
@@ -44,7 +44,7 @@
 //!
 //! The format for public keys consists in:
 //!
-//! > base58(concat(prefix, 32-bytes-public-key, checksum))
+//! > `base58(concat(prefix, 32-bytes-public-key, checksum))`
 //!
 //! The prefix, also known as network identifier, also known as an address type is one or more
 //! bytes identifying which blockchain network the address corresponds to. This is used for

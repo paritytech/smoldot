@@ -70,7 +70,7 @@ pub struct VerifyProofConfig<'a, I> {
 ///
 /// Returns an error if the proof couldn't be verified.
 /// If the proof could be verified and the key has an associated storage value, `Ok(Some(_))` is
-/// returned, containining that storage value.
+/// returned, containing that storage value.
 /// If the proof could be verified but the key does not have an associated storage value,
 /// `Ok(None)` is returned.
 ///

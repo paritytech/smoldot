@@ -28,16 +28,16 @@ mod keys_proto {
 
 /// Public key of a node's identity.
 ///
-/// Libp2p specifies multiple different possible algorithms, but only ed25519 support is
+/// Libp2p specifies multiple different possible algorithms, but only Ed25519 support is
 /// mandatory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PublicKey {
-    /// An ed25519 public key.
+    /// An Ed25519 public key.
     Ed25519([u8; 32]),
 }
 
 impl PublicKey {
-    /// Encode the public key into a protobuf structure for storage or
+    /// Encode the public key into a Protobuf structure for storage or
     /// exchange with other nodes.
     pub fn to_protobuf_encoding(&self) -> Vec<u8> {
         let public_key = match self {
@@ -52,7 +52,7 @@ impl PublicKey {
         buf
     }
 
-    /// Decode a public key from a protobuf structure, e.g. read from storage
+    /// Decode a public key from a Protobuf structure, e.g. read from storage
     /// or received from another node.
     pub fn from_protobuf_encoding(bytes: &[u8]) -> Result<PublicKey, FromProtobufEncodingError> {
         let pubkey = keys_proto::PublicKey::decode(bytes)
@@ -96,13 +96,13 @@ impl PublicKey {
 /// Error potentially returned by [`PublicKey::from_protobuf_encoding`].
 #[derive(Debug, derive_more::Display)]
 pub enum FromProtobufEncodingError {
-    /// Error decoding the protobuf message.
+    /// Error decoding the Protobuf message.
     ProtobufDecodeError,
     /// Public key algorithm unknown.
     UnknownAlgorithm,
     /// Ed25519 key doesn't have a correct length.
     BadEd25519Key,
-    /// Algorithms other than ed25519 aren't supported.
+    /// Algorithms other than Ed25519 aren't supported.
     UnsupportedAlgorithm,
 }
 
@@ -281,7 +281,7 @@ impl FromStr for PeerId {
 pub enum FromBytesError {
     /// Failed to decode bytes into a multihash.
     DecodeError(multihash::FromBytesError),
-    /// The algorithm used in the multihash isn't identity or sha256.
+    /// The algorithm used in the multihash isn't identity or SHA-256.
     InvalidMultihashAlgorithm,
     /// Multihash uses the identity algorithm, but the data isn't a valid public key.
     InvalidPublicKey(FromProtobufEncodingError),
@@ -290,12 +290,12 @@ pub enum FromBytesError {
 /// Error when parsing a string to a [`PeerId`].
 #[derive(Debug, derive_more::Display)]
 pub enum ParseError {
-    /// Error decoding the base58 encoding.
+    /// Error decoding the Base58 encoding.
     Bs58(Bs58DecodeError),
     /// Decoded bytes aren't a valid [`PeerId`].
     NotPeerId(FromBytesError),
 }
 
-/// Error when decoding base58 encoding.
+/// Error when decoding Base58 encoding.
 #[derive(Debug, derive_more::Display, derive_more::From)]
 pub struct Bs58DecodeError(bs58::decode::Error);

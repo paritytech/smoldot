@@ -168,7 +168,7 @@ impl ChainSpec {
     }
 
     /// Returns the identifier of the chain. Similar to the name, but a bit more "system-looking".
-    /// For example, if the name is "Flaming Fir 7", then the id could be "flamingfir7". To be
+    /// For example, if the name is "Flaming Fir 7", then the id could be `flamingfir7`. To be
     /// used for example in file system paths.
     pub fn id(&self) -> &str {
         &self.client_spec.id
@@ -291,14 +291,14 @@ impl ChainSpec {
 pub enum Bootnode<'a> {
     /// The address of the bootnode is valid.
     Parsed {
-        /// String representation of the multiaddr that can be used to reach the bootnode.
+        /// String representation of the `Multiaddr` that can be used to reach the bootnode.
         ///
         /// Does *not* contain the trailing `/p2p/...`.
         multiaddr: String,
 
         /// Bytes representation of the libp2p peer id of the bootnode.
         ///
-        /// The format can be found in cthe libp2p specification:
+        /// The format can be found in the libp2p specification:
         /// <https://github.com/libp2p/specs/blob/master/peer-ids/peer-ids.md>
         peer_id: Vec<u8>,
     },

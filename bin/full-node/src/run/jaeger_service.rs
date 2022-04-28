@@ -23,7 +23,7 @@
 //!
 //! - Start a docker container with the all-in-one docker image (see below).
 //! - Run [`JaegerService`] with [`Config::jaeger_agent`] set to `127.0.0.1:6831`.
-//! - Open your browser and navigate to <http://localhost:16686> to acces the UI.
+//! - Open your browser and navigate to <http://localhost:16686> to access the UI.
 //!
 //! The all-in-one docker image can be started with:
 //!

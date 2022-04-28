@@ -121,7 +121,7 @@ pub struct LightPool<TTx, TBl, TErr> {
     /// Symmetry of [`LightPool::transaction_validations`].
     transactions_by_validation: BTreeSet<([u8; 32], TransactionId)>,
 
-    /// Transaction ids (i.e. indices within [`LightPool::transactions`]) indexed by the blake2
+    /// Transaction ids (i.e. indices within [`LightPool::transactions`]) indexed by the BLAKE2
     /// hash of the bytes of the transaction.
     by_hash: BTreeSet<([u8; 32], TransactionId)>,
 
@@ -182,7 +182,7 @@ where
         self.transactions.len()
     }
 
-    /// Inserts a new unvalidated transaction in the pool.
+    /// Inserts a new unverified transaction in the pool.
     ///
     /// Must be passed as parameter the SCALE-encoded transaction.
     pub fn add_unvalidated(&mut self, scale_encoded: Vec<u8>, user_data: TTx) -> TransactionId {
@@ -1196,7 +1196,7 @@ enum BodyState {
     Known,
 }
 
-/// Utility. Calculates the blake2 hash of the given bytes.
+/// Utility. Calculates the BLAKE2 hash of the given bytes.
 fn blake2_hash(bytes: &[u8]) -> [u8; 32] {
     <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], bytes).as_bytes()).unwrap()
 }

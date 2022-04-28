@@ -136,7 +136,7 @@ pub struct Decoded<'a> {
     /// can be:
     ///
     /// - Of length 32, in which case the slice is the hash of the node value of the child (also
-    ///   known as the merkle value).
+    ///   known as the Merkle value).
     /// - Empty when decoding a compact trie proof.
     /// - Of length inferior to 32, in which case the slice is directly the node value.
     ///

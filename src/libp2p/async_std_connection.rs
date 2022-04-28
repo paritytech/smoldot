@@ -43,7 +43,7 @@ pub enum RunOutcome<TNow> {
 
 /// Access to a [`ReadWrite`] within a [`ConnectionTask`].
 ///
-/// This struct derefs to [`ReadWrite`].
+/// This struct dereferences to [`ReadWrite`].
 pub struct ReadWriteLock<'a, TNow> {
     inner: ReadWrite<'a, TNow>,
     latest_read_outcome: &'a mut ReadWriteOutcome<TNow>,

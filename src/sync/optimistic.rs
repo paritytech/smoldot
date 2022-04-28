@@ -157,7 +157,7 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     sources: HashMap<SourceId, Source<TSrc>, fnv::FnvBuildHasher>,
 
     /// Next [`SourceId`] to allocate.
-    /// SourceIds are unique so that the source in the [`verification_queue::VerificationQueue`]
+    /// `SourceIds` are unique so that the source in the [`verification_queue::VerificationQueue`]
     /// doesn't accidentally collide with a new source.
     next_source_id: SourceId,
 
@@ -208,7 +208,7 @@ struct Source<TSrc> {
 
     /// If `true`, this source is banned and shouldn't use be used to request blocks.
     /// Note that the ban is lifted if the source is removed. This ban isn't meant to be a line of
-    /// defense against malicious peers but rather an optimisation.
+    /// defense against malicious peers but rather an optimization.
     banned: bool,
 
     /// Number of requests that use this source.
@@ -238,7 +238,7 @@ pub struct BlockFull {
     /// Changes to the storage made by this block compared to its parent.
     pub storage_top_trie_changes: storage_diff::StorageDiff,
 
-    /// List of changes to the offchain storage that this block performs.
+    /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::StorageDiff,
 }
 

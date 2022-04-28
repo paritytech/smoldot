@@ -50,7 +50,7 @@ pub enum ConfigConsensus<'a, TLocAuth> {
         /// an authorities list change digest item.
         current_authorities: header::AuraAuthoritiesIter<'a>,
 
-        /// Iterator to the list of sr25519 public keys available locally.
+        /// Iterator to the list of Sr25519 public keys available locally.
         ///
         /// Must implement `Iterator<Item = &[u8; 32]>`.
         local_authorities: TLocAuth,
@@ -388,7 +388,7 @@ impl Seal {
         }
     }
 
-    /// Injects the sr25519 signature of the hash of the SCALE-encoded header from the given
+    /// Injects the Sr25519 signature of the hash of the SCALE-encoded header from the given
     /// authority.
     ///
     /// The method then returns the finished block.

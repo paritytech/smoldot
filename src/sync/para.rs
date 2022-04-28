@@ -106,7 +106,7 @@ pub struct PersistedValidationDataRef<'a> {
     pub max_pov_size: u32,
 }
 
-/// Nom combinator that parses a [`PersistedValidationDataRef`].
+/// `Nom` combinator that parses a [`PersistedValidationDataRef`].
 fn persisted_validation_data<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], PersistedValidationDataRef, E> {

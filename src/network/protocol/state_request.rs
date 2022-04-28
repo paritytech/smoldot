@@ -95,6 +95,6 @@ pub struct StateResponseEntry {
 /// Error potentially returned by [`decode_state_response`].
 #[derive(Debug, derive_more::Display)]
 pub enum DecodeStateResponseError {
-    /// Error while decoding the protobuf encoding.
+    /// Error while decoding the Protobuf encoding.
     ProtobufDecode(ProtobufDecodeError),
 }

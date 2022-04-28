@@ -54,7 +54,7 @@
 //!
 //! The SQL schema of the database, with explanatory comments, can be found in `open.rs`.
 //!
-//! # About blocking behaviour
+//! # About blocking behavior
 //!
 //! This implementation uses the SQLite library, which isn't Rust-asynchronous-compatible. Many
 //! functions will, with the help of the operating system, put the current thread to sleep while

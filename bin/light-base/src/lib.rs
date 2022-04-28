@@ -73,15 +73,15 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     /// chains, it means that a call to [`Client::add_chain`] could influence the outcome of a
     /// subsequent call to [`Client::add_chain`].
     ///
-    /// For example: if user A adds a chain named "kusama", then user B adds a different chain
-    /// also named "kusama", then user B adds a parachain whose relay chain is "kusama", it would
-    /// be wrong to connect to the "kusama" created by user A.
+    /// For example: if user A adds a chain named "Kusama", then user B adds a different chain
+    /// also named "Kusama", then user B adds a parachain whose relay chain is "Kusama", it would
+    /// be wrong to connect to the "Kusama" created by user A.
     pub potential_relay_chains: TRelays,
 
     /// Channel to use to send the JSON-RPC responses.
     ///
     /// If `None`, then no JSON-RPC service is started for this chain. This saves up a lot of
-    /// resources, but will cause all JSON-RPC requests targetting this chain to fail.
+    /// resources, but will cause all JSON-RPC requests targeting this chain to fail.
     pub json_rpc_responses: Option<mpsc::Sender<String>>,
 }
 
@@ -140,7 +140,7 @@ pub trait Platform: Send + 'static {
     /// the futures must be notified. The user of this function, however, is encouraged to
     /// maintain only one active future.
     ///
-    /// If the future is polled after the connection object has been dropped, the behaviour is
+    /// If the future is polled after the connection object has been dropped, the behavior is
     /// not specified. The polling might panic, or return `Ready`, or return `Pending`.
     fn wait_more_data(connection: &mut Self::Connection) -> Self::ConnectionDataFuture;
 

@@ -174,7 +174,7 @@ where
         self.inner.request_response_protocols()
     }
 
-    /// Returns the Noise key originalled passed as [`Config::noise_key`].
+    /// Returns the Noise key originally passed as [`Config::noise_key`].
     pub fn noise_key(&self) -> &libp2p::connection::NoiseKey {
         self.inner.noise_key()
     }
@@ -1098,7 +1098,7 @@ where
     /// Equivalent to calling [`Peers::queue_notification`] for all peers an outbound
     /// notifications substream is open with.
     ///
-    /// Individual errors that would have occured when calling [`Peers::queue_notification`] are
+    /// Individual errors that would have occurred when calling [`Peers::queue_notification`] are
     /// silently discarded.
     // TODO: consider returning the peers we successfully sent to
     pub async fn broadcast_notification(
@@ -1510,7 +1510,7 @@ pub enum Event<TConn> {
     /// This combination of [`PeerId`] and notification protocol will now be returned when calling
     /// [`Peers::refused_notifications_out`].
     NotificationsOutClose {
-        /// Peer the subtream is no longer open with.
+        /// Peer the substream is no longer open with.
         peer_id: PeerId,
         /// Notifications protocol the substream is about.
         notifications_protocol_index: usize,
@@ -1567,7 +1567,7 @@ pub enum RequestError {
 #[derive(Debug, derive_more::Display)]
 pub enum InNotificationAcceptError {
     /// The request is now obsolete, either because the connection has been shut down or the
-    /// remote has cancelled their request.
+    /// remote has canceled their request.
     Obsolete,
 }
 

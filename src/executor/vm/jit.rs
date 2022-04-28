@@ -66,7 +66,7 @@ impl Module {
 pub struct JitPrototype {
     store: wasmtime::Store<()>,
 
-    /// Instanciated Wasm VM.
+    /// Instantiated Wasm VM.
     instance: wasmtime::Instance,
 
     /// Shared between the "outside" and the external functions. See [`Shared`].
@@ -402,11 +402,11 @@ enum Shared {
         /// is grown, which can happen between function calls.
         memory_size: usize,
 
-        /// Waker that `wasmtime` has passed to the future that is waiting for `return_value`.
+        /// `Waker` that `wasmtime` has passed to the future that is waiting for `return_value`.
         /// This value is most likely not very useful, because [`Jit::run`] always polls the outer
         /// future whenever the inner future is known to be ready.
         /// However, it would be completely legal for `wasmtime` to not poll the inner future if the
-        /// waker that it has passed (the one stored here) wasn't waken up.
+        /// `waker` that it has passed (the one stored here) wasn't waken up.
         /// This field therefore exists in order to future-proof against this possible optimization
         /// that `wasmtime` might perform in the future.
         in_interrupted_waker: Option<Waker>,
@@ -427,7 +427,7 @@ enum Shared {
 pub struct Jit {
     inner: JitInner,
 
-    /// Instanciated Wasm VM.
+    /// Instantiated Wasm VM.
     instance: wasmtime::Instance,
 
     /// Shared between the "outside" and the external functions. See [`Shared`].

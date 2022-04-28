@@ -92,7 +92,7 @@ impl<T> WithBuffers<T> {
     /// Returns a buffer containing data read from the socket, and a buffer containing data
     /// destined to be written to the socket.
     ///
-    /// If an error happend on the socket earlier, it is returned instead.
+    /// If an error happens on the socket earlier, it is returned instead.
     ///
     /// The read buffer is an `Option` containing `None` if the reading side of the socket has
     /// been closed. The write buffer is an `Option` containing `None` if the writing side of the

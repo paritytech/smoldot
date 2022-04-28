@@ -32,7 +32,7 @@
 //!
 //! > **Note**: While wasi could theoretically also be used in order to obtain the current time,
 //! >           the Wasi syscall cannot be implemented in pure JavaScript code at the moment, due
-//! >           to `u64`s being unusable in Javascript. As such, alternatives are present in the
+//! >           to `u64`s being unusable in JavaScript. As such, alternatives are present in the
 //! >           `extern` block below.
 //!
 //! Consequently, the exports found in the `extern` block below are not the only functions that
@@ -106,8 +106,8 @@ extern "C" {
 
     /// Client is emitting a log entry.
     ///
-    /// Each log entry is made of a log level (1 = Error, 2 = Warn, 3 = Info, 4 = Debug,
-    /// 5 = Trace), a log target (e.g. "network"), and a log message.
+    /// Each log entry is made of a log level (`1 = Error, 2 = Warn, 3 = Info, 4 = Debug,
+    /// 5 = Trace`), a log target (e.g. "network"), and a log message.
     ///
     /// The log target and message is a UTF-8 string found in the memory of the WebAssembly
     /// virtual machine at offset `ptr` and with length `len`.
@@ -121,8 +121,8 @@ extern "C" {
     /// See <https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now>
     ///
     /// > **Note**: Ideally this function isn't needed. The wasi target supports clocks through
-    /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses u64s, and
-    /// >           browsers don't support u64s, using it causes an unbypassable exception. See
+    /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses `u64s`, and
+    /// >           browsers don't support `u64s`, using it causes an unbypassable exception. See
     /// >           also <https://github.com/dcodeIO/webassembly/issues/26#issuecomment-410157370>.
     pub fn unix_time_ms() -> f64;
 
@@ -136,8 +136,8 @@ extern "C" {
     /// See <https://developer.mozilla.org/fr/docs/Web/API/Performance/now>
     ///
     /// > **Note**: Ideally this function isn't needed. The wasi target supports clocks through
-    /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses u64s, and
-    /// >           browsers don't support u64s, using it causes an unbypassable exception. See
+    /// >           the `clock_time_get` syscall. However, since `clock_time_get` uses `u64s`, and
+    /// >           browsers don't support `u64s`, using it causes an unbypassable exception. See
     /// >           also <https://github.com/dcodeIO/webassembly/issues/26#issuecomment-410157370>.
     pub fn monotonic_clock_ms() -> f64;
 
@@ -157,7 +157,7 @@ extern "C" {
     /// Must initialize a new connection that tries to connect to the given multiaddress.
     ///
     /// The multiaddress is a UTF-8 string found in the WebAssembly memory at offset `addr_ptr`
-    /// and with `addr_len` bytes. The string is a multiaddres such as `/ip4/1.2.3.4/tcp/5/ws`.
+    /// and with `addr_len` bytes. The string is a multiaddress such as `/ip4/1.2.3.4/tcp/5/ws`.
     ///
     /// The `id` parameter is an identifier for this connection, as chosen by the Rust code. It
     /// must be passed on every interaction with this connection.
@@ -251,7 +251,7 @@ extern "C" {
 ///
 /// `cpu_rate_limit` can be used to limit the amount of CPU that smoldot will use on average.
 /// `u32::max_value()` represents "one CPU". For example passing `rate_limit / 2` represents
-/// "50% of one CPU".
+/// "`50%` of one CPU".
 #[no_mangle]
 pub extern "C" fn init(max_log_level: u32, enable_current_task: u32, cpu_rate_limit: u32) {
     crate::init(max_log_level, enable_current_task, cpu_rate_limit)
@@ -389,7 +389,7 @@ pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) {
 /// with potentially different values.
 ///
 /// The `max_size` parameter contains the maximum length, in bytes, of the value that will be
-/// provided back. Please be aware that passing a `u32` accross the FFI boundary can be tricky.
+/// provided back. Please be aware that passing a `u32` across the FFI boundary can be tricky.
 /// From the Wasm perspective, the parameter of this function is actually a `i32` that is then
 /// reinterpreted as a `u32`.
 ///
