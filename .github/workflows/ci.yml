@@ -157,14 +157,6 @@ jobs:
         command: check --config .github/cargo-deny.toml ${{ matrix.checks }}
         arguments: --workspace --all-features
 
-  spellcheck:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: mickare/cargo-spellcheck-action@v0.0.3
-        with:
-          args: --cfg .config/spellcheck.toml --code 1
-
   wasm-node-versions-match:
     runs-on: ubuntu-latest
     steps:
@@ -186,7 +178,7 @@ jobs:
   all-ci:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [test-64bits, test-32bits, wasm-node-check, wasm-node-size-diff, check-features, check-rustdoc-links, fmt, clippy, cargo-deny, spellcheck, wasm-node-versions-match]
+    needs: [test-64bits, test-32bits, wasm-node-check, wasm-node-size-diff, check-features, check-rustdoc-links, fmt, clippy, cargo-deny, wasm-node-versions-match]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success
