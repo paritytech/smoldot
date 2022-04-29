@@ -8,7 +8,7 @@ extra_dictionaries = ["smoldot.dic"]
 
 # TODO: Uncomment once <https://github.com/drahnr/cargo-spellcheck/issues/15> is done.
 # skip_os_lookups = true
-use_builtin = true
+# use_builtin = true
 
 
 [Hunspell.quirks]
