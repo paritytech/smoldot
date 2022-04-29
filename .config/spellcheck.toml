@@ -3,10 +3,11 @@
 lang = "en_US"
 
 search_dirs = ["."]
-# AFF rules: https://github.com/drahnr/cargo-spellcheck/blob/master/hunspell-data/en_US.aff
+# AFF rules: <https://github.com/drahnr/cargo-spellcheck/blob/master/hunspell-data/en_US.aff>
 extra_dictionaries = ["smoldot.dic"]
 
-skip_os_lookups = true
+# TODO: Uncomment once <https://github.com/drahnr/cargo-spellcheck/issues/15> is done.
+# skip_os_lookups = true
 use_builtin = true
 
 
