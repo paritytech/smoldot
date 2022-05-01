@@ -291,7 +291,7 @@ impl ChainSpec {
 pub enum Bootnode<'a> {
     /// The address of the bootnode is valid.
     Parsed {
-        /// String representation of the `Multiaddr` that can be used to reach the bootnode.
+        /// String representation of the multiaddress that can be used to reach the bootnode.
         ///
         /// Does *not* contain the trailing `/p2p/...`.
         multiaddr: String,

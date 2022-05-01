@@ -775,7 +775,7 @@ impl<'a> From<&'a Digest> for DigestRef<'a> {
     }
 }
 
-/// Seal poped using [`DigestRef::pop_seal`].
+/// Seal popped using [`DigestRef::pop_seal`].
 pub enum Seal<'a> {
     Aura(&'a [u8; 64]),
     Babe(&'a [u8; 64]),

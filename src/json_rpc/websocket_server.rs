@@ -106,7 +106,7 @@
 //! number of clients (the complexity being `O(n)`).
 //!
 //! The single-threadedness can even be beneficial when the WebSocket server isn't the primary
-//! *`raison d'être`* of a certain program, which is what this module has been designed for. In the
+//! purpose of a certain program, which is what this module has been designed for. In the
 //! case of a (D)DoS attack on the WebSocket server, only up to one core of CPU processing power
 //! can be occupied by the attacker.
 
@@ -148,7 +148,7 @@ pub struct Config {
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct ConnectionId(usize);
 
-/// WebSocket's listening socket and list of open connections.
+/// Listening socket and list of open connections.
 pub struct WsServer<T> {
     /// Value passed through [`Config::max_frame_size`].
     max_frame_size: usize,

@@ -770,7 +770,7 @@ pub enum BodyVerifyStep2<T> {
     /// A new runtime must be compiled.
     ///
     /// This variant doesn't require any specific input from the user, but is provided in order to
-    /// make it possible to `benchmBodyVerifyStep2<ark` the time it takes to compile runtimes.
+    /// make it possible to benchmark the time it takes to compile runtimes.
     RuntimeCompilation(RuntimeCompilation<T>),
 }
 
