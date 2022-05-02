@@ -297,7 +297,7 @@ impl SubstreamDirection {
 /// See [`Guarded::connection_overlays`].
 ///
 /// > **Note**: There is no `Closed` variant, as this corresponds to a lack of entry in the
-/// >           hashmap.
+/// >           hash map.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 enum SubstreamState {
     /// Substream hasn't been accepted or refused yet. Contains the requested overlay network
@@ -418,7 +418,7 @@ where
         self.guarded.lock().await.connections_by_id.len()
     }
 
-    /// Returns the Noise key originalled passed as [`Config::noise_key`].
+    /// Returns the Noise key originally passed as [`Config::noise_key`].
     pub fn noise_key(&self) -> &NoiseKey {
         &self.noise_key
     }
@@ -1344,14 +1344,14 @@ pub enum ConnectionError {
     /// Protocol error after the connection has been established.
     #[display(fmt = "{}", _0)]
     Established(established::Error),
-    /// Eror during the handshake phase.
+    /// Error during the handshake phase.
     #[display(fmt = "{}", _0)]
     Handshake(HandshakeError),
     /// Connection was shut down by calling [`Network::start_shutdown`].
     // TODO: that seems hacky
     LocalShutdown,
     /// Connection was gracefully terminated. Can only happen if the connection was established,
-    /// as an EOF during the handshake is an error.
+    /// as an end of file during the handshake is an error.
     Eof,
 }
 

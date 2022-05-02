@@ -58,7 +58,7 @@ pub(crate) fn nom_option_decode<'a, O, E: nom::error::ParseError<&'a [u8]>>(
     ))
 }
 
-/// Decodes a SCALE-encoded vec of bytes.
+/// Decodes a SCALE-encoded vector of bytes.
 pub(crate) fn nom_bytes_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], &'a [u8], E> {
@@ -88,7 +88,7 @@ pub(crate) fn nom_bool_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     ))(bytes)
 }
 
-/// Decodes a SCALE-compact-encoded usize.
+/// Decodes a SCALE-compact-encoded `usize`.
 ///
 /// > **Note**: When using this function outside of a `nom` "context", you might have to explicit
 /// >           the type of `E`. Use `nom::error::Error<&[u8]>`.

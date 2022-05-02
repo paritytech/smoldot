@@ -25,16 +25,16 @@
 //! # Network identity
 //!
 //! In order to join the peer-to-peer network, one must first generate a *network identity*. A
-//! network identity is a small struct containing a cryptographic public key (typically ed25519,
+//! network identity is a small struct containing a cryptographic public key (typically Ed25519,
 //! but other algorithms might be used) or the hash of a cryptographic public key. A network
 //! identity is represented with the [`PeerId`] struct.
 //!
 //! Network identities primarily have a binary encoding. When displayed for UI purposes, the
-//! string representation, which consists in the base58 encoding of the binary encoding, is used.
+//! string representation, which consists in the Base58 encoding of the binary encoding, is used.
 //! Example string representation: `12D3KooWR3UGwwSP5wdBMk2JXXuzXoscPSudv8hmQkzfZTBzSbeE`.
 //!
 //! In order to generate a network identity, fill a [`peer_id::PublicKey::Ed25519`] with an
-//! ed25519 public key, then use [`PeerId::from_public_key`].
+//! Ed25519 public key, then use [`PeerId::from_public_key`].
 //!
 //! When establishing a connection to another member the peer-to-peer network, a Diffie-Hellman
 //! handshake is performed in order to ensure that the remote indeed possesses the private key
@@ -42,7 +42,7 @@
 //!
 //! See also the documentation of [`peer_id`] for more information.
 //!
-//! # The ReadWrite object
+//! # The `ReadWrite` object
 //!
 //! One of the most important objects in this module is the [`read_write::ReadWrite`] struct.
 //!

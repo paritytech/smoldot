@@ -107,7 +107,7 @@ pub struct Success {
     pub parent_runtime: host::HostVmPrototype,
     /// List of changes to the storage top trie that the block performs.
     pub storage_top_trie_changes: storage_diff::StorageDiff,
-    /// List of changes to the offchain storage that this block performs.
+    /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::StorageDiff,
     /// Cache used for calculating the top trie root of the new block.
     pub top_trie_root_calculation_cache: calculate_root::CalculationCache,

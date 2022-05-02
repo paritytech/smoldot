@@ -195,7 +195,7 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         /// number of queued pings.
         outgoing_payload: VecDeque<u8>,
         /// FIFO queue of pings waiting to be answered. For each ping, when the ping will time
-        /// out, or `None` if the timeout has already occured.
+        /// out, or `None` if the timeout has already occurred.
         queued_pings: smallvec::SmallVec<[Option<TNow>; 1]>,
     },
     /// Failed to negotiate a protocol for an outgoing ping substream.
@@ -211,7 +211,7 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         /// Contains even the data that is still queued in `outgoing_payload`.
         expected_payload: VecDeque<u8>,
         /// FIFO queue of pings waiting to be answered. For each ping, when the ping will time
-        /// out, or `None` if the timeout has already occured.
+        /// out, or `None` if the timeout has already occurred.
         queued_pings: smallvec::SmallVec<[Option<TNow>; 1]>,
     },
 }
@@ -220,7 +220,7 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd>
 where
     TNow: Clone + Ord,
 {
-    /// Initializes an new ingoing substream.
+    /// Initializes an new `ingoing` substream.
     ///
     /// After the remote has requested a protocol, an [`Event::InboundNegotiated`] event will be
     /// generated, after which [`Substream::set_inbound_ty`] must be called in order to indicate
@@ -233,7 +233,7 @@ where
     /// In response, the API user must call either [`Substream::accept_in_notifications_substream`]
     /// or [`Substream::reject_in_notifications_substream`]. Before one of these two methods is
     /// called, it is possible for an [`Event::NotificationsInOpenCancel`] to be generated, in
-    /// which case the inbound request is cancelled and the substream closed.
+    /// which case the inbound request is canceled and the substream closed.
     /// After [`Substream::accept_in_notifications_substream`] is called, zero or more
     /// [`Event::NotificationIn`] will be generated, until a [`Event::NotificationsInClose`] which
     /// indicates the end of the substream.
@@ -256,7 +256,7 @@ where
 
     /// Initializes an outgoing notifications substream.
     ///
-    /// After the remote has sent back a handshake or after an error occured, an
+    /// After the remote has sent back a handshake or after an error occurred, an
     /// [`Event::NotificationsOutResult`] event will be generated locally.
     ///
     /// If this event contains an `Ok`, then [`Substream::write_notification_unbounded`],
@@ -290,7 +290,7 @@ where
 
     /// Initializes an outgoing request substream.
     ///
-    /// After the remote has sent back a response or after an error occured, an [`Event::Response`]
+    /// After the remote has sent back a response or after an error occurred, an [`Event::Response`]
     /// event will be generated locally. The `user_data` parameter will be passed back.
     ///
     /// If the `request` is `None`, then nothing at all will be written out, not even a length
@@ -1586,7 +1586,7 @@ pub enum RequestError {
     /// Remote has decided to close the substream. This most likely indicates that the remote
     /// is unwilling the respond to the request.
     SubstreamClosed,
-    /// Remote has decided to RST the substream. This most likely indicates that the remote has
+    /// Remote has decided to `RST` the substream. This most likely indicates that the remote has
     /// detected a protocol error.
     SubstreamReset,
     /// Error during protocol negotiation.

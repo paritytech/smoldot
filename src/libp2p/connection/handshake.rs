@@ -23,7 +23,7 @@
 //! protocol is supported at the moment.
 //! - A noise protocol handshake, where public keys are exchanged and symmetric encryption is
 //! initialized.
-//! - A multistream-select negotiation to negotiate the yamux protocol. Only the yamux protocol is
+//! - A multistream-select negotiation to negotiate the Yamux protocol. Only the Yamux protocol is
 //! supported at the moment. This negotiation is performed on top of the noise cipher.
 //!
 //! This entire handshake requires in total either three or five TCP packets (not including the

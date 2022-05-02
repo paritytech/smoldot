@@ -98,7 +98,7 @@ pub fn decode_call_proof_response(
 /// Error potentially returned by [`decode_call_proof_response`].
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum DecodeCallProofResponseError {
-    /// Error while decoding the protobuf encoding.
+    /// Error while decoding the Protobuf encoding.
     ProtobufDecode(ProtobufDecodeError),
     /// Response isn't a response to a call proof request.
     BadResponseTy,

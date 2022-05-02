@@ -305,7 +305,7 @@ impl fmt::Debug for Output {
     }
 }
 
-/// The merkle value of a node is defined as either the hash of the node value, or the node value
+/// The Merkle value of a node is defined as either the hash of the node value, or the node value
 /// itself if it is shorted than 32 bytes (or if we are the root).
 ///
 /// This struct serves as a helper to handle these situations. Rather than putting intermediary

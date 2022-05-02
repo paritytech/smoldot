@@ -26,8 +26,8 @@
 //! Libp2p uses [the XX pattern](https://noiseexplorer.com/patterns/XX/). The handshake consists
 //! of three packets:
 //!
-//! - The initiator generates an ephemeral keypair and sends the public key to the responder.
-//! - The responder generates its own ephemeral keypair and sends the public key to the
+//! - The initiator generates an ephemeral key pair and sends the public key to the responder.
+//! - The responder generates its own ephemeral key pair and sends the public key to the
 //! initiator. Afterwards, the responder derives a shared secret and uses it to encrypt all
 //! further communications. Now encrypted, the responder also sends back its static noise public
 //! key (represented with the [`NoiseKey`] type of this module), its libp2p public key, and a
@@ -109,7 +109,7 @@ pub struct NoiseKey {
 }
 
 impl NoiseKey {
-    /// Generates a new private and public key pair signed with the given libp2p ed25519 key.
+    /// Generates a new private and public key pair signed with the given libp2p Ed25519 key.
     pub fn new(libp2p_ed25519_private_key: &[u8; 32]) -> Self {
         let unsigned = UnsignedNoiseKey::random();
 
@@ -308,7 +308,7 @@ impl Noise {
     /// Reads data from `payload` and writes it to `destination`. Returns, in order, the number
     /// of bytes read from `payload` and the number of bytes written to `destination`. The data
     /// written out is always slightly larger than the data read, in order to add the
-    /// [HMAC](https://en.wikipedia.org/wiki/HMAC)s.
+    /// [`HMAC`](https://en.wikipedia.org/wiki/HMAC)s.
     ///
     /// This function returns only after the input bytes are fully consumed or the output buffer
     /// is full.
@@ -790,9 +790,9 @@ fn noise_params() -> snow::params::NoiseParams {
 /// Potential error during the noise handshake.
 #[derive(Debug, derive_more::Display)]
 pub enum HandshakeError {
-    /// Reading side of the connection is closed. The handshake can't proceeed further.
+    /// Reading side of the connection is closed. The handshake can't proceed further.
     ReadClosed,
-    /// Writing side of the connection is closed. The handshake can't proceeed further.
+    /// Writing side of the connection is closed. The handshake can't proceed further.
     WriteClosed,
     /// Error in the decryption state machine.
     Cipher(CipherError),

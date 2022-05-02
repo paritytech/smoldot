@@ -83,7 +83,7 @@ pub struct Config<'a> {
     /// For example, passing `u16::max_value()` means that the entire slot is used. Passing
     /// `u16::max_value() / 2` means that half of the slot is used.
     ///
-    /// A typical value is `43691_u16`, representing 2/3rds of a slot.
+    /// A typical value is `43691_u16`, representing 2/3 of a slot.
     ///
     /// Note that this value doesn't determine the moment when creating the block has ended, but
     /// the moment when creating the block should start its final phase.
@@ -288,7 +288,7 @@ struct SyncBackground {
     keystore: Arc<keystore::Keystore>,
 
     /// Holds, in parallel of the database, the storage of the latest finalized block.
-    /// At the time of writing, this state is stable around ~3MiB for Polkadot, meaning that it is
+    /// At the time of writing, this state is stable around `~3MiB` for Polkadot, meaning that it is
     /// completely acceptable to hold it entirely in memory.
     // While reading the storage from the database is an option, doing so considerably slows down
     /// the verification, and also makes it impossible to insert blocks in the database in

@@ -32,8 +32,8 @@ struct AllocCounter {
     /// library. See <https://github.com/rust-lang/rust/tree/1.47.0/library/std/src/sys/wasm>.
     ///
     /// While the `wee_alloc` crate is usually the recommended choice in WebAssembly, testing has
-    /// shown that using it makes memory usage explode from ~100MiB to ~2GiB and more (the
-    /// environment then refuses to allocate 4GiB).
+    /// shown that using it makes memory usage explode from `~100MiB` to `~2GiB` and more (the
+    /// environment then refuses to allocate `4GiB`).
     inner: alloc::System,
 
     /// Total number of bytes allocated.

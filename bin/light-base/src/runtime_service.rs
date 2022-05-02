@@ -587,7 +587,7 @@ impl<TPlat: Platform> Subscription<TPlat> {
 pub enum Notification {
     /// A non-finalized block has been finalized.
     Finalized {
-        /// Blake2 hash of the header of the block that has been finalized.
+        /// BLAKE2 hash of the header of the block that has been finalized.
         ///
         /// A block with this hash is guaranteed to have earlier been reported in a
         /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
@@ -612,7 +612,7 @@ pub enum Notification {
         /// or in a [`Notification::Block`].
         best_block_hash: [u8; 32],
 
-        /// List of blake2 hashes of the headers of the blocks that have been discarded because
+        /// List of BLAKE2 hashes of the headers of the blocks that have been discarded because
         /// they're not descendants of the newly-finalized block.
         ///
         /// This list contains all the siblings of the newly-finalized block and all their
@@ -635,7 +635,7 @@ pub struct BlockNotification {
     /// SCALE-encoded header of the block.
     pub scale_encoded_header: Vec<u8>,
 
-    /// Blake2 hash of the header of the parent of this block.
+    /// BLAKE2 hash of the header of the parent of this block.
     ///
     ///
     /// A block with this hash is guaranteed to have earlier been reported in a

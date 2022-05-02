@@ -28,7 +28,7 @@
 //! the chain.
 //!
 //! A *request* represents a query for information from a source. Once the request has finished,
-//! call one of the methods of the [`AllSync`] in order to notify the state machine of the oucome.
+//! call one of the methods of the [`AllSync`] in order to notify the state machine of the outcome.
 
 use crate::{
     chain::{blocks_tree, chain_information},
@@ -1750,7 +1750,7 @@ pub struct BlockFull {
     /// Changes to the storage made by this block compared to its parent.
     pub storage_top_trie_changes: storage_diff::StorageDiff,
 
-    /// List of changes to the offchain storage that this block performs.
+    /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::StorageDiff,
 }
 

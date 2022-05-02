@@ -578,7 +578,7 @@ impl<TPlat: Platform> Task<TPlat> {
     /// Verifies one block, or justification, or warp sync fragment, etc. that is queued for
     /// verification.
     ///
-    /// Returns ̀`self` and a boolean indicating whether something has been processed.
+    /// Returns `self` and a boolean indicating whether something has been processed.
     async fn process_one_verification_queue(mut self) -> (Self, bool) {
         // Note that `process_one` moves out of `sync` and provides the value back in its
         // return value.

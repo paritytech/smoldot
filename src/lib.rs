@@ -44,7 +44,7 @@
 //!
 //! - A parent block, referred to by its hash.
 //! - An ordered list of **extrinsics**, representing a state change about the storage. An
-//! extrinsic can be either a **transaction** or an **intrisic**.
+//! extrinsic can be either a **transaction** or an **intrinsic**.
 //! - A list of **digest log items**, which include information necessary to verify the
 //! authenticity of the block, such as a cryptographic signature of the block made by its author.
 //!
@@ -96,14 +96,14 @@
 //! extrinsics of the block.
 //! - The list of digest log items.
 //!
-//! The hash of a block consists in the blake2 hash of its header.
+//! The hash of a block consists in the `blake2` hash of its header.
 //!
 //! See the [`header`] module for more information.
 //!
 //! ## Runtime
 //!
 //! The state of the storage of each block is mostly opaque from the client's perspective. There
-//! exists, however, a few hardcoded keys, the most important one being
+//! exists, however, a few hard coded keys, the most important one being
 //! `[0x3a, 0x63, 0x6f, 0x64, 0x65]` (which is the ASCII encoding of the string `:code`). The
 //! value associated with this key must always be a [WebAssembly](https://webassembly.org/) binary
 //! code called the **runtime**.

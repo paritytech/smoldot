@@ -121,7 +121,7 @@ pub struct ValidTransaction {
     /// If `false`, the transaction will still be considered for inclusion in blocks that are
     /// authored locally, but will not be sent to the rest of the network.
     ///
-    /// > **Note**: A value of `false` is typically returned for transctions that are very heavy.
+    /// > **Note**: A value of `false` is typically returned for transactions that are very heavy.
     pub propagate: bool,
 }
 

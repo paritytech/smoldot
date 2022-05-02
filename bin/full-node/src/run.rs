@@ -38,7 +38,7 @@ mod jaeger_service;
 mod json_rpc_service;
 mod network_service;
 
-/// Runs the node using the given configuration. Catches SIGINT signals and stops if one is
+/// Runs the node using the given configuration. Catches `SIGINT` signals and stops if one is
 /// detected.
 pub async fn run(cli_options: cli::CliOptionsRun) {
     // Determine the actual CLI output by replacing `Auto` with the actual value.
@@ -549,7 +549,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     }
 }
 
-/// Opens the database from the filesystem, or create a new database if none is found.
+/// Opens the database from the file system, or create a new database if none is found.
 ///
 /// If `tmp` is `true`, open the database in memory instead.
 ///

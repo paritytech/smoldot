@@ -29,7 +29,7 @@
 //! 3- When sending a notification.
 //! 4- When receiving a request and sending back a response.
 //! 5- When receiving a notification.
-//! // TODO: 6- on yamux ping frames
+//! // TODO: 6- on Yamux ping frames
 //!
 //! In order to solve 1-, there exists a maximum number of simultaneous substreams allowed by the
 //! protocol, thereby guaranteeing that the memory consumption doesn't exceed a certain bound.
@@ -649,7 +649,7 @@ where
         SubstreamId(substream.id())
     }
 
-    /// Returns the user dat associated to a notifications substream.
+    /// Returns the user data associated to a notifications substream.
     ///
     /// Returns `None` if the substream doesn't exist or isn't a notifications substream.
     pub fn notifications_substream_user_data_mut(
@@ -1018,7 +1018,7 @@ pub enum Event<TRqUd, TNotifUd> {
 pub enum Error {
     /// Error in the noise cipher. Data has most likely been corrupted.
     Noise(noise::CipherError),
-    /// Error in the yamux multiplexing protocol.
+    /// Error in the Yamux multiplexing protocol.
     Yamux(yamux::Error),
 }
 
