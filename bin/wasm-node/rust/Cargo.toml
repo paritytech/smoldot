@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 event-listener = { version = "2.5.2" }
 futures = "0.3.21"
 lazy_static = "1.4.0"
-log = { version = "0.4.16", features = ["std"] }
+log = { version = "0.4.17", features = ["std"] }
 pin-project = "1.0.8"
 rand = "0.8.5"
 slab = { version = "0.4.6", default-features = false }
