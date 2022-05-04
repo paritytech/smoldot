@@ -64,8 +64,8 @@
 //! summary, contains:
 //!
 //! - A list of handshaking and established connections, that the API user must manually
-//! synchronize by calling [`peers::Peers::read_write`]. When inserting a new outgoing connection,
-//! the API user can specify which [`PeerId`] this connection is expected to reach.
+//! synchronize by calling [`peers::ConnectionTask::read_write`]. When inserting a new outgoing
+//! connection, the API user can specify which [`PeerId`] this connection is expected to reach.
 //! - A list of [`̀PeerId`]s that have been marked by the API user as desired. The [`peers::Peers`]
 //! is then able to provide the list of [`PeerId`]s that have been marked as desired but that no
 //! existing connection reaches or tries to reach.
@@ -79,8 +79,8 @@
 //!
 //! It is also the responsibility of the API user to call [`peers::Peers::next_event`] in order to
 //! react to the activity on the various connections, and user the various other methods of the
-//! [`peers::Peers`] state machine, such as for example [`peers::Peers::request`], to interact
-//! with the remotes.
+//! [`peers::Peers`] state machine, such as for example [`peers::Peers::start_request`], to
+//! interact with the remotes.
 //!
 //! See also the documentation of [`peers`] for more information.
 //!
