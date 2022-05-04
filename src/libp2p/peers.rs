@@ -61,7 +61,7 @@ use core::{
 use rand::{Rng as _, SeedableRng as _};
 
 pub use collection::{
-    ConfigRequestResponse, ConfigRequestResponseIn, ConnectionError, ConnectionId, ConnectionTask,
+    ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionTask,
     ConnectionToCoordinator, CoordinatorToConnection, InboundError, NotificationProtocolConfig,
     NotificationsInClosedErr, NotificationsOutErr, ReadWrite, RequestError, SubstreamId,
 };
