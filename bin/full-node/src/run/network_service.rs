@@ -882,7 +882,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
     loop {
         if lock.num_pending_out_attempts >= 16 {
             // TODO: constant
-            continue;
+            break;
         }
 
         let start_connect = match lock.network.next_start_connect(|| Instant::now()) {
