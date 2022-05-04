@@ -1937,7 +1937,7 @@ enum ConnectionToCoordinatorInner {
     /// [`ConnectionToCoordinatorInner::StartShutdown`]. No message is sent by the connection
     /// task anymore after that.
     ///
-    /// Must be confirmed with a [`ConnectionToCoordinatorInner::ShutdownFinishedAck`].
+    /// Must be confirmed with a [`CoordinatorToConnectionInner::ShutdownFinishedAck`].
     ShutdownFinished,
 }
 
@@ -2156,16 +2156,6 @@ pub enum NotificationsInClosedErr {
 
     /// Error happened in the context of the substream.
     Substream(established::NotificationsInClosedErr),
-}
-
-/// Protocol error within the context of a connection. See [`Network::read_write`].
-#[derive(Debug, derive_more::Display)]
-pub enum HandshakeError {
-    /// The handshake took too long.
-    Timeout,
-    /// Protocol error.
-    #[display(fmt = "{}", _0)]
-    Protocol(handshake::HandshakeError),
 }
 
 /// Error potentially returned by [`Network::queue_notification`].

@@ -144,8 +144,8 @@ pub struct Peers<TConn, TNow> {
     // TODO: doc
     desired_out_notifications: slab::Slab<Option<(usize, collection::ConnectionId, usize)>>,
 
-    /// When a [`DesiredOutNotificationId`] is allocated, the values of the fields of the
-    /// corresponding [`Event::DesiredOutNotification`] are added to this FIFO queue.
+    /// When a [`DesiredOutNotificationId`] is allocated, the parameters of the desired out
+    /// notification are added to this FIFO queue.
     /// This list is later processed in the [`Peers::next_unfulfilled_desired_outbound_substream`]
     /// function.
     // TODO: explain why it can't grow unbounded
@@ -279,16 +279,6 @@ where
     }
 
     /// Returns the next event produced by the service.
-    ///
-    /// This function should be called at a high enough rate that [`Peers::read_write`] can
-    /// continue pushing events to the internal buffer of events. Failure to call this function
-    /// often enough will lead to connections being back-pressured.
-    /// See also [`Config::pending_api_events_buffer_size`].
-    ///
-    /// It is technically possible to call this function multiple times simultaneously, in which
-    /// case the events will be distributed amongst the multiple calls in an unspecified way.
-    /// Keep in mind that some [`Event`]s have logic attached to the order in which they are
-    /// produced, and calling this function multiple times is therefore discouraged.
     pub fn next_event(&mut self) -> Option<Event<TConn>> {
         loop {
             let event = match self.inner.next_event() {
@@ -999,8 +989,8 @@ where
         ))
     }
 
-    /// Responds to an [`Event::DesiredOutNotification`] by indicating the handshake to send to
-    /// the remote.
+    /// Continuation of calling [`Peers::next_unfulfilled_desired_outbound_substream`] by
+    /// indicating the handshake to send to the remote.
     ///
     /// Must be passed the current moment in time in order to determine when the operation of
     /// opening the substream times out.
@@ -1174,7 +1164,7 @@ where
     ///
     /// # Panic
     ///
-    /// Panics if the [`RequestId`] is invalid. Note that these ids remain valid forever until
+    /// Panics if the [`InRequestId`] is invalid. Note that these ids remain valid forever until
     /// [`Peers::respond_in_request`] is called or a [`Event::RequestInCancel`] is generated.
     ///
     pub fn respond_in_request(&mut self, id: InRequestId, response: Result<Vec<u8>, ()>) {
@@ -1299,7 +1289,7 @@ impl<TConn, TNow> ops::IndexMut<ConnectionId> for Peers<TConn, TNow> {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DesiredInNotificationId(usize);
 
-/// See [`Event::DesiredOutNotification`].
+/// See [`Peers::next_unfulfilled_desired_outbound_substream`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DesiredOutNotificationId(usize);
 
@@ -1364,7 +1354,8 @@ pub enum Event<TConn> {
 
     /// Received a request from a request-response protocol.
     RequestIn {
-        /// Identifier for this request. Must be passed back when calling [`Peers::respond`].
+        /// Identifier for this request. Must be passed back when calling
+        /// [`Peers::respond_in_request`].
         request_id: InRequestId,
         /// Peer which sent the request.
         peer_id: PeerId,
@@ -1380,7 +1371,7 @@ pub enum Event<TConn> {
 
     /// A previously-emitted [`Event::RequestIn`] is now obsolete.
     ///
-    /// The [`InRequestId`] is now considered dead, and calling [`Peers::response_in_request`] is
+    /// The [`InRequestId`] is now considered dead, and calling [`Peers::respond_in_request`] is
     /// now invalid.
     RequestInCancel {
         /// Identifier for this request.
