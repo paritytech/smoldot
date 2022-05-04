@@ -304,7 +304,7 @@ impl CalcInner {
                     Some(c) => Some(c.node_index()),
                     None => {
                         // Trie is empty.
-                        let merkle_value = node_value::calculate_merkle_root(node_value::Config {
+                        let merkle_value = node_value::calculate_merkle_value(node_value::Config {
                             ty: node_value::NodeTy::Root { key: iter::empty() },
                             children: (0..16).map(|_| None),
                             stored_value: None::<Vec<u8>>,
@@ -371,7 +371,7 @@ impl CalcInner {
 
             if !current.has_storage_value() {
                 // Calculate the Merkle value of the node.
-                let merkle_value = node_value::calculate_merkle_root(node_value::Config {
+                let merkle_value = node_value::calculate_merkle_value(node_value::Config {
                     ty: if current.is_root_node() {
                         node_value::NodeTy::Root {
                             key: current.partial_key(),
@@ -460,7 +460,7 @@ impl StorageValue {
             .unwrap();
 
         // Calculate the Merkle value of the node.
-        let merkle_value = node_value::calculate_merkle_root(node_value::Config {
+        let merkle_value = node_value::calculate_merkle_value(node_value::Config {
             ty: if current.is_root_node() {
                 node_value::NodeTy::Root {
                     key: current.partial_key(),

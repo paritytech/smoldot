@@ -17,7 +17,7 @@
 
 //! Calculation of the Merkle value of a node given the information about it.
 //!
-//! Use the [`calculate_merkle_root`] function to calculate the Merkle value. The [`Config`]
+//! Use the [`calculate_merkle_value`] function to calculate the Merkle value. The [`Config`]
 //! struct contains all the input required for the calculation.
 //!
 //! # Example
@@ -43,7 +43,7 @@
 //!         children
 //!     };
 //!
-//!     node_value::calculate_merkle_root(node_value::Config {
+//!     node_value::calculate_merkle_value(node_value::Config {
 //!         ty: node_value::NodeTy::NonRoot {
 //!             partial_key: [
 //!                 Nibble::try_from(8).unwrap(),
@@ -118,7 +118,7 @@ pub enum NodeTy<TPKey> {
 ///
 /// Panics if `config.children.len() != 16`.
 ///
-pub fn calculate_merkle_root<'a, TChIter, TPKey, TVal>(
+pub fn calculate_merkle_value<'a, TChIter, TPKey, TVal>(
     config: Config<TChIter, TPKey, TVal>,
 ) -> Output
 where
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn empty_root() {
-        let obtained = super::calculate_merkle_root(super::Config {
+        let obtained = super::calculate_merkle_value(super::Config {
             ty: super::NodeTy::Root { key: iter::empty() },
             children: (0..16).map(|_| None),
             stored_value: None::<Vec<u8>>,
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn empty_node() {
-        let obtained = super::calculate_merkle_root(super::Config {
+        let obtained = super::calculate_merkle_value(super::Config {
             ty: super::NodeTy::NonRoot {
                 partial_key: iter::empty(),
             },
@@ -398,7 +398,7 @@ mod tests {
             children
         };
 
-        let obtained = super::calculate_merkle_root(super::Config {
+        let obtained = super::calculate_merkle_value(super::Config {
             ty: super::NodeTy::NonRoot {
                 partial_key: [
                     Nibble::try_from(8).unwrap(),
@@ -424,7 +424,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn bad_children_len() {
-        super::calculate_merkle_root(super::Config {
+        super::calculate_merkle_value(super::Config {
             ty: super::NodeTy::NonRoot {
                 partial_key: iter::empty(),
             },
