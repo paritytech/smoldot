@@ -1142,6 +1142,15 @@ where
                         continue;
                     }
 
+                    // The substream might already have been destroyed if the user closed the
+                    // substream while this message was pending in the queue.
+                    if self
+                        .outgoing_notification_substreams
+                        .contains_key(&substream_id)
+                    {
+                        continue;
+                    }
+
                     Event::NotificationsOutCloseDemanded { substream_id }
                 }
                 ConnectionToCoordinatorInner::NotificationsOutReset { id: substream_id } => {
@@ -1150,8 +1159,15 @@ where
                         continue;
                     }
 
-                    let _was_in = self.outgoing_notification_substreams.remove(&substream_id);
-                    debug_assert!(_was_in.is_some());
+                    // The substream might already have been destroyed if the user closed the
+                    // substream while this message was pending in the queue.
+                    if self
+                        .outgoing_notification_substreams
+                        .remove(&substream_id)
+                        .is_none()
+                    {
+                        continue;
+                    }
 
                     let _was_removed = self
                         .outgoing_notification_substreams_by_connection
