@@ -280,16 +280,12 @@ where
                         read_bytes: 0,
                         written_bytes: 0,
                         wake_up_after: None,
-                        wake_up_future: None,
                     };
 
                     let (_, _event) = state_machine.read_write(&mut substream_read_write);
 
                     if let Some(wake_up_after) = substream_read_write.wake_up_after {
                         read_write.wake_up_after(&wake_up_after);
-                    }
-                    if let Some(future) = substream_read_write.wake_up_future {
-                        read_write.wake_up_when_boxed(future);
                     }
 
                     // TODO: finish here
@@ -428,7 +424,6 @@ where
                 read_bytes: 0,
                 written_bytes: 0,
                 wake_up_after: None,
-                wake_up_future: None,
             };
 
             let (substream_update, event) = substream
@@ -440,9 +435,6 @@ where
             total_read += substream_read_write.read_bytes;
             if let Some(wake_up_after) = substream_read_write.wake_up_after {
                 outer_read_write.wake_up_after(&wake_up_after);
-            }
-            if let Some(wake_up_future) = substream_read_write.wake_up_future {
-                outer_read_write.wake_up_when_boxed(wake_up_future);
             }
 
             let closed_after = substream_read_write.outgoing_buffer.is_none();
@@ -954,6 +946,7 @@ pub enum Event<TRqUd, TNotifUd> {
         ///
         /// The index refers to the position of the protocol in
         /// [`Config::notifications_protocols`].
+        // TODO: no longer necessary
         protocol_index: usize,
     },
     /// Remote has sent a notification on an inbound notifications substream. Can only happen
@@ -976,6 +969,7 @@ pub enum Event<TRqUd, TNotifUd> {
         ///
         /// The index refers to the position of the protocol in
         /// [`Config::notifications_protocols`].
+        // TODO: no longer necessary
         protocol_index: usize,
     },
 

@@ -852,7 +852,6 @@ mod tests {
                                 read_bytes: 0,
                                 written_bytes: 0,
                                 wake_up_after: None,
-                                wake_up_future: None,
                             };
 
                             handshake1 = nego.read_write(&mut read_write).unwrap();
@@ -870,7 +869,6 @@ mod tests {
                                 read_bytes: 0,
                                 written_bytes: 0,
                                 wake_up_after: None,
-                                wake_up_future: None,
                             };
                             handshake1 = nego.read_write(&mut read_write).unwrap();
                             for _ in 0..read_write.read_bytes {
@@ -893,7 +891,6 @@ mod tests {
                                 read_bytes: 0,
                                 written_bytes: 0,
                                 wake_up_after: None,
-                                wake_up_future: None,
                             };
 
                             handshake2 = nego.read_write(&mut read_write).unwrap();
@@ -911,7 +908,6 @@ mod tests {
                                 read_bytes: 0,
                                 written_bytes: 0,
                                 wake_up_after: None,
-                                wake_up_future: None,
                             };
                             handshake2 = nego.read_write(&mut read_write).unwrap();
                             for _ in 0..read_write.read_bytes {

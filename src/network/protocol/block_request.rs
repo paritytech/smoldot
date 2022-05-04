@@ -63,7 +63,7 @@ pub enum BlocksRequestConfigStart {
 }
 
 /// Builds the bytes corresponding to a block request.
-pub fn build_block_request(config: BlocksRequestConfig) -> impl Iterator<Item = impl AsRef<[u8]>> {
+pub fn build_block_request(config: &BlocksRequestConfig) -> impl Iterator<Item = impl AsRef<[u8]>> {
     // Note: while the API of this function allows for a zero-cost implementation, the protobuf
     // library doesn't permit to avoid allocations.
 

@@ -78,7 +78,6 @@ impl<'a, TNow> Drop for ReadWriteLock<'a, TNow> {
         self.latest_read_outcome.written_bytes = self.inner.written_bytes;
         self.latest_read_outcome.write_closed = self.inner.outgoing_buffer.is_none();
         self.latest_read_outcome.wake_up_after = self.inner.wake_up_after.take();
-        self.latest_read_outcome.wake_up_future = self.inner.wake_up_future.take();
     }
 }
 
@@ -113,7 +112,6 @@ impl<TNow> ConnectionTask<TNow> {
                 written_bytes: 0,
                 write_closed: false,
                 wake_up_after: None,
-                wake_up_future: None,
             },
         }
     }
@@ -132,7 +130,6 @@ impl<TNow> ConnectionTask<TNow> {
                 read_bytes: self.latest_read_outcome.read_bytes,
                 written_bytes: self.latest_read_outcome.written_bytes,
                 wake_up_after: self.latest_read_outcome.wake_up_after.take(),
-                wake_up_future: self.latest_read_outcome.wake_up_future.take(),
             },
             latest_read_outcome: &mut self.latest_read_outcome,
         }
@@ -144,14 +141,6 @@ impl<TNow> ConnectionTask<TNow> {
     /// This function returns when the connection task needs something or when data is ready on
     /// the socket.
     pub async fn resume(mut self) -> RunOutcome<TNow> {
-        let wake_up_future =
-            if let Some(wake_up_future) = self.latest_read_outcome.wake_up_future.take() {
-                future::Either::Left(wake_up_future)
-            } else {
-                future::Either::Right(future::pending())
-            }
-            .boxed();
-
         if self.latest_read_outcome.write_closed && !self.tcp_socket.is_closed() {
             self.tcp_socket.close();
         }
@@ -175,18 +164,15 @@ impl<TNow> ConnectionTask<TNow> {
         if let Some(wake_up) = wake_up {
             RunOutcome::TimerNeeded(TimerNeeded {
                 inner: self,
-                wake_up_future,
                 when_wake_up: wake_up,
             })
         } else {
-            self.continue_with_timer(wake_up_future, future::pending())
-                .await
+            self.continue_with_timer(future::pending()).await
         }
     }
 
     async fn continue_with_timer(
         mut self,
-        wake_up_future: future::BoxFuture<'static, ()>,
         poll_after: impl Future<Output = ()>,
     ) -> RunOutcome<TNow> {
         let poll_after = poll_after.fuse();
@@ -195,7 +181,6 @@ impl<TNow> ConnectionTask<TNow> {
         let mut tcp_socket = Pin::new(&mut self.tcp_socket);
         futures::select! {
             _ = tcp_socket.as_mut().process().fuse() => {},
-            _ = wake_up_future.fuse() => {},
             () = poll_after => {
                 // Nothing to do, but guarantees that we loop again.
             }
@@ -220,13 +205,11 @@ struct ReadWriteOutcome<TNow> {
     written_bytes: usize,
     write_closed: bool,
     wake_up_after: Option<TNow>,
-    wake_up_future: Option<future::BoxFuture<'static, ()>>,
 }
 
 /// In order to continue, connection task needs a future that becomes ready at a specific moment.
 pub struct TimerNeeded<TNow> {
     inner: ConnectionTask<TNow>,
-    wake_up_future: future::BoxFuture<'static, ()>,
     when_wake_up: TNow,
 }
 
@@ -241,9 +224,7 @@ impl<TNow> TimerNeeded<TNow> {
     /// Resumes the connection task, using the timer passed as parameter. The timer passed as
     /// parameter must become ready at the moment returned by [`TimerNeeded::when`].
     pub async fn resume(self, delay: impl Future<Output = ()>) -> RunOutcome<TNow> {
-        self.inner
-            .continue_with_timer(self.wake_up_future, delay)
-            .await
+        self.inner.continue_with_timer(delay).await
     }
 }
 

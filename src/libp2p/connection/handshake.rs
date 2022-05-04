@@ -245,7 +245,6 @@ impl HealthyHandshake {
                             read_bytes: 0,
                             written_bytes: 0,
                             wake_up_after: None,
-                            wake_up_future: None,
                         };
                         let updated = negotiation
                             .read_write(&mut interm_read_write)
