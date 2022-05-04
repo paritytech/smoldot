@@ -1165,14 +1165,6 @@ where
                         continue;
                     }
 
-                    let _was_in = self.outgoing_notification_substreams.remove(&substream_id);
-                    debug_assert!(_was_in.is_some());
-
-                    let _was_removed = self
-                        .outgoing_notification_substreams_by_connection
-                        .remove(&(connection_id, substream_id));
-                    debug_assert!(_was_removed);
-
                     Event::NotificationsOutCloseDemanded { substream_id }
                 }
                 ConnectionToCoordinatorInner::NotificationsOutReset { id: substream_id } => {
