@@ -167,7 +167,7 @@ pub struct ChainNetwork<TNow> {
     /// Keys of this slab are [`PendingId`]s. Values are the parameters associated to that
     /// [`PendingId`].
     /// The entries here correspond to the entries in
-    /// [`EphemeralGuarded::num_pending_per_peer`].
+    /// [`ChainNetwork::num_pending_per_peer`].
     pending_ids: slab::Slab<(PeerId, multiaddr::Multiaddr, TNow)>,
 
     /// List of all open connections.
@@ -183,9 +183,6 @@ pub struct ChainNetwork<TNow> {
     ///
     /// The `Vec` always has the same length as [`Config::chains`].
     chains: Vec<Chain<TNow>>,
-
-    /// Number of chains. Equal to the length of [`EphemeralGuarded::chains`].
-    num_chains: usize,
 
     /// Generator for randomness.
     randomness: rand_chacha::ChaCha20Rng,
@@ -370,7 +367,6 @@ where
                 ping_protocol: "/ipfs/ping/1.0.0".into(),
                 handshake_timeout: config.handshake_timeout,
             }),
-            num_chains: chains.len(),
             open_chains: hashbrown::HashSet::with_capacity_and_hasher(
                 config.peers_capacity * chains.len(),
                 SipHasherBuild::new(randomness.gen()),
@@ -419,7 +415,7 @@ where
 
     /// Returns the number of chains. Always equal to the length of [`Config::chains`].
     pub fn num_chains(&self) -> usize {
-        self.num_chains
+        self.chains.len()
     }
 
     /// Returns the Noise key originalled passed as [`Config::noise_key`].
@@ -434,9 +430,6 @@ where
     ///
     /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
     /// to determine when the handshake timeout expires.
-    ///
-    /// After this function has returned, you must process the connection with
-    /// [`ChainNetwork::read_write`].
     ///
     /// The `remote_addr` is the address used to reach back the remote. In the case of TCP, it
     /// contains the TCP dialing port of the remote. The remote can ask, through the `identify`
@@ -641,7 +634,7 @@ where
     /// This function might generate a message destined a connection. Use
     /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
     // TODO: does an empty response mean that `start_key` is the last key of the storage? unclear
-    pub fn state_request_unchecked(
+    pub fn start_state_request_unchecked(
         &mut self,
         now: TNow,
         target: &PeerId,
@@ -708,9 +701,9 @@ where
 
     /// Sends a call proof request to the given peer.
     ///
-    /// This request is similar to [`ChainNetwork::storage_proof_request`]. Instead of requesting
-    /// specific keys, we request the list of all the keys that are accessed for a specific
-    /// runtime call.
+    /// This request is similar to [`ChainNetwork::start_storage_proof_request`]. Instead of
+    /// requesting specific keys, we request the list of all the keys that are accessed for a
+    /// specific runtime call.
     ///
     /// There exists no guarantee that the proof is complete (i.e. that it contains all the
     /// necessary entries), as it is impossible to know this from just the proof itself. As such,
@@ -956,16 +949,6 @@ where
     }
 
     /// Returns the next event produced by the service.
-    ///
-    /// This function should be called at a high enough rate that [`ChainNetwork::read_write`] can
-    /// continue pushing events to the internal buffer of events. Failure to call this function
-    /// often enough will lead to connections being back-pressured.
-    /// See also [`Config::pending_api_events_buffer_size`].
-    ///
-    /// It is technically possible to call this function multiple times simultaneously, in which
-    /// case the events will be distributed amongst the multiple calls in an unspecified way.
-    /// Keep in mind that some [`Event`]s have logic attached to the order in which they are
-    /// produced, and calling this function multiple times is therefore discouraged.
     // TODO: this `now` parameter, it's a hack
     pub fn next_event(&mut self, now: TNow) -> Option<Event> {
         if let Some((kademlia_operation_id, error)) = self.pending_kademlia_errors.pop_front() {
@@ -2028,8 +2011,7 @@ where
         let _ = self.inner.respond_in_request(request_id, Ok(response));
     }
 
-    /// Queue the response to send back. The future provided by [`ChainNetwork::read_write`] will
-    /// automatically be woken up.
+    /// Queue the response to send back.
     ///
     /// Pass `None` in order to deny the request. Do this if blocks aren't available locally.
     ///
@@ -2217,7 +2199,7 @@ pub enum Event {
 
     /// A remote has sent a request for identification information.
     ///
-    /// You are strongly encouraged to call [`IdentifyRequestIn::respond`].
+    /// You are strongly encouraged to call [`ChainNetwork::respond_identify`].
     IdentifyRequestIn {
         /// Remote that has sent the request.
         peer_id: PeerId,
@@ -2228,7 +2210,7 @@ pub enum Event {
     ///
     /// Can only happen for chains where [`ChainConfig::allow_inbound_block_requests`] is `true`.
     ///
-    /// You are strongly encouraged to call [`BlocksRequestIn::respond`].
+    /// You are strongly encouraged to call [`ChainNetwork::respond_blocks`].
     BlocksRequestIn {
         /// Remote that has sent the request.
         peer_id: PeerId,
@@ -2334,21 +2316,21 @@ impl fmt::Debug for EncodedGrandpaCommitMessage {
     }
 }
 
-/// Error during [`ChainNetwork::kademlia_discovery_round`].
+/// Error during [`ChainNetwork::start_kademlia_discovery_round`].
 #[derive(Debug, derive_more::Display)]
 pub enum DiscoveryError {
     NoPeer,
     FindNode(KademliaFindNodeError),
 }
 
-/// Error during [`ChainNetwork::kademlia_find_node`].
+/// Error during [`ChainNetwork::start_kademlia_find_node`].
 #[derive(Debug, derive_more::Display)]
 pub enum KademliaFindNodeError {
     RequestFailed(peers::RequestError),
     DecodeError(kademlia::DecodeFindNodeResponseError),
 }
 
-/// Error returned by [`ChainNetwork::blocks_request`].
+/// Error returned by [`ChainNetwork::start_blocks_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum BlocksRequestError {
     /// Error while waiting for the response from the peer.
@@ -2391,14 +2373,14 @@ pub enum BlocksRequestResponseEntryError {
     InvalidHash,
 }
 
-/// Error returned by [`ChainNetwork::storage_proof_request`].
+/// Error returned by [`ChainNetwork::start_storage_proof_request`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum StorageProofRequestError {
     Request(peers::RequestError),
     Decode(protocol::DecodeStorageProofResponseError),
 }
 
-/// Error returned by [`ChainNetwork::call_proof_request`].
+/// Error returned by [`ChainNetwork::start_call_proof_request`].
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum CallProofRequestError {
     Request(peers::RequestError),
@@ -2416,14 +2398,14 @@ impl CallProofRequestError {
     }
 }
 
-/// Error returned by [`ChainNetwork::grandpa_warp_sync_request`].
+/// Error returned by [`ChainNetwork::start_grandpa_warp_sync_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum GrandpaWarpSyncRequestError {
     Request(peers::RequestError),
     Decode(protocol::DecodeGrandpaWarpSyncResponseError),
 }
 
-/// Error returned by [`ChainNetwork::state_request_unchecked`].
+/// Error returned by [`ChainNetwork::start_state_request_unchecked`].
 #[derive(Debug, derive_more::Display)]
 pub enum StateRequestError {
     Request(peers::RequestError),
