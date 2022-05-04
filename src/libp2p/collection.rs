@@ -739,33 +739,6 @@ where
         ));
     }
 
-    /// Returns the connection associated to the given substream.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`SubstreamId`] is invalid.
-    ///
-    // TODO: this method is probably useless if we provide user datas
-    pub fn substream_connection(&self, substream_id: SubstreamId) -> ConnectionId {
-        if let Some((id, _)) = self.outgoing_notification_substreams.get(&substream_id) {
-            return *id;
-        }
-
-        if let Some(id) = self.outgoing_requests.get(&substream_id) {
-            return *id;
-        }
-
-        if let Some((id, ..)) = self.ingoing_notification_substreams.get(&substream_id) {
-            return *id;
-        }
-
-        if let Some((id, ..)) = self.ingoing_requests.get(&substream_id) {
-            return *id;
-        }
-
-        panic!()
-    }
-
     /// Pulls a message that must be sent to a connection.
     ///
     /// The message must be passed to [`ConnectionTask::inject_coordinator_message`] in the
