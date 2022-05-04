@@ -386,10 +386,8 @@ where
                     });
                 }
 
-                collection::Event::StartShutdown {
-                    id: connection_id, ..
-                } => {
-                    // TODO: mark connection as shutting down so that we don't start any new request or substream
+                collection::Event::StartShutdown { .. } => {
+                    // TODO: mark connection as shutting down so that we don't start any new request or substream; in practice this can't happen right now because events are processed in a loop, but in theory the user could do something stupid and get a panic
                 }
 
                 collection::Event::Shutdown {
