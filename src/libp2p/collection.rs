@@ -1108,7 +1108,11 @@ where
                     let mut entry = match self.outgoing_notification_substreams.entry(substream_id)
                     {
                         hashbrown::hash_map::Entry::Occupied(e) => e,
-                        hashbrown::hash_map::Entry::Vacant(_) => unreachable!(),
+                        hashbrown::hash_map::Entry::Vacant(_) => {
+                            // This can be reached if the API user closed the substream while it
+                            // was being open.
+                            continue;
+                        }
                     };
 
                     debug_assert!(matches!(entry.get_mut().1, OutSubstreamState::Pending));

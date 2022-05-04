@@ -881,6 +881,7 @@ where
                 NotificationsOutOpenState::Open(substream_id)
                 | NotificationsOutOpenState::Opening(substream_id) => {
                     self.inner.close_out_notifications(substream_id);
+                    current_state.open = NotificationsOutOpenState::Closed;
                 }
             }
 
