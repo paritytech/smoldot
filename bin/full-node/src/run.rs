@@ -104,7 +104,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     };
 
     // TODO: don't unwrap?
-    let genesis_chain_information = chain_spec.as_chain_information().unwrap();
+    let genesis_chain_information = chain_spec.as_chain_information().unwrap().0;
 
     // If `chain_spec` define a parachain, also load the specs of the relay chain.
     let (relay_chain_spec, _parachain_id) =
@@ -138,7 +138,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     // TODO: don't unwrap?
     let relay_genesis_chain_information = relay_chain_spec
         .as_ref()
-        .map(|relay_chain_spec| relay_chain_spec.as_chain_information().unwrap());
+        .map(|relay_chain_spec| relay_chain_spec.as_chain_information().unwrap().0);
 
     let threads_pool = futures::executor::ThreadPool::builder()
         .name_prefix("tasks-pool-")
