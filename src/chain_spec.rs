@@ -34,11 +34,13 @@
 //! - Multiple other miscellaneous information.
 //!
 
-use crate::chain::chain_information::{
-    aura_config, babe_genesis_config, grandpa_genesis_config, BabeEpochInformation,
-    ChainInformation, ChainInformationConsensus, ChainInformationFinality,
+use crate::{
+    chain::chain_information::{
+        aura_config, babe_genesis_config, grandpa_genesis_config, BabeEpochInformation,
+        ChainInformation, ChainInformationConsensus, ChainInformationFinality,
+    },
+    executor, libp2p,
 };
-use crate::libp2p;
 
 use alloc::{
     borrow::ToOwned as _,
@@ -79,7 +81,12 @@ impl ChainSpec {
 
     /// Builds the [`ChainInformation`] corresponding to the genesis block contained in this chain
     /// spec.
-    pub fn as_chain_information(&self) -> Result<ChainInformation, FromGenesisStorageError> {
+    ///
+    /// In addition to the information, also returns the virtual machine of the runtime of the
+    /// genesis block.
+    pub fn as_chain_information(
+        &self,
+    ) -> Result<(ChainInformation, executor::host::HostVmPrototype), FromGenesisStorageError> {
         let genesis_storage = match self.genesis_storage() {
             GenesisStorage::Items(items) => items,
             GenesisStorage::TrieRootHash(_) => {
@@ -87,64 +94,79 @@ impl ChainSpec {
             }
         };
 
-        let consensus = {
-            let aura_genesis_config = aura_config::AuraConfiguration::from_storage(|k| {
+        let wasm_code = genesis_storage
+            .value(b":code")
+            .ok_or(FromGenesisStorageError::RuntimeNotFound)?;
+        let heap_pages =
+            executor::storage_heap_pages_to_value(genesis_storage.value(b":heappages").as_deref())
+                .map_err(FromGenesisStorageError::HeapPagesDecode)?;
+        let vm_prototype = executor::host::HostVmPrototype::new(executor::host::Config {
+            module: &wasm_code,
+            heap_pages,
+            exec_hint: executor::vm::ExecHint::Oneshot,
+            allow_unresolved_imports: true,
+        })
+        .map_err(FromGenesisStorageError::VmInitialization)?;
+
+        let (aura_genesis_config, vm_prototype) =
+            aura_config::AuraConfiguration::from_virtual_machine_prototype(vm_prototype, |k| {
                 genesis_storage.value(k).map(|v| v.to_owned())
             });
 
-            let babe_genesis_config =
-                babe_genesis_config::BabeGenesisConfiguration::from_genesis_storage(|k| {
-                    genesis_storage.value(k).map(|v| v.to_owned())
-                });
+        let (babe_genesis_config, vm_prototype) =
+            babe_genesis_config::BabeGenesisConfiguration::from_virtual_machine_prototype(
+                vm_prototype,
+                |k| genesis_storage.value(k).map(|v| v.to_owned()),
+            );
 
-            match (aura_genesis_config, babe_genesis_config) {
-                (Ok(aura_genesis_config), Err(err)) if err.is_function_not_found() => {
-                    ChainInformationConsensus::Aura {
-                        finalized_authorities_list: aura_genesis_config.authorities_list,
-                        slot_duration: aura_genesis_config.slot_duration,
-                    }
+        let consensus = match (aura_genesis_config, babe_genesis_config) {
+            (Ok(aura_genesis_config), Err(err)) if err.is_function_not_found() => {
+                ChainInformationConsensus::Aura {
+                    finalized_authorities_list: aura_genesis_config.authorities_list,
+                    slot_duration: aura_genesis_config.slot_duration,
                 }
-                (Err(err), Ok(babe_genesis_config)) if err.is_function_not_found() => {
-                    ChainInformationConsensus::Babe {
-                        slots_per_epoch: babe_genesis_config.slots_per_epoch,
-                        finalized_block_epoch_information: None,
-                        finalized_next_epoch_transition: BabeEpochInformation {
-                            epoch_index: 0,
-                            start_slot_number: None,
-                            authorities: babe_genesis_config.epoch0_information.authorities,
-                            randomness: babe_genesis_config.epoch0_information.randomness,
-                            c: babe_genesis_config.epoch0_configuration.c,
-                            allowed_slots: babe_genesis_config.epoch0_configuration.allowed_slots,
-                        },
-                    }
+            }
+            (Err(err), Ok(babe_genesis_config)) if err.is_function_not_found() => {
+                ChainInformationConsensus::Babe {
+                    slots_per_epoch: babe_genesis_config.slots_per_epoch,
+                    finalized_block_epoch_information: None,
+                    finalized_next_epoch_transition: BabeEpochInformation {
+                        epoch_index: 0,
+                        start_slot_number: None,
+                        authorities: babe_genesis_config.epoch0_information.authorities,
+                        randomness: babe_genesis_config.epoch0_information.randomness,
+                        c: babe_genesis_config.epoch0_configuration.c,
+                        allowed_slots: babe_genesis_config.epoch0_configuration.allowed_slots,
+                    },
                 }
-                (Err(err1), Err(err2))
-                    if err1.is_function_not_found() && err2.is_function_not_found() =>
-                {
-                    // TODO: seems a bit risky to automatically fall back to this?
-                    ChainInformationConsensus::AllAuthorized
-                }
-                (Err(error), _) => {
-                    // Note that Babe might have produced an error as well, which is intentionally
-                    // ignored here in order to not make the API too complicated.
-                    return Err(FromGenesisStorageError::AuraConfigLoad(error));
-                }
-                (_, Err(error)) => {
-                    return Err(FromGenesisStorageError::BabeConfigLoad(error));
-                }
-                (Ok(_), Ok(_)) => {
-                    return Err(FromGenesisStorageError::MultipleConsensusAlgorithms);
-                }
+            }
+            (Err(err1), Err(err2))
+                if err1.is_function_not_found() && err2.is_function_not_found() =>
+            {
+                // TODO: seems a bit risky to automatically fall back to this?
+                ChainInformationConsensus::AllAuthorized
+            }
+            (Err(error), _) => {
+                // Note that Babe might have produced an error as well, which is intentionally
+                // ignored here in order to not make the API too complicated.
+                return Err(FromGenesisStorageError::AuraConfigLoad(error));
+            }
+            (_, Err(error)) => {
+                return Err(FromGenesisStorageError::BabeConfigLoad(error));
+            }
+            (Ok(_), Ok(_)) => {
+                return Err(FromGenesisStorageError::MultipleConsensusAlgorithms);
             }
         };
 
-        let finality = {
-            let grandpa_genesis_config =
-                grandpa_genesis_config::GrandpaGenesisConfiguration::from_genesis_storage(|k| {
-                    genesis_storage.value(k).map(|v| v.to_owned())
-                });
+        let (finality, vm_prototype) = {
+            let (grandpa_genesis_config, vm_prototype) =
+                grandpa_genesis_config::GrandpaGenesisConfiguration::from_virtual_machine_prototype(
+                    vm_prototype,
+                    |k| genesis_storage.value(k).map(|v| v.to_owned()),
+                );
 
-            match grandpa_genesis_config {
+            let finality = match grandpa_genesis_config {
                 Ok(grandpa_genesis_config) => ChainInformationFinality::Grandpa {
                     after_finalized_block_authorities_set_id: 0,
                     finalized_scheduled_change: None,
@@ -152,14 +174,18 @@ impl ChainSpec {
                 },
                 Err(error) if error.is_function_not_found() => ChainInformationFinality::Outsourced,
                 Err(error) => return Err(FromGenesisStorageError::GrandpaConfigLoad(error)),
-            }
+            };
+
+            (finality, vm_prototype)
         };
 
-        Ok(ChainInformation {
+        let chain_info = ChainInformation {
             finalized_block_header: crate::calculate_genesis_block_header(self),
             consensus,
             finality,
-        })
+        };
+
+        Ok((chain_info, vm_prototype))
     }
 
     /// Returns the name of the chain. Meant to be displayed to the user.
@@ -437,12 +463,18 @@ enum ParseErrorInner {
 /// Error when building the chain information from the genesis storage.
 #[derive(Debug, derive_more::Display)]
 pub enum FromGenesisStorageError {
+    /// Runtime couldn't be found in the storage.
+    RuntimeNotFound,
+    /// Failed to decode heap pages from the storage.
+    HeapPagesDecode(executor::InvalidHeapPagesError),
+    /// Error when initializing the virtual machine.
+    VmInitialization(executor::host::NewErr),
     /// Error when retrieving the GrandPa configuration.
-    GrandpaConfigLoad(grandpa_genesis_config::FromGenesisStorageError),
+    GrandpaConfigLoad(grandpa_genesis_config::FromVmPrototypeError),
     /// Error when retrieving the Aura algorithm configuration.
-    AuraConfigLoad(aura_config::FromStorageError),
+    AuraConfigLoad(aura_config::FromVmPrototypeError),
     /// Error when retrieving the Babe algorithm configuration.
-    BabeConfigLoad(babe_genesis_config::FromGenesisStorageError),
+    BabeConfigLoad(babe_genesis_config::FromVmPrototypeError),
     /// Multiple consensus algorithms have been detected.
     MultipleConsensusAlgorithms,
     /// Chain specification doesn't contain the list of storage items.

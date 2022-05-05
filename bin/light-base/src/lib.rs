@@ -352,7 +352,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
             match (
                 chain_spec
                     .as_chain_information() // TODO: very expensive, don't always call?
-                    .map(chain::chain_information::ValidChainInformation::try_from),
+                    .map(|(ci, _)| chain::chain_information::ValidChainInformation::try_from(ci)), // TODO: don't just throw away the runtime
                 chain_spec.light_sync_state().map(|s| {
                     chain::chain_information::ValidChainInformation::try_from(
                         s.as_chain_information(),
