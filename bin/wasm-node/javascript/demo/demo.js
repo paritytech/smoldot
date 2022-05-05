@@ -31,6 +31,7 @@ const kusama = fs.readFileSync('../../kusama.json', 'utf8');
 const statemine = fs.readFileSync('../../kusama-statemine.json', 'utf8');
 const rococo = fs.readFileSync('../../rococo.json', 'utf8');
 const adz = fs.readFileSync('../../rococo-adz.json', 'utf8');
+const canvas = fs.readFileSync('../../rococo-canvas.json', 'utf8');
 
 const client = smoldot.start({
     maxLogLevel: 3,  // Can be increased for more verbosity
@@ -81,6 +82,7 @@ server.listen(9944, function () {
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fpolkadot');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Frococo');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fadz');
+    console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fcanvas');
     console.log('');
 });
 let wsServer = new websocket.server({
@@ -180,6 +182,22 @@ wsServer.on('request', function (request) {
 
             const para = await client.addChain({
                 chainSpec: adz,
+                jsonRpcCallback: (resp) => {
+                    connection.sendUTF(resp);
+                },
+                potentialRelayChains: [relay]
+            });
+
+            return { relay, para };
+        })();
+    } else if (request.resource == '/canvas') {
+        chain = (async () => {
+            const relay = await client.addChain({
+                chainSpec: rococo,
+            });
+
+            const para = await client.addChain({
+                chainSpec: canvas,
                 jsonRpcCallback: (resp) => {
                     connection.sendUTF(resp);
                 },
