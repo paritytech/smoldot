@@ -193,7 +193,7 @@ pub enum ChainInformationConsensus {
         ///
         /// If the finalized block belongs to epoch #0, which starts at block #1, then this must
         /// contain the information about the epoch #0, which can be found by calling
-        /// [`babe_genesis_config::BabeGenesisConfiguration::from_genesis_storage`].
+        /// [`babe_genesis_config::BabeGenesisConfiguration::from_virtual_machine_prototype`].
         ///
         /// Must be `None` if and only if the finalized block is block #0.
         ///
@@ -213,7 +213,7 @@ pub enum ChainInformationConsensus {
         ///
         /// If the finalized block is block #0, then this must contain the information about the
         /// epoch #0, which can be found by calling
-        /// [`babe_genesis_config::BabeGenesisConfiguration::from_genesis_storage`].
+        /// [`babe_genesis_config::BabeGenesisConfiguration::from_virtual_machine_prototype`].
         finalized_next_epoch_transition: BabeEpochInformation,
     },
 }
