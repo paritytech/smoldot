@@ -219,7 +219,11 @@ pub fn trie_node_info<'a, 'b>(
         } else {
             // The current node (as per `proof_iter`) exactly matches the requested key.
             return Ok(TrieNodeInfo {
-                storage_value: decoded_node_value.storage_value,
+                storage_value: match decoded_node_value.storage_value {
+                    proof_node_decode::StorageValue::Hashed(_) => todo!(), // TODO: /!\
+                    proof_node_decode::StorageValue::Unhashed(v) => Some(v),
+                    proof_node_decode::StorageValue::None => None,
+                },
                 children: Children::Multiple {
                     children_bitmap: decoded_node_value.children_bitmap(),
                 },

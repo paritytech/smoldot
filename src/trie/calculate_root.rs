@@ -66,7 +66,7 @@
 
 use super::{
     nibble::{bytes_to_nibbles, Nibble},
-    node_value, trie_structure,
+    node_value, trie_structure, TrieEntryVersion,
 };
 
 use alloc::vec::Vec;
@@ -308,6 +308,7 @@ impl CalcInner {
                             ty: node_value::NodeTy::Root { key: iter::empty() },
                             children: (0..16).map(|_| None),
                             stored_value: None::<Vec<u8>>,
+                            version: TrieEntryVersion::V1, // Version makes no difference for empty tries.
                         });
 
                         return RootMerkleValueCalculation::Finished {
@@ -387,6 +388,7 @@ impl CalcInner {
                             .map(|child| child.merkle_value.as_ref().unwrap())
                     }),
                     stored_value: None::<Vec<u8>>,
+                    version: TrieEntryVersion::V1, // Version has no influence on the output if `stored_value` is `None`.
                 });
 
                 current.user_data().merkle_value = Some(merkle_value);
@@ -451,7 +453,11 @@ impl StorageValue {
     }
 
     /// Indicates the storage value and advances the calculation.
-    pub fn inject(mut self, stored_value: Option<impl AsRef<[u8]>>) -> RootMerkleValueCalculation {
+    pub fn inject(
+        mut self,
+        version: TrieEntryVersion,
+        stored_value: Option<impl AsRef<[u8]>>,
+    ) -> RootMerkleValueCalculation {
         assert!(stored_value.is_some());
 
         let trie_structure = self.calculation.cache.structure.as_mut().unwrap();
@@ -476,6 +482,7 @@ impl StorageValue {
                     .map(|child| child.merkle_value.as_ref().unwrap())
             }),
             stored_value,
+            version,
         });
 
         current.user_data().merkle_value = Some(merkle_value);
@@ -489,9 +496,10 @@ impl StorageValue {
 
 #[cfg(test)]
 mod tests {
+    use crate::trie::TrieEntryVersion;
     use alloc::collections::BTreeMap;
 
-    fn calculate_root(trie: BTreeMap<Vec<u8>, Vec<u8>>) -> [u8; 32] {
+    fn calculate_root(version: TrieEntryVersion, trie: &BTreeMap<Vec<u8>, Vec<u8>>) -> [u8; 32] {
         let mut calculation = super::root_merkle_value(None);
 
         loop {
@@ -504,7 +512,7 @@ mod tests {
                 }
                 super::RootMerkleValueCalculation::StorageValue(value) => {
                     let key = value.key().collect::<Vec<u8>>();
-                    calculation = value.inject(trie.get(&key));
+                    calculation = value.inject(version, trie.get(&key));
                 }
             }
         }
@@ -520,14 +528,22 @@ mod tests {
             208, 109, 154, 182, 168, 182, 65, 165, 222, 124, 63, 236, 200, 81,
         ];
 
-        assert_eq!(calculate_root(trie), &expected[..]);
+        assert_eq!(calculate_root(TrieEntryVersion::V0, &trie), &expected[..]);
+        assert_eq!(calculate_root(TrieEntryVersion::V1, &trie), &expected[..]);
     }
 
     #[test]
     fn trie_root_empty() {
         let trie = BTreeMap::new();
         let expected = blake2_rfc::blake2b::blake2b(32, &[], &[0x0]);
-        assert_eq!(calculate_root(trie), expected.as_bytes());
+        assert_eq!(
+            calculate_root(TrieEntryVersion::V0, &trie),
+            expected.as_bytes()
+        );
+        assert_eq!(
+            calculate_root(TrieEntryVersion::V1, &trie),
+            expected.as_bytes()
+        );
     }
 
     #[test]
@@ -546,7 +562,14 @@ mod tests {
             ],
         );
 
-        assert_eq!(calculate_root(trie), expected.as_bytes());
+        assert_eq!(
+            calculate_root(TrieEntryVersion::V0, &trie),
+            expected.as_bytes()
+        );
+        assert_eq!(
+            calculate_root(TrieEntryVersion::V1, &trie),
+            expected.as_bytes()
+        );
     }
 
     #[test]
@@ -573,6 +596,13 @@ mod tests {
         ex.push(0xfe); // value data
 
         let expected = blake2_rfc::blake2b::blake2b(32, &[], &ex);
-        assert_eq!(calculate_root(trie), expected.as_bytes());
+        assert_eq!(
+            calculate_root(TrieEntryVersion::V0, &trie),
+            expected.as_bytes()
+        );
+        assert_eq!(
+            calculate_root(TrieEntryVersion::V1, &trie),
+            expected.as_bytes()
+        );
     }
 }

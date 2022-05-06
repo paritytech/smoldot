@@ -116,7 +116,8 @@ pub fn hash_from_scale_encoded_header_vectored(
 /// Returns the value appropriate for [`Header::extrinsics_root`]. Must be passed the list of
 /// transactions in that block.
 pub fn extrinsics_root(transactions: &[impl AsRef<[u8]>]) -> [u8; 32] {
-    trie::ordered_root(transactions)
+    // The extrinsics root is always calculated with V0 of the trie.
+    trie::ordered_root(trie::TrieEntryVersion::V0, transactions)
 }
 
 /// Attempt to decode the given SCALE-encoded header.

@@ -348,10 +348,11 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
         // Load the information about the chain from the chain spec. If a light sync state (also
         // known as a checkpoint) is present in the chain spec, it is possible to start syncing at
         // the finalized block it describes.
-        let chain_information = {
+        // TODO: clean up that block
+        let (chain_information, genesis_block_header) = {
             match (
                 chain_spec
-                    .as_chain_information() // TODO: very expensive, don't always call?
+                    .as_chain_information()
                     .map(|(ci, _)| chain::chain_information::ValidChainInformation::try_from(ci)), // TODO: don't just throw away the runtime
                 chain_spec.light_sync_state().map(|s| {
                     chain::chain_information::ValidChainInformation::try_from(
@@ -360,7 +361,22 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                 }),
                 finalized_serialize::decode_chain(config.database_content),
             ) {
-                (_, _, Ok((ci, _))) => ci,
+                (Ok(Ok(genesis_ci)), _, Ok((ci, _))) => {
+                    let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
+                    (ci, genesis_header.into())
+                }
+
+                (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), _, Ok((ci, _))) => {
+                    let genesis_header = header::Header {
+                        parent_hash: [0; 32],
+                        number: 0,
+                        state_root: *chain_spec.genesis_storage().into_trie_root_hash().unwrap(),
+                        extrinsics_root: smoldot::trie::empty_trie_merkle_value(),
+                        digest: header::DigestRef::empty().into(),
+                    };
+
+                    (ci, genesis_header)
+                }
 
                 (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None, _) => {
                     // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
@@ -376,7 +392,17 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                     Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
                     Some(Ok(ci)),
                     _,
-                ) => ci,
+                ) => {
+                    let genesis_header = header::Header {
+                        parent_hash: [0; 32],
+                        number: 0,
+                        state_root: *chain_spec.genesis_storage().into_trie_root_hash().unwrap(),
+                        extrinsics_root: smoldot::trie::empty_trie_merkle_value(),
+                        digest: header::DigestRef::empty().into(),
+                    };
+
+                    (ci, genesis_header)
+                }
 
                 (Err(err), _, _) => {
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
@@ -399,15 +425,18 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                     }));
                 }
 
-                (_, Some(Ok(ci)), _) => ci,
+                (Ok(Ok(genesis_ci)), Some(Ok(ci)), _) => {
+                    let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
+                    (ci, genesis_header.into())
+                }
 
-                (Ok(Ok(ci)), None, _) => ci,
+                (Ok(Ok(ci)), None, _) => {
+                    let genesis_header =
+                        header::Header::from(ci.as_ref().finalized_block_header.clone());
+                    (ci, genesis_header)
+                }
             }
         };
-
-        // Even with a checkpoint, knowing the genesis block header is necessary for various
-        // reasons.
-        let genesis_block_header = smoldot::calculate_genesis_block_header(&chain_spec);
 
         // If the chain specification specifies a parachain, find the corresponding relay chain
         // in the list of potential relay chains passed by the user.

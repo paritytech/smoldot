@@ -39,7 +39,7 @@ use crate::{
         aura_config, babe_genesis_config, grandpa_genesis_config, BabeEpochInformation,
         ChainInformation, ChainInformationConsensus, ChainInformationFinality,
     },
-    executor, libp2p,
+    executor, header, libp2p, trie,
 };
 
 use alloc::{
@@ -179,8 +179,59 @@ impl ChainSpec {
             (finality, vm_prototype)
         };
 
+        let (state_version, vm_prototype) = {
+            match executor::core_version(vm_prototype) {
+                (Ok(runtime_spec), vm_prototype) => {
+                    let state_version = match runtime_spec.decode().state_version {
+                        Some(0) | None => trie::TrieEntryVersion::V0,
+                        Some(1) => trie::TrieEntryVersion::V1,
+                        Some(_) => return Err(FromGenesisStorageError::UnknownStateVersion),
+                    };
+
+                    (state_version, vm_prototype)
+                }
+                (Err(err), _) => return Err(FromGenesisStorageError::CoreVersionLoad(err)),
+            }
+        };
+
         let chain_info = ChainInformation {
-            finalized_block_header: crate::calculate_genesis_block_header(self),
+            finalized_block_header: {
+                let state_root = match self.genesis_storage() {
+                    GenesisStorage::TrieRootHash(hash) => *hash,
+                    GenesisStorage::Items(genesis_storage) => {
+                        let mut calculation = trie::calculate_root::root_merkle_value(None);
+
+                        loop {
+                            match calculation {
+                                trie::calculate_root::RootMerkleValueCalculation::Finished {
+                                    hash,
+                                    ..
+                                } => break hash,
+                                trie::calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
+                                    calculation = keys.inject(
+                                        genesis_storage.iter().map(|(k, _)| k.iter().copied()),
+                                    );
+                                }
+                                trie::calculate_root::RootMerkleValueCalculation::StorageValue(
+                                    val,
+                                ) => {
+                                    let key: alloc::vec::Vec<u8> = val.key().collect();
+                                    let value = genesis_storage.value(&key[..]);
+                                    calculation = val.inject(state_version, value);
+                                }
+                            }
+                        }
+                    }
+                };
+
+                header::Header {
+                    parent_hash: [0; 32],
+                    number: 0,
+                    state_root,
+                    extrinsics_root: trie::empty_trie_merkle_value(),
+                    digest: header::DigestRef::empty().into(),
+                }
+            },
             consensus,
             finality,
         };
@@ -353,6 +404,14 @@ impl<'a> GenesisStorage<'a> {
             GenesisStorage::TrieRootHash(_) => None,
         }
     }
+
+    /// Returns `Some` for [`GenesisStorage::TrieRootHash`], and `None` otherwise.
+    pub fn into_trie_root_hash(self) -> Option<&'a [u8; 32]> {
+        match self {
+            GenesisStorage::Items(_) => None,
+            GenesisStorage::TrieRootHash(hash) => Some(hash),
+        }
+    }
 }
 
 /// See [`GenesisStorage`].
@@ -475,6 +534,10 @@ pub enum FromGenesisStorageError {
     AuraConfigLoad(aura_config::FromVmPrototypeError),
     /// Error when retrieving the Babe algorithm configuration.
     BabeConfigLoad(babe_genesis_config::FromVmPrototypeError),
+    /// Failed to retrieve the core version of the runtime.
+    CoreVersionLoad(executor::CoreVersionError),
+    /// State version in runtime specification is not supported.
+    UnknownStateVersion,
     /// Multiple consensus algorithms have been detected.
     MultipleConsensusAlgorithms,
     /// Chain specification doesn't contain the list of storage items.
