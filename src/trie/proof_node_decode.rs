@@ -41,7 +41,7 @@ pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
         0b10 => (true, None, 6),
         0b01 => (false, Some(false), 6),
         0b11 => (true, Some(false), 6),
-        _ => unreachable!()
+        _ => unreachable!(),
     };
 
     // Length of the partial key, in nibbles.
