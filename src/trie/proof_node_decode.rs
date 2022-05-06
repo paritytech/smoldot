@@ -186,7 +186,7 @@ impl<'a> Decoded<'a> {
     }
 }
 
-/// See [`Decoded::StorageValue`].
+/// See [`Decoded::storage_value`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum StorageValue<'a> {
     /// Storage value of the item is present in the node value.
