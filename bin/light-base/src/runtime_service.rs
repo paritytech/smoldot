@@ -822,7 +822,11 @@ impl<'a> RuntimeCallLock<'a> {
             })
             .map_err(RuntimeCallError::StorageRetrieval)?;
 
-            if node_info.storage_value.is_some() {
+            if matches!(
+                node_info.storage_value,
+                proof_verify::StorageValue::Known(_)
+                    | proof_verify::StorageValue::HashKnownValueMissing(_)
+            ) {
                 assert_eq!(key.len() % 2, 0);
                 output.push(trie::nibbles_to_bytes_extend(key.iter().copied()).collect::<Vec<_>>());
             }
