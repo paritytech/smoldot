@@ -28,7 +28,7 @@
 //!
 //! ```
 //! use std::collections::BTreeMap;
-//! use smoldot::trie::calculate_root;
+//! use smoldot::trie::{TrieEntryVersion, calculate_root};
 //!
 //! // In this example, the storage consists in a binary tree map.
 //! let mut storage = BTreeMap::<Vec<u8>, Vec<u8>>::new();
@@ -44,7 +44,7 @@
 //!             }
 //!             calculate_root::RootMerkleValueCalculation::StorageValue(value_request) => {
 //!                 let key = value_request.key().collect::<Vec<u8>>();
-//!                 calculation = value_request.inject(storage.get(&key));
+//!                 calculation = value_request.inject(TrieEntryVersion::V1, storage.get(&key));
 //!             }
 //!         }
 //!     }

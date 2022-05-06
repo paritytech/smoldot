@@ -23,7 +23,7 @@
 //! # Example
 //!
 //! ```
-//! use smoldot::trie::{Nibble, node_value};
+//! use smoldot::trie::{Nibble, TrieEntryVersion, node_value};
 //!
 //! let merkle_value = {
 //!     // The example node whose value we calculate has three children.
@@ -55,6 +55,7 @@
 //!         },
 //!         children: children.iter().map(|opt| opt.as_ref()),
 //!         stored_value: Some(b"hello world"),
+//!         version: TrieEntryVersion::V1,
 //!     })
 //! };
 //!
