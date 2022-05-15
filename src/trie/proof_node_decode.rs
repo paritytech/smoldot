@@ -26,6 +26,7 @@ pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
         return Err(Error::Empty);
     }
 
+    // See https://spec.polkadot.network/#defn-node-header
     let (has_children, storage_value_hashed, pk_len_first_byte_bits) = match node_value[0] >> 6 {
         0b00 => {
             if (node_value[0] >> 5) == 0b001 {

@@ -158,6 +158,7 @@ where
     // Push the header of the node to `merkle_value_sink`.
     {
         // The most significant bits of the header contain the type of node.
+        // See https://spec.polkadot.network/#defn-node-header
         let (header_msb, header_pkll_num_bytes): (u8, u8) =
             match (stored_value_to_be_hashed, has_children) {
                 (None, false) => {
