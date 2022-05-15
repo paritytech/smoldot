@@ -216,19 +216,16 @@ where
         if let Some(hash_stored_value) = stored_value_to_be_hashed {
             let stored_value = config.stored_value.unwrap();
 
-            // Doing something like `merkle_value_sink.update(stored_value.encode());` would be
-            // quite expensive because we would duplicate the storage value. Instead, we do the
-            // encoding manually by pushing the length then the value.
-            if !hash_stored_value {
-                merkle_value_sink
-                    .update(util::encode_scale_compact_usize(stored_value.as_ref().len()).as_ref());
-            }
-
             if hash_stored_value {
                 merkle_value_sink.update(
                     blake2_rfc::blake2b::blake2b(32, &[], stored_value.as_ref()).as_bytes(),
                 );
             } else {
+                // Doing something like `merkle_value_sink.update(stored_value.encode());` would be
+                // quite expensive because we would duplicate the storage value. Instead, we do the
+                // encoding manually by pushing the length then the value.
+                merkle_value_sink
+                    .update(util::encode_scale_compact_usize(stored_value.as_ref().len()).as_ref());
                 merkle_value_sink.update(stored_value.as_ref());
             }
         }
@@ -251,18 +248,15 @@ where
     if let Some(hash_stored_value) = stored_value_to_be_hashed {
         let stored_value = config.stored_value.unwrap();
 
-        // Doing something like `merkle_value_sink.update(stored_value.encode());` would be
-        // quite expensive because we would duplicate the storage value. Instead, we do the
-        // encoding manually by pushing the length then the value.
-        if !hash_stored_value {
-            merkle_value_sink
-                .update(util::encode_scale_compact_usize(stored_value.as_ref().len()).as_ref());
-        }
-
         if hash_stored_value {
             merkle_value_sink
                 .update(blake2_rfc::blake2b::blake2b(32, &[], stored_value.as_ref()).as_bytes());
         } else {
+            // Doing something like `merkle_value_sink.update(stored_value.encode());` would be
+            // quite expensive because we would duplicate the storage value. Instead, we do the
+            // encoding manually by pushing the length then the value.
+            merkle_value_sink
+                .update(util::encode_scale_compact_usize(stored_value.as_ref().len()).as_ref());
             merkle_value_sink.update(stored_value.as_ref());
         }
     }
