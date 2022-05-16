@@ -19,7 +19,7 @@
 //!
 //! Each block of a chain is composed of two parts: its header, and its body.
 //!
-//! The header of a block consists in a list of hardcoded fields such as the parent block's hash
+//! The header of a block consists in a list of hard coded fields such as the parent block's hash
 //! or the block number, and a variable-sized list of log items.
 //!
 //! The standard format of a block header is the
@@ -116,7 +116,8 @@ pub fn hash_from_scale_encoded_header_vectored(
 /// Returns the value appropriate for [`Header::extrinsics_root`]. Must be passed the list of
 /// transactions in that block.
 pub fn extrinsics_root(transactions: &[impl AsRef<[u8]>]) -> [u8; 32] {
-    trie::ordered_root(transactions)
+    // The extrinsics root is always calculated with V0 of the trie.
+    trie::ordered_root(trie::TrieEntryVersion::V0, transactions)
 }
 
 /// Attempt to decode the given SCALE-encoded header.
@@ -227,9 +228,9 @@ pub struct HeaderRef<'a> {
     pub parent_hash: &'a [u8; 32],
     /// Block number stored in the header.
     pub number: u64,
-    /// The state trie merkle root
+    /// The state trie Merkle root
     pub state_root: &'a [u8; 32],
-    /// The merkle root of the extrinsics.
+    /// The Merkle root of the extrinsics.
     ///
     /// You can use the [`extrinsics_root`] function to compute this value.
     pub extrinsics_root: &'a [u8; 32],
@@ -291,9 +292,9 @@ pub struct Header {
     pub parent_hash: [u8; 32],
     /// Block number stored in the header.
     pub number: u64,
-    /// The state trie merkle root
+    /// The state trie Merkle root
     pub state_root: [u8; 32],
-    /// The merkle root of the extrinsics.
+    /// The Merkle root of the extrinsics.
     ///
     /// You can use the [`extrinsics_root`] function to compute this value.
     pub extrinsics_root: [u8; 32],
@@ -775,7 +776,7 @@ impl<'a> From<&'a Digest> for DigestRef<'a> {
     }
 }
 
-/// Seal poped using [`DigestRef::pop_seal`].
+/// Seal popped using [`DigestRef::pop_seal`].
 pub enum Seal<'a> {
     Aura(&'a [u8; 64]),
     Babe(&'a [u8; 64]),

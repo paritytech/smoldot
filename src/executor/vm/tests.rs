@@ -62,3 +62,17 @@ fn basic_seems_to_work() {
         }
     }
 }
+
+#[test]
+fn out_of_memory_access() {
+    let input = [
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x03, 0x01, 0x00, 0x00, 0x0b, 0x06,
+        0x01, 0x00, 0x41, 0x03, 0x0b, 0x00,
+    ];
+
+    let module1 = super::Module::new(input, super::ExecHint::CompileAheadOfTime).unwrap();
+    assert!(super::VirtualMachinePrototype::new(&module1, |_, _, _| Ok(0)).is_err());
+
+    let module2 = super::Module::new(input, super::ExecHint::Untrusted).unwrap();
+    assert!(super::VirtualMachinePrototype::new(&module2, |_, _, _| Ok(0)).is_err());
+}

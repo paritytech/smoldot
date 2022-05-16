@@ -27,7 +27,7 @@ jobs:
   test-64bits:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.59
+      image: rust:1.60
     steps:
     - run: apt-get update && apt install -y cmake # For the `prost-build` library
     - uses: actions/checkout@v3
@@ -37,7 +37,7 @@ jobs:
   test-32bits:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.59
+      image: rust:1.60
     steps:
     - run: apt-get update && apt install -y libc6-dev-i386 && apt install -y cmake # For the `prost-build` library
     - uses: actions/checkout@v3
@@ -48,12 +48,12 @@ jobs:
   wasm-node-check:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.59
+      image: rust:1.60
     steps:
     - run: apt-get update && apt install -y binaryen && apt install -y cmake # For `wasm-opt` and the `prost-build` library
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
-    - uses: actions/setup-node@v3.0.0
+    - uses: actions/setup-node@v3.1.1
       with:
         node-version: '14'
     - run: cd bin/wasm-node/javascript && RUSTFLAGS=-Dwarnings npm install-ci-test
@@ -61,14 +61,14 @@ jobs:
   wasm-node-size-diff:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.59
+      image: rust:1.60
     steps:
     - run: apt-get update && apt install -y cmake # For the `prost-build` library
     - uses: actions/checkout@v3
       with:
         fetch-depth: 0  # Necessary to fetch pull request base below
     - uses: Swatinem/rust-cache@v1
-    - uses: actions/setup-node@v3.0.0
+    - uses: actions/setup-node@v3.1.1
       with:
         node-version: '14'
     - uses: baptiste0928/cargo-install@v1  # This action ensures that the twiggy compilation is cached.
@@ -88,7 +88,7 @@ jobs:
         mkdir -p ./pr
         echo ${{ github.event.pull_request.number }} > ./pr/number
         cp ./twiggy-diff ./pr
-    - uses: actions/upload-artifact@v2
+    - uses: actions/upload-artifact@v3
       with:
         name: pr
         path: pr/
@@ -96,7 +96,7 @@ jobs:
   check-features:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.59
+      image: rust:1.60
     steps:
     - run: apt-get update && apt install -y cmake # For the `prost-build` library
     - uses: actions/checkout@v3
@@ -109,7 +109,7 @@ jobs:
   check-rustdoc-links:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.59
+      image: rust:1.60
     steps:
     - run: apt-get update && apt install -y cmake # For the `prost-build` library
     - uses: actions/checkout@v3
@@ -161,6 +161,16 @@ jobs:
         command: check --config .github/cargo-deny.toml ${{ matrix.checks }}
         arguments: --workspace --all-features
 
+  cargo-spellcheck:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - uses: baptiste0928/cargo-install@v1  # This action ensures that the compilation is cached.
+      with:
+        crate: cargo-spellcheck
+        version: 0.11.2
+    - run: cargo spellcheck check
+
   wasm-node-versions-match:
     runs-on: ubuntu-latest
     steps:
@@ -182,7 +192,7 @@ jobs:
   all-ci:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [test-64bits, test-32bits, wasm-node-check, wasm-node-size-diff, check-features, check-rustdoc-links, fmt, clippy, cargo-deny, wasm-node-versions-match]
+    needs: [test-64bits, test-32bits, wasm-node-check, wasm-node-size-diff, check-features, check-rustdoc-links, fmt, clippy, cargo-deny, cargo-spellcheck, wasm-node-versions-match]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success

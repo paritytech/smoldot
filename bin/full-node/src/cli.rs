@@ -49,7 +49,7 @@ pub enum CliOptions {
     Run(CliOptionsRun),
     /// Connects to an IP address and prints some information about the node.
     NodeInfo(CliOptionsNodeInfo),
-    /// Computes the 64bits blake2 hash of a string payload and prints the hexadecimal-encoded hash.
+    /// Computes the 64 bits BLAKE2 hash of a string payload and prints the hexadecimal-encoded hash.
     #[structopt(name = "blake2-64bits-hash")]
     Blake264BitsHash(CliOptionsBlake264Hash),
 }
@@ -66,13 +66,13 @@ pub struct CliOptionsNodeInfo {
 
 #[derive(Debug, clap::StructOpt)]
 pub struct CliOptionsRun {
-    /// Chain to connect to ("polkadot", "kusama", "westend", or a file path).
+    /// Chain to connect to ("Polkadot", "Kusama", "Westend", or a file path).
     #[structopt(long, default_value = "polkadot")]
     pub chain: CliChain,
     /// Output to stdout: auto, none, informant, logs, logs-json.
     #[structopt(long, default_value = "auto")]
     pub output: Output,
-    /// Log filter. Example: foo=trace
+    /// Log filter. Example: `foo=trace`
     #[structopt(long)]
     pub log: Vec<tracing_subscriber::filter::Directive>,
     /// Coloring: auto, always, never
@@ -81,10 +81,10 @@ pub struct CliOptionsRun {
     /// Ed25519 private key of network identity (as a seed phrase).
     #[structopt(long, parse(try_from_str = decode_ed25519_private_key))]
     pub libp2p_key: Option<[u8; 32]>,
-    /// Multiaddr to listen on.
+    /// `Multiaddr` to listen on.
     #[structopt(long, parse(try_from_str = decode_multiaddr))]
     pub listen_addr: Vec<Multiaddr>,
-    /// Multiaddr of an additional node to try to connect to on startup.
+    /// `Multiaddr` of an additional node to try to connect to on startup.
     #[structopt(long, parse(try_from_str = parse_bootnode))]
     pub additional_bootnode: Vec<Bootnode>,
     /// Bind point of the JSON-RPC server ("none" or <ip>:<port>).

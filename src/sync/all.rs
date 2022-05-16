@@ -28,7 +28,7 @@
 //! the chain.
 //!
 //! A *request* represents a query for information from a source. Once the request has finished,
-//! call one of the methods of the [`AllSync`] in order to notify the state machine of the oucome.
+//! call one of the methods of the [`AllSync`] in order to notify the state machine of the outcome.
 
 use crate::{
     chain::{blocks_tree, chain_information},
@@ -1229,24 +1229,31 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 (request_user_data.user_data.unwrap(), outcome)
             }
             (AllSyncInner::Optimistic { inner }, RequestMapping::Optimistic(inner_request_id)) => {
-                let (request_user_data, outcome) = inner.finish_request(
-                    inner_request_id,
-                    blocks
-                        .map_err(|()| optimistic::RequestFail::BlocksUnavailable)
-                        .map(|iter| {
-                            iter.map(|block| optimistic::RequestSuccessBlock {
-                                scale_encoded_header: block.scale_encoded_header,
-                                scale_encoded_justifications: block.scale_encoded_justifications,
-                                scale_encoded_extrinsics: block.scale_encoded_extrinsics,
-                                user_data: block.user_data,
-                            })
+                let (request_user_data, outcome) = if let Ok(blocks) = blocks {
+                    let (request_user_data, outcome) = inner.finish_request_success(
+                        inner_request_id,
+                        blocks.map(|block| optimistic::RequestSuccessBlock {
+                            scale_encoded_header: block.scale_encoded_header,
+                            scale_encoded_justifications: block.scale_encoded_justifications,
+                            scale_encoded_extrinsics: block.scale_encoded_extrinsics,
+                            user_data: block.user_data,
                         }),
-                );
+                    );
 
-                let outcome = match outcome {
-                    optimistic::FinishRequestOutcome::Obsolete => ResponseOutcome::Outdated,
-                    optimistic::FinishRequestOutcome::Queued => ResponseOutcome::Queued,
-                    optimistic::FinishRequestOutcome::SourcePunished(_) => ResponseOutcome::Queued, // TODO: what to do here?
+                    match outcome {
+                        optimistic::FinishRequestOutcome::Obsolete => {
+                            (request_user_data, ResponseOutcome::Outdated)
+                        }
+                        optimistic::FinishRequestOutcome::Queued => {
+                            (request_user_data, ResponseOutcome::Queued)
+                        }
+                    }
+                } else {
+                    // TODO: `ResponseOutcome::Queued` is a hack
+                    (
+                        inner.finish_request_failed(inner_request_id),
+                        ResponseOutcome::Queued,
+                    )
                 };
 
                 debug_assert_eq!(request_user_data.outer_request_id, request_id);
@@ -1743,7 +1750,7 @@ pub struct BlockFull {
     /// Changes to the storage made by this block compared to its parent.
     pub storage_top_trie_changes: storage_diff::StorageDiff,
 
-    /// List of changes to the offchain storage that this block performs.
+    /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::StorageDiff,
 }
 

@@ -1175,7 +1175,7 @@ async fn validate_transaction<TPlat: Platform>(
     }
 }
 
-/// Utility. Calculates the blake2 hash of the given bytes.
+/// Utility. Calculates the BLAKE2 hash of the given bytes.
 fn blake2_hash(bytes: &[u8]) -> [u8; 32] {
     <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], bytes).as_bytes()).unwrap()
 }

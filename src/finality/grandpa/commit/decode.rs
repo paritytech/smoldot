@@ -57,7 +57,7 @@ pub struct CompactCommitRef<'a> {
     // TODO: don't use Vec
     pub precommits: Vec<UnsignedPrecommitRef<'a>>,
 
-    /// List of ed25519 signatures and public keys.
+    /// List of Ed25519 signatures and public keys.
     // TODO: refactor
     // TODO: don't use Vec
     pub auth_data: Vec<(&'a [u8; 64], &'a [u8; 32])>,

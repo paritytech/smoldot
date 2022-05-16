@@ -688,7 +688,7 @@ pub struct FinalizedBlockRuntime {
 pub enum Notification {
     /// A non-finalized block has been finalized.
     Finalized {
-        /// Blake2 hash of the block that has been finalized.
+        /// BLAKE2 hash of the block that has been finalized.
         ///
         /// A block with this hash is guaranteed to have earlier been reported in a
         /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
@@ -726,7 +726,7 @@ pub struct BlockNotification {
     /// SCALE-encoded header of the block.
     pub scale_encoded_header: Vec<u8>,
 
-    /// Blake2 hash of the header of the parent of this block.
+    /// BLAKE2 hash of the header of the parent of this block.
     ///
     ///
     /// A block with this hash is guaranteed to have earlier been reported in a

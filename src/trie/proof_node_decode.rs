@@ -19,19 +19,37 @@ use super::nibble;
 use core::{fmt, iter, slice};
 
 /// Decodes a node value found in a proof into its components.
+///
+/// This can decode nodes no matter their version.
 pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
     if node_value.is_empty() {
         return Err(Error::Empty);
     }
 
-    let has_children = (node_value[0] & 0x80) != 0;
-    let has_storage_value = (node_value[0] & 0x40) != 0;
+    // See https://spec.polkadot.network/#defn-node-header
+    let (has_children, storage_value_hashed, pk_len_first_byte_bits) = match node_value[0] >> 6 {
+        0b00 => {
+            if (node_value[0] >> 5) == 0b001 {
+                (false, Some(true), 5)
+            } else if (node_value[0] >> 4) == 0b0001 {
+                (true, Some(true), 4)
+            } else if node_value[0] == 0 {
+                (false, None, 6)
+            } else {
+                return Err(Error::InvalidHeaderBits);
+            }
+        }
+        0b10 => (true, None, 6),
+        0b01 => (false, Some(false), 6),
+        0b11 => (true, Some(false), 6),
+        _ => unreachable!(),
+    };
 
     // Length of the partial key, in nibbles.
     let pk_len = {
-        let mut accumulator = usize::from(node_value[0] & 0b11_1111);
+        let mut accumulator = usize::from(node_value[0] & ((1 << pk_len_first_byte_bits) - 1));
         node_value = &node_value[1..];
-        let mut continue_iter = accumulator == 63;
+        let mut continue_iter = accumulator == ((1 << pk_len_first_byte_bits) - 1);
         while continue_iter {
             if node_value.is_empty() {
                 return Err(Error::PartialKeyLenTooShort);
@@ -79,19 +97,28 @@ pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
         0
     };
 
-    let storage_value = if has_storage_value {
-        // Now at the value that interests us.
-        let (node_value_update, len) = crate::util::nom_scale_compact_usize(node_value)
-            .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::StorageValueLenDecode)?;
-        node_value = node_value_update;
-        if node_value.len() < len {
-            return Err(Error::StorageValueTooShort);
+    // Now at the value that interests us.
+    let storage_value = match storage_value_hashed {
+        Some(false) => {
+            let (node_value_update, len) = crate::util::nom_scale_compact_usize(node_value)
+                .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| Error::StorageValueLenDecode)?;
+            node_value = node_value_update;
+            if node_value.len() < len {
+                return Err(Error::StorageValueTooShort);
+            }
+            let storage_value = &node_value[..len];
+            node_value = &node_value[len..];
+            StorageValue::Unhashed(storage_value)
         }
-        let storage_value = &node_value[..len];
-        node_value = &node_value[len..];
-        Some(storage_value)
-    } else {
-        None
+        Some(true) => {
+            if node_value.len() < 32 {
+                return Err(Error::StorageValueTooShort);
+            }
+            let storage_value_hash = <&[u8; 32]>::try_from(&node_value[..32]).unwrap();
+            node_value = &node_value[32..];
+            StorageValue::Hashed(storage_value_hash)
+        }
+        None => StorageValue::None,
     };
 
     let mut children = [None; 16];
@@ -136,14 +163,14 @@ pub struct Decoded<'a> {
     /// can be:
     ///
     /// - Of length 32, in which case the slice is the hash of the node value of the child (also
-    ///   known as the merkle value).
+    ///   known as the Merkle value).
     /// - Empty when decoding a compact trie proof.
     /// - Of length inferior to 32, in which case the slice is directly the node value.
     ///
     pub children: [Option<&'a [u8]>; 16],
 
-    /// Storage value of this node, or `None` if there is no storage value.
-    pub storage_value: Option<&'a [u8]>,
+    /// Storage value of this node.
+    pub storage_value: StorageValue<'a>,
 }
 
 impl<'a> Decoded<'a> {
@@ -158,6 +185,17 @@ impl<'a> Decoded<'a> {
         }
         out
     }
+}
+
+/// See [`Decoded::storage_value`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum StorageValue<'a> {
+    /// Storage value of the item is present in the node value.
+    Unhashed(&'a [u8]),
+    /// Blake2 hash of the storage value of the item is present in the node value.
+    Hashed(&'a [u8; 32]),
+    /// Item doesn't have any storage value.
+    None,
 }
 
 /// Iterator to the nibbles of the partial key. See [`Decoded::partial_key`].
@@ -210,6 +248,8 @@ impl<'a> fmt::Debug for PartialKey<'a> {
 pub enum Error {
     /// Node value is empty.
     Empty,
+    /// Bits in the header have an invalid format.
+    InvalidHeaderBits,
     /// Node value ends while parsing partial key length.
     PartialKeyLenTooShort,
     /// Length of partial key is too large to be reasonable.
@@ -253,7 +293,10 @@ mod tests {
                 nibble::Nibble::try_from(0x3).unwrap()
             ]
         );
-        assert_eq!(decoded.storage_value, Some(&[][..]));
+        assert_eq!(
+            decoded.storage_value,
+            super::StorageValue::Unhashed(&[][..])
+        );
 
         assert_eq!(decoded.children.iter().filter(|c| c.is_some()).count(), 2);
         assert_eq!(

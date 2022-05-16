@@ -408,6 +408,8 @@ export function start(options?: ClientOptions): Client {
       globalThis.clearTimeout(livenessTimeout);
     livenessTimeout = globalThis.setTimeout(() => {
       livenessTimeout = null;
+      if (workerError)
+        return; // The unresponsiveness is due to a crash. No need to print more warnings.
       console.warn(
         "Smoldot appears unresponsive" +
         (workerCurrentTask.name ? (" while executing task `" + workerCurrentTask.name + "`") : "") +

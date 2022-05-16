@@ -91,7 +91,7 @@ pub fn decode_storage_proof_response(
 /// Error potentially returned by [`decode_storage_proof_response`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum DecodeStorageProofResponseError {
-    /// Error while decoding the protobuf encoding.
+    /// Error while decoding the Protobuf encoding.
     ProtobufDecode(ProtobufDecodeError),
     /// Response isn't a response to a storage proof request.
     BadResponseTy,

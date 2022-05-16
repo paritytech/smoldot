@@ -66,7 +66,7 @@ impl Module {
 pub struct JitPrototype {
     store: wasmtime::Store<()>,
 
-    /// Instanciated Wasm VM.
+    /// Instantiated Wasm VM.
     instance: wasmtime::Instance,
 
     /// Shared between the "outside" and the external functions. See [`Shared`].
@@ -97,28 +97,21 @@ impl JitPrototype {
             for import in module.inner.imports() {
                 match import.ty() {
                     wasmtime::ExternType::Func(f) => {
-                        let name = match import.name() {
-                            Some(name) => name,
+                        let function_index = match symbols(
+                            import.module(),
+                            import.name(),
+                            &TryFrom::try_from(&f).unwrap(),
+                        )
+                        .ok()
+                        {
+                            Some(idx) => idx,
                             None => {
-                                return Err(NewErr::ModuleError(ModuleError(format!(
-                                    "unresolved unnamed import in module `{}`",
-                                    import.module()
-                                ))))
+                                return Err(NewErr::UnresolvedFunctionImport {
+                                    module_name: import.module().to_owned(),
+                                    function: import.name().to_owned(),
+                                })
                             }
                         };
-
-                        let function_index =
-                            match symbols(import.module(), name, &TryFrom::try_from(&f).unwrap())
-                                .ok()
-                            {
-                                Some(idx) => idx,
-                                None => {
-                                    return Err(NewErr::UnresolvedFunctionImport {
-                                        module_name: import.module().to_owned(),
-                                        function: name.to_owned(),
-                                    })
-                                }
-                            };
 
                         let shared = shared.clone();
 
@@ -208,16 +201,13 @@ impl JitPrototype {
                             },
                         )));
                     }
-                    wasmtime::ExternType::Global(_)
-                    | wasmtime::ExternType::Table(_)
-                    | wasmtime::ExternType::Instance(_)
-                    | wasmtime::ExternType::Module(_) => {
+                    wasmtime::ExternType::Global(_) | wasmtime::ExternType::Table(_) => {
                         return Err(NewErr::ModuleError(ModuleError(
-                            "global/table/instance/module imports not supported".to_string(),
+                            "global/table imports not supported".to_string(),
                         )));
                     }
                     wasmtime::ExternType::Memory(m) => {
-                        if import.module() != "env" || import.name() != Some("memory") {
+                        if import.module() != "env" || import.name() != "memory" {
                             return Err(NewErr::MemoryNotNamedMemory);
                         }
 
@@ -241,7 +231,7 @@ impl JitPrototype {
         let instance = wasmtime::Instance::new_async(&mut store, &module.inner, &imports)
             .now_or_never()
             .unwrap()
-            .unwrap(); // TODO: don't unwrap
+            .map_err(|err| NewErr::ModuleError(ModuleError(err.to_string())))?;
 
         let exported_memory = if let Some(mem) = instance.get_export(&mut store, "memory") {
             if let Some(mem) = mem.into_memory() {
@@ -412,11 +402,11 @@ enum Shared {
         /// is grown, which can happen between function calls.
         memory_size: usize,
 
-        /// Waker that `wasmtime` has passed to the future that is waiting for `return_value`.
+        /// `Waker` that `wasmtime` has passed to the future that is waiting for `return_value`.
         /// This value is most likely not very useful, because [`Jit::run`] always polls the outer
         /// future whenever the inner future is known to be ready.
         /// However, it would be completely legal for `wasmtime` to not poll the inner future if the
-        /// waker that it has passed (the one stored here) wasn't waken up.
+        /// `waker` that it has passed (the one stored here) wasn't waken up.
         /// This field therefore exists in order to future-proof against this possible optimization
         /// that `wasmtime` might perform in the future.
         in_interrupted_waker: Option<Waker>,
@@ -437,7 +427,7 @@ enum Shared {
 pub struct Jit {
     inner: JitInner,
 
-    /// Instanciated Wasm VM.
+    /// Instantiated Wasm VM.
     instance: wasmtime::Instance,
 
     /// Shared between the "outside" and the external functions. See [`Shared`].

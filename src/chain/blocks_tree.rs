@@ -28,7 +28,7 @@
 //!   [`chain_information::ChainInformation`].
 //! - Zero or more blocks that descend from that latest finalized block.
 //!
-//! The latest finalized block is a block that is guaranted to never be reverted. While it can
+//! The latest finalized block is a block that is guaranteed to never be reverted. While it can
 //! always be set to the genesis block of the chain, it is preferable, in order to reduce
 //! memory utilization, to maintain it to a block that is as high as possible in the chain.
 //!

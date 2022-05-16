@@ -138,7 +138,7 @@ pub struct Config<TBannedBlocksIter> {
     /// Maximum number of simultaneous pending requests made towards the same block.
     ///
     /// Should be set according to the failure rate of requests. For example if requests have a
-    /// 10% chance of failing, then setting to value to `2` gives a 1% chance that downloading
+    /// `10%` chance of failing, then setting to value to `2` gives a `1%` chance that downloading
     /// this block will overall fail and has to be attempted again.
     ///
     /// Also keep in mind that sources might maliciously take a long time to answer requests. A
@@ -987,7 +987,7 @@ pub enum AddBlock<TBl, TRq, TSrc> {
     AlreadyInChain(AddBlockOccupied<TBl, TRq, TSrc>),
 }
 
-/// See [`FinishAncestrySearch::add_block`] and ̀[`AddBlock`].
+/// See [`FinishAncestrySearch::add_block`] and [`AddBlock`].
 pub struct AddBlockOccupied<TBl, TRq, TSrc> {
     inner: FinishAncestrySearch<TBl, TRq, TSrc>,
     decoded_header: header::Header,
@@ -1100,7 +1100,7 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
     }
 }
 
-/// See [`FinishAncestrySearch::add_block`] and ̀[`AddBlock`].
+/// See [`FinishAncestrySearch::add_block`] and [`AddBlock`].
 pub struct AddBlockVacant<TBl, TRq, TSrc> {
     inner: FinishAncestrySearch<TBl, TRq, TSrc>,
     decoded_header: header::Header,

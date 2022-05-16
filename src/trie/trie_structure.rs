@@ -473,7 +473,7 @@ impl<TUd> TrieStructure<TUd> {
     /// Each node inserted in the trie is placed in the underlying data structure at a specific
     /// [`NodeIndex`] that never changes until the node is removed from the trie.
     ///
-    /// This [`NodeIndex`] can be retreived by calling [`NodeAccess::node_index`],
+    /// This [`NodeIndex`] can be retrieved by calling [`NodeAccess::node_index`],
     /// [`StorageNodeAccess::node_index`] or [`BranchNodeAccess::node_index`]. The same node can
     /// later be accessed again by calling [`TrieStructure::node_by_index`].
     ///

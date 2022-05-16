@@ -902,7 +902,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
     ///
     /// Note that the remote doesn't confirm that it has received the transaction. Because
     /// networking is inherently unreliable, successfully sending a transaction to a peer doesn't
-    /// necessarily mean that the remote has received it. In practice, however, the likelyhood of
+    /// necessarily mean that the remote has received it. In practice, however, the likelihood of
     /// a transaction not being received are extremely low. This can be considered as known flaw.
     pub async fn announce_transaction(
         self: Arc<Self>,

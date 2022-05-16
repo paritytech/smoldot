@@ -17,7 +17,7 @@
 
 //! Yamux multiplexing protocol.
 //!
-//! The yamux protocol is a multiplexing protocol. As such, it allows dividing a single stream of
+//! The Yamux protocol is a multiplexing protocol. As such, it allows dividing a single stream of
 //! data, typically a TCP socket, into multiple individual parallel substreams. The data sent and
 //! received over that single stream is divided into frames which, with the exception of `ping`
 //! and `goaway` frames, belong to a specific substream. In other words, the data transmitted
@@ -60,9 +60,9 @@ use hashbrown::hash_map::{Entry, OccupiedEntry};
 pub const PROTOCOL_NAME: &str = "/yamux/1.0.0";
 
 pub struct Yamux<T> {
-    /// List of substreams currently open in the yamux state machine.
+    /// List of substreams currently open in the Yamux state machine.
     ///
-    /// A SipHasher is used in order to avoid hash collision attacks on substream IDs.
+    /// A `SipHasher` is used in order to avoid hash collision attacks on substream IDs.
     substreams: hashbrown::HashMap<NonZeroU32, Substream<T>, SipHasherBuild>,
 
     /// What kind of data is expected on the socket next.
@@ -88,7 +88,7 @@ pub struct Yamux<T> {
 
 struct Substream<T> {
     /// True if a message on this substream has already been sent since it has been opened. The
-    /// first message on a substream must contain either a SYN or ACK flag.
+    /// first message on a substream must contain either a SYN or `ACK` flag.
     first_message_queued: bool,
     /// Amount of data the remote is allowed to transmit to the local node.
     remote_allowed_window: u64,
@@ -143,7 +143,7 @@ enum Incoming {
 }
 
 impl<T> Yamux<T> {
-    /// Initializes a new yamux state machine.
+    /// Initializes a new Yamux state machine.
     pub fn new(config: Config) -> Yamux<T> {
         Yamux {
             substreams: hashbrown::HashMap::with_capacity_and_hasher(
@@ -170,14 +170,14 @@ impl<T> Yamux<T> {
     /// >           before the local side sends data on this substream. As such, protocols where
     /// >           the remote is expected to send data in response to a substream being open,
     /// >           without the local side first sending some data on that substream, will not
-    /// >           work. In practice, while this is technically out of concern of the yamux
+    /// >           work. In practice, while this is technically out of concern of the Yamux
     /// >           protocol, all substreams in the context of libp2p start with a
     /// >           multistream-select negotiation, and this scenario can therefore never happen.
     ///
     /// # Panic
     ///
     /// Panics if all possible substream IDs are already taken. This happen if there exists more
-    /// than approximately 2^31 substreams, which is very unlikely to happen unless there exists a
+    /// than approximately `2^31` substreams, which is very unlikely to happen unless there exists a
     /// bug in the code.
     ///
     pub fn open_substream(&mut self, user_data: T) -> SubstreamMut<T> {
@@ -570,14 +570,14 @@ impl<T> Yamux<T> {
     /// data. The user is expected to pass an exact amount of bytes that the next layer is ready
     /// to accept.
     ///
-    /// After the [`ExtractOut`] has been destroyed, the yamux state machine will automatically
+    /// After the [`ExtractOut`] has been destroyed, the Yamux state machine will automatically
     /// consider that these `size_bytes` have been sent out, even if the iterator has been
     /// destroyed before finishing. It is a logic error to `mem::forget` the [`ExtractOut`].
     ///
     /// > **Note**: Most other objects in the networking code have a "`read_write`" method that
     /// >           writes the outgoing data to a buffer. This is an idiomatic way to do things in
-    /// >           situations where the data is generated on the fly. In the context of yamux,
-    /// >           however, this would be rather suboptimal considering that buffers to send out
+    /// >           situations where the data is generated on the fly. In the context of Yamux,
+    /// >           however, this would be rather sub-optimal considering that buffers to send out
     /// >           are already stored in their final form in the state machine.
     pub fn extract_out(&mut self, size_bytes: usize) -> ExtractOut<T> {
         // TODO: this function has a zero-cost API, but its body isn't really zero-cost due to laziness
@@ -890,7 +890,7 @@ pub struct Config {
     /// Expected number of substreams simultaneously open, both inbound and outbound substreams
     /// combined.
     pub capacity: usize,
-    /// Seed used for the randomness. Used to avoid HashDos attack and determines the order in
+    /// Seed used for the randomness. Used to avoid HashDoS attack and determines the order in
     /// which the data on substreams is sent out.
     pub randomness_seed: [u8; 16],
 }
@@ -940,7 +940,7 @@ impl<'a, T> SubstreamMut<'a, T> {
     ///
     /// # Context
     ///
-    /// In order to properly handle back-pressure, the yamux protocol only allows the remote to
+    /// In order to properly handle back-pressure, the Yamux protocol only allows the remote to
     /// send a certain number of bytes before the local node grants the authorization to send more
     /// data.
     /// This method grants the authorization to the remote to send up to `bytes` bytes.
@@ -1102,7 +1102,7 @@ pub enum IncomingDataDetail<T> {
     },
 }
 
-/// Error while decoding the yamux stream.
+/// Error while decoding the Yamux stream.
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
     /// Unknown version number in a header.
@@ -1123,7 +1123,7 @@ pub enum Error {
     LocalCreditsOverflow,
     /// Remote sent additional data on a substream after having sent the FIN flag.
     WriteAfterFin,
-    /// Remote has sent a data frame containing data at the same time as a RST flag.
+    /// Remote has sent a data frame containing data at the same time as a `RST` flag.
     DataWithRst,
 }
 

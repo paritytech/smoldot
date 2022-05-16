@@ -18,7 +18,7 @@
 //! This module provides the `Delay` struct, which implement `Future` and becomes ready after a
 //! certain time.
 //!
-//! In order to optimize performances, we avoid invoking the ffi once per timer. Instead, the ffi
+//! In order to optimize performances, we avoid invoking the FFI once per timer. Instead, the FFI
 //! is only used in order to wake up when the earliest timer finishes, then restarted for the next
 //! timer.
 

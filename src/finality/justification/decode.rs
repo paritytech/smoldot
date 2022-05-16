@@ -280,7 +280,7 @@ impl<'a> ExactSizeIterator for VotesAncestriesIter<'a> {}
 #[display(fmt = "Justification parsing error: {:?}", _0)]
 pub struct Error(nom::error::ErrorKind);
 
-/// Nom combinator that parses a justification.
+/// `Nom` combinator that parses a justification.
 fn grandpa_justification(bytes: &[u8]) -> nom::IResult<&[u8], GrandpaJustificationRef> {
     nom::error::context(
         "grandpa_justification",
@@ -305,7 +305,7 @@ fn grandpa_justification(bytes: &[u8]) -> nom::IResult<&[u8], GrandpaJustificati
     )(bytes)
 }
 
-/// Nom combinator that parses a list of precommits.
+/// `Nom` combinator that parses a list of precommits.
 fn precommits(bytes: &[u8]) -> nom::IResult<&[u8], PrecommitsRef> {
     nom::combinator::map(
         nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
@@ -323,7 +323,7 @@ fn precommits(bytes: &[u8]) -> nom::IResult<&[u8], PrecommitsRef> {
     )(bytes)
 }
 
-/// Nom combinator that parses a single precommit.
+/// `Nom` combinator that parses a single precommit.
 fn precommit(bytes: &[u8]) -> nom::IResult<&[u8], PrecommitRef> {
     nom::error::context(
         "precommit",
@@ -344,7 +344,7 @@ fn precommit(bytes: &[u8]) -> nom::IResult<&[u8], PrecommitRef> {
     )(bytes)
 }
 
-/// Nom combinator that parses a list of headers.
+/// `Nom` combinator that parses a list of headers.
 fn votes_ancestries(bytes: &[u8]) -> nom::IResult<&[u8], VotesAncestriesIter> {
     nom::error::context(
         "votes ancestries",

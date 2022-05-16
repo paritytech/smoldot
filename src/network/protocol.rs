@@ -52,7 +52,7 @@ mod schema {
     include!(concat!(env!("OUT_DIR"), "/structs.rs"));
 }
 
-/// Error while decoding the protobuf encoding.
+/// Error while decoding the Protobuf encoding.
 #[derive(Debug, Clone, derive_more::Display)]
 #[display(fmt = "{}", _0)]
 pub struct ProtobufDecodeError(prost::DecodeError);

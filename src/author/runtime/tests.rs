@@ -28,26 +28,12 @@ fn block_building_works() {
     .unwrap();
     let genesis_storage = chain_specs.genesis_storage().into_genesis_items().unwrap();
 
-    let parent_runtime = {
-        let code = genesis_storage
-            .iter()
-            .find(|(k, _)| k == b":code")
-            .unwrap()
-            .1;
-        crate::executor::host::HostVmPrototype::new(crate::executor::host::Config {
-            module: code,
-            heap_pages: crate::executor::DEFAULT_HEAP_PAGES,
-            exec_hint: crate::executor::vm::ExecHint::Oneshot,
-            allow_unresolved_imports: false,
-        })
-        .unwrap()
-    };
-
-    let parent_hash = crate::calculate_genesis_block_header(&chain_specs).hash();
+    let (chain_info, genesis_runtime) = chain_specs.as_chain_information().unwrap();
+    let genesis_hash = chain_info.finalized_block_header.hash();
 
     let mut builder = super::build_block(super::Config {
-        parent_runtime,
-        parent_hash: &parent_hash,
+        parent_runtime: genesis_runtime,
+        parent_hash: &genesis_hash,
         parent_number: 0,
         block_body_capacity: 0,
         consensus_digest_log_item: super::ConfigPreRuntime::Aura(crate::header::AuraPreDigest {
@@ -61,7 +47,7 @@ fn block_building_works() {
             super::BlockBuild::Finished(Ok(success)) => {
                 let decoded = crate::header::decode(&success.scale_encoded_header).unwrap();
                 assert_eq!(decoded.number, 1);
-                assert_eq!(*decoded.parent_hash, parent_hash);
+                assert_eq!(*decoded.parent_hash, genesis_hash);
                 break;
             }
             super::BlockBuild::Finished(Err(err)) => panic!("{}", err),

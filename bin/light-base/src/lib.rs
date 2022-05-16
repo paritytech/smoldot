@@ -73,15 +73,15 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     /// chains, it means that a call to [`Client::add_chain`] could influence the outcome of a
     /// subsequent call to [`Client::add_chain`].
     ///
-    /// For example: if user A adds a chain named "kusama", then user B adds a different chain
-    /// also named "kusama", then user B adds a parachain whose relay chain is "kusama", it would
-    /// be wrong to connect to the "kusama" created by user A.
+    /// For example: if user A adds a chain named "Kusama", then user B adds a different chain
+    /// also named "Kusama", then user B adds a parachain whose relay chain is "Kusama", it would
+    /// be wrong to connect to the "Kusama" created by user A.
     pub potential_relay_chains: TRelays,
 
     /// Channel to use to send the JSON-RPC responses.
     ///
     /// If `None`, then no JSON-RPC service is started for this chain. This saves up a lot of
-    /// resources, but will cause all JSON-RPC requests targetting this chain to fail.
+    /// resources, but will cause all JSON-RPC requests targeting this chain to fail.
     pub json_rpc_responses: Option<mpsc::Sender<String>>,
 }
 
@@ -140,7 +140,7 @@ pub trait Platform: Send + 'static {
     /// the futures must be notified. The user of this function, however, is encouraged to
     /// maintain only one active future.
     ///
-    /// If the future is polled after the connection object has been dropped, the behaviour is
+    /// If the future is polled after the connection object has been dropped, the behavior is
     /// not specified. The polling might panic, or return `Ready`, or return `Pending`.
     fn wait_more_data(connection: &mut Self::Connection) -> Self::ConnectionDataFuture;
 
@@ -348,11 +348,12 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
         // Load the information about the chain from the chain spec. If a light sync state (also
         // known as a checkpoint) is present in the chain spec, it is possible to start syncing at
         // the finalized block it describes.
-        let chain_information = {
+        // TODO: clean up that block
+        let (chain_information, genesis_block_header) = {
             match (
                 chain_spec
-                    .as_chain_information() // TODO: very expensive, don't always call?
-                    .map(chain::chain_information::ValidChainInformation::try_from),
+                    .as_chain_information()
+                    .map(|(ci, _)| chain::chain_information::ValidChainInformation::try_from(ci)), // TODO: don't just throw away the runtime
                 chain_spec.light_sync_state().map(|s| {
                     chain::chain_information::ValidChainInformation::try_from(
                         s.as_chain_information(),
@@ -360,7 +361,22 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                 }),
                 finalized_serialize::decode_chain(config.database_content),
             ) {
-                (_, _, Ok((ci, _))) => ci,
+                (Ok(Ok(genesis_ci)), _, Ok((ci, _))) => {
+                    let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
+                    (ci, genesis_header.into())
+                }
+
+                (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), _, Ok((ci, _))) => {
+                    let genesis_header = header::Header {
+                        parent_hash: [0; 32],
+                        number: 0,
+                        state_root: *chain_spec.genesis_storage().into_trie_root_hash().unwrap(),
+                        extrinsics_root: smoldot::trie::empty_trie_merkle_value(),
+                        digest: header::DigestRef::empty().into(),
+                    };
+
+                    (ci, genesis_header)
+                }
 
                 (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None, _) => {
                     // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
@@ -376,7 +392,17 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                     Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
                     Some(Ok(ci)),
                     _,
-                ) => ci,
+                ) => {
+                    let genesis_header = header::Header {
+                        parent_hash: [0; 32],
+                        number: 0,
+                        state_root: *chain_spec.genesis_storage().into_trie_root_hash().unwrap(),
+                        extrinsics_root: smoldot::trie::empty_trie_merkle_value(),
+                        digest: header::DigestRef::empty().into(),
+                    };
+
+                    (ci, genesis_header)
+                }
 
                 (Err(err), _, _) => {
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
@@ -399,15 +425,18 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                     }));
                 }
 
-                (_, Some(Ok(ci)), _) => ci,
+                (Ok(Ok(genesis_ci)), Some(Ok(ci)), _) => {
+                    let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
+                    (ci, genesis_header.into())
+                }
 
-                (Ok(Ok(ci)), None, _) => ci,
+                (Ok(Ok(ci)), None, _) => {
+                    let genesis_header =
+                        header::Header::from(ci.as_ref().finalized_block_header.clone());
+                    (ci, genesis_header)
+                }
             }
         };
-
-        // Even with a checkpoint, knowing the genesis block header is necessary for various
-        // reasons.
-        let genesis_block_header = smoldot::calculate_genesis_block_header(&chain_spec);
 
         // If the chain specification specifies a parachain, find the corresponding relay chain
         // in the list of potential relay chains passed by the user.

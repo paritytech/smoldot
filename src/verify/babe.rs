@@ -61,7 +61,7 @@
 //!
 //! In order to produce a block, one must generate, using a
 //! [VRF (Verifiable Random Function)](https://en.wikipedia.org/wiki/Verifiable_random_function),
-//! and based on the slot number, genesis hash, and aformentioned "randomness value",
+//! and based on the slot number, genesis hash, and aforementioned "randomness value",
 //! a number whose value is lower than a certain threshold.
 //!
 //! The number that has been generated must be included in the header of the authored block,
@@ -69,7 +69,7 @@
 //! public keys allowed to generate blocks in that epoch. The weight associated to that public key
 //! determines the allowed threshold.
 //!
-//! The "randomess value" of an epoch `N` is calculated by combining the generated numbers of all
+//! The "randomness value" of an epoch `N` is calculated by combining the generated numbers of all
 //! the blocks of the epoch `N - 2`.
 //!
 //! ## Secondary slots
@@ -118,7 +118,7 @@
 //! determined by performing runtime calls.
 //!
 //! Any time verifying a block produces a `Some` in [`VerifySuccess::epoch_transition_target`],
-//! which is guarateed to be the case when verifying block number 1, an epoch transition occurs.
+//! which is guaranteed to be the case when verifying block number 1, an epoch transition occurs.
 //! When verifying a child of such block, the value formerly passed as
 //! [`VerifyConfig::parent_block_next_epoch`] must now be passed as
 //! [`VerifyConfig::parent_block_epoch`], and the value in
@@ -488,7 +488,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
 ///
 /// The value of `c` can be found in the current Babe configuration.
 ///
-/// `authorities_weights` must be the list of all weights of all autorities.
+/// `authorities_weights` must be the list of all weights of all authorities.
 /// `authority_weight` must be the weight of the authority whose threshold to calculate.
 ///
 /// # Panic

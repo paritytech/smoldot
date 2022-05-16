@@ -31,12 +31,12 @@ pub struct Multiaddr {
 }
 
 impl Multiaddr {
-    /// Creates a new empty multiaddr.
+    /// Creates a new empty `Multiaddr`.
     pub fn new() -> Self {
         Multiaddr { bytes: Vec::new() }
     }
 
-    /// Pushes a protocol at the end of this multiaddr.
+    /// Pushes a protocol at the end of this `Multiaddr`.
     pub fn push(&mut self, protocol: ProtocolRef) {
         for slice in protocol.as_bytes() {
             self.bytes.extend(slice.as_ref());
@@ -48,7 +48,7 @@ impl Multiaddr {
         self.bytes.shrink_to_fit();
     }
 
-    /// Returns the serialized version of this multiaddr.
+    /// Returns the serialized version of this `Multiaddr`.
     pub fn to_vec(&self) -> Vec<u8> {
         self.bytes.clone()
     }
@@ -64,7 +64,7 @@ impl Multiaddr {
     ///
     /// # Panic
     ///
-    /// Panics if the multiaddr is empty.
+    /// Panics if the `Multiaddr` is empty.
     ///
     pub fn pop(&mut self) {
         let remain = {

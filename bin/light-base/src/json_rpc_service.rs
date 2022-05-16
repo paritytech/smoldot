@@ -407,8 +407,8 @@ struct Background<TPlat: Platform> {
     chain_properties_json: String,
     /// Whether the chain is a live network. Found in the chain specification.
     chain_is_live: bool,
-    /// See [`StartConfig::peer_id`]. The only use for this field is to send the base58 encoding of
-    /// the [`PeerId`]. Consequently, we store the conversion to base58 ahead of time.
+    /// See [`StartConfig::peer_id`]. The only use for this field is to send the Base58 encoding of
+    /// the [`PeerId`]. Consequently, we store the conversion to Base58 ahead of time.
     peer_id_base58: String,
     /// Value to return when the `system_name` RPC is called.
     system_name: String,

@@ -533,9 +533,9 @@ impl<I, P> fmt::Debug for InProgress<I, P> {
 /// Error that can happen during the negotiation.
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum Error {
-    /// Reading side of the connection is closed. The handshake can't proceeed further.
+    /// Reading side of the connection is closed. The handshake can't proceed further.
     ReadClosed,
-    /// Writing side of the connection is closed. The handshake can't proceeed further.
+    /// Writing side of the connection is closed. The handshake can't proceed further.
     WriteClosed,
     /// Error while decoding a frame length, or frame size limit reached.
     Frame(leb128::FramedError),

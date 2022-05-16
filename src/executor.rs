@@ -279,10 +279,10 @@ pub fn hash_api_name(api_name: &str) -> [u8; 8] {
 /// One API that the runtime supports.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CoreVersionApi {
-    /// Blake2 hash of length 8 of the name of the API.
+    /// BLAKE2 hash of length 8 of the name of the API.
     ///
     /// > **Note**: Available APIs can be found by searching for `decl_runtime_apis!` in the
-    /// >           Substrate code base. The value stored in this field is the blake2 hash of
+    /// >           Substrate code base. The value stored in this field is the BLAKE2 hash of
     /// >           length 8 of the trait name declared within `decl_runtime_apis!`.
     pub name_hash: [u8; 8],
 

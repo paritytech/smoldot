@@ -99,7 +99,7 @@ pub enum VerifyError {
     TooFarInFuture,
     /// Block header signature is invalid.
     BadSignature,
-    /// Failed to parse ed25519 public key.
+    /// Failed to parse Ed25519 public key.
     BadPublicKey,
     /// List of authorities is empty.
     EmptyAuthorities,

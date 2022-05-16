@@ -157,7 +157,7 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     sources: HashMap<SourceId, Source<TSrc>, fnv::FnvBuildHasher>,
 
     /// Next [`SourceId`] to allocate.
-    /// SourceIds are unique so that the source in the [`verification_queue::VerificationQueue`]
+    /// `SourceIds` are unique so that the source in the [`verification_queue::VerificationQueue`]
     /// doesn't accidentally collide with a new source.
     next_source_id: SourceId,
 
@@ -208,7 +208,7 @@ struct Source<TSrc> {
 
     /// If `true`, this source is banned and shouldn't use be used to request blocks.
     /// Note that the ban is lifted if the source is removed. This ban isn't meant to be a line of
-    /// defense against malicious peers but rather an optimisation.
+    /// defense against malicious peers but rather an optimization.
     banned: bool,
 
     /// Number of requests that use this source.
@@ -238,7 +238,7 @@ pub struct BlockFull {
     /// Changes to the storage made by this block compared to its parent.
     pub storage_top_trie_changes: storage_diff::StorageDiff,
 
-    /// List of changes to the offchain storage that this block performs.
+    /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::StorageDiff,
 }
 
@@ -504,7 +504,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     /// Updates the [`OptimisticSync`] with the fact that a request has been started.
     ///
     /// Returns the identifier for the request that must later be passed back to
-    /// [`OptimisticSync::finish_request`].
+    /// [`OptimisticSync::finish_request_success`] or [`OptimisticSync::finish_request_failed`].
     ///
     /// # Panic
     ///
@@ -537,7 +537,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         request_id
     }
 
-    /// Update the [`OptimisticSync`] with the outcome of a request.
+    /// Update the [`OptimisticSync`] with the successful outcome of a request.
     ///
     /// Returns the user data that was associated to that request.
     ///
@@ -552,11 +552,11 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     ///
     /// Panics if the [`RequestId`] is invalid.
     ///
-    pub fn finish_request(
+    pub fn finish_request_success(
         &mut self,
         request_id: RequestId,
-        outcome: Result<impl Iterator<Item = RequestSuccessBlock<TBl>>, RequestFail>,
-    ) -> (TRq, FinishRequestOutcome<TSrc>) {
+        blocks: impl Iterator<Item = RequestSuccessBlock<TBl>>,
+    ) -> (TRq, FinishRequestOutcome) {
         if let Some((source_id, user_data)) = self.inner.obsolete_requests.remove(&request_id) {
             self.inner.obsolete_requests.shrink_to_fit();
             self.inner
@@ -567,12 +567,10 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             return (user_data, FinishRequestOutcome::Obsolete);
         }
 
-        let outcome_is_err = outcome.is_err();
-
         let ((_, user_data), source_id) = self
             .inner
             .verification_queue
-            .finish_request(|(rq, _)| *rq == request_id, outcome.map_err(|_| ()));
+            .finish_request(|(rq, _)| *rq == request_id, Ok(blocks));
 
         self.inner
             .sources
@@ -580,27 +578,49 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             .unwrap()
             .num_ongoing_requests -= 1;
 
-        if outcome_is_err {
-            self.inner.sources.get_mut(&source_id).unwrap().banned = true;
+        (user_data, FinishRequestOutcome::Queued)
+    }
 
-            // If all sources are banned, unban them.
-            if self.inner.sources.iter().all(|(_, s)| s.banned) {
-                for src in self.inner.sources.values_mut() {
-                    src.banned = false;
-                }
+    /// Update the [`OptimisticSync`] with the information that the given request has failed.
+    ///
+    /// Returns the user data that was associated to that request.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    ///
+    pub fn finish_request_failed(&mut self, request_id: RequestId) -> TRq {
+        if let Some((source_id, user_data)) = self.inner.obsolete_requests.remove(&request_id) {
+            self.inner.obsolete_requests.shrink_to_fit();
+            self.inner
+                .sources
+                .get_mut(&source_id)
+                .unwrap()
+                .num_ongoing_requests -= 1;
+            return user_data;
+        }
+
+        let ((_, user_data), source_id) = self.inner.verification_queue.finish_request(
+            |(rq, _)| *rq == request_id,
+            Result::<iter::Empty<_>, _>::Err(()),
+        );
+
+        self.inner
+            .sources
+            .get_mut(&source_id)
+            .unwrap()
+            .num_ongoing_requests -= 1;
+
+        self.inner.sources.get_mut(&source_id).unwrap().banned = true;
+
+        // If all sources are banned, unban them.
+        if self.inner.sources.iter().all(|(_, s)| s.banned) {
+            for src in self.inner.sources.values_mut() {
+                src.banned = false;
             }
         }
 
-        (
-            user_data,
-            if !outcome_is_err {
-                FinishRequestOutcome::Queued
-            } else {
-                FinishRequestOutcome::SourcePunished(
-                    &mut self.inner.sources.get_mut(&source_id).unwrap().user_data,
-                )
-            },
-        )
+        user_data
     }
 
     /// Process the next block in the queue of verification.
@@ -1425,16 +1445,9 @@ pub struct RequestDetail {
     pub num_blocks: NonZeroU32,
 }
 
-pub enum FinishRequestOutcome<'a, TSrc> {
+pub enum FinishRequestOutcome {
     Obsolete,
     Queued,
-    SourcePunished(&'a mut TSrc),
-}
-
-/// Reason why a request has failed.
-pub enum RequestFail {
-    /// Requested blocks aren't available from this source.
-    BlocksUnavailable,
 }
 
 /// Iterator that drains requests after a source has been removed.

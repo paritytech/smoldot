@@ -75,7 +75,7 @@ pub struct KBuckets<K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
     /// Key of the "local" node, that holds the buckets.
     local_key: (K, Key),
     /// List of buckets, ordered by increasing distance. In other words, the first elements of
-    /// this field are the ones that are the closests to [`KBuckets::local_key`].
+    /// this field are the ones that are the closest to [`KBuckets::local_key`].
     buckets: Vec<Bucket<K, V, TNow, ENTRIES_PER_BUCKET>>,
     /// Duration after which the last entry of each bucket will expired if it is disconnected.
     pending_timeout: Duration,
@@ -428,7 +428,7 @@ impl Key {
     }
 }
 
-/// Returns the log2 distance between two keys. Returns `None` if the distance is zero.
+/// Returns the `log2` distance between two keys. Returns `None` if the distance is zero.
 fn distance_log2(a: &Key, b: &Key) -> Option<u8> {
     for n in 0..32 {
         let a = a.digest[n];

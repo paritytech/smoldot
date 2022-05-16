@@ -1060,13 +1060,13 @@ pub enum OutputUpdate<'a, TBl, TAsync> {
         /// User data associated to this block.
         user_data: TBl,
 
-        /// User data associated to the async operation of this block.
+        /// User data associated to the `async` operation of this block.
         ///
         /// This is the same value as is now returned by
         /// [`AsyncTree::finalized_async_user_data`], and is provided here for convenience.
         async_op_user_data: &'a TAsync,
 
-        /// User data associated to the async operation of the previous finalized block.
+        /// User data associated to the `async` operation of the previous finalized block.
         former_finalized_async_op_user_data: TAsync,
 
         /// Index of the best block after the finalization. `None` if the best block is the block
@@ -1094,7 +1094,7 @@ pub struct OutputUpdateBlock<'a, TBl, TAsync> {
     /// User data associated to this block.
     pub user_data: &'a TBl,
 
-    /// User data associated to the async operation of this block.
+    /// User data associated to the `async` operation of this block.
     pub async_op_user_data: &'a TAsync,
 
     /// True if this block is considered as the best block of the chain.
