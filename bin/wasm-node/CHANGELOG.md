@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.16 - 2022-05-16
+
 ### Added
 
 - Added support for version 1 of the trie. Previously, it wasn't possible to connect to chains that were using version 1. ([#2277](https://github.com/paritytech/smoldot/pull/2277))
