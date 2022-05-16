@@ -223,6 +223,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             num_events_receivers: 2 + if relay_chain_database.is_some() { 1 } else { 0 },
             chains: iter::once(network_service::ChainConfig {
                 protocol_id: chain_spec.protocol_id().to_owned(),
+                fork_id: chain_spec.fork_id().map(|s| s.to_owned()),
                 database: database.clone(),
                 has_grandpa_protocol: matches!(
                     genesis_chain_information.finality,
@@ -272,6 +273,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 if let Some(relay_chains_specs) = &relay_chain_spec {
                     Some(network_service::ChainConfig {
                         protocol_id: relay_chains_specs.protocol_id().to_owned(),
+                        fork_id: relay_chains_specs.fork_id().map(|s| s.to_owned()),
                         database: relay_chain_database.clone().unwrap(),
                         has_grandpa_protocol: matches!(
                             relay_genesis_chain_information.as_ref().unwrap().finality,

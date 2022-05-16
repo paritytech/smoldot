@@ -24,12 +24,7 @@ use crate::libp2p::{
 use crate::network::{kademlia, protocol};
 use crate::util::{self, SipHasherBuild};
 
-use alloc::{
-    borrow::Cow,
-    format,
-    string::{String, ToString as _},
-    vec::Vec,
-};
+use alloc::{borrow::Cow, format, string::String, vec::Vec};
 use core::{
     fmt, iter, mem,
     num::NonZeroUsize,
@@ -118,6 +113,12 @@ pub struct ChainConfig {
     /// > **Note**: This value is typically found in the specification of the chain (the
     /// >           "chain spec").
     pub protocol_id: String,
+
+    /// Optional fork identifier, used to differentiate between chains with the same genesis hash.
+    ///
+    /// > **Note**: This value is typically found in the specification of the chain (the
+    /// >           "chain spec").
+    pub fork_id: Option<String>,
 
     /// If `Some`, the chain uses the GrandPa networking protocol.
     pub grandpa_protocol_config: Option<GrandpaState>,
@@ -277,12 +278,13 @@ where
                     max_notification_size: 16 * 1024 * 1024,
                 }))
                 .chain({
-                    // The `has_grandpa_protocol` flag controls whether the chain uses GrandPa.
-                    // Note, however, that GrandPa is technically left enabled (but unused) on all
-                    // chains, in order to make the rest of the code of this module more
-                    // comprehensible.
                     iter::once(peers::NotificationProtocolConfig {
-                        protocol_name: "/paritytech/grandpa/1".to_string(),
+                        protocol_name: match &chain.fork_id {
+                            Some(id) => {
+                                format!("/{}/{}/grandpa/1", hex::encode(&chain.genesis_hash), id)
+                            }
+                            None => format!("/{}/grandpa/1", hex::encode(&chain.genesis_hash)),
+                        },
                         fallback_protocol_names: Vec::new(),
                         max_handshake_size: 4,
                         max_notification_size: 1024 * 1024,

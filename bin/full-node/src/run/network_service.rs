@@ -99,6 +99,11 @@ pub struct ChainConfig {
     /// chain, so as to not introduce conflicts in the networking messages.
     pub protocol_id: String,
 
+    /// Optional fork identifier, used to differentiate between chains with the same genesis hash.
+    ///
+    /// This can be a counter (e.g. "1", "2", "3") or some unique identifier (e.g. "classic").
+    pub fork_id: Option<String>,
+
     /// If true, the chain uses the GrandPa networking protocol.
     pub has_grandpa_protocol: bool,
 }
@@ -163,6 +168,7 @@ impl NetworkService {
                 in_slots: 25,
                 out_slots: 25,
                 protocol_id: chain.protocol_id.clone(),
+                fork_id: chain.fork_id.clone(),
                 best_hash: chain.best_block.1,
                 best_number: chain.best_block.0,
                 genesis_hash: chain.genesis_block_hash,
