@@ -697,13 +697,13 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         let mut inner = self.shared.guarded.lock().await;
 
         // TODO: collecting in a Vec :-/
-        for target in inner.network.peers_list().cloned().collect::<Vec<_>>() {
+        for peer in inner.network.peers_list().cloned().collect::<Vec<_>>() {
             if inner
                 .network
-                .announce_transaction(&target, chain_index, &transaction)
+                .announce_transaction(&peer, chain_index, &transaction)
                 .is_ok()
             {
-                sent_peers.push(target);
+                sent_peers.push(peer);
             };
         }
 
