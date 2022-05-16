@@ -231,7 +231,7 @@ impl JitPrototype {
         let instance = wasmtime::Instance::new_async(&mut store, &module.inner, &imports)
             .now_or_never()
             .unwrap()
-            .unwrap(); // TODO: don't unwrap
+            .map_err(|err| NewErr::ModuleError(ModuleError(err.to_string())))?;
 
         let exported_memory = if let Some(mem) = instance.get_export(&mut store, "memory") {
             if let Some(mem) = mem.into_memory() {
