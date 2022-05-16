@@ -171,7 +171,7 @@ struct Guarded {
     /// ISPs/cloud providers don't like seeing too many dialing connections at the same time.
     num_pending_out_attempts: usize,
 
-    connec_tx: mpsc::Sender<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    conn_tasks_tx: mpsc::Sender<Pin<Box<dyn Future<Output = ()> + Send>>>,
 
     active_connections: HashMap<
         service::ConnectionId,
@@ -256,7 +256,7 @@ impl NetworkService {
         }
 
         // A channel is used to communicate new tasks dedicated to handling connections.
-        let (connec_tx, mut connec_rx) = mpsc::channel(
+        let (conn_tasks_tx, mut conn_tasks_rx) = mpsc::channel(
             thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(4),
@@ -277,7 +277,7 @@ impl NetworkService {
                     num_pending_out_attempts: 0,
                     messages_from_connections_tx,
                     messages_from_connections_rx,
-                    connec_tx: connec_tx.clone(),
+                    conn_tasks_tx: conn_tasks_tx.clone(),
                     network,
                     active_connections: hashbrown::HashMap::with_capacity_and_hasher(
                         100, // TODO: ?
@@ -373,7 +373,7 @@ impl NetworkService {
 
             // Spawn a background task dedicated to this listener.
             (config.tasks_executor)(Box::pin({
-                let mut connec_tx = connec_tx.clone();
+                let mut conn_tasks_tx = conn_tasks_tx.clone();
                 let inner = inner.clone();
                 let future = async move {
                     loop {
@@ -422,7 +422,7 @@ impl NetworkService {
 
                         // Ignore errors, as it is possible for the destination task to have been
                         // aborted already.
-                        let _ = connec_tx.send(
+                        let _ = conn_tasks_tx.send(
                             task.instrument(
                                 tracing::trace_span!(parent: None, "connection", address = %multiaddr),
                             ).boxed()
@@ -446,7 +446,7 @@ impl NetworkService {
                 let mut connections = stream::FuturesUnordered::new();
                 loop {
                     futures::select! {
-                        new_connec = connec_rx.select_next_some() => {
+                        new_connec = conn_tasks_rx.select_next_some() => {
                             connections.push(new_connec);
                         },
                         () = connections.select_next_some() => {},
@@ -902,7 +902,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
         // Sending the new task might fail in case a shutdown is happening, in which case
         // we don't really care about the state of anything anymore.
         // The sending here is normally very quick.
-        let _ = lock.connec_tx.send(Box::pin(task)).await;
+        let _ = lock.conn_tasks_tx.send(Box::pin(task)).await;
     }
 
     // Pull messages that the coordinator has generated in destination to the various
