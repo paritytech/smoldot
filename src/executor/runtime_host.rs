@@ -39,7 +39,7 @@
 
 use crate::{
     executor::{self, host, storage_diff, vm},
-    trie::calculate_root,
+    trie::{self, calculate_root},
     util,
 };
 
@@ -259,7 +259,9 @@ impl StorageGet {
                 if let calculate_root::RootMerkleValueCalculation::StorageValue(value_request) =
                     self.inner.root_calculation.take().unwrap()
                 {
-                    self.inner.root_calculation = Some(value_request.inject(value));
+                    // TODO: we only support V0 for now, see https://github.com/paritytech/smoldot/issues/1967
+                    self.inner.root_calculation =
+                        Some(value_request.inject(trie::TrieEntryVersion::V0, value));
                 } else {
                     // We only create a `StorageGet` if the state is `StorageValue`.
                     panic!()
@@ -621,7 +623,9 @@ impl Inner {
                                 .top_trie_changes
                                 .diff_get(&value_request.key().collect::<Vec<_>>())
                             {
-                                self.root_calculation = Some(value_request.inject(overlay));
+                                // TODO: we only support V0 for now, see https://github.com/paritytech/smoldot/issues/1967
+                                self.root_calculation =
+                                    Some(value_request.inject(trie::TrieEntryVersion::V0, overlay));
                             } else {
                                 self.root_calculation =
                                     Some(calculate_root::RootMerkleValueCalculation::StorageValue(

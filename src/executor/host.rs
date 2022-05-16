@@ -791,8 +791,8 @@ impl ReadyToRun {
         macro_rules! expect_state_version {
             ($num:expr) => {{
                 match &params[$num] {
-                    vm::WasmValue::I32(0) => 0,
-                    vm::WasmValue::I32(1) => 1,
+                    vm::WasmValue::I32(0) => trie::TrieEntryVersion::V0,
+                    vm::WasmValue::I32(1) => trie::TrieEntryVersion::V1,
                     v => {
                         return HostVm::Error {
                             error: Error::WrongParamTy {
@@ -932,9 +932,10 @@ impl ReadyToRun {
             HostFunction::ext_storage_root_version_2 => {
                 let state_version = expect_state_version!(0);
                 match state_version {
-                    0 => HostVm::ExternalStorageRoot(ExternalStorageRoot { inner: self.inner }),
-                    1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
-                    _ => unreachable!(),
+                    trie::TrieEntryVersion::V0 => {
+                        HostVm::ExternalStorageRoot(ExternalStorageRoot { inner: self.inner })
+                    }
+                    trie::TrieEntryVersion::V1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
                 }
             }
             HostFunction::ext_storage_changes_root_version_1 => {
@@ -1481,13 +1482,12 @@ impl ReadyToRun {
             HostFunction::ext_sandbox_get_global_val_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_trie_blake2_256_root_version_1
             | HostFunction::ext_trie_blake2_256_root_version_2 => {
-                if matches!(host_fn, HostFunction::ext_trie_blake2_256_root_version_2) {
-                    match expect_state_version!(1) {
-                        0 => {}
-                        1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
-                        _ => unreachable!(),
-                    }
-                }
+                let state_version =
+                    if matches!(host_fn, HostFunction::ext_trie_blake2_256_root_version_2) {
+                        expect_state_version!(1)
+                    } else {
+                        trie::TrieEntryVersion::V0
+                    };
 
                 let result = {
                     let input = expect_pointer_size!(0);
@@ -1514,7 +1514,7 @@ impl ReadyToRun {
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {
-                        Ok(elements) => Ok(trie::trie_root(&elements[..])),
+                        Ok(elements) => Ok(trie::trie_root(state_version, &elements[..])),
                         Err(_) => Err(()),
                     }
                 };
@@ -1531,16 +1531,14 @@ impl ReadyToRun {
             }
             HostFunction::ext_trie_blake2_256_ordered_root_version_1
             | HostFunction::ext_trie_blake2_256_ordered_root_version_2 => {
-                if matches!(
+                let state_version = if matches!(
                     host_fn,
                     HostFunction::ext_trie_blake2_256_ordered_root_version_2
                 ) {
-                    match expect_state_version!(1) {
-                        0 => {}
-                        1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
-                        _ => unreachable!(),
-                    }
-                }
+                    expect_state_version!(1)
+                } else {
+                    trie::TrieEntryVersion::V0
+                };
 
                 let result = {
                     let input = expect_pointer_size!(0);
@@ -1561,7 +1559,7 @@ impl ReadyToRun {
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {
-                        Ok(elements) => Ok(trie::ordered_root(&elements[..])),
+                        Ok(elements) => Ok(trie::ordered_root(state_version, &elements[..])),
                         Err(_) => Err(()),
                     }
                 };

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Added support for version 1 of the trie. Previously, it wasn't possible to connect to chains that were using version 1. ([#2277](https://github.com/paritytech/smoldot/pull/2277))
+
 ### Changed
 
 - The runtime of the genesis block is now only compiled once when a chain is added, decreasing the time this operation takes. ([#2270](https://github.com/paritytech/smoldot/pull/2270))

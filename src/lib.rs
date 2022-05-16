@@ -215,52 +215,6 @@ pub mod verify;
 
 mod util;
 
-/// Builds the header of the genesis block, from the values in storage.
-///
-/// # Example
-///
-/// ```no_run
-/// # let chain_spec_json: &[u8] = b"";
-/// let chain_spec = smoldot::chain_spec::ChainSpec::from_json_bytes(chain_spec_json)
-///     .unwrap();
-/// let genesis_block_header =
-///     smoldot::calculate_genesis_block_header(&chain_spec);
-/// println!("{:?}", genesis_block_header);
-/// ```
-pub fn calculate_genesis_block_header(chain_spec: &chain_spec::ChainSpec) -> header::Header {
-    let state_root = match chain_spec.genesis_storage() {
-        chain_spec::GenesisStorage::TrieRootHash(hash) => *hash,
-        chain_spec::GenesisStorage::Items(genesis_storage) => {
-            let mut calculation = trie::calculate_root::root_merkle_value(None);
-
-            loop {
-                match calculation {
-                    trie::calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => {
-                        break hash
-                    }
-                    trie::calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
-                        calculation =
-                            keys.inject(genesis_storage.iter().map(|(k, _)| k.iter().copied()));
-                    }
-                    trie::calculate_root::RootMerkleValueCalculation::StorageValue(val) => {
-                        let key: alloc::vec::Vec<u8> = val.key().collect();
-                        let value = genesis_storage.value(&key[..]);
-                        calculation = val.inject(value);
-                    }
-                }
-            }
-        }
-    };
-
-    header::Header {
-        parent_hash: [0; 32],
-        number: 0,
-        state_root,
-        extrinsics_root: trie::empty_trie_merkle_value(),
-        digest: header::DigestRef::empty().into(),
-    }
-}
-
 /// Removes the length prefix at the beginning of `metadata`. Returns an error if there is no
 /// valid length prefix.
 ///
