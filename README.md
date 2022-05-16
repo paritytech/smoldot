@@ -25,6 +25,7 @@ The following list is a best-effort list of packages that must be available on t
 - `clang` or `gcc`
 - `pkg-config`
 - `sqlite`
+- `cmake`
 
 The full client is currently a work in progress and doesn't support many features that the official client supports.
 

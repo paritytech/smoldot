@@ -55,7 +55,7 @@ jobs:
       - uses: actions/setup-node@v3.1.1
         with:
           node-version: 14
-      - run: apt-get update && apt install -y binaryen # For `wasm-opt`
+      - run: apt-get update && apt install -y binaryen && apt install -y cmake # For `wasm-opt` and the `prost-build` library
       - uses: actions-rs/toolchain@v1
         with:
           # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
