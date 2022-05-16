@@ -103,6 +103,20 @@ pub use nibble::{
     NibbleFromU8Error,
 };
 
+/// The format of the nodes of trie has two different versions.
+///
+/// As a summary of the difference between versions, in V1 the value of the item in the trie is
+/// hashed if it is too large. This isn't the case in V0 where the value of the item is always
+/// unhashed.
+///
+/// An encoded node value can be decoded unambiguously no matter whether it was encoded using V0
+/// or V1.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum TrieEntryVersion {
+    V0,
+    V1,
+}
+
 /// Radix-16 Merkle-Patricia trie.
 // TODO: probably useless, remove
 pub struct Trie {
@@ -116,13 +130,17 @@ pub struct Trie {
     ///
     /// All the keys have an even number of nibbles.
     entries: BTreeMap<Vec<u8>, Vec<u8>>,
+
+    /// Value passed as initialization.
+    entries_version: TrieEntryVersion,
 }
 
 impl Trie {
     /// Builds a new empty [`Trie`].
-    pub fn new() -> Trie {
+    pub fn new(entries_version: TrieEntryVersion) -> Trie {
         Trie {
             entries: BTreeMap::new(),
+            entries_version,
         }
     }
 
@@ -180,16 +198,10 @@ impl Trie {
                 }
                 calculate_root::RootMerkleValueCalculation::StorageValue(value) => {
                     let key = value.key().collect::<Vec<u8>>();
-                    calculation = value.inject(self.entries.get(&key));
+                    calculation = value.inject(self.entries_version, self.entries.get(&key));
                 }
             }
         }
-    }
-}
-
-impl Default for Trie {
-    fn default() -> Self {
-        Trie::new()
     }
 }
 
@@ -204,7 +216,9 @@ pub fn empty_trie_merkle_value() -> [u8; 32] {
                 calculation = keys.inject(iter::empty::<iter::Empty<u8>>());
             }
             calculate_root::RootMerkleValueCalculation::StorageValue(val) => {
-                calculation = val.inject(None::<&[u8]>);
+                // Note that the version has no influence whatsoever on the output of the
+                // calculation. The version passed here is a dummy value.
+                calculation = val.inject(TrieEntryVersion::V1, None::<&[u8]>);
             }
         }
     }
@@ -215,7 +229,10 @@ pub fn empty_trie_merkle_value() -> [u8; 32] {
 ///
 /// The complexity of this method is `O(n²)` where `n` is the number of entries.
 // TODO: improve complexity?
-pub fn trie_root(entries: &[(impl AsRef<[u8]>, impl AsRef<[u8]>)]) -> [u8; 32] {
+pub fn trie_root(
+    version: TrieEntryVersion,
+    entries: &[(impl AsRef<[u8]>, impl AsRef<[u8]>)],
+) -> [u8; 32] {
     let mut calculation = calculate_root::root_merkle_value(None);
 
     loop {
@@ -231,7 +248,7 @@ pub fn trie_root(entries: &[(impl AsRef<[u8]>, impl AsRef<[u8]>)]) -> [u8; 32] {
                     .iter()
                     .find(|(k, _)| k.as_ref().iter().copied().eq(value.key()))
                     .map(|(_, v)| v);
-                calculation = value.inject(result);
+                calculation = value.inject(version, result);
             }
         }
     }
@@ -242,7 +259,7 @@ pub fn trie_root(entries: &[(impl AsRef<[u8]>, impl AsRef<[u8]>)]) -> [u8; 32] {
 ///
 /// > **Note**: In isolation, this function seems highly specific. In practice, it is notably used
 /// >           in order to build the trie root of the list of extrinsics of a block.
-pub fn ordered_root(entries: &[impl AsRef<[u8]>]) -> [u8; 32] {
+pub fn ordered_root(version: TrieEntryVersion, entries: &[impl AsRef<[u8]>]) -> [u8; 32] {
     const USIZE_COMPACT_BYTES: usize = 1 + (usize::BITS as usize) / 8;
 
     let mut calculation = calculate_root::root_merkle_value(None);
@@ -267,7 +284,7 @@ pub fn ordered_root(entries: &[impl AsRef<[u8]>]) -> [u8; 32] {
                     .collect::<arrayvec::ArrayVec<u8, USIZE_COMPACT_BYTES>>();
                 let (_, key) =
                     util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(&key).unwrap();
-                calculation = value.inject(entries.get(key));
+                calculation = value.inject(version, entries.get(key));
             }
         }
     }

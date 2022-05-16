@@ -102,7 +102,11 @@ impl PrefixScan {
 
                 any_successful_proof = true;
 
-                if info.storage_value.is_some() {
+                if matches!(
+                    info.storage_value,
+                    proof_verify::StorageValue::Known(_)
+                        | proof_verify::StorageValue::HashKnownValueMissing(_)
+                ) {
                     // Trie nodes with a value are always aligned to "bytes-keys". In other words,
                     // the number of nibbles is always even.
                     debug_assert_eq!(query.len() % 2, 0);

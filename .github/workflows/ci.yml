@@ -29,6 +29,7 @@ jobs:
     container:
       image: rust:1.60
     steps:
+    - run: apt-get update && apt install -y cmake # For the `prost-build` library
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
     - run: RUSTFLAGS=-Dwarnings cargo test --locked --workspace --all-features
@@ -38,8 +39,8 @@ jobs:
     container:
       image: rust:1.60
     steps:
+    - run: apt-get update && apt install -y libc6-dev-i386 && apt install -y cmake # For the `prost-build` library
     - uses: actions/checkout@v3
-    - run: apt-get update && apt-get install -y libc6-dev-i386
     - uses: Swatinem/rust-cache@v1
     - run: rustup target add i686-unknown-linux-gnu
     - run: RUSTFLAGS=-Dwarnings cargo test --target i686-unknown-linux-gnu --locked --workspace --all-features
@@ -49,12 +50,12 @@ jobs:
     container:
       image: rust:1.60
     steps:
+    - run: apt-get update && apt install -y binaryen && apt install -y cmake # For `wasm-opt` and the `prost-build` library
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
     - uses: actions/setup-node@v3.1.1
       with:
         node-version: '14'
-    - run: apt-get update && apt install -y binaryen # For `wasm-opt`
     - run: cd bin/wasm-node/javascript && RUSTFLAGS=-Dwarnings npm install-ci-test
 
   wasm-node-size-diff:
@@ -62,6 +63,7 @@ jobs:
     container:
       image: rust:1.60
     steps:
+    - run: apt-get update && apt install -y cmake # For the `prost-build` library
     - uses: actions/checkout@v3
       with:
         fetch-depth: 0  # Necessary to fetch pull request base below
@@ -96,6 +98,7 @@ jobs:
     container:
       image: rust:1.60
     steps:
+    - run: apt-get update && apt install -y cmake # For the `prost-build` library
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
     - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features
@@ -108,6 +111,7 @@ jobs:
     container:
       image: rust:1.60
     steps:
+    - run: apt-get update && apt install -y cmake # For the `prost-build` library
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
     - run: cargo doc --verbose --workspace --all-features --no-deps --document-private-items
@@ -161,10 +165,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
-    - uses: actions-rs/install@v0.1
+    - uses: baptiste0928/cargo-install@v1  # This action ensures that the compilation is cached.
       with:
         crate: cargo-spellcheck
-        version: latest
+        version: 0.11.2
     - run: cargo spellcheck check
 
   wasm-node-versions-match:

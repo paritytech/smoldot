@@ -20,7 +20,7 @@
 //! It can be used on any block.
 
 use crate::{
-    executor::{self, host, vm},
+    executor::{host, vm},
     header,
 };
 
@@ -40,29 +40,6 @@ pub struct AuraConfiguration {
 }
 
 impl AuraConfiguration {
-    /// Retrieves the configuration from the storage of a block.
-    ///
-    /// Must be passed a closure that returns the storage value corresponding to the given key in
-    /// the block storage.
-    pub fn from_storage(
-        mut storage_access: impl FnMut(&[u8]) -> Option<Vec<u8>>,
-    ) -> Result<Self, FromStorageError> {
-        let wasm_code = storage_access(b":code").ok_or(FromStorageError::RuntimeNotFound)?;
-        let heap_pages =
-            executor::storage_heap_pages_to_value(storage_access(b":heappages").as_deref())
-                .map_err(FromStorageError::HeapPagesDecode)?;
-        let vm = host::HostVmPrototype::new(host::Config {
-            module: &wasm_code,
-            heap_pages,
-            exec_hint: vm::ExecHint::Oneshot,
-            allow_unresolved_imports: false,
-        })
-        .map_err(FromStorageError::VmInitialization)?;
-        let (cfg, _) = Self::from_virtual_machine_prototype(vm, storage_access)
-            .map_err(FromStorageError::VmError)?;
-        Ok(cfg)
-    }
-
     /// Retrieves the configuration from the given virtual machine prototype.
     ///
     /// Must be passed a closure that returns the storage value corresponding to the given key in
@@ -72,24 +49,36 @@ impl AuraConfiguration {
     pub fn from_virtual_machine_prototype(
         vm: host::HostVmPrototype,
         mut storage_access: impl FnMut(&[u8]) -> Option<Vec<u8>>,
-    ) -> Result<(Self, host::HostVmPrototype), FromVmPrototypeError> {
-        let mut vm: host::HostVm = vm
-            .run_no_param("AuraApi_slot_duration")
-            .map_err(|(err, proto)| FromVmPrototypeError::VmStart(err, proto))?
-            .into();
+    ) -> (Result<Self, FromVmPrototypeError>, host::HostVmPrototype) {
+        let mut vm: host::HostVm = match vm.run_no_param("AuraApi_slot_duration") {
+            Ok(vm) => vm.into(),
+            Err((err, proto)) => return (Err(FromVmPrototypeError::VmStart(err)), proto),
+        };
 
         let (slot_duration, vm_prototype) = loop {
             match vm {
                 host::HostVm::ReadyToRun(r) => vm = r.run(),
                 host::HostVm::Finished(finished) => {
-                    let slot_duration = NonZeroU64::new(u64::from_le_bytes(
-                        <[u8; 8]>::try_from(finished.value().as_ref())
-                            .map_err(|_| FromVmPrototypeError::BadSlotDuration)?,
-                    ))
-                    .ok_or(FromVmPrototypeError::BadSlotDuration)?;
-                    break (slot_duration, finished.into_prototype());
+                    let convert_attempt = <[u8; 8]>::try_from(finished.value().as_ref());
+                    let vm_prototype = finished.into_prototype();
+
+                    let slot_duration = match convert_attempt {
+                        Ok(val) => match NonZeroU64::new(u64::from_le_bytes(val)) {
+                            Some(val) => val,
+                            None => {
+                                return (Err(FromVmPrototypeError::BadSlotDuration), vm_prototype)
+                            }
+                        },
+                        Err(_) => {
+                            return (Err(FromVmPrototypeError::BadSlotDuration), vm_prototype)
+                        }
+                    };
+
+                    break (slot_duration, vm_prototype);
                 }
-                host::HostVm::Error { .. } => return Err(FromVmPrototypeError::Trapped),
+                host::HostVm::Error { prototype, .. } => {
+                    return (Err(FromVmPrototypeError::Trapped), prototype)
+                }
 
                 host::HostVm::ExternalStorageGet(req) => {
                     let value = storage_access(req.key().as_ref());
@@ -101,27 +90,38 @@ impl AuraConfiguration {
                 }
                 host::HostVm::LogEmit(req) => vm = req.resume(),
 
-                _ => return Err(FromVmPrototypeError::HostFunctionNotAllowed),
+                other => {
+                    let prototype = other.into_prototype();
+                    return (Err(FromVmPrototypeError::HostFunctionNotAllowed), prototype);
+                }
             }
         };
 
-        let mut vm: host::HostVm = vm_prototype
-            .run_no_param("AuraApi_authorities")
-            .map_err(|(err, proto)| FromVmPrototypeError::VmStart(err, proto))?
-            .into();
+        let mut vm: host::HostVm = match vm_prototype.run_no_param("AuraApi_authorities") {
+            Ok(vm) => vm.into(),
+            Err((err, proto)) => return (Err(FromVmPrototypeError::VmStart(err)), proto),
+        };
 
         let (authorities_list, vm_prototype) = loop {
             match vm {
                 host::HostVm::ReadyToRun(r) => vm = r.run(),
                 host::HostVm::Finished(finished) => {
                     let authorities_list =
-                        header::AuraAuthoritiesIter::decode(finished.value().as_ref())
-                            .map_err(|_| FromVmPrototypeError::AuthoritiesListDecodeError)?
-                            .map(header::AuraAuthority::from)
-                            .collect::<Vec<_>>();
-                    break (authorities_list, finished.into_prototype());
+                        match header::AuraAuthoritiesIter::decode(finished.value().as_ref()) {
+                            Ok(iter) => {
+                                Ok(iter.map(header::AuraAuthority::from).collect::<Vec<_>>())
+                            }
+                            Err(_) => Err(FromVmPrototypeError::AuthoritiesListDecodeError),
+                        };
+
+                    match authorities_list {
+                        Ok(l) => break (l, finished.into_prototype()),
+                        Err(err) => return (Err(err), finished.into_prototype()),
+                    }
                 }
-                host::HostVm::Error { .. } => return Err(FromVmPrototypeError::Trapped),
+                host::HostVm::Error { prototype, .. } => {
+                    return (Err(FromVmPrototypeError::Trapped), prototype)
+                }
 
                 host::HostVm::ExternalStorageGet(req) => {
                     let value = storage_access(req.key().as_ref());
@@ -133,7 +133,10 @@ impl AuraConfiguration {
                 }
                 host::HostVm::LogEmit(req) => vm = req.resume(),
 
-                _ => return Err(FromVmPrototypeError::HostFunctionNotAllowed),
+                other => {
+                    let prototype = other.into_prototype();
+                    return (Err(FromVmPrototypeError::HostFunctionNotAllowed), prototype);
+                }
             }
         };
 
@@ -142,30 +145,7 @@ impl AuraConfiguration {
             slot_duration,
         };
 
-        Ok((outcome, vm_prototype))
-    }
-}
-
-/// Error when retrieving the Aura configuration.
-#[derive(Debug, derive_more::Display)]
-pub enum FromStorageError {
-    /// Runtime couldn't be found in the storage.
-    RuntimeNotFound,
-    /// Failed to decode heap pages from the storage.
-    HeapPagesDecode(executor::InvalidHeapPagesError),
-    /// Error when initializing the virtual machine.
-    VmInitialization(host::NewErr),
-    /// Error while executing the runtime.
-    VmError(FromVmPrototypeError),
-}
-
-impl FromStorageError {
-    /// Returns `true` if this error is about an invalid function.
-    pub fn is_function_not_found(&self) -> bool {
-        match self {
-            FromStorageError::VmError(err) => err.is_function_not_found(),
-            _ => false,
-        }
+        (Ok(outcome), vm_prototype)
     }
 }
 
@@ -174,7 +154,7 @@ impl FromStorageError {
 pub enum FromVmPrototypeError {
     /// Error when starting the virtual machine.
     #[display(fmt = "{}", _0)]
-    VmStart(host::StartErr, host::HostVmPrototype),
+    VmStart(host::StartErr),
     /// Crash while running the virtual machine.
     Trapped,
     /// Virtual machine tried to call a host function that isn't valid in this context.
@@ -190,12 +170,9 @@ impl FromVmPrototypeError {
     pub fn is_function_not_found(&self) -> bool {
         matches!(
             self,
-            FromVmPrototypeError::VmStart(
-                host::StartErr::VirtualMachine(
-                    vm::StartErr::FunctionNotFound | vm::StartErr::NotAFunction
-                ),
-                _
-            )
+            FromVmPrototypeError::VmStart(host::StartErr::VirtualMachine(
+                vm::StartErr::FunctionNotFound | vm::StartErr::NotAFunction
+            ))
         )
     }
 }
