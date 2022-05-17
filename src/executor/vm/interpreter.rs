@@ -180,7 +180,7 @@ impl InterpreterPrototype {
         };
 
         if not_started.has_start() {
-            return Err(NewErr::StartFunctionNotSupported)
+            return Err(NewErr::StartFunctionNotSupported);
         }
         let module = not_started.assert_no_start();
 
