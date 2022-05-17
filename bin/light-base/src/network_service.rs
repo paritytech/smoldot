@@ -288,13 +288,13 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                         TPlat::sleep(next_discovery).await;
                         next_discovery = cmp::min(next_discovery * 2, Duration::from_secs(120));
 
-                        let mut lock = shared.guarded.lock().await;
+                        let mut guarded = shared.guarded.lock().await;
                         for chain_index in 0..shared.log_chain_names.len() {
-                            let operation_id = lock
+                            let operation_id = guarded
                                 .network
                                 .start_kademlia_discovery_round(TPlat::now(), chain_index);
 
-                            let _prev_value = lock
+                            let _prev_value = guarded
                                 .kademlia_discovery_operations
                                 .insert(operation_id, chain_index);
                             debug_assert!(_prev_value.is_none());
@@ -366,7 +366,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         timeout: Duration,
     ) -> Result<Vec<protocol::BlockData>, service::BlocksRequestError> {
         let rx = {
-            let mut inner = self.shared.guarded.lock().await;
+            let mut guarded = self.shared.guarded.lock().await;
 
             match &config.start {
                 protocol::BlocksRequestConfigStart::Hash(hash) => {
@@ -391,7 +391,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                 }
             }
 
-            let request_id = inner.network.start_blocks_request(
+            let request_id = guarded.network.start_blocks_request(
                 TPlat::now(),
                 &target,
                 chain_index,
@@ -402,7 +402,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             self.shared.wake_up_main_background_task.notify(1);
 
             let (tx, rx) = oneshot::channel();
-            inner.blocks_requests.insert(request_id, tx);
+            guarded.blocks_requests.insert(request_id, tx);
             rx
         };
 
@@ -462,14 +462,14 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         timeout: Duration,
     ) -> Result<protocol::GrandpaWarpSyncResponse, service::GrandpaWarpSyncRequestError> {
         let rx = {
-            let mut inner = self.shared.guarded.lock().await;
+            let mut guarded = self.shared.guarded.lock().await;
 
             log::debug!(
                 target: "network", "Connection({}) <= GrandpaWarpSyncRequest(chain={}, start={})",
                 target, self.shared.log_chain_names[chain_index], HashDisplay(&begin_hash)
             );
 
-            let request_id = inner.network.start_grandpa_warp_sync_request(
+            let request_id = guarded.network.start_grandpa_warp_sync_request(
                 TPlat::now(),
                 &target,
                 chain_index,
@@ -480,7 +480,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             self.shared.wake_up_main_background_task.notify(1);
 
             let (tx, rx) = oneshot::channel();
-            inner.grandpa_warp_sync_requests.insert(request_id, tx);
+            guarded.grandpa_warp_sync_requests.insert(request_id, tx);
             rx
         };
 
@@ -559,7 +559,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         timeout: Duration,
     ) -> Result<Vec<Vec<u8>>, service::StorageProofRequestError> {
         let rx = {
-            let mut inner = self.shared.guarded.lock().await;
+            let mut guarded = self.shared.guarded.lock().await;
 
             log::debug!(
                 target: "network",
@@ -569,7 +569,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                 HashDisplay(&config.block_hash)
             );
 
-            let request_id = inner.network.start_storage_proof_request(
+            let request_id = guarded.network.start_storage_proof_request(
                 TPlat::now(),
                 &target,
                 chain_index,
@@ -580,7 +580,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             self.shared.wake_up_main_background_task.notify(1);
 
             let (tx, rx) = oneshot::channel();
-            inner.storage_proof_requests.insert(request_id, tx);
+            guarded.storage_proof_requests.insert(request_id, tx);
             rx
         };
 
@@ -623,7 +623,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         timeout: Duration,
     ) -> Result<Vec<Vec<u8>>, service::CallProofRequestError> {
         let rx = {
-            let mut inner = self.shared.guarded.lock().await;
+            let mut guarded = self.shared.guarded.lock().await;
 
             log::debug!(
                 target: "network",
@@ -634,7 +634,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                 config.method
             );
 
-            let request_id = inner.network.start_call_proof_request(
+            let request_id = guarded.network.start_call_proof_request(
                 TPlat::now(),
                 &target,
                 chain_index,
@@ -645,7 +645,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             self.shared.wake_up_main_background_task.notify(1);
 
             let (tx, rx) = oneshot::channel();
-            inner.call_proof_requests.insert(request_id, tx);
+            guarded.call_proof_requests.insert(request_id, tx);
             rx
         };
 
@@ -694,11 +694,11 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
         // TODO: keep track of which peer knows about which transaction, and don't send it again
 
-        let mut inner = self.shared.guarded.lock().await;
+        let mut guarded = self.shared.guarded.lock().await;
 
         // TODO: collecting in a Vec :-/
-        for peer in inner.network.peers_list().cloned().collect::<Vec<_>>() {
-            if inner
+        for peer in guarded.network.peers_list().cloned().collect::<Vec<_>>() {
+            if guarded
                 .network
                 .announce_transaction(&peer, chain_index, &transaction)
                 .is_ok()
@@ -744,15 +744,15 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         list: impl IntoIterator<Item = (PeerId, impl IntoIterator<Item = Multiaddr>)>,
         important_nodes: bool,
     ) {
-        let mut inner = self.shared.guarded.lock().await;
+        let mut guarded = self.shared.guarded.lock().await;
 
         if important_nodes {
             let list = list.into_iter().collect::<Vec<_>>();
             let to_add_important = list.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>();
-            inner.network.discover(now, chain_index, list);
-            inner.important_nodes.extend(to_add_important);
+            guarded.network.discover(now, chain_index, list);
+            guarded.important_nodes.extend(to_add_important);
         } else {
-            inner.network.discover(now, chain_index, list)
+            guarded.network.discover(now, chain_index, list)
         }
 
         self.shared.wake_up_main_background_task.notify(1);
@@ -826,24 +826,25 @@ async fn update_round<TPlat: Platform>(
     shared: &Arc<Shared<TPlat>>,
     event_senders: &mut [mpsc::Sender<Event>],
 ) {
-    let mut lock = shared.guarded.lock().await;
+    let mut guarded = shared.guarded.lock().await;
 
     // Inject in the coordinator the messages that the connections have generated.
     loop {
-        let (connection_id, message) = match lock.messages_from_connections_rx.next().now_or_never()
-        {
-            Some(Some(v)) => v,
-            _ => break,
-        };
+        let (connection_id, message) =
+            match guarded.messages_from_connections_rx.next().now_or_never() {
+                Some(Some(v)) => v,
+                _ => break,
+            };
 
-        lock.network
+        guarded
+            .network
             .inject_connection_message(connection_id, message);
     }
 
     // Process the events that the coordinator has generated.
     'events_loop: loop {
         let event = loop {
-            let inner_event = match lock.network.next_event(TPlat::now()) {
+            let inner_event = match guarded.network.next_event(TPlat::now()) {
                 Some(ev) => ev,
                 None => break 'events_loop,
             };
@@ -972,7 +973,7 @@ async fn update_round<TPlat: Platform>(
                     request_id,
                     response,
                 } => {
-                    let _ = lock
+                    let _ = guarded
                         .blocks_requests
                         .remove(&request_id)
                         .unwrap()
@@ -982,7 +983,7 @@ async fn update_round<TPlat: Platform>(
                     request_id,
                     response,
                 } => {
-                    let _ = lock
+                    let _ = guarded
                         .grandpa_warp_sync_requests
                         .remove(&request_id)
                         .unwrap()
@@ -992,7 +993,7 @@ async fn update_round<TPlat: Platform>(
                     request_id,
                     response,
                 } => {
-                    let _ = lock
+                    let _ = guarded
                         .storage_proof_requests
                         .remove(&request_id)
                         .unwrap()
@@ -1002,7 +1003,7 @@ async fn update_round<TPlat: Platform>(
                     request_id,
                     response,
                 } => {
-                    let _ = lock
+                    let _ = guarded
                         .call_proof_requests
                         .remove(&request_id)
                         .unwrap()
@@ -1017,7 +1018,7 @@ async fn update_round<TPlat: Platform>(
                     operation_id,
                     result,
                 } => {
-                    let chain_index = lock
+                    let chain_index = guarded
                         .kademlia_discovery_operations
                         .remove(&operation_id)
                         .unwrap();
@@ -1029,7 +1030,7 @@ async fn update_round<TPlat: Platform>(
                                 nodes.iter().map(|(p, _)| p.to_string()).join(", ")
                             );
 
-                            lock.network.discover(&TPlat::now(), chain_index, nodes);
+                            guarded.network.discover(&TPlat::now(), chain_index, nodes);
                         }
                         Err(error) => {
                             log::warn!(
@@ -1061,7 +1062,7 @@ async fn update_round<TPlat: Platform>(
                         "Connection({}) => IdentifyRequest",
                         peer_id,
                     );
-                    lock.network.respond_identify(request_id, "smoldot");
+                    guarded.network.respond_identify(request_id, "smoldot");
                 }
                 service::Event::BlocksRequestIn { .. } => unreachable!(),
                 service::Event::RequestInCancel { .. } => {
@@ -1100,7 +1101,7 @@ async fn update_round<TPlat: Platform>(
         // Because the tasks processing the receivers might be waiting to acquire the lock, we
         // need to unlock the lock before sending. This guarantees that the sending finishes at
         // some point in the future.
-        drop(lock);
+        drop(guarded);
 
         // This little `if` avoids having to do `event.clone()` if we don't have to.
         if event_senders.len() == 1 {
@@ -1115,13 +1116,13 @@ async fn update_round<TPlat: Platform>(
         }
 
         // Re-acquire lock to continue the function.
-        lock = shared.guarded.lock().await;
+        guarded = shared.guarded.lock().await;
     }
 
     // TODO: doc
     for chain_index in 0..shared.log_chain_names.len() {
         loop {
-            let peer = lock.network.assign_slots(chain_index);
+            let peer = guarded.network.assign_slots(chain_index);
             if let Some(peer_id) = peer {
                 log::debug!(
                     target: "connections",
@@ -1139,12 +1140,12 @@ async fn update_round<TPlat: Platform>(
     // Grab this list and start opening a connection for each.
     // TODO: restore the rate limiting for connections openings
     loop {
-        let start_connect = match lock.network.next_start_connect(|| TPlat::now()) {
+        let start_connect = match guarded.network.next_start_connect(|| TPlat::now()) {
             Some(sc) => sc,
             None => break,
         };
 
-        let is_important = lock
+        let is_important = guarded
             .important_nodes
             .contains(&start_connect.expected_peer_id);
 
@@ -1152,20 +1153,20 @@ async fn update_round<TPlat: Platform>(
         let task = connection_task(
             start_connect,
             shared.clone(),
-            lock.messages_from_connections_tx.clone(),
+            guarded.messages_from_connections_tx.clone(),
             is_important,
         );
 
         // Sending the new task might fail in case a shutdown is happening, in which case
         // we don't really care about the state of anything anymore.
         // The sending here is normally very quick.
-        let _ = lock.new_tasks_tx.send(Box::pin(task)).await;
+        let _ = guarded.new_tasks_tx.send(Box::pin(task)).await;
     }
 
     // Pull messages that the coordinator has generated in destination to the various
     // connections.
     loop {
-        let (connection_id, message) = match lock.network.pull_message_to_connection() {
+        let (connection_id, message) = match guarded.network.pull_message_to_connection() {
             Some(m) => m,
             None => break,
         };
@@ -1176,7 +1177,8 @@ async fn update_round<TPlat: Platform>(
         // a message on the connection-to-coordinator channel, this will result in a deadlock.
         // For this reason, the connection task is always ready to immediately accept a message
         // on the coordinator-to-connection channel.
-        lock.active_connections
+        guarded
+            .active_connections
             .get_mut(&connection_id)
             .unwrap()
             .send(message)
@@ -1256,8 +1258,8 @@ async fn connection_task<TPlat: Platform>(
         match result {
             Ok(ws) => ws,
             Err(err) => {
-                let mut lock = shared.guarded.lock().await;
-                lock.network.pending_outcome_err(
+                let mut guarded = shared.guarded.lock().await;
+                guarded.network.pending_outcome_err(
                     start_connect.id,
                     err.map_or(false, |err| err.is_bad_addr),
                 ); // TODO: should pass a proper value for `is_unreachable`, but an error is sometimes returned despite a timeout https://github.com/paritytech/smoldot/issues/1531
@@ -1273,8 +1275,8 @@ async fn connection_task<TPlat: Platform>(
     };
 
     // Connection process is successful. Notify the network state machine.
-    let mut lock = shared.guarded.lock().await;
-    let (connection_id, connec_task) = lock.network.pending_outcome_ok(start_connect.id);
+    let mut guarded = shared.guarded.lock().await;
+    let (connection_id, connec_task) = guarded.network.pending_outcome_ok(start_connect.id);
     log::debug!(
         target: "connections",
         "Pending({:?}, {}) => Connection through {}",
@@ -1284,12 +1286,12 @@ async fn connection_task<TPlat: Platform>(
     );
 
     let (coordinator_to_connection_tx, coordinator_to_connection_rx) = mpsc::channel(8);
-    let _prev_value = lock
+    let _prev_value = guarded
         .active_connections
         .insert(connection_id, coordinator_to_connection_tx);
     debug_assert!(_prev_value.is_none());
 
-    drop(lock);
+    drop(guarded);
 
     open_connection_task::<TPlat>(
         socket,
@@ -1381,8 +1383,8 @@ async fn open_connection_task<TPlat: Platform>(
         // that the connection id is still attributed to the current task, and not to a new
         // connection that the coordinator has assigned after receiving the message.
         if task_update.is_none() {
-            let mut lock = shared.guarded.lock().await;
-            let _was_in = lock.active_connections.remove(&connection_id);
+            let mut guarded = shared.guarded.lock().await;
+            let _was_in = guarded.active_connections.remove(&connection_id);
             debug_assert!(_was_in.is_some());
         }
 
