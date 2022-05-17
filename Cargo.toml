@@ -30,6 +30,7 @@ std = [
     "async-std",
     "futures/thread-pool",
     "parking_lot",
+    "pin-project",
     "schnorrkel/getrandom", # TODO: necessary for signing; clarify in docs and in source code
     "soketto",
     "wasmtime",
@@ -66,7 +67,6 @@ num-bigint = { version = "0.4.3", default-features = false }
 num-rational = { version = "0.4.0", default-features = false, features = ["num-bigint"] }
 num-traits = { version = "0.2.15", default-features = false }
 pbkdf2 = { version = "0.11.0", default-features = false }
-pin-project = "1.0.8"
 prost = { version = "0.10.3", default-features = false, features = ["prost-derive"] }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }  # TODO: rand is used in hack-y ways at the moment ; these features should be removed
 rand_chacha = { version = "0.3.1", default-features = false }
@@ -90,6 +90,7 @@ sqlite = { version = "0.26.0", optional = true, default-features = false, featur
 # Add here the crates that cannot function without the help of the operating system or environment.
 async-std = { version = "1.11.0", optional = true }
 parking_lot = { version = "0.12.0", optional = true }
+pin-project = { version = "1.0.8", optional = true }
 soketto = { version = "0.7.1", optional = true }
 
 # BELOW: DEPENDENCIES TO REMOVE

@@ -743,7 +743,6 @@ mod tests {
                                 read_bytes: 0,
                                 written_bytes: 0,
                                 wake_up_after: None,
-                                wake_up_future: None,
                             };
                             negotiation1 = nego.read_write(&mut read_write).unwrap();
                             let (read_bytes, written_bytes) =
@@ -760,7 +759,6 @@ mod tests {
                                 read_bytes: 0,
                                 written_bytes: 0,
                                 wake_up_after: None,
-                                wake_up_future: None,
                             };
                             negotiation1 = nego.read_write(&mut read_write).unwrap();
                             for _ in 0..read_write.read_bytes {
@@ -783,7 +781,6 @@ mod tests {
                                 read_bytes: 0,
                                 written_bytes: 0,
                                 wake_up_after: None,
-                                wake_up_future: None,
                             };
                             negotiation2 = nego.read_write(&mut read_write).unwrap();
                             let (read_bytes, written_bytes) =
@@ -800,7 +797,6 @@ mod tests {
                                 read_bytes: 0,
                                 written_bytes: 0,
                                 wake_up_after: None,
-                                wake_up_future: None,
                             };
                             negotiation2 = nego.read_write(&mut read_write).unwrap();
                             for _ in 0..read_write.read_bytes {

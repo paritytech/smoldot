@@ -547,7 +547,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                 Ok(value) if !value.is_empty() => return Ok(value),
                 // TODO: this check of emptiness is a bit of a hack; it is necessary because Substrate responds to requests about blocks it doesn't know with an empty proof
                 Ok(_) => outcome_errors.push(service::CallProofRequestError::Request(
-                    smoldot::libp2p::peers::RequestError::Connection(
+                    smoldot::libp2p::peers::RequestError::Substream(
                         smoldot::libp2p::connection::established::RequestError::SubstreamClosed,
                     ),
                 )),
