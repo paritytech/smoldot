@@ -89,7 +89,7 @@ impl JitPrototype {
         let mut store = wasmtime::Store::new(module.inner.engine(), ());
 
         let mut imported_memory = None;
-        let shared = Arc::new(Mutex::new(Shared::Poisoned));
+        let shared = Arc::new(Mutex::new(Shared::ExecutingStart));
 
         // Building the list of symbols that the Wasm VM is able to use.
         let imports = {
@@ -142,6 +142,12 @@ impl JitPrototype {
                                                 memory_pointer: memory.data_ptr(&caller) as usize,
                                                 memory_size: memory.data_size(&mut caller),
                                             };
+                                        }
+                                        Shared::ExecutingStart => {
+                                            // TODO: somehow turn this into a `NewErr::StartFunctionNotSupported`?
+                                            return Box::new(future::ready(Err(
+                                                wasmtime::Trap::new("start function forbidden"),
+                                            )));
                                         }
                                         _ => unreachable!(),
                                     }
@@ -225,13 +231,23 @@ impl JitPrototype {
             imports
         };
 
-        // Note: we assume that `new_async` is instantaneous, which it seems to be. It's actually
-        // unclear why this function is async at all, as all it is supposed to do in synchronous.
-        // Future versions of `wasmtime` might break this assumption.
+        // Calling `wasmtime::Instance::new` executes the `start` function of the module, if any.
+        // If this `start` function calls into one of the imports, then the import will detect
+        // that the shared state is `ExecutingStart` and return an error.
+        // This function call is asynchronous because the `start` function might be asynchronous.
+        // In principle, `now_or_never()` can be unwrapped because the only way for `start` to
+        // not be immediately finished is if it enters an import, which immediately returns an
+        // error. However we return an error anyway, just in case.
+        // If the `start` function doesn't call any import, then it will go undetected and no
+        // error will be returned.
+        // TODO: detect `start` anyway, for consistency with other backends
         let instance = wasmtime::Instance::new_async(&mut store, &module.inner, &imports)
             .now_or_never()
-            .unwrap()
+            .ok_or(NewErr::StartFunctionNotSupported)?
             .map_err(|err| NewErr::ModuleError(ModuleError(err.to_string())))?;
+
+        // Now that we are passed the `start` stage, update the state of execution.
+        *shared.lock() = Shared::Poisoned;
 
         let exported_memory = if let Some(mem) = instance.get_export(&mut store, "memory") {
             if let Some(mem) = mem.into_memory() {
@@ -374,6 +390,7 @@ impl fmt::Debug for JitPrototype {
 ///
 enum Shared {
     Poisoned,
+    ExecutingStart,
     OutsideFunctionCall {
         memory: wasmtime::Memory,
     },

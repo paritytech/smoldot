@@ -641,6 +641,10 @@ pub enum NewErr {
         /// Name of module associated with the unresolved function.
         module_name: String,
     },
+    /// Smoldot doesn't support wasm runtime that have a start function. It is unclear whether
+    /// this is allowed in the Substrate/Polkadot specification.
+    // TODO: figure this out
+    StartFunctionNotSupported,
     /// If a "memory" symbol is provided, it must be a memory.
     #[display(fmt = "If a \"memory\" symbol is provided, it must be a memory.")]
     MemoryIsntMemory,
