@@ -53,7 +53,7 @@ jobs:
     - run: apt-get update && apt install -y binaryen && apt install -y cmake # For `wasm-opt` and the `prost-build` library
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
-    - uses: actions/setup-node@v3.1.1
+    - uses: actions/setup-node@v3.2.0
       with:
         node-version: '14'
     - run: cd bin/wasm-node/javascript && RUSTFLAGS=-Dwarnings npm install-ci-test
@@ -68,7 +68,7 @@ jobs:
       with:
         fetch-depth: 0  # Necessary to fetch pull request base below
     - uses: Swatinem/rust-cache@v1
-    - uses: actions/setup-node@v3.1.1
+    - uses: actions/setup-node@v3.2.0
       with:
         node-version: '14'
     - uses: baptiste0928/cargo-install@v1  # This action ensures that the twiggy compilation is cached.
