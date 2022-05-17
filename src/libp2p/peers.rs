@@ -1180,8 +1180,7 @@ where
 
         self.connections_by_peer
             .range(
-                (peer_index, ConnectionId::min_value())
-                    ..=(peer_index, ConnectionId::max_value()),
+                (peer_index, ConnectionId::min_value())..=(peer_index, ConnectionId::max_value()),
             )
             .any(|(_, established)| *established)
     }

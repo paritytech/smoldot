@@ -529,19 +529,17 @@ impl NetworkService {
         is_best: bool,
     ) -> Result<(), QueueNotificationError> {
         let mut guarded = self.inner.guarded.lock().await;
-    
+
         // The call to `send_block_announce` below panics if we have no active connection.
         // TODO: not the correct check; must make sure that we have a substream open
         if !guarded.network.has_established_connection(&target) {
             return Err(QueueNotificationError::NoConnection);
         }
-    
-        let result = guarded.network.send_block_announce(
-            &target,
-            chain_index,
-            scale_encoded_header,
-            is_best,
-        ).map_err(QueueNotificationError::Queue);
+
+        let result = guarded
+            .network
+            .send_block_announce(&target, chain_index, scale_encoded_header, is_best)
+            .map_err(QueueNotificationError::Queue);
 
         self.inner.wake_up_main_background_task.notify(1);
         result
