@@ -527,13 +527,22 @@ impl NetworkService {
         chain_index: usize,
         scale_encoded_header: &[u8],
         is_best: bool,
-    ) -> Result<(), peers::QueueNotificationError> {
-        let result = self.inner.guarded.lock().await.network.send_block_announce(
+    ) -> Result<(), QueueNotificationError> {
+        let mut guarded = self.inner.guarded.lock().await;
+    
+        // The call to `send_block_announce` below panics if we have no active connection.
+        // TODO: not the correct check; must make sure that we have a substream open
+        if !guarded.network.has_established_connection(&target) {
+            return Err(QueueNotificationError::NoConnection);
+        }
+    
+        let result = guarded.network.send_block_announce(
             &target,
             chain_index,
             scale_encoded_header,
             is_best,
-        );
+        ).map_err(QueueNotificationError::Queue);
+
         self.inner.wake_up_main_background_task.notify(1);
         result
     }
@@ -547,7 +556,7 @@ impl NetworkService {
         target: PeerId, // TODO: by value?
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
-    ) -> Result<Vec<protocol::BlockData>, service::BlocksRequestError> {
+    ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
         let _jaeger_span = self.inner.jaeger_service.outgoing_block_request_span(
             &self.inner.local_peer_id,
             &target,
@@ -563,6 +572,11 @@ impl NetworkService {
 
         let rx = {
             let mut guarded = self.inner.guarded.lock().await;
+
+            // The call to `start_blocks_request` below panics if we have no active connection.
+            if !guarded.network.has_established_connection(&target) {
+                return Err(BlocksRequestError::NoConnection);
+            }
 
             let (tx, rx) = oneshot::channel();
 
@@ -580,7 +594,7 @@ impl NetworkService {
             rx
         };
 
-        rx.await.unwrap()
+        rx.await.unwrap().map_err(BlocksRequestError::Request)
     }
 }
 
@@ -600,6 +614,24 @@ pub enum InitError {
     ListenerIo(Multiaddr, io::Error),
     /// A listening address passed through the configuration isn't valid.
     BadListenMultiaddr(Multiaddr),
+}
+
+/// Error returned by [`NetworkService::blocks_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum BlocksRequestError {
+    /// No established connection with the target.
+    NoConnection,
+    /// Error during the request.
+    Request(service::BlocksRequestError),
+}
+
+/// Error returned by [`NetworkService::send_block_announce`].
+#[derive(Debug, derive_more::Display)]
+pub enum QueueNotificationError {
+    /// No established connection with the target.
+    NoConnection,
+    /// Error during the queuing.
+    Queue(peers::QueueNotificationError),
 }
 
 async fn background_task(inner: Arc<Inner>, mut event_senders: Vec<mpsc::Sender<Event>>) {

@@ -37,7 +37,7 @@ use smoldot::{
     identity::keystore,
     informant::HashDisplay,
     libp2p,
-    network::{self, protocol::BlockData, service::BlocksRequestError},
+    network::{self, protocol::BlockData},
     sync::all,
 };
 use std::{
@@ -323,7 +323,10 @@ struct SyncBackground {
             'static,
             (
                 all::RequestId,
-                Result<Result<Vec<BlockData>, BlocksRequestError>, future::Aborted>,
+                Result<
+                    Result<Vec<BlockData>, network_service::BlocksRequestError>,
+                    future::Aborted,
+                >,
             ),
         >,
     >,

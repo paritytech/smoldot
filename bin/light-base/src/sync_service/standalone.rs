@@ -394,7 +394,7 @@ struct Task<TPlat: Platform> {
             (
                 all::RequestId,
                 Result<
-                    Result<Vec<protocol::BlockData>, network::service::BlocksRequestError>,
+                    Result<Vec<protocol::BlockData>, network_service::BlocksRequestError>,
                     future::Aborted,
                 >,
             ),
@@ -410,7 +410,7 @@ struct Task<TPlat: Platform> {
                 Result<
                     Result<
                         protocol::GrandpaWarpSyncResponse,
-                        network::service::GrandpaWarpSyncRequestError,
+                        network_service::GrandpaWarpSyncRequestError,
                     >,
                     future::Aborted,
                 >,
