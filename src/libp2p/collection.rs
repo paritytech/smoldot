@@ -224,6 +224,7 @@ pub struct Network<TConn, TNow> {
     ping_protocol: Arc<str>,
 }
 
+// TODO: consider refactoring this struct to use an enum
 struct Connection<TConn> {
     /// `true` if the connection is still in its handshake phase.
     handshaking: bool,
