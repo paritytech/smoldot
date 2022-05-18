@@ -1920,8 +1920,8 @@ where
     }
 
     /// Returns `true` if there exists an established connection with the given peer.
-    pub fn has_established_connection(&self, peer: &PeerId) -> bool {
-        self.inner.has_established_connection(peer)
+    pub fn has_established_connection(&self, peer_id: &PeerId) -> bool {
+        self.inner.has_established_connection(peer_id)
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection

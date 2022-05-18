@@ -1172,8 +1172,8 @@ where
     }
 
     /// Returns `true` if there exists an established connection with the given peer.
-    pub fn has_established_connection(&self, peer: &PeerId) -> bool {
-        let peer_index = match self.peer_indices.get(peer) {
+    pub fn has_established_connection(&self, peer_id: &PeerId) -> bool {
+        let peer_index = match self.peer_indices.get(peer_id) {
             Some(idx) => *idx,
             None => return false,
         };
