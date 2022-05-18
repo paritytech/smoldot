@@ -170,9 +170,6 @@ pub struct ChainNetwork<TNow> {
     /// [`ChainNetwork::num_pending_per_peer`].
     pending_ids: slab::Slab<(PeerId, multiaddr::Multiaddr, TNow)>,
 
-    /// List of all open connections.
-    connections: hashbrown::HashSet<PeerId, SipHasherBuild>,
-
     /// Identifier to assign to the next Kademlia operation that is started.
     next_kademlia_operation_id: KademliaOperationId,
 
@@ -376,10 +373,6 @@ where
                 SipHasherBuild::new(randomness.gen()),
             ),
             pending_ids: slab::Slab::with_capacity(config.peers_capacity),
-            connections: hashbrown::HashSet::with_capacity_and_hasher(
-                config.peers_capacity,
-                SipHasherBuild::new(randomness.gen()),
-            ),
             next_kademlia_operation_id: KademliaOperationId(0),
             pending_kademlia_errors: VecDeque::with_capacity(4),
             chains,
@@ -897,7 +890,7 @@ where
             != 1;
 
         // If the peer is completely unreachable, unassign all of its slots.
-        if !has_any_attempt_left && !self.connections.contains(expected_peer_id) {
+        if !has_any_attempt_left && !self.inner.has_established_connection(expected_peer_id) {
             let expected_peer_id = expected_peer_id.clone(); // Necessary for borrowck reasons.
 
             for chain_index in 0..self.chains.len() {
@@ -970,9 +963,6 @@ where
                     num_peer_connections,
                     ..
                 } if num_peer_connections.get() == 1 => {
-                    let _was_inserted = self.connections.insert(peer_id.clone());
-                    debug_assert!(_was_inserted);
-
                     break Some(Event::Connected(peer_id));
                 }
                 peers::Event::Connected { .. } => {
@@ -996,9 +986,6 @@ where
                     for idx in &chain_indices {
                         self.unassign_slot(*idx, &peer_id);
                     }
-
-                    let _was_in = self.connections.remove(&peer_id);
-                    debug_assert!(_was_in);
 
                     // Update the k-buckets.
                     // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
