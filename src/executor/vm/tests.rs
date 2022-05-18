@@ -76,3 +76,19 @@ fn out_of_memory_access() {
     let module2 = super::Module::new(input, super::ExecHint::Untrusted).unwrap();
     assert!(super::VirtualMachinePrototype::new(&module2, |_, _, _| Ok(0)).is_err());
 }
+
+#[test]
+fn unsupported_type() {
+    let input = [
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7b,
+        0x02, 0x0d, 0x01, 0x04, 0x74, 0x65, 0x73, 0x74, 0x04, 0x66, 0x75, 0x6e, 0x63, 0x00, 0x00,
+    ];
+
+    if let Ok(module1) = super::Module::new(input, super::ExecHint::CompileAheadOfTime) {
+        assert!(super::VirtualMachinePrototype::new(&module1, |_, _, _| Ok(0)).is_err());
+    }
+
+    if let Ok(module2) = super::Module::new(input, super::ExecHint::Untrusted) {
+        assert!(super::VirtualMachinePrototype::new(&module2, |_, _, _| Ok(0)).is_err());
+    }
+}

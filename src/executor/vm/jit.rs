@@ -97,13 +97,13 @@ impl JitPrototype {
             for import in module.inner.imports() {
                 match import.ty() {
                     wasmtime::ExternType::Func(f) => {
-                        let function_index = match symbols(
-                            import.module(),
-                            import.name(),
-                            &TryFrom::try_from(&f).unwrap(),
-                        )
-                        .ok()
-                        {
+                        let function_index = if let Ok(ty) = TryFrom::try_from(&f) {
+                            symbols(import.module(), import.name(), &ty).ok()
+                        } else {
+                            None
+                        };
+
+                        let function_index = match function_index {
                             Some(idx) => idx,
                             None => {
                                 return Err(NewErr::UnresolvedFunctionImport {
@@ -133,6 +133,9 @@ impl JitPrototype {
                                         Shared::OutsideFunctionCall { memory } => {
                                             *shared_lock = Shared::EnteredFunctionCall {
                                                 function_index,
+                                                // Because the function signature has been
+                                                // validated at initialization, we can safely
+                                                // convert all the parameter types.
                                                 parameters: params
                                                     .iter()
                                                     .map(TryFrom::try_from)
