@@ -364,9 +364,14 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
         timeout: Duration,
-    ) -> Result<Vec<protocol::BlockData>, service::BlocksRequestError> {
+    ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
         let rx = {
             let mut guarded = self.shared.guarded.lock().await;
+
+            // The call to `start_blocks_request` below panics if we have no active connection.
+            if !guarded.network.has_established_connection(&target) {
+                return Err(BlocksRequestError::NoConnection);
+            }
 
             match &config.start {
                 protocol::BlocksRequestConfigStart::Hash(hash) => {
@@ -449,7 +454,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             }
         }
 
-        result
+        result.map_err(BlocksRequestError::Request)
     }
 
     /// Sends a grandpa warp sync request to the given peer.
@@ -460,9 +465,15 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         chain_index: usize,
         begin_hash: [u8; 32],
         timeout: Duration,
-    ) -> Result<protocol::GrandpaWarpSyncResponse, service::GrandpaWarpSyncRequestError> {
+    ) -> Result<protocol::GrandpaWarpSyncResponse, GrandpaWarpSyncRequestError> {
         let rx = {
             let mut guarded = self.shared.guarded.lock().await;
+
+            // The call to `start_grandpa_warp_sync_request` below panics if we have no
+            // active connection.
+            if !guarded.network.has_established_connection(&target) {
+                return Err(GrandpaWarpSyncRequestError::NoConnection);
+            }
 
             log::debug!(
                 target: "network", "Connection({}) <= GrandpaWarpSyncRequest(chain={}, start={})",
@@ -509,7 +520,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             }
         }
 
-        result
+        result.map_err(GrandpaWarpSyncRequestError::Request)
     }
 
     pub async fn set_local_best_block(
@@ -557,9 +568,15 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
-    ) -> Result<Vec<Vec<u8>>, service::StorageProofRequestError> {
+    ) -> Result<Vec<Vec<u8>>, StorageProofRequestError> {
         let rx = {
             let mut guarded = self.shared.guarded.lock().await;
+
+            // The call to `start_storage_proof_request` below panics if we have no active
+            // connection.
+            if !guarded.network.has_established_connection(&target) {
+                return Err(StorageProofRequestError::NoConnection);
+            }
 
             log::debug!(
                 target: "network",
@@ -608,7 +625,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             }
         }
 
-        result
+        result.map_err(StorageProofRequestError::Request)
     }
 
     /// Sends a call proof request to the given peer.
@@ -621,9 +638,14 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::CallProofRequestConfig<'a, impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
-    ) -> Result<Vec<Vec<u8>>, service::CallProofRequestError> {
+    ) -> Result<Vec<Vec<u8>>, CallProofRequestError> {
         let rx = {
             let mut guarded = self.shared.guarded.lock().await;
+
+            // The call to `start_call_proof_request` below panics if we have no active connection.
+            if !guarded.network.has_established_connection(&target) {
+                return Err(CallProofRequestError::NoConnection);
+            }
 
             log::debug!(
                 target: "network",
@@ -673,7 +695,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             }
         }
 
-        result
+        result.map_err(CallProofRequestError::Request)
     }
 
     /// Announces transaction to the peers we are connected to.
@@ -719,14 +741,19 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         chain_index: usize,
         scale_encoded_header: &[u8],
         is_best: bool,
-    ) -> Result<(), peers::QueueNotificationError> {
-        let result = self
-            .shared
-            .guarded
-            .lock()
-            .await
+    ) -> Result<(), QueueNotificationError> {
+        let mut guarded = self.shared.guarded.lock().await;
+
+        // The call to `send_block_announce` below panics if we have no active connection.
+        // TODO: not the correct check; must make sure that we have a substream open
+        if !guarded.network.has_established_connection(&target) {
+            return Err(QueueNotificationError::NoConnection);
+        }
+
+        let result = guarded
             .network
-            .send_block_announce(&target, chain_index, scale_encoded_header, is_best);
+            .send_block_announce(&target, chain_index, scale_encoded_header, is_best)
+            .map_err(QueueNotificationError::Queue);
 
         self.shared.wake_up_main_background_task.notify(1);
 
@@ -805,6 +832,62 @@ pub enum Event {
         chain_index: usize,
         message: service::EncodedGrandpaCommitMessage,
     },
+}
+
+/// Error returned by [`NetworkService::blocks_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum BlocksRequestError {
+    /// No established connection with the target.
+    NoConnection,
+    /// Error during the request.
+    Request(service::BlocksRequestError),
+}
+
+/// Error returned by [`NetworkService::grandpa_warp_sync_request`].
+#[derive(Debug, derive_more::Display)]
+pub enum GrandpaWarpSyncRequestError {
+    /// No established connection with the target.
+    NoConnection,
+    /// Error during the request.
+    Request(service::GrandpaWarpSyncRequestError),
+}
+
+/// Error returned by [`NetworkService::storage_proof_request`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum StorageProofRequestError {
+    /// No established connection with the target.
+    NoConnection,
+    /// Error during the request.
+    Request(service::StorageProofRequestError),
+}
+
+/// Error returned by [`NetworkService::call_proof_request`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum CallProofRequestError {
+    /// No established connection with the target.
+    NoConnection,
+    /// Error during the request.
+    Request(service::CallProofRequestError),
+}
+
+impl CallProofRequestError {
+    /// Returns `true` if this is caused by networking issues, as opposed to a consensus-related
+    /// issue.
+    pub fn is_network_problem(&self) -> bool {
+        match self {
+            CallProofRequestError::Request(err) => err.is_network_problem(),
+            CallProofRequestError::NoConnection => true,
+        }
+    }
+}
+
+/// Error returned by [`NetworkService::send_block_announce`].
+#[derive(Debug, derive_more::Display)]
+pub enum QueueNotificationError {
+    /// No established connection with the target.
+    NoConnection,
+    /// Error during the queuing.
+    Queue(peers::QueueNotificationError),
 }
 
 async fn background_task<TPlat: Platform>(
