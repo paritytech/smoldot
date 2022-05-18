@@ -26,25 +26,25 @@ use crate::util::{self, SipHasherBuild};
 
 use alloc::{
     borrow::Cow,
+    collections::VecDeque,
     format,
     string::{String, ToString as _},
     vec::Vec,
 };
 use core::{
-    fmt, iter, mem,
+    fmt, iter,
     num::NonZeroUsize,
     ops::{Add, Sub},
     time::Duration,
-};
-use futures::{
-    lock::{Mutex, MutexGuard},
-    prelude::*,
 };
 use rand::{seq::SliceRandom as _, Rng as _, SeedableRng as _};
 
 pub use crate::libp2p::{
     collection::ReadWrite,
-    peers::{ConnectionId, InboundError},
+    peers::{
+        ConnectionId, ConnectionTask, ConnectionToCoordinator, CoordinatorToConnection,
+        InRequestId, InboundError, OutRequestId,
+    },
 };
 
 mod addresses;
@@ -62,7 +62,7 @@ pub struct Config<TNow> {
 
     /// Seed for the randomness within the networking state machine.
     ///
-    /// While this seed influences the general behavior of the networking state machine, it
+    /// While this seed influences the general behaviour of the networking state machine, it
     /// notably isn't used when generating the ephemeral key used for the Diffie-Hellman
     /// handshake.
     /// This is a defensive measure against users passing a dummy seed instead of actual entropy.
@@ -92,21 +92,6 @@ pub struct Config<TNow> {
     /// >           maximum number of addresses per peer ensures that the total number of
     /// >           addresses is capped as well.
     pub max_addresses_per_peer: NonZeroUsize,
-
-    /// Number of events that can be buffered internally before connections are back-pressured.
-    ///
-    /// A good default value is 64.
-    ///
-    /// # Context
-    ///
-    /// The [`ChainNetwork`] maintains an internal buffer of the events returned by
-    /// [`ChainNetwork::next_event`]. When [`ChainNetwork::read_write`] is called, an event might
-    /// get pushed to this buffer. If this buffer is full, back-pressure will be applied to the
-    /// connections in order to prevent new events from being pushed.
-    ///
-    /// This value is important if [`ChainNetwork::next_event`] is called at a slower than the
-    /// calls to [`ChainNetwork::read_write`] generate events.
-    pub pending_api_events_buffer_size: NonZeroUsize,
 }
 
 /// Configuration for a specific overlay network.
@@ -153,6 +138,10 @@ pub struct GrandpaState {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PendingId(usize);
 
+/// Identifier for a Kademlia iterative query.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct KademliaOperationId(u64);
+
 /// Data structure containing the list of all connections, pending or not, and their latest known
 /// state. See also [the module-level documentation](..).
 pub struct ChainNetwork<TNow> {
@@ -165,64 +154,46 @@ pub struct ChainNetwork<TNow> {
     /// See [`Config::max_addresses_per_peer`].
     max_addresses_per_peer: NonZeroUsize,
 
-    /// Extra fields protected by a `Mutex` and that relate to the logic in
-    /// [`ChainNetwork::next_event`]. Must only be locked within that method and is kept locked
-    /// throughout that method.
-    next_event_guarded: Mutex<NextEventGuarded>,
-
-    /// Extra fields protected by a `Mutex` and that are briefly accessed.
-    ephemeral_guarded: Mutex<EphemeralGuarded<TNow>>,
-
-    /// Number of chains. Equal to the length of [`EphemeralGuarded::chains`].
-    num_chains: usize,
-
-    /// Generator for randomness.
-    randomness: Mutex<rand_chacha::ChaCha20Rng>,
-
-    /// Event notified when [`ChainNetwork::next_start_connect`] should be called again by the
-    /// user.
-    start_connect_needed: event_listener::Event,
-}
-
-/// See [`ChainNetwork::next_event_guarded`].
-struct NextEventGuarded {
-    /// In the [`ChainNetwork::next_event`] function, an event is grabbed from the underlying
-    /// [`peers::Peers`]. This event might lead to some asynchronous post-processing being
-    /// needed. Because the user can interrupt the future returned by [`ChainNetwork::next_event`]
-    /// at any point in time, this post-processing cannot be immediately performed, as the user
-    /// could interrupt the future and lose the event. Instead, the event is temporarily stored
-    /// in this field while this post-processing happens and is only cleared afterwards.
-    to_process_pre_event: Option<peers::Event<multiaddr::Multiaddr>>,
-
     /// Tuples of `(peer_id, chain_index)` that have been reported as open to the API user.
     ///
     /// This is a subset of the block announce notification protocol substreams that are open.
     /// Some substreams might have been opened and have been left out of this map if their
     /// handshake was invalid, or had a different genesis hash, or similar problem.
     open_chains: hashbrown::HashSet<(PeerId, usize), SipHasherBuild>,
-}
 
-/// See [`ChainNetwork::ephemeral_guarded`].
-struct EphemeralGuarded<TNow> {
     /// For each peer, the number of pending attempts.
     num_pending_per_peer: hashbrown::HashMap<PeerId, NonZeroUsize, SipHasherBuild>,
 
     /// Keys of this slab are [`PendingId`]s. Values are the parameters associated to that
     /// [`PendingId`].
     /// The entries here correspond to the entries in
-    /// [`EphemeralGuarded::num_pending_per_peer`].
+    /// [`ChainNetwork::num_pending_per_peer`].
     pending_ids: slab::Slab<(PeerId, multiaddr::Multiaddr, TNow)>,
 
     /// List of all open connections.
     connections: hashbrown::HashSet<PeerId, SipHasherBuild>,
 
+    /// Identifier to assign to the next Kademlia operation that is started.
+    next_kademlia_operation_id: KademliaOperationId,
+
+    /// Errors during a Kademlia operation that is yet to be reported to the user.
+    pending_kademlia_errors: VecDeque<(KademliaOperationId, DiscoveryError)>,
+
     /// For each item in [`Config::chains`], the corresponding chain state.
     ///
     /// The `Vec` always has the same length as [`Config::chains`].
-    chains: Vec<EphemeralGuardedChain<TNow>>,
+    chains: Vec<Chain<TNow>>,
+
+    /// Generator for randomness.
+    randomness: rand_chacha::ChaCha20Rng,
+
+    in_requests_types: hashbrown::HashMap<InRequestId, InRequestTy, fnv::FnvBuildHasher>,
+
+    // TODO: could be a user data in the request
+    out_requests_types: hashbrown::HashMap<OutRequestId, OutRequestTy, fnv::FnvBuildHasher>,
 }
 
-struct EphemeralGuardedChain<TNow> {
+struct Chain<TNow> {
     /// See [`ChainConfig`].
     chain_config: ChainConfig,
 
@@ -245,6 +216,23 @@ struct EphemeralGuardedChain<TNow> {
     ///
     /// For each peer, a list of addresses is hold. This list must never become empty.
     kbuckets: kademlia::kbuckets::KBuckets<PeerId, addresses::Addresses, TNow, 20>,
+}
+
+enum InRequestTy {
+    Identify { observed_addr: multiaddr::Multiaddr },
+    Blocks,
+}
+
+enum OutRequestTy {
+    Blocks {
+        checked: Option<protocol::BlocksRequestConfig>,
+    },
+    GrandpaWarpSync,
+    State,
+    StorageProof,
+    CallProof,
+    KademliaFindNode,
+    KademliaDiscoveryFindNode(KademliaOperationId),
 }
 
 // Update this when a new request response protocol is added.
@@ -350,7 +338,7 @@ where
             .chains
             .into_iter()
             .map(|chain| {
-                EphemeralGuardedChain {
+                Chain {
                     in_peers: hashbrown::HashSet::with_capacity_and_hasher(
                         usize::try_from(chain.in_slots).unwrap_or(0),
                         SipHasherBuild::new(randomness.gen()),
@@ -375,35 +363,37 @@ where
                 request_response_protocols,
                 noise_key: config.noise_key,
                 randomness_seed: randomness.sample(rand::distributions::Standard),
-                pending_api_events_buffer_size: config.pending_api_events_buffer_size,
                 notification_protocols,
                 ping_protocol: "/ipfs/ping/1.0.0".into(),
                 handshake_timeout: config.handshake_timeout,
             }),
-            num_chains: chains.len(),
-            next_event_guarded: Mutex::new(NextEventGuarded {
-                to_process_pre_event: None,
-                open_chains: hashbrown::HashSet::with_capacity_and_hasher(
-                    config.peers_capacity * chains.len(),
-                    SipHasherBuild::new(randomness.gen()),
-                ),
-            }),
-            ephemeral_guarded: Mutex::new(EphemeralGuarded {
-                num_pending_per_peer: hashbrown::HashMap::with_capacity_and_hasher(
-                    config.peers_capacity,
-                    SipHasherBuild::new(randomness.gen()),
-                ),
-                pending_ids: slab::Slab::with_capacity(config.peers_capacity),
-                connections: hashbrown::HashSet::with_capacity_and_hasher(
-                    config.peers_capacity,
-                    SipHasherBuild::new(randomness.gen()),
-                ),
-                chains,
-            }),
+            open_chains: hashbrown::HashSet::with_capacity_and_hasher(
+                config.peers_capacity * chains.len(),
+                SipHasherBuild::new(randomness.gen()),
+            ),
+            num_pending_per_peer: hashbrown::HashMap::with_capacity_and_hasher(
+                config.peers_capacity,
+                SipHasherBuild::new(randomness.gen()),
+            ),
+            pending_ids: slab::Slab::with_capacity(config.peers_capacity),
+            connections: hashbrown::HashSet::with_capacity_and_hasher(
+                config.peers_capacity,
+                SipHasherBuild::new(randomness.gen()),
+            ),
+            next_kademlia_operation_id: KademliaOperationId(0),
+            pending_kademlia_errors: VecDeque::with_capacity(4),
+            chains,
             handshake_timeout: config.handshake_timeout,
             max_addresses_per_peer: config.max_addresses_per_peer,
-            randomness: Mutex::new(randomness),
-            start_connect_needed: event_listener::Event::new(),
+            out_requests_types: hashbrown::HashMap::with_capacity_and_hasher(
+                config.peers_capacity,
+                Default::default(),
+            ),
+            in_requests_types: hashbrown::HashMap::with_capacity_and_hasher(
+                config.peers_capacity,
+                Default::default(),
+            ),
+            randomness,
         }
     }
 
@@ -412,25 +402,23 @@ where
     }
 
     /// Returns the number of established TCP connections, both incoming and outgoing.
-    // TODO: note about race
-    pub async fn num_established_connections(&self) -> usize {
+    pub fn num_established_connections(&self) -> usize {
         // TODO: better impl
-        self.peers_list().await.count()
+        self.peers_list().count()
     }
 
     /// Returns the number of peers we have a substream with.
-    pub async fn num_peers(&self, chain_index: usize) -> usize {
+    pub fn num_peers(&self, chain_index: usize) -> usize {
         self.inner
             .num_outgoing_substreams(self.protocol_index(chain_index, 0))
-            .await
     }
 
     /// Returns the number of chains. Always equal to the length of [`Config::chains`].
     pub fn num_chains(&self) -> usize {
-        self.num_chains
+        self.chains.len()
     }
 
-    /// Returns the Noise key originally passed as [`Config::noise_key`].
+    /// Returns the Noise key originalled passed as [`Config::noise_key`].
     pub fn noise_key(&self) -> &connection::NoiseKey {
         self.inner.noise_key()
     }
@@ -443,20 +431,32 @@ where
     /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
     /// to determine when the handshake timeout expires.
     ///
-    /// After this function has returned, you must process the connection with
-    /// [`ChainNetwork::read_write`].
-    ///
     /// The `remote_addr` is the address used to reach back the remote. In the case of TCP, it
     /// contains the TCP dialing port of the remote. The remote can ask, through the `identify`
     /// libp2p protocol, its own address, in which case we send it.
-    pub async fn add_incoming_connection(
-        &self,
+    pub fn add_incoming_connection(
+        &mut self,
         when_connected: TNow,
         remote_addr: multiaddr::Multiaddr,
-    ) -> ConnectionId {
+    ) -> (ConnectionId, ConnectionTask<TNow>) {
         self.inner
             .add_incoming_connection(when_connected, remote_addr)
-            .await
+    }
+
+    pub fn pull_message_to_connection(
+        &mut self,
+    ) -> Option<(ConnectionId, CoordinatorToConnection<TNow>)> {
+        self.inner.pull_message_to_connection()
+    }
+
+    /// Injects into the state machine a message generated by
+    /// [`ConnectionTask::pull_message_to_coordinator`].
+    pub fn inject_connection_message(
+        &mut self,
+        connection_id: ConnectionId,
+        message: ConnectionToCoordinator,
+    ) {
+        self.inner.inject_connection_message(connection_id, message)
     }
 
     /// Modifies the best block of the local node. See [`ChainConfig::best_hash`] and
@@ -466,14 +466,13 @@ where
     ///
     /// Panics if `chain_index` is out of range.
     ///
-    pub async fn set_local_best_block(
-        &self,
+    pub fn set_local_best_block(
+        &mut self,
         chain_index: usize,
         best_hash: [u8; 32],
         best_number: u64,
     ) {
-        let mut guarded = self.ephemeral_guarded.lock().await;
-        let mut config = &mut guarded.chains[chain_index].chain_config;
+        let mut config = &mut self.chains[chain_index].chain_config;
         config.best_hash = best_hash;
         config.best_number = best_number;
     }
@@ -492,13 +491,15 @@ where
     ///
     /// > **Note**: The information passed as parameter isn't validated in any way by this method.
     ///
+    /// This function might generate a message destined to connections. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process these messages after it has
+    /// returned.
+    ///
     /// # Panic
     ///
     /// Panics if `chain_index` is out of range, or if the chain has GrandPa disabled.
     ///
-    pub async fn set_local_grandpa_state(&self, chain_index: usize, grandpa_state: GrandpaState) {
-        let mut guarded = self.ephemeral_guarded.lock().await;
-
+    pub fn set_local_grandpa_state(&mut self, chain_index: usize, grandpa_state: GrandpaState) {
         // Bytes of the neighbor packet to send out.
         let packet = protocol::GrandpaNotificationRef::Neighbor(protocol::NeighborPacket {
             round_number: grandpa_state.round_number,
@@ -514,13 +515,12 @@ where
         // Now sending out.
         let _ = self
             .inner
-            .broadcast_notification(chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2, packet)
-            .await;
+            .broadcast_notification(chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2, packet);
 
         // Update the locally-stored state, but only after the notification has been broadcasted.
         // This way, if the user cancels the future while `broadcast_notification` is executing,
         // the whole operation is cancelled.
-        *guarded.chains[chain_index]
+        *self.chains[chain_index]
             .chain_config
             .grandpa_protocol_config
             .as_mut()
@@ -528,160 +528,95 @@ where
     }
 
     /// Sends a blocks request to the given peer.
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
     // TODO: more docs
-    pub async fn blocks_request(
-        &self,
+    pub fn start_blocks_request(
+        &mut self,
         now: TNow,
-        target: &peer_id::PeerId,
+        target: &PeerId,
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
         timeout: Duration,
-    ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
-        if !config.fields.header {
-            return Err(BlocksRequestError::NotVerifiable);
-        }
-
-        let request_start = config.start.clone();
-        let requested_fields = config.fields.clone();
-
-        let mut result = self
-            .blocks_request_unchecked(now, target, chain_index, config, timeout)
-            .await?;
-
-        if result.is_empty() {
-            return Err(BlocksRequestError::EmptyResponse);
-        }
-
-        // Verify validity of all the blocks.
-        for (block_index, block) in result.iter_mut().enumerate() {
-            if block.header.is_none() {
-                return Err(BlocksRequestError::Entry {
-                    index: block_index,
-                    error: BlocksRequestResponseEntryError::MissingField,
-                });
-            }
-
-            if block
-                .header
-                .as_ref()
-                .map_or(false, |h| header::decode(h).is_err())
-            {
-                return Err(BlocksRequestError::Entry {
-                    index: block_index,
-                    error: BlocksRequestResponseEntryError::InvalidHeader,
-                });
-            }
-
-            match (block.body.is_some(), requested_fields.body) {
-                (false, true) => {
-                    return Err(BlocksRequestError::Entry {
-                        index: block_index,
-                        error: BlocksRequestResponseEntryError::MissingField,
-                    });
-                }
-                (true, false) => {
-                    block.body = None;
-                }
-                _ => {}
-            }
-
-            // Note: the presence of a justification isn't checked and can't be checked, as not
-            // all blocks have a justification in the first place.
-
-            if block.header.as_ref().map_or(false, |h| {
-                header::hash_from_scale_encoded_header(&h) != block.hash
-            }) {
-                return Err(BlocksRequestError::Entry {
-                    index: block_index,
-                    error: BlocksRequestResponseEntryError::InvalidHash,
-                });
-            }
-
-            if let (Some(header), Some(body)) = (&block.header, &block.body) {
-                let decoded_header = header::decode(header).unwrap();
-                let expected = header::extrinsics_root(&body[..]);
-                if expected != *decoded_header.extrinsics_root {
-                    return Err(BlocksRequestError::Entry {
-                        index: block_index,
-                        error: BlocksRequestResponseEntryError::InvalidExtrinsicsRoot {
-                            calculated: expected,
-                            in_header: *decoded_header.extrinsics_root,
-                        },
-                    });
-                }
-            }
-        }
-
-        match request_start {
-            protocol::BlocksRequestConfigStart::Hash(hash) if result[0].hash != hash => {
-                return Err(BlocksRequestError::InvalidStart);
-            }
-            protocol::BlocksRequestConfigStart::Number(n)
-                if header::decode(result[0].header.as_ref().unwrap())
-                    .unwrap()
-                    .number
-                    != n =>
-            {
-                return Err(BlocksRequestError::InvalidStart)
-            }
-            _ => {}
-        }
-
-        Ok(result)
+    ) -> OutRequestId {
+        self.start_blocks_request_inner(now, target, chain_index, config, timeout, true)
     }
 
     /// Sends a blocks request to the given peer.
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
     // TODO: more docs
-    pub async fn blocks_request_unchecked(
-        &self,
+    pub fn start_blocks_request_unchecked(
+        &mut self,
         now: TNow,
-        target: &peer_id::PeerId,
+        target: &PeerId,
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
         timeout: Duration,
-    ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
-        let request_data = protocol::build_block_request(config).fold(Vec::new(), |mut a, b| {
+    ) -> OutRequestId {
+        self.start_blocks_request_inner(now, target, chain_index, config, timeout, false)
+    }
+
+    fn start_blocks_request_inner(
+        &mut self,
+        now: TNow,
+        target: &PeerId,
+        chain_index: usize,
+        config: protocol::BlocksRequestConfig,
+        timeout: Duration,
+        checked: bool,
+    ) -> OutRequestId {
+        let request_data = protocol::build_block_request(&config).fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
             a
         });
 
-        let response = self
-            .inner
-            .request(
-                target,
-                self.protocol_index(chain_index, 0),
-                request_data,
-                now + timeout,
-            )
-            .map_err(BlocksRequestError::Request)
-            .await?;
+        let id = self.inner.start_request(
+            target,
+            self.protocol_index(chain_index, 0),
+            request_data,
+            now + timeout,
+        );
 
-        protocol::decode_block_response(&response).map_err(BlocksRequestError::Decode)
+        let _prev_value = self.out_requests_types.insert(
+            id,
+            OutRequestTy::Blocks {
+                checked: if checked { Some(config) } else { None },
+            },
+        );
+        debug_assert!(_prev_value.is_none());
+
+        id
     }
 
-    pub async fn grandpa_warp_sync_request(
-        &self,
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    pub fn start_grandpa_warp_sync_request(
+        &mut self,
         now: TNow,
-        target: &peer_id::PeerId,
+        target: &PeerId,
         chain_index: usize,
         begin_hash: [u8; 32],
         timeout: Duration,
-    ) -> Result<protocol::GrandpaWarpSyncResponse, GrandpaWarpSyncRequestError> {
+    ) -> OutRequestId {
         let request_data = begin_hash.to_vec();
 
-        let response = self
-            .inner
-            .request(
-                target,
-                self.protocol_index(chain_index, 3),
-                request_data,
-                now + timeout,
-            )
-            .map_err(GrandpaWarpSyncRequestError::Request)
-            .await?;
+        let id = self.inner.start_request(
+            target,
+            self.protocol_index(chain_index, 3),
+            request_data,
+            now + timeout,
+        );
 
-        protocol::decode_grandpa_warp_sync_response(&response)
-            .map_err(GrandpaWarpSyncRequestError::Decode)
+        let _prev_value = self
+            .out_requests_types
+            .insert(id, OutRequestTy::GrandpaWarpSync);
+        debug_assert!(_prev_value.is_none());
+
+        id
     }
 
     /// Sends a state request to a peer.
@@ -695,16 +630,19 @@ where
     /// Because response have a size limit, it is unlikely that a single request will return the
     /// entire storage of the chain at once. Instead, call this function multiple times, each call
     /// passing a `start_key` that follows the last key of the previous response.
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
     // TODO: does an empty response mean that `start_key` is the last key of the storage? unclear
-    pub async fn state_request_unchecked(
-        &self,
+    pub fn start_state_request_unchecked(
+        &mut self,
         now: TNow,
-        target: &peer_id::PeerId,
+        target: &PeerId,
         chain_index: usize,
         block_hash: [u8; 32],
         start_key: &[u8],
         timeout: Duration,
-    ) -> Result<Vec<protocol::StateResponseEntry>, StateRequestError> {
+    ) -> OutRequestId {
         let request_data = protocol::build_state_request(protocol::StateRequestConfig {
             block_hash,
             start_key: start_key.to_vec(),
@@ -714,92 +652,100 @@ where
             a
         });
 
-        let response = self
-            .inner
-            .request(
-                target,
-                self.protocol_index(chain_index, 4),
-                request_data,
-                now + timeout,
-            )
-            .map_err(StateRequestError::Request)
-            .await?;
+        let id = self.inner.start_request(
+            target,
+            self.protocol_index(chain_index, 4),
+            request_data,
+            now + timeout,
+        );
 
-        protocol::decode_state_response(&response).map_err(StateRequestError::Decode)
+        let _prev_value = self.out_requests_types.insert(id, OutRequestTy::State);
+        debug_assert!(_prev_value.is_none());
+
+        id
     }
 
     /// Sends a storage request to the given peer.
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
     // TODO: more docs
-    pub async fn storage_proof_request(
-        &self,
+    pub fn start_storage_proof_request(
+        &mut self,
         now: TNow,
-        target: &peer_id::PeerId,
+        target: &PeerId,
         chain_index: usize,
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
-    ) -> Result<Vec<Vec<u8>>, StorageProofRequestError> {
+    ) -> OutRequestId {
         let request_data =
             protocol::build_storage_proof_request(config).fold(Vec::new(), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
                 a
             });
 
-        let response = self
-            .inner
-            .request(
-                target,
-                self.protocol_index(chain_index, 1),
-                request_data,
-                now + timeout,
-            )
-            .map_err(StorageProofRequestError::Request)
-            .await?;
+        let id = self.inner.start_request(
+            target,
+            self.protocol_index(chain_index, 1),
+            request_data,
+            now + timeout,
+        );
 
-        protocol::decode_storage_proof_response(&response).map_err(StorageProofRequestError::Decode)
+        let _prev_value = self
+            .out_requests_types
+            .insert(id, OutRequestTy::StorageProof);
+        debug_assert!(_prev_value.is_none());
+
+        id
     }
 
     /// Sends a call proof request to the given peer.
     ///
-    /// This request is similar to [`ChainNetwork::storage_proof_request`]. Instead of requesting
-    /// specific keys, we request the list of all the keys that are accessed for a specific
-    /// runtime call.
+    /// This request is similar to [`ChainNetwork::start_storage_proof_request`]. Instead of
+    /// requesting specific keys, we request the list of all the keys that are accessed for a
+    /// specific runtime call.
     ///
     /// There exists no guarantee that the proof is complete (i.e. that it contains all the
     /// necessary entries), as it is impossible to know this from just the proof itself. As such,
     /// this method is just an optimization. When performing the actual call, regular storage proof
     /// requests should be performed if the key is not present in the call proof response.
-    pub async fn call_proof_request(
-        &self,
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    pub fn start_call_proof_request(
+        &mut self,
         now: TNow,
-        target: &peer_id::PeerId,
+        target: &PeerId,
         chain_index: usize,
         config: protocol::CallProofRequestConfig<'_, impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
-    ) -> Result<Vec<Vec<u8>>, CallProofRequestError> {
+    ) -> OutRequestId {
         let request_data =
             protocol::build_call_proof_request(config).fold(Vec::new(), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
                 a
             });
 
-        let response = self
-            .inner
-            .request(
-                target,
-                self.protocol_index(chain_index, 1),
-                request_data,
-                now + timeout,
-            )
-            .map_err(CallProofRequestError::Request)
-            .await?;
+        let id = self.inner.start_request(
+            target,
+            self.protocol_index(chain_index, 1),
+            request_data,
+            now + timeout,
+        );
 
-        protocol::decode_call_proof_response(&response).map_err(CallProofRequestError::Decode)
+        let _prev_value = self.out_requests_types.insert(id, OutRequestTy::CallProof);
+        debug_assert!(_prev_value.is_none());
+
+        id
     }
 
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
     // TODO: there this extra parameter in block announces that is unused on many chains but not always
-    pub async fn send_block_announce(
-        &self,
-        target: &peer_id::PeerId,
+    pub fn send_block_announce(
+        &mut self,
+        target: &PeerId,
         chain_index: usize,
         scale_encoded_header: &[u8],
         is_best: bool,
@@ -814,55 +760,44 @@ where
             a
         });
 
-        self.inner
-            .queue_notification(
-                target,
-                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
-                notification,
-            )
-            .await
+        self.inner.queue_notification(
+            target,
+            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
+            notification,
+        )
     }
 
     ///
     ///
     /// Must be passed the SCALE-encoded transaction.
+    ///
+    /// This function might generate a message destined connections. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
     // TODO: -> broadcast_transaction
-    pub async fn announce_transaction(
-        &self,
-        target: &peer_id::PeerId,
+    pub fn announce_transaction(
+        &mut self,
+        target: &PeerId,
         chain_index: usize,
         extrinsic: &[u8],
     ) -> Result<(), QueueNotificationError> {
         let mut val = Vec::with_capacity(1 + extrinsic.len());
         val.extend_from_slice(util::encode_scale_compact_usize(1).as_ref());
         val.extend_from_slice(extrinsic);
-        self.inner
-            .queue_notification(
-                target,
-                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
-                val,
-            )
-            .await
+        self.inner.queue_notification(
+            target,
+            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
+            val,
+        )
     }
 
     /// Inserts the given list of nodes into the list of known nodes held within the state machine.
-    ///
-    /// The service might, but without guarantee, try to connect to these nodes in the future.
-    pub async fn discover(
-        &self,
+    pub fn discover(
+        &mut self,
         now: &TNow,
         chain_index: usize,
-        list: impl IntoIterator<
-            Item = (
-                peer_id::PeerId,
-                impl IntoIterator<Item = multiaddr::Multiaddr>,
-            ),
-        >,
+        list: impl IntoIterator<Item = (PeerId, impl IntoIterator<Item = multiaddr::Multiaddr>)>,
     ) {
-        let mut lock = self.ephemeral_guarded.lock().await;
-        let lock = &mut *lock; // Avoids borrow checker issues.
-
-        let kbuckets = &mut lock.chains[chain_index].kbuckets;
+        let kbuckets = &mut self.chains[chain_index].kbuckets;
 
         for (peer_id, discovered_addrs) in list {
             let mut discovered_addrs = discovered_addrs.into_iter().peekable();
@@ -898,47 +833,42 @@ where
     ///
     /// See also [`ChainNetwork::pending_outcome_err`].
     ///
-    /// After this function has returned, you must process the connection with
-    /// [`ChainNetwork::read_write`].
-    ///
     /// # Panic
     ///
     /// Panics if the [`PendingId`] is invalid.
     ///
-    pub async fn pending_outcome_ok(&self, id: PendingId) -> ConnectionId {
-        let mut lock = self.ephemeral_guarded.lock().await;
-        let lock = &mut *lock; // Prevents borrow checker issues.
-
+    pub fn pending_outcome_ok(&mut self, id: PendingId) -> (ConnectionId, ConnectionTask<TNow>) {
         // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
         // the user cancels the future returned by `add_outgoing_connection`.
-        let (expected_peer_id, multiaddr, when_connected) = lock.pending_ids.get(id.0).unwrap();
+        let (expected_peer_id, multiaddr, when_connected) = self.pending_ids.get(id.0).unwrap();
 
-        let connection_id = self
-            .inner
-            .add_outgoing_connection(when_connected.clone(), expected_peer_id, multiaddr.clone())
-            .await;
+        let (connection_id, connection_task) = self.inner.add_outgoing_connection(
+            when_connected.clone(),
+            expected_peer_id,
+            multiaddr.clone(),
+        );
 
-        // Update `lock.peers`.
+        // Update `self.peers`.
         {
-            let value = lock.num_pending_per_peer.get_mut(expected_peer_id).unwrap();
+            let value = self.num_pending_per_peer.get_mut(expected_peer_id).unwrap();
             if let Some(new_value) = NonZeroUsize::new(value.get() - 1) {
                 *value = new_value;
             } else {
-                lock.num_pending_per_peer.remove(expected_peer_id).unwrap();
+                self.num_pending_per_peer.remove(expected_peer_id).unwrap();
             }
         }
 
         // Update the list of addresses.
         // TODO: O(n)
-        for chain in &mut lock.chains {
+        for chain in &mut self.chains {
             if let Some(addrs) = chain.kbuckets.get_mut(expected_peer_id) {
                 addrs.set_connected(multiaddr);
             }
         }
 
-        lock.pending_ids.remove(id.0);
+        self.pending_ids.remove(id.0);
 
-        connection_id
+        (connection_id, connection_task)
     }
 
     /// After calling [`ChainNetwork::next_start_connect`], notifies the [`ChainNetwork`] of the
@@ -955,12 +885,11 @@ where
     ///
     /// Panics if the [`PendingId`] is invalid.
     ///
-    pub async fn pending_outcome_err(&self, id: PendingId, is_unreachable: bool) {
-        let mut lock = self.ephemeral_guarded.lock().await;
-        let (expected_peer_id, multiaddr, _) = lock.pending_ids.get(id.0).unwrap();
+    pub fn pending_outcome_err(&mut self, id: PendingId, is_unreachable: bool) {
+        let (expected_peer_id, multiaddr, _) = self.pending_ids.get(id.0).unwrap();
         let multiaddr = multiaddr.clone(); // Solves borrowck issues.
 
-        let has_any_attempt_left = lock
+        let has_any_attempt_left = self
             .num_pending_per_peer
             .get(expected_peer_id)
             .unwrap()
@@ -968,25 +897,24 @@ where
             != 1;
 
         // If the peer is completely unreachable, unassign all of its slots.
-        if !has_any_attempt_left && !lock.connections.contains(expected_peer_id) {
+        if !has_any_attempt_left && !self.connections.contains(expected_peer_id) {
             let expected_peer_id = expected_peer_id.clone(); // Necessary for borrowck reasons.
 
-            for chain_index in 0..lock.chains.len() {
-                // TODO: report as event or something; this is complicated because of futures cancellation issues, and because of concerns shown in `assign_slots`
-                self.unassign_slot(&mut *lock, chain_index, &expected_peer_id)
-                    .await;
+            for chain_index in 0..self.chains.len() {
+                // TODO: report as event or something
+                self.unassign_slot(chain_index, &expected_peer_id);
             }
         }
 
-        // Now update `lock`.
+        // Now update `self`.
         // For future-cancellation-safety reasons, this is done after all the asynchronous
         // operations.
 
-        let (expected_peer_id, _, _) = lock.pending_ids.remove(id.0);
+        let (expected_peer_id, _, _) = self.pending_ids.remove(id.0);
 
         // Updates the addresses book.
         // TODO: O(n)
-        for chain in &mut lock.chains {
+        for chain in &mut self.chains {
             if let Some(addrs) = chain.kbuckets.get_mut(&expected_peer_id) {
                 if is_unreachable {
                     // Do not remove last remaining address, in order to prevent the addresses
@@ -1008,237 +936,182 @@ where
         }
 
         {
-            let value = lock
+            let value = self
                 .num_pending_per_peer
                 .get_mut(&expected_peer_id)
                 .unwrap();
             if let Some(new_value) = NonZeroUsize::new(value.get() - 1) {
                 *value = new_value;
             } else {
-                lock.num_pending_per_peer.remove(&expected_peer_id).unwrap();
+                self.num_pending_per_peer.remove(&expected_peer_id).unwrap();
             }
         };
-
-        self.start_connect_needed.notify_additional(1);
     }
 
     /// Returns the next event produced by the service.
-    ///
-    /// This function should be called at a high enough rate that [`ChainNetwork::read_write`] can
-    /// continue pushing events to the internal buffer of events. Failure to call this function
-    /// often enough will lead to connections being back-pressured.
-    /// See also [`Config::pending_api_events_buffer_size`].
-    ///
-    /// It is technically possible to call this function multiple times simultaneously, in which
-    /// case the events will be distributed amongst the multiple calls in an unspecified way.
-    /// Keep in mind that some [`Event`]s have logic attached to the order in which they are
-    /// produced, and calling this function multiple times is therefore discouraged.
     // TODO: this `now` parameter, it's a hack
-    pub async fn next_event(&'_ self, now: TNow) -> Event<'_, TNow> {
-        let mut guarded = self.next_event_guarded.lock().await;
-        let guarded = &mut *guarded;
+    pub fn next_event(&mut self, now: TNow) -> Option<Event> {
+        if let Some((kademlia_operation_id, error)) = self.pending_kademlia_errors.pop_front() {
+            return Some(Event::KademliaDiscoveryResult {
+                operation_id: kademlia_operation_id,
+                result: Err(error),
+            });
+        }
 
-        loop {
-            // It might be that a previous call to `next_event` has been interrupted. If that is
-            // the case, an event will have been left in `to_process_pre_event`. Only pull a new
-            // event if there isn't any not-fully-processed-yet event.
-            let inner_event = match &mut guarded.to_process_pre_event {
+        let event_to_return = loop {
+            let inner_event = match self.inner.next_event() {
                 Some(ev) => ev,
-                ev @ None => {
-                    let new_event = self.inner.next_event().await;
-                    ev.insert(new_event)
-                }
+                None => break None,
             };
 
-            // `inner_event` is a mutable reference to `guarded.to_process_pre_event`. All the
-            // branches below must clear `to_process_pre_event` after all potentially-cancellable
-            // asynchronous operations are finished.
             match inner_event {
                 peers::Event::Connected {
                     peer_id,
                     num_peer_connections,
                     ..
                 } if num_peer_connections.get() == 1 => {
-                    let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
-
-                    let _was_inserted = ephemeral_guarded.connections.insert(peer_id.clone());
+                    let _was_inserted = self.connections.insert(peer_id.clone());
                     debug_assert!(_was_inserted);
 
-                    return match guarded.to_process_pre_event.take().unwrap() {
-                        peers::Event::Connected { peer_id, .. } => Event::Connected(peer_id),
-                        _ => unreachable!(),
-                    };
+                    break Some(Event::Connected(peer_id));
                 }
                 peers::Event::Connected { .. } => {
-                    guarded.to_process_pre_event = None;
+                    // When `num_peer_connections` != 1 we don't care about this event.
                 }
 
                 peers::Event::Disconnected {
                     peer_id,
                     num_peer_connections,
-                    peer_is_desired,
                     user_data: address,
-                } if *num_peer_connections == 0 => {
-                    if *peer_is_desired {
-                        self.start_connect_needed.notify_additional(1);
-                    }
-
+                } if num_peer_connections == 0 => {
                     // TODO: O(n)
-                    let chain_indices = guarded
+                    let chain_indices = self
                         .open_chains
                         .iter()
-                        .filter(|(pid, _)| pid == peer_id)
+                        .filter(|(pid, _)| pid == &peer_id)
                         .map(|(_, c)| *c)
                         .collect::<Vec<_>>();
 
-                    let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
-
                     // Un-assign all the slots of that peer.
-                    // Because this is an asynchronous operation, this is done ahead of time and
-                    // before any modification to `guarded` or `ephemeral_guarded`.
                     for idx in &chain_indices {
-                        self.unassign_slot(&mut *ephemeral_guarded, *idx, peer_id)
-                            .await;
+                        self.unassign_slot(*idx, &peer_id);
                     }
 
-                    let _was_in = ephemeral_guarded.connections.remove(peer_id);
+                    let _was_in = self.connections.remove(&peer_id);
                     debug_assert!(_was_in);
 
                     // Update the k-buckets.
                     // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
-                    for chain in &mut ephemeral_guarded.chains {
-                        if let Some(mut entry) = chain.kbuckets.entry(peer_id).into_occupied() {
+                    for chain in &mut self.chains {
+                        if let Some(mut entry) = chain.kbuckets.entry(&peer_id).into_occupied() {
                             entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
-                            entry.get_mut().set_disconnected(address);
+                            entry.get_mut().set_disconnected(&address);
                         }
                     }
 
                     for idx in &chain_indices {
-                        guarded.open_chains.remove(&(peer_id.clone(), *idx)); // TODO: cloning :-/
+                        self.open_chains.remove(&(peer_id.clone(), *idx)); // TODO: cloning :-/
                     }
 
-                    return match guarded.to_process_pre_event.take().unwrap() {
-                        peers::Event::Disconnected { peer_id, .. } => Event::Disconnected {
-                            peer_id,
-                            chain_indices,
-                        },
-                        _ => unreachable!(),
-                    };
+                    break Some(Event::Disconnected {
+                        peer_id,
+                        chain_indices,
+                    });
                 }
                 peers::Event::Disconnected {
                     peer_id,
                     user_data: address,
                     ..
                 } => {
-                    let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
-
                     // Update the k-buckets.
                     // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
-                    for chain in &mut ephemeral_guarded.chains {
-                        if let Some(mut entry) = chain.kbuckets.entry(peer_id).into_occupied() {
+                    for chain in &mut self.chains {
+                        if let Some(mut entry) = chain.kbuckets.entry(&peer_id).into_occupied() {
                             entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
-                            entry.get_mut().set_disconnected(address);
+                            entry.get_mut().set_disconnected(&address);
                         }
                     }
-
-                    guarded.to_process_pre_event = None;
                 }
 
                 // Insubstantial error for diagnostic purposes.
-                peers::Event::InboundError { .. } => {
-                    match guarded.to_process_pre_event.take().unwrap() {
-                        peers::Event::InboundError { peer_id, error, .. } => {
-                            return Event::ProtocolError {
-                                peer_id,
-                                error: ProtocolError::InboundError(error),
-                            };
-                        }
-                        _ => unreachable!(),
-                    }
+                peers::Event::InboundError { peer_id, error, .. } => {
+                    break Some(Event::ProtocolError {
+                        peer_id,
+                        error: ProtocolError::InboundError(error),
+                    });
                 }
 
                 // Incoming requests of the "identify" protocol.
                 peers::Event::RequestIn {
                     protocol_index: 0,
+                    connection_id,
+                    peer_id,
                     request_payload,
                     request_id,
                     ..
                 } => {
                     if request_payload.is_empty() {
-                        return match guarded.to_process_pre_event.take().unwrap() {
-                            peers::Event::RequestIn {
-                                peer_id,
-                                request_id,
-                                connection_user_data: observed_addr,
-                                ..
-                            } => Event::IdentifyRequestIn {
-                                peer_id,
-                                request: IdentifyRequestIn {
-                                    service: self,
-                                    request_id,
-                                    observed_addr,
-                                },
-                            },
-                            _ => unreachable!(),
-                        };
-                    }
-                    let _ = self.inner.respond(*request_id, Err(())).await;
-                    return match guarded.to_process_pre_event.take().unwrap() {
-                        peers::Event::RequestIn { peer_id, .. } => Event::ProtocolError {
+                        let observed_addr = self.inner[connection_id].clone();
+                        let _prev_value = self
+                            .in_requests_types
+                            .insert(request_id, InRequestTy::Identify { observed_addr });
+                        debug_assert!(_prev_value.is_none());
+
+                        break Some(Event::IdentifyRequestIn {
                             peer_id,
-                            error: ProtocolError::BadIdentifyRequest,
-                        },
-                        _ => unreachable!(),
-                    };
+                            request_id,
+                        });
+                    }
+
+                    let _ = self.inner.respond_in_request(request_id, Err(()));
+                    break Some(Event::ProtocolError {
+                        peer_id,
+                        error: ProtocolError::BadIdentifyRequest,
+                    });
                 }
                 // Incoming requests of the "sync" protocol.
                 peers::Event::RequestIn {
+                    peer_id,
                     request_id,
                     protocol_index,
                     request_payload,
                     ..
-                } if ((*protocol_index - 1) % REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN) == 0 => {
-                    let chain_index = (*protocol_index - 1) / REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN;
+                } if ((protocol_index - 1) % REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN) == 0 => {
+                    let chain_index = (protocol_index - 1) / REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN;
 
-                    match protocol::decode_block_request(request_payload) {
+                    match protocol::decode_block_request(&request_payload) {
                         Ok(config) => {
-                            return match guarded.to_process_pre_event.take().unwrap() {
-                                peers::Event::RequestIn {
-                                    peer_id,
-                                    request_id,
-                                    ..
-                                } => Event::BlocksRequestIn {
-                                    peer_id,
-                                    chain_index,
-                                    config,
-                                    request: BlocksRequestIn {
-                                        service: self,
-                                        request_id,
-                                    },
-                                },
-                                _ => unreachable!(),
-                            };
+                            let _prev_value = self
+                                .in_requests_types
+                                .insert(request_id, InRequestTy::Blocks);
+                            debug_assert!(_prev_value.is_none());
+
+                            break Some(Event::BlocksRequestIn {
+                                peer_id,
+                                chain_index,
+                                config,
+                                request_id,
+                            });
                         }
                         Err(error) => {
-                            let _ = self.inner.respond(*request_id, Err(())).await;
-                            return match guarded.to_process_pre_event.take().unwrap() {
-                                peers::Event::RequestIn { peer_id, .. } => Event::ProtocolError {
-                                    peer_id,
-                                    error: ProtocolError::BadBlocksRequest(error),
-                                },
-                                _ => unreachable!(),
-                            };
+                            let _ = self.inner.respond_in_request(request_id, Err(()));
+                            break Some(Event::ProtocolError {
+                                peer_id,
+                                error: ProtocolError::BadBlocksRequest(error),
+                            });
                         }
                     }
                 }
-                // Only protocol 0 (identify) can receive requests at the moment.
+                // Protocols that receive requests are whitelisted, meaning that no other protocol
+                // indices can reach here.
                 peers::Event::RequestIn { .. } => unreachable!(),
 
                 // Remote is no longer interested in the response.
                 // We don't do anything yet. The obsolescence is detected when trying to answer
                 // it.
-                peers::Event::RequestInCancel { .. } => {
-                    guarded.to_process_pre_event = None;
+                peers::Event::RequestInCancel { id, .. } => {
+                    self.in_requests_types.remove(&id).unwrap();
+                    break Some(Event::RequestInCancel { request_id: id });
                 }
 
                 // Successfully opened block announces substream.
@@ -1248,116 +1121,87 @@ where
                     peer_id,
                     notifications_protocol_index,
                     result: Ok(remote_handshake),
-                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
+                } if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
                     let chain_index =
-                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     // Check validity of the handshake.
                     let remote_handshake =
-                        match protocol::decode_block_announces_handshake(remote_handshake) {
+                        match protocol::decode_block_announces_handshake(&remote_handshake) {
                             Ok(hs) => hs,
                             Err(err) => {
                                 // TODO: must close the substream and unassigned the slot
-                                return Event::ProtocolError {
+                                break Some(Event::ProtocolError {
                                     error: ProtocolError::BadBlockAnnouncesHandshake(err),
-                                    peer_id: match guarded.to_process_pre_event.take().unwrap() {
-                                        peers::Event::NotificationsOutResult {
-                                            peer_id, ..
-                                        } => peer_id,
-                                        _ => unreachable!(),
-                                    },
-                                };
+                                    peer_id,
+                                });
                             }
                         };
 
                     // The desirability of the transactions and grandpa substreams is always equal
                     // to whether the block announces substream is open.
-                    self.inner
-                        .set_peer_notifications_out_desired(
-                            peer_id,
-                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
-                            peers::DesiredState::DesiredReset,
-                        )
-                        .await;
-                    self.inner
-                        .set_peer_notifications_out_desired(
-                            peer_id,
-                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
-                            peers::DesiredState::DesiredReset,
-                        )
-                        .await;
+                    self.inner.set_peer_notifications_out_desired(
+                        &peer_id,
+                        chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
+                        peers::DesiredState::DesiredReset,
+                    );
+                    self.inner.set_peer_notifications_out_desired(
+                        &peer_id,
+                        chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
+                        peers::DesiredState::DesiredReset,
+                    );
 
                     let slot_ty = {
-                        let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                        let local_genesis = ephemeral_guarded.chains[chain_index]
-                            .chain_config
-                            .genesis_hash;
+                        let local_genesis = self.chains[chain_index].chain_config.genesis_hash;
                         let remote_genesis = *remote_handshake.genesis_hash;
 
                         if remote_genesis != local_genesis {
-                            let unassigned_slot_ty = self
-                                .unassign_slot(&mut *ephemeral_guarded, chain_index, peer_id)
-                                .await
-                                .unwrap();
+                            let unassigned_slot_ty =
+                                self.unassign_slot(chain_index, &peer_id).unwrap();
 
-                            return match guarded.to_process_pre_event.take().unwrap() {
-                                peers::Event::NotificationsOutResult { peer_id, .. } => {
-                                    Event::ChainConnectAttemptFailed {
-                                        peer_id,
-                                        chain_index,
-                                        unassigned_slot_ty,
-                                        error: NotificationsOutErr::GenesisMismatch {
-                                            local_genesis,
-                                            remote_genesis,
-                                        },
-                                    }
-                                }
-                                _ => unreachable!(),
-                            };
+                            break Some(Event::ChainConnectAttemptFailed {
+                                peer_id,
+                                chain_index,
+                                unassigned_slot_ty,
+                                error: NotificationsOutErr::GenesisMismatch {
+                                    local_genesis,
+                                    remote_genesis,
+                                },
+                            });
                         }
 
                         // Update the k-buckets.
-                        if let Some(mut entry) = ephemeral_guarded.chains[chain_index]
+                        if let Some(mut entry) = self.chains[chain_index]
                             .kbuckets
-                            .entry(peer_id)
+                            .entry(&peer_id)
                             .into_occupied()
                         {
                             entry.set_state(&now, kademlia::kbuckets::PeerState::Connected);
                         }
 
-                        if ephemeral_guarded.chains[chain_index]
-                            .in_peers
-                            .contains(peer_id)
-                        {
+                        if self.chains[chain_index].in_peers.contains(&peer_id) {
                             SlotTy::Inbound
                         } else {
-                            debug_assert!(ephemeral_guarded.chains[chain_index]
-                                .out_peers
-                                .contains(peer_id));
+                            debug_assert!(self.chains[chain_index].out_peers.contains(&peer_id));
                             SlotTy::Outbound
                         }
                     };
 
-                    let _was_inserted = guarded.open_chains.insert((peer_id.clone(), chain_index));
+                    let _was_inserted = self.open_chains.insert((peer_id.clone(), chain_index));
                     debug_assert!(_was_inserted);
 
                     let best_hash = *remote_handshake.best_hash;
                     let best_number = remote_handshake.best_number;
                     let role = remote_handshake.role;
 
-                    return match guarded.to_process_pre_event.take().unwrap() {
-                        peers::Event::NotificationsOutResult { peer_id, .. } => {
-                            Event::ChainConnected {
-                                peer_id,
-                                chain_index,
-                                slot_ty,
-                                best_hash,
-                                best_number,
-                                role,
-                            }
-                        }
-                        _ => unreachable!(),
-                    };
+                    break Some(Event::ChainConnected {
+                        peer_id,
+                        chain_index,
+                        slot_ty,
+                        best_hash,
+                        best_number,
+                        role,
+                    });
                 }
 
                 // Successfully opened transactions substream.
@@ -1365,10 +1209,116 @@ where
                     notifications_protocol_index,
                     result: Ok(_),
                     ..
-                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 => {
+                } if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 => {
                     // Nothing to do.
-                    guarded.to_process_pre_event = None;
                 }
+
+                peers::Event::Response {
+                    request_id,
+                    response,
+                } => match self.out_requests_types.remove(&request_id).unwrap() {
+                    OutRequestTy::Blocks { checked } => {
+                        let mut response =
+                            response
+                                .map_err(BlocksRequestError::Request)
+                                .and_then(|payload| {
+                                    protocol::decode_block_response(&payload)
+                                        .map_err(BlocksRequestError::Decode)
+                                });
+
+                        if let (Some(config), &mut Ok(ref mut blocks)) = (checked, &mut response) {
+                            if let Err(err) = check_blocks_response(config, blocks) {
+                                response = Err(err);
+                            }
+                        }
+
+                        break Some(Event::BlocksRequestResult {
+                            request_id,
+                            response,
+                        });
+                    }
+                    OutRequestTy::GrandpaWarpSync => {
+                        let response = response
+                            .map_err(GrandpaWarpSyncRequestError::Request)
+                            .and_then(|payload| {
+                                protocol::decode_grandpa_warp_sync_response(&payload)
+                                    .map_err(GrandpaWarpSyncRequestError::Decode)
+                            });
+
+                        break Some(Event::GrandpaWarpSyncRequestResult {
+                            request_id,
+                            response,
+                        });
+                    }
+                    OutRequestTy::State => {
+                        let response =
+                            response
+                                .map_err(StateRequestError::Request)
+                                .and_then(|payload| {
+                                    protocol::decode_state_response(&payload)
+                                        .map_err(StateRequestError::Decode)
+                                });
+
+                        break Some(Event::StateRequestResult {
+                            request_id,
+                            response,
+                        });
+                    }
+                    OutRequestTy::StorageProof => {
+                        let response = response
+                            .map_err(StorageProofRequestError::Request)
+                            .and_then(|payload| {
+                                protocol::decode_storage_proof_response(&payload)
+                                    .map_err(StorageProofRequestError::Decode)
+                            });
+
+                        break Some(Event::StorageProofRequestResult {
+                            request_id,
+                            response,
+                        });
+                    }
+                    OutRequestTy::CallProof => {
+                        let response =
+                            response
+                                .map_err(CallProofRequestError::Request)
+                                .and_then(|payload| {
+                                    protocol::decode_call_proof_response(&payload)
+                                        .map_err(CallProofRequestError::Decode)
+                                });
+
+                        break Some(Event::CallProofRequestResult {
+                            request_id,
+                            response,
+                        });
+                    }
+                    OutRequestTy::KademliaFindNode => {
+                        let response = response
+                            .map_err(KademliaFindNodeError::RequestFailed)
+                            .and_then(|payload| {
+                                kademlia::decode_find_node_response(&payload)
+                                    .map_err(KademliaFindNodeError::DecodeError)
+                            });
+
+                        break Some(Event::KademliaFindNodeRequestResult {
+                            request_id,
+                            response,
+                        });
+                    }
+                    OutRequestTy::KademliaDiscoveryFindNode(operation_id) => {
+                        let result = response
+                            .map_err(KademliaFindNodeError::RequestFailed)
+                            .and_then(|payload| {
+                                kademlia::decode_find_node_response(&payload)
+                                    .map_err(KademliaFindNodeError::DecodeError)
+                            })
+                            .map_err(DiscoveryError::FindNode);
+
+                        break Some(Event::KademliaDiscoveryResult {
+                            operation_id,
+                            result,
+                        });
+                    }
+                },
 
                 // Successfully opened Grandpa substream.
                 // Need to send a Grandpa neighbor packet in response.
@@ -1377,13 +1327,12 @@ where
                     notifications_protocol_index,
                     result: Ok(_),
                     ..
-                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 => {
+                } if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 => {
                     let chain_index =
-                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
-                    let ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     let notification = {
-                        let grandpa_config = *ephemeral_guarded.chains[chain_index]
+                        let grandpa_config = *self.chains[chain_index]
                             .chain_config
                             .grandpa_protocol_config
                             .as_ref()
@@ -1401,157 +1350,74 @@ where
                         })
                     };
 
-                    let _ = self
-                        .inner
-                        .queue_notification(
-                            peer_id,
-                            *notifications_protocol_index,
-                            notification.clone(),
-                        )
-                        .await;
-
-                    guarded.to_process_pre_event = None;
+                    let _ = self.inner.queue_notification(
+                        &peer_id,
+                        notifications_protocol_index,
+                        notification.clone(),
+                    );
                 }
 
                 // Unrecognized protocol.
                 peers::Event::NotificationsOutResult { result: Ok(_), .. } => unreachable!(),
 
-                // The underlying state machine is requesting our local handshake in order to
-                // send it out.
-                // This is a purely local event that isn't related to any networking activity.
-                peers::Event::DesiredOutNotification {
-                    id,
-                    notifications_protocol_index,
-                    ..
-                } => {
-                    let ephemeral_guarded = self.ephemeral_guarded.lock().await;
-                    let chain_config = &ephemeral_guarded.chains
-                        [*notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN]
-                        .chain_config;
-
-                    let handshake = if *notifications_protocol_index
-                        % NOTIFICATIONS_PROTOCOLS_PER_CHAIN
-                        == 0
-                    {
-                        protocol::encode_block_announces_handshake(
-                            protocol::BlockAnnouncesHandshakeRef {
-                                best_hash: &chain_config.best_hash,
-                                best_number: chain_config.best_number,
-                                genesis_hash: &chain_config.genesis_hash,
-                                role: chain_config.role,
-                            },
-                        )
-                        .fold(Vec::new(), |mut a, b| {
-                            a.extend_from_slice(b.as_ref());
-                            a
-                        })
-                    } else if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1
-                    {
-                        Vec::new()
-                    } else if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2
-                    {
-                        chain_config.role.scale_encoding().to_vec()
-                    } else {
-                        unreachable!()
-                    };
-
-                    self.inner
-                        .open_out_notification(*id, now.clone(), handshake)
-                        .await;
-
-                    guarded.to_process_pre_event = None;
-                }
-
                 // Failed to open block announces substream.
                 peers::Event::NotificationsOutResult {
                     notifications_protocol_index,
                     peer_id,
-                    result: Err(_),
-                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
+                    result: Err(error),
+                } if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
                     let chain_index =
-                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
-                    let unassigned_slot_ty = self
-                        .unassign_slot(
-                            &mut *self.ephemeral_guarded.lock().await,
-                            chain_index,
-                            peer_id,
-                        )
-                        .await
-                        .unwrap();
+                    let unassigned_slot_ty = self.unassign_slot(chain_index, &peer_id).unwrap();
 
-                    // As a slot has been unassigned, wake up the discovery process in order for
-                    // it to be filled.
-                    // TODO: correct?
-                    // TODO: if necessary, mark another peer+substream tuple as desired to fill a slot
-                    self.start_connect_needed.notify_additional(1);
-
-                    match guarded.to_process_pre_event.take().unwrap() {
-                        peers::Event::NotificationsOutResult {
-                            peer_id,
-                            result: Err(error),
-                            ..
-                        } => {
-                            return Event::ChainConnectAttemptFailed {
-                                peer_id,
-                                chain_index,
-                                unassigned_slot_ty,
-                                error: NotificationsOutErr::Substream(error),
-                            };
-                        }
-                        _ => unreachable!(),
-                    }
+                    break Some(Event::ChainConnectAttemptFailed {
+                        peer_id,
+                        chain_index,
+                        unassigned_slot_ty,
+                        error: NotificationsOutErr::Substream(error),
+                    });
                 }
 
                 // Other protocol.
-                peers::Event::NotificationsOutResult { result: Err(_), .. } => {
-                    guarded.to_process_pre_event = None;
-                }
+                peers::Event::NotificationsOutResult { result: Err(_), .. } => {}
 
                 // Remote closes our outbound block announces substream.
                 peers::Event::NotificationsOutClose {
                     notifications_protocol_index,
                     peer_id,
-                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
+                } if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
                     let chain_index =
-                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     // The desirability of the transactions and grandpa substreams is always equal
                     // to whether the block announces substream is open.
                     //
                     // These two calls modify `self.inner`, but they are still cancellation-safe
                     // as they can be repeated multiple times.
-                    self.inner
-                        .set_peer_notifications_out_desired(
-                            peer_id,
-                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
-                            peers::DesiredState::NotDesired,
-                        )
-                        .await;
-                    self.inner
-                        .set_peer_notifications_out_desired(
-                            peer_id,
-                            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
-                            peers::DesiredState::NotDesired,
-                        )
-                        .await;
+                    self.inner.set_peer_notifications_out_desired(
+                        &peer_id,
+                        chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1,
+                        peers::DesiredState::NotDesired,
+                    );
+                    self.inner.set_peer_notifications_out_desired(
+                        &peer_id,
+                        chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 2,
+                        peers::DesiredState::NotDesired,
+                    );
 
                     // The chain is now considered as closed.
-                    let was_open = guarded.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
+                    let was_open = self.open_chains.remove(&(peer_id.clone(), chain_index)); // TODO: cloning :(
 
                     if was_open {
                         // Update the k-buckets, marking the peer as disconnected.
                         let unassigned_slot_ty = {
-                            let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                            let unassigned_slot_ty =
+                                self.unassign_slot(chain_index, &peer_id).unwrap();
 
-                            let unassigned_slot_ty = self
-                                .unassign_slot(&mut *ephemeral_guarded, chain_index, peer_id)
-                                .await
-                                .unwrap();
-
-                            if let Some(mut entry) = ephemeral_guarded.chains[chain_index]
+                            if let Some(mut entry) = self.chains[chain_index]
                                 .kbuckets
-                                .entry(peer_id)
+                                .entry(&peer_id)
                                 .into_occupied()
                             {
                                 entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
@@ -1560,22 +1426,12 @@ where
                             unassigned_slot_ty
                         };
 
-                        // As a slot has been unassigned, wake up the discovery process in order for
-                        // it to be filled.
-                        // TODO: correct?
-                        // TODO: if necessary, mark another peer+substream tuple as desired to fill a slot
-                        self.start_connect_needed.notify_additional(1);
-
-                        return Event::ChainDisconnected {
+                        break Some(Event::ChainDisconnected {
                             chain_index,
-                            peer_id: match guarded.to_process_pre_event.take().unwrap() {
-                                peers::Event::NotificationsOutClose { peer_id, .. } => peer_id,
-                                _ => unreachable!(),
-                            },
+                            peer_id,
                             unassigned_slot_ty,
-                        };
+                        });
                     }
-                    guarded.to_process_pre_event = None;
                 }
 
                 // Other protocol.
@@ -1585,44 +1441,35 @@ where
                     ..
                 } => {
                     let chain_index =
-                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     // The state of notification substreams other than block announces must
                     // always match the state of the block announces.
                     // Therefore, if the peer is considered open, try to reopen the substream that
                     // has just been closed.
                     // TODO: cloning of peer_id :-/
-                    if guarded
-                        .open_chains
-                        .contains(&(peer_id.clone(), chain_index))
-                    {
-                        self.inner
-                            .set_peer_notifications_out_desired(
-                                peer_id,
-                                *notifications_protocol_index,
-                                peers::DesiredState::DesiredReset,
-                            )
-                            .await;
+                    if self.open_chains.contains(&(peer_id.clone(), chain_index)) {
+                        self.inner.set_peer_notifications_out_desired(
+                            &peer_id,
+                            notifications_protocol_index,
+                            peers::DesiredState::DesiredReset,
+                        );
                     }
-
-                    guarded.to_process_pre_event = None;
                 }
 
                 // Remote closes a substream.
                 // There isn't anything to do as long as the remote doesn't close our local
                 // outbound substream.
-                peers::Event::NotificationsInClose { .. } => {
-                    guarded.to_process_pre_event = None;
-                }
+                peers::Event::NotificationsInClose { .. } => {}
 
                 // Received a block announce.
                 peers::Event::NotificationsIn {
                     notifications_protocol_index,
                     peer_id,
                     notification,
-                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
+                } if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0 => {
                     let chain_index =
-                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     // Don't report events about nodes we don't have an outbound substream with.
                     // TODO: think about possible race conditions regarding missing block
@@ -1631,37 +1478,23 @@ where
                     // are generated continuously, as announcements will be generated periodically
                     // as well and the state will no longer mismatch
                     // TODO: cloning of peer_id :(
-                    if !guarded
-                        .open_chains
-                        .contains(&(peer_id.clone(), chain_index))
-                    {
-                        guarded.to_process_pre_event = None;
+                    if !self.open_chains.contains(&(peer_id.clone(), chain_index)) {
                         continue;
                     }
 
                     // Check the format of the block announce.
-                    if let Err(err) = protocol::decode_block_announce(notification) {
-                        return Event::ProtocolError {
+                    if let Err(err) = protocol::decode_block_announce(&notification) {
+                        break Some(Event::ProtocolError {
                             error: ProtocolError::BadBlockAnnounce(err),
-                            peer_id: match guarded.to_process_pre_event.take().unwrap() {
-                                peers::Event::NotificationsIn { peer_id, .. } => peer_id,
-                                _ => unreachable!(),
-                            },
-                        };
+                            peer_id,
+                        });
                     }
 
-                    return match guarded.to_process_pre_event.take().unwrap() {
-                        peers::Event::NotificationsIn {
-                            peer_id,
-                            notification,
-                            ..
-                        } => Event::BlockAnnounce {
-                            chain_index,
-                            peer_id,
-                            announce: EncodedBlockAnnounce(notification),
-                        },
-                        _ => unreachable!(),
-                    };
+                    break Some(Event::BlockAnnounce {
+                        chain_index,
+                        peer_id,
+                        announce: EncodedBlockAnnounce(notification),
+                    });
                 }
 
                 // Received transaction notification.
@@ -1669,22 +1502,17 @@ where
                     peer_id,
                     notifications_protocol_index,
                     ..
-                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 => {
+                } if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 => {
                     let chain_index =
-                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     // Don't report events about nodes we don't have an outbound substream with.
                     // TODO: cloning of peer_id :(
-                    if !guarded
-                        .open_chains
-                        .contains(&(peer_id.clone(), chain_index))
-                    {
-                        guarded.to_process_pre_event = None;
+                    if !self.open_chains.contains(&(peer_id.clone(), chain_index)) {
                         continue;
                     }
 
                     // TODO: this is unimplemented
-                    guarded.to_process_pre_event = None;
                 }
 
                 // Received Grandpa notification.
@@ -1692,45 +1520,34 @@ where
                     notifications_protocol_index,
                     peer_id,
                     notification,
-                } if *notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 => {
+                } if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 => {
                     let chain_index =
-                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     // Don't report events about nodes we don't have an outbound substream with.
                     // TODO: cloning of peer_id :(
-                    if !guarded
-                        .open_chains
-                        .contains(&(peer_id.clone(), chain_index))
-                    {
-                        guarded.to_process_pre_event = None;
+                    if !self.open_chains.contains(&(peer_id.clone(), chain_index)) {
                         continue;
                     }
 
-                    let decoded_notif = match protocol::decode_grandpa_notification(notification) {
+                    let decoded_notif = match protocol::decode_grandpa_notification(&notification) {
                         Ok(n) => n,
                         Err(err) => {
-                            return Event::ProtocolError {
+                            break Some(Event::ProtocolError {
                                 error: ProtocolError::BadGrandpaNotification(err),
-                                peer_id: match guarded.to_process_pre_event.take().unwrap() {
-                                    peers::Event::NotificationsIn { peer_id, .. } => peer_id,
-                                    _ => unreachable!(),
-                                },
-                            };
+                                peer_id,
+                            });
                         }
                     };
 
                     // Commit messages are the only type of message that is important for
                     // light clients. Anything else is presently ignored.
                     if let protocol::GrandpaNotificationRef::Commit(_) = decoded_notif {
-                        let notification = mem::take(notification);
-                        guarded.to_process_pre_event = None;
-                        return Event::GrandpaCommitMessage {
+                        break Some(Event::GrandpaCommitMessage {
                             chain_index,
                             message: EncodedGrandpaCommitMessage(notification),
-                        };
+                        });
                     }
-
-                    guarded.to_process_pre_event = None;
                 }
 
                 peers::Event::NotificationsIn { .. } => {
@@ -1746,45 +1563,32 @@ where
                     handshake,
                     id: desired_in_notification_id,
                     notifications_protocol_index,
-                } if (*notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 => {
+                } if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 0 => {
                     let chain_index =
-                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     // Immediately reject the substream if the handshake fails to parse.
-                    if let Err(err) = protocol::decode_block_announces_handshake(handshake) {
+                    if let Err(err) = protocol::decode_block_announces_handshake(&handshake) {
                         self.inner
-                            .in_notification_refuse(*desired_in_notification_id)
-                            .await;
+                            .in_notification_refuse(desired_in_notification_id);
 
-                        return Event::ProtocolError {
+                        break Some(Event::ProtocolError {
                             error: ProtocolError::BadBlockAnnouncesHandshake(err),
-                            peer_id: match guarded.to_process_pre_event.take().unwrap() {
-                                peers::Event::DesiredInNotification { peer_id, .. } => peer_id,
-                                _ => unreachable!(),
-                            },
-                        };
+                            peer_id,
+                        });
                     }
-
-                    let mut ephemeral_guarded = self.ephemeral_guarded.lock().await;
 
                     // If the peer doesn't already have an outbound slot, check whether we can
                     // allocate an inbound slot for it.
-                    let has_out_slot = ephemeral_guarded.chains[chain_index]
-                        .out_peers
-                        .contains(peer_id);
+                    let has_out_slot = self.chains[chain_index].out_peers.contains(&peer_id);
                     if !has_out_slot
-                        && ephemeral_guarded.chains[chain_index].in_peers.len()
-                            >= usize::try_from(
-                                ephemeral_guarded.chains[chain_index].chain_config.in_slots,
-                            )
-                            .unwrap_or(usize::max_value())
+                        && self.chains[chain_index].in_peers.len()
+                            >= usize::try_from(self.chains[chain_index].chain_config.in_slots)
+                                .unwrap_or(usize::max_value())
                     {
                         // All in slots are occupied. Refuse the substream.
-                        drop(ephemeral_guarded);
                         self.inner
-                            .in_notification_refuse(*desired_in_notification_id)
-                            .await;
-                        guarded.to_process_pre_event = None;
+                            .in_notification_refuse(desired_in_notification_id);
                         continue;
                     }
 
@@ -1792,7 +1596,7 @@ where
 
                     // Generate the handshake to send back.
                     let handshake = {
-                        let chain_config = &ephemeral_guarded.chains[chain_index].chain_config;
+                        let chain_config = &self.chains[chain_index].chain_config;
                         protocol::encode_block_announces_handshake(
                             protocol::BlockAnnouncesHandshakeRef {
                                 best_hash: &chain_config.best_hash,
@@ -1809,38 +1613,28 @@ where
 
                     if self
                         .inner
-                        .in_notification_accept(*desired_in_notification_id, handshake)
-                        .await
+                        .in_notification_accept(desired_in_notification_id, handshake)
                         .is_ok()
                         && !has_out_slot
                     {
                         // TODO: future cancellation issue; if this future is cancelled, then trying to do the `in_notification_accept` again next time will panic
-                        self.inner
-                            .set_peer_notifications_out_desired(
-                                peer_id,
-                                *notifications_protocol_index,
-                                peers::DesiredState::DesiredReset,
-                            )
-                            .await;
+                        self.inner.set_peer_notifications_out_desired(
+                            &peer_id,
+                            notifications_protocol_index,
+                            peers::DesiredState::DesiredReset,
+                        );
 
                         // The state modification is done at the very end, to not have any
                         // future cancellation issue.
-                        let _was_inserted = ephemeral_guarded.chains[chain_index]
-                            .in_peers
-                            .insert(peer_id.clone());
+                        let _was_inserted =
+                            self.chains[chain_index].in_peers.insert(peer_id.clone());
                         debug_assert!(_was_inserted);
 
-                        return match guarded.to_process_pre_event.take().unwrap() {
-                            peers::Event::DesiredInNotification { peer_id, .. } => {
-                                Event::InboundSlotAssigned {
-                                    chain_index,
-                                    peer_id,
-                                }
-                            }
-                            _ => unreachable!(),
-                        };
+                        break Some(Event::InboundSlotAssigned {
+                            chain_index,
+                            peer_id,
+                        });
                     }
-                    guarded.to_process_pre_event = None;
                 }
 
                 // Remote wants to open a transactions substream.
@@ -1849,26 +1643,23 @@ where
                     id: desired_in_notification_id,
                     notifications_protocol_index,
                     ..
-                } if (*notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 1 => {
+                } if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 1 => {
                     let chain_index =
-                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     // Accept the substream only if the peer is "chain connected".
-                    if guarded
+                    if self
                         .open_chains // TODO: clone :-/
                         .contains(&(peer_id.clone(), chain_index))
                     {
                         // It doesn't matter if the substream is obsolete.
                         let _ = self
                             .inner
-                            .in_notification_accept(*desired_in_notification_id, Vec::new())
-                            .await;
+                            .in_notification_accept(desired_in_notification_id, Vec::new());
                     } else {
                         self.inner
-                            .in_notification_refuse(*desired_in_notification_id)
-                            .await;
+                            .in_notification_refuse(desired_in_notification_id);
                     }
-                    guarded.to_process_pre_event = None;
                 }
 
                 // Remote wants to open a grandpa substream.
@@ -1877,20 +1668,17 @@ where
                     id: desired_in_notification_id,
                     notifications_protocol_index,
                     ..
-                } if (*notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 2 => {
-                    let ephemeral_guarded = self.ephemeral_guarded.lock().await;
+                } if (notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN) == 2 => {
                     let chain_index =
-                        *notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                        notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     // Reject the substream if the this peer isn't "chain connected".
-                    if !guarded
+                    if !self
                         .open_chains // TODO: clone :-/
                         .contains(&(peer_id.clone(), chain_index))
                     {
                         self.inner
-                            .in_notification_refuse(*desired_in_notification_id)
-                            .await;
-                        guarded.to_process_pre_event = None;
+                            .in_notification_refuse(desired_in_notification_id);
                         continue;
                     }
 
@@ -1898,7 +1686,7 @@ where
 
                     // Build the handshake to send back.
                     let handshake = {
-                        ephemeral_guarded.chains[chain_index]
+                        self.chains[chain_index]
                             .chain_config
                             .role
                             .scale_encoding()
@@ -1908,10 +1696,7 @@ where
                     // It doesn't matter if the substream is obsolete.
                     let _ = self
                         .inner
-                        .in_notification_accept(*desired_in_notification_id, handshake)
-                        .await;
-
-                    guarded.to_process_pre_event = None;
+                        .in_notification_accept(desired_in_notification_id, handshake);
                 }
 
                 peers::Event::DesiredInNotification { .. } => {
@@ -1920,32 +1705,70 @@ where
                 }
 
                 peers::Event::DesiredInNotificationCancel { .. } => {
-                    guarded.to_process_pre_event = None;
+                    // TODO: do something
                 }
             }
+        };
 
-            debug_assert!(guarded.to_process_pre_event.is_none());
+        // Before returning the event, we check whether there is any desired outbound substream
+        // to open.
+        loop {
+            // Note: we can't use a `while let` due to borrow checker errors.
+            let (id, _, notifications_protocol_index) =
+                match self.inner.next_unfulfilled_desired_outbound_substream() {
+                    Some(v) => v,
+                    None => break,
+                };
+
+            let chain_config = &self.chains
+                [notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN]
+                .chain_config;
+
+            let handshake = if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0
+            {
+                protocol::encode_block_announces_handshake(protocol::BlockAnnouncesHandshakeRef {
+                    best_hash: &chain_config.best_hash,
+                    best_number: chain_config.best_number,
+                    genesis_hash: &chain_config.genesis_hash,
+                    role: chain_config.role,
+                })
+                .fold(Vec::new(), |mut a, b| {
+                    a.extend_from_slice(b.as_ref());
+                    a
+                })
+            } else if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 1 {
+                Vec::new()
+            } else if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 {
+                chain_config.role.scale_encoding().to_vec()
+            } else {
+                unreachable!()
+            };
+
+            self.inner.open_out_notification(id, now.clone(), handshake);
         }
+
+        event_to_return
     }
 
     /// Performs a round of Kademlia discovery.
     ///
     /// This future yields once a list of nodes on the network has been discovered, or a problem
     /// happened.
-    pub async fn kademlia_discovery_round(
-        &'_ self,
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    pub fn start_kademlia_discovery_round(
+        &'_ mut self,
         now: TNow,
         chain_index: usize,
-    ) -> Result<DiscoveryInsert<'_, TNow>, DiscoveryError> {
+    ) -> KademliaOperationId {
         let random_peer_id = {
-            let mut randomness = self.randomness.lock().await;
-            let pub_key = randomness.sample(rand::distributions::Standard);
-            peer_id::PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
+            let pub_key = self.randomness.sample(rand::distributions::Standard);
+            PeerId::from_public_key(&peer_id::PublicKey::Ed25519(pub_key))
         };
 
         let queried_peer = {
-            let ephemeral_guarded = self.ephemeral_guarded.lock().await;
-            let peer_id = ephemeral_guarded.chains[chain_index]
+            let peer_id = self.chains[chain_index]
                 .kbuckets
                 .closest_entries(&random_peer_id)
                 // TODO: instead of filtering by connectd only, connect to nodes if not connected
@@ -1954,48 +1777,72 @@ where
             peer_id
         };
 
+        let kademlia_operation_id = self.next_kademlia_operation_id;
+        self.next_kademlia_operation_id.0 += 1;
+
         if let Some(queried_peer) = queried_peer {
-            let outcome = self
-                .kademlia_find_node(&queried_peer, now, chain_index, random_peer_id.as_bytes())
-                .await
-                .map_err(DiscoveryError::FindNode)?;
-            Ok(DiscoveryInsert {
-                service: self,
-                outcome,
+            self.start_kademlia_find_node_inner(
+                &queried_peer,
+                now,
                 chain_index,
-            })
+                random_peer_id.as_bytes(),
+                Some(kademlia_operation_id),
+            );
         } else {
-            Err(DiscoveryError::NoPeer)
+            self.pending_kademlia_errors
+                .push_back((kademlia_operation_id, DiscoveryError::NoPeer))
         }
+
+        kademlia_operation_id
     }
 
     /// Sends a Kademlia "find node" request to a single peer, and waits for it to answer.
     ///
     /// Returns an error if there is no active connection with that peer.
-    pub async fn kademlia_find_node(
-        &'_ self,
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    pub fn start_kademlia_find_node(
+        &mut self,
         target: &PeerId,
         now: TNow,
         chain_index: usize,
         close_to_key: &[u8],
-    ) -> Result<Vec<(peer_id::PeerId, Vec<multiaddr::Multiaddr>)>, KademliaFindNodeError> {
+    ) -> OutRequestId {
+        self.start_kademlia_find_node_inner(target, now, chain_index, close_to_key, None)
+    }
+
+    fn start_kademlia_find_node_inner(
+        &mut self,
+        target: &PeerId,
+        now: TNow,
+        chain_index: usize,
+        close_to_key: &[u8],
+        part_of_operation: Option<KademliaOperationId>,
+    ) -> OutRequestId {
         let request_data = kademlia::build_find_node_request(close_to_key);
         // The timeout needs to be long enough to potentially download the maximum
         // response size of 1 MiB. Assuming a 128 kiB/sec connection, that's 8 seconds.
         let timeout = now + Duration::from_secs(8);
-        let response = self
-            .inner
-            .request(
-                target,
-                self.protocol_index(chain_index, 2),
-                request_data,
-                timeout,
-            )
-            .await
-            .map_err(KademliaFindNodeError::RequestFailed)?;
-        let decoded = kademlia::decode_find_node_response(&response)
-            .map_err(KademliaFindNodeError::DecodeError)?;
-        Ok(decoded)
+
+        let id = self.inner.start_request(
+            target,
+            self.protocol_index(chain_index, 2),
+            request_data,
+            timeout,
+        );
+
+        let _prev_value = self.out_requests_types.insert(
+            id,
+            if let Some(operation_id) = part_of_operation {
+                OutRequestTy::KademliaDiscoveryFindNode(operation_id)
+            } else {
+                OutRequestTy::KademliaFindNode
+            },
+        );
+        debug_assert!(_prev_value.is_none());
+
+        id
     }
 
     /// Allocates a [`PendingId`] and returns a [`StartConnect`] indicating a multiaddress that
@@ -2007,105 +1854,75 @@ where
     /// The returned [`StartConnect`] contains the [`StartConnect::timeout`] field. It is the
     /// responsibility of the API user to ensure that [`ChainNetwork::pending_outcome_err`] is
     /// called if this timeout is reached.
-    ///
-    /// If no outgoing connection is desired, the method waits until there is one.
     // TODO: give more control, with number of slots and node choice
     // TODO: this API with now is a bit hacky?
-    pub async fn next_start_connect<'a>(&self, now: impl FnOnce() -> TNow) -> StartConnect<TNow> {
-        loop {
-            let mut pending_lock = self.ephemeral_guarded.lock().await;
-            let pending = &mut *pending_lock; // Prevents borrow checker issues.
+    pub fn next_start_connect<'a>(
+        &mut self,
+        now: impl FnOnce() -> TNow,
+    ) -> Option<StartConnect<TNow>> {
+        // Ask the underlying state machine which nodes are desired but don't have any
+        // associated connection attempt yet.
+        // Since the underlying state machine is only made aware of connections when
+        // `pending_outcome_ok` is reached, we must filter out nodes that already have an
+        // associated `PendingId`.
+        let unfulfilled_desired_peers = self.inner.unfulfilled_desired_peers();
 
-            // Ask the underlying state machine which nodes are desired but don't have any
-            // associated connection attempt yet.
-            // Since the underlying state machine is only made aware of connections in
-            // `pending_outcome_ok`, we must filter out nodes that already have an associated
-            // `PendingId`.
-            let unfulfilled_desired_peers = self.inner.unfulfilled_desired_peers().await;
+        for peer_id in unfulfilled_desired_peers {
+            // TODO: allow more than one simultaneous dial per peer, and distribute the dials so that we don't just return the same peer multiple times in a row while there are other peers waiting
+            // TODO: cloning the peer_id :-/
+            let entry = match self.num_pending_per_peer.entry(peer_id.clone()) {
+                hashbrown::hash_map::Entry::Occupied(_) => continue,
+                hashbrown::hash_map::Entry::Vacant(entry) => entry,
+            };
 
-            for peer_id in unfulfilled_desired_peers {
-                // TODO: allow more than one simultaneous dial per peer, and distribute the dials so that we don't just return the same peer multiple times in a row while there are other peers waiting
-                let entry = match pending.num_pending_per_peer.entry(peer_id) {
-                    hashbrown::hash_map::Entry::Occupied(_) => continue,
-                    hashbrown::hash_map::Entry::Vacant(entry) => entry,
-                };
-
-                // TODO: O(n)
-                let multiaddr: multiaddr::Multiaddr = {
-                    let potential = pending
-                        .chains
-                        .iter_mut()
-                        .flat_map(|chain| chain.kbuckets.iter_mut())
-                        .find(|(p, _)| **p == *entry.key())
-                        .and_then(|(_, addrs)| addrs.addr_to_pending());
-                    match potential {
-                        Some(a) => a.clone(),
-                        None => continue,
-                    }
-                };
-
-                // TODO: O(n)
-                for chain in &mut pending.chains {
-                    if let Some(_) = chain.kbuckets.get_mut(entry.key()) {
-                        // TODO: mark address as pending
-                    }
+            // TODO: O(n)
+            let multiaddr: multiaddr::Multiaddr = {
+                let potential = self
+                    .chains
+                    .iter_mut()
+                    .flat_map(|chain| chain.kbuckets.iter_mut())
+                    .find(|(p, _)| **p == *entry.key())
+                    .and_then(|(_, addrs)| addrs.addr_to_pending());
+                match potential {
+                    Some(a) => a.clone(),
+                    None => continue,
                 }
+            };
 
-                let now = now();
-                let pending_id = PendingId(pending.pending_ids.insert((
-                    entry.key().clone(),
-                    multiaddr.clone(),
-                    now.clone(),
-                )));
-
-                let start_connect = StartConnect {
-                    expected_peer_id: entry.key().clone(),
-                    id: pending_id,
-                    multiaddr,
-                    timeout: now + self.handshake_timeout,
-                };
-
-                entry.insert(NonZeroUsize::new(1).unwrap());
-
-                return start_connect;
+            // TODO: O(n)
+            for chain in &mut self.chains {
+                if let Some(_) = chain.kbuckets.get_mut(entry.key()) {
+                    // TODO: mark address as pending
+                }
             }
 
-            // No valid desired peer has been found.
-            // We start listening for an event, unlock the mutex, and wait until the event is
-            // notified. This needs to be done in this order, in particular the mutex needs to be
-            // unlocked after we start listening for events, to avoid race conditions.
-            // The rest of the code of this state machine makes sure to notify the event when
-            // there is a potential new desired peer or known address.
-            let event_listener = self.start_connect_needed.listen();
-            drop::<MutexGuard<_>>(pending_lock);
-            event_listener.await;
-        }
-    }
+            let now = now();
+            let pending_id = PendingId(self.pending_ids.insert((
+                entry.key().clone(),
+                multiaddr.clone(),
+                now.clone(),
+            )));
 
-    /// Reads data coming from the connection, updates the internal state machine, and writes data
-    /// destined to the connection through the [`ReadWrite`].
-    ///
-    /// If an error is returned, the connection should be destroyed altogether and the
-    /// [`ConnectionId`] is no longer valid. You should continue calling this function until
-    /// an error is returned, even if the [`ReadWrite`] indicates a full shutdown.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`ConnectionId`] isn't a valid connection. Once this function returns an
-    /// error, is no longer valid to call this function with this [`ConnectionId`].
-    ///
-    pub async fn read_write(
-        &self,
-        connection_id: ConnectionId,
-        read_write: &'_ mut ReadWrite<'_, TNow>,
-    ) -> Result<(), peers::ConnectionError> {
-        self.inner.read_write(connection_id, read_write).await
+            let start_connect = StartConnect {
+                expected_peer_id: entry.key().clone(),
+                id: pending_id,
+                multiaddr,
+                timeout: now + self.handshake_timeout,
+            };
+
+            entry.insert(NonZeroUsize::new(1).unwrap());
+
+            return Some(start_connect);
+        }
+
+        // No valid desired peer has been found.
+        None
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
     /// with.
-    pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
-        self.inner.peers_list().await
+    pub fn peers_list(&self) -> impl Iterator<Item = &PeerId> {
+        self.inner.peers_list()
     }
 
     ///
@@ -2117,14 +1934,12 @@ where
     /// see the slot assignments and de-assignments in the wrong order.
     // TODO: docs
     // TODO: when to call this?
-    pub async fn assign_slots(&self, chain_index: usize) -> Option<PeerId> {
-        let mut lock = self.ephemeral_guarded.lock().await;
-        let chain = &mut lock.chains[chain_index];
+    pub fn assign_slots(&mut self, chain_index: usize) -> Option<PeerId> {
+        let chain = &mut self.chains[chain_index];
 
         let list = {
             let mut list = chain.kbuckets.iter().collect::<Vec<_>>();
-            let mut randomness = self.randomness.lock().await;
-            list.shuffle(&mut *randomness);
+            list.shuffle(&mut self.randomness);
             list
         };
 
@@ -2145,43 +1960,99 @@ where
 
             // The peer is marked as desired before inserting it in `out_peers`, to handle
             // potential future cancellation issues.
-            self.inner
-                .set_peer_notifications_out_desired(
-                    peer_id,
-                    chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
-                    peers::DesiredState::DesiredReset, // TODO: ?
-                )
-                .await;
+            self.inner.set_peer_notifications_out_desired(
+                peer_id,
+                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
+                peers::DesiredState::DesiredReset, // TODO: ?
+            );
             chain.out_peers.insert(peer_id.clone());
 
-            self.start_connect_needed.notify_additional(1);
             return Some(peer_id.clone());
         }
 
         None
     }
 
-    /// Removes the slot assignment of the given peer, if any.
-    async fn unassign_slot(
-        &self,
-        ephemeral_guarded: &mut EphemeralGuarded<TNow>,
-        chain_index: usize,
-        peer_id: &PeerId,
-    ) -> Option<SlotTy> {
-        self.inner
-            .set_peer_notifications_out_desired(
-                peer_id,
-                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
-                peers::DesiredState::NotDesired,
-            )
-            .await;
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    pub fn respond_identify(&mut self, request_id: InRequestId, agent_version: &str) {
+        let observed_addr = match self.in_requests_types.remove(&request_id) {
+            Some(InRequestTy::Identify { observed_addr }) => observed_addr,
+            _ => panic!(),
+        };
 
-        let was_in_out = ephemeral_guarded.chains[chain_index]
-            .out_peers
-            .remove(peer_id);
-        let was_in_in = ephemeral_guarded.chains[chain_index]
-            .in_peers
-            .remove(peer_id);
+        let response = {
+            protocol::build_identify_response(protocol::IdentifyResponse {
+                protocol_version: "/substrate/1.0".into(), // TODO: same value as in Substrate
+                agent_version: agent_version.into(),
+                ed25519_public_key: Cow::Borrowed(
+                    self.inner.noise_key().libp2p_public_ed25519_key(),
+                ),
+                listen_addrs: iter::empty(), // TODO:
+                observed_addr: Cow::Borrowed(&observed_addr),
+                protocols: self
+                    .inner
+                    .request_response_protocols()
+                    .filter(|p| p.inbound_allowed)
+                    .map(|p| &p.name[..])
+                    .chain(
+                        self.inner
+                            .notification_protocols()
+                            .map(|p| &p.protocol_name[..]),
+                    ),
+            })
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            })
+        };
+
+        let _ = self.inner.respond_in_request(request_id, Ok(response));
+    }
+
+    /// Queue the response to send back.
+    ///
+    /// Pass `None` in order to deny the request. Do this if blocks aren't available locally.
+    ///
+    /// Has no effect if the connection that sends the request no longer exists.
+    ///
+    /// This function might generate a message destined a connection. Use
+    /// [`ChainNetwork::pull_message_to_connection`] to process messages after it has returned.
+    pub fn respond_blocks(
+        &mut self,
+        request_id: InRequestId,
+        response: Option<Vec<protocol::BlockData>>,
+    ) {
+        match self.in_requests_types.remove(&request_id) {
+            Some(InRequestTy::Blocks) => {}
+            _ => panic!(),
+        };
+
+        let response = if let Some(response) = response {
+            Ok(
+                protocol::build_block_response(response).fold(Vec::new(), |mut a, b| {
+                    a.extend_from_slice(b.as_ref());
+                    a
+                }),
+            )
+        } else {
+            Err(())
+        };
+
+        let _ = self.inner.respond_in_request(request_id, response);
+    }
+
+    /// Removes the slot assignment of the given peer, if any.
+    fn unassign_slot(&mut self, chain_index: usize, peer_id: &PeerId) -> Option<SlotTy> {
+        self.inner.set_peer_notifications_out_desired(
+            peer_id,
+            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
+            peers::DesiredState::NotDesired,
+        );
+
+        let was_in_out = self.chains[chain_index].out_peers.remove(peer_id);
+        let was_in_in = self.chains[chain_index].in_peers.remove(peer_id);
 
         match (was_in_in, was_in_out) {
             (true, false) => Some(SlotTy::Inbound),
@@ -2214,9 +2085,9 @@ pub struct StartConnect<TNow> {
 
 /// Event generated by [`ChainNetwork::next_event`].
 #[derive(Debug)]
-pub enum Event<'a, TNow> {
+pub enum Event {
     /// Established a transport-level connection (e.g. a TCP socket) with the given peer.
-    Connected(peer_id::PeerId),
+    Connected(PeerId),
 
     /// A transport-level connection (e.g. a TCP socket) has been closed.
     ///
@@ -2224,13 +2095,13 @@ pub enum Event<'a, TNow> {
     /// closed. If `chain_indices` isn't empty, this event is also equivalent to one or more
     /// [`Event::ChainDisconnected`] events.
     Disconnected {
-        peer_id: peer_id::PeerId,
+        peer_id: PeerId,
         chain_indices: Vec<usize>,
     },
 
     ChainConnected {
         chain_index: usize,
-        peer_id: peer_id::PeerId,
+        peer_id: PeerId,
         /// Type of the slot that the peer has.
         slot_ty: SlotTy,
         /// Role the node reports playing on the network.
@@ -2241,7 +2112,7 @@ pub enum Event<'a, TNow> {
         best_hash: [u8; 32],
     },
     ChainDisconnected {
-        peer_id: peer_id::PeerId,
+        peer_id: PeerId,
         chain_index: usize,
         /// Type of the slot that the peer had and no longer has.
         unassigned_slot_ty: SlotTy,
@@ -2250,11 +2121,41 @@ pub enum Event<'a, TNow> {
     /// An attempt has been made to open the given chain, but a problem happened.
     ChainConnectAttemptFailed {
         chain_index: usize,
-        peer_id: peer_id::PeerId,
+        peer_id: PeerId,
         /// Problem that happened.
         error: NotificationsOutErr,
         /// Type of the slot that the peer had and no longer has.
         unassigned_slot_ty: SlotTy,
+    },
+
+    BlocksRequestResult {
+        request_id: OutRequestId,
+        response: Result<Vec<protocol::BlockData>, BlocksRequestError>,
+    },
+
+    GrandpaWarpSyncRequestResult {
+        request_id: OutRequestId,
+        response: Result<protocol::GrandpaWarpSyncResponse, GrandpaWarpSyncRequestError>,
+    },
+
+    StateRequestResult {
+        request_id: OutRequestId,
+        response: Result<Vec<protocol::StateResponseEntry>, StateRequestError>,
+    },
+
+    StorageProofRequestResult {
+        request_id: OutRequestId,
+        response: Result<Vec<Vec<u8>>, StorageProofRequestError>,
+    },
+
+    CallProofRequestResult {
+        request_id: OutRequestId,
+        response: Result<Vec<Vec<u8>>, CallProofRequestError>,
+    },
+
+    KademliaFindNodeRequestResult {
+        request_id: OutRequestId,
+        response: Result<Vec<(peer_id::PeerId, Vec<multiaddr::Multiaddr>)>, KademliaFindNodeError>,
     },
 
     /// The given peer has opened a block announces substream with the local node, and an inbound
@@ -2264,7 +2165,7 @@ pub enum Event<'a, TNow> {
     /// generated for this peer.
     InboundSlotAssigned {
         chain_index: usize,
-        peer_id: peer_id::PeerId,
+        peer_id: PeerId,
     },
 
     /// Received a new block announce from a peer.
@@ -2273,7 +2174,7 @@ pub enum Event<'a, TNow> {
     /// combination has happened.
     BlockAnnounce {
         /// Identity of the sender of the block announce.
-        peer_id: peer_id::PeerId,
+        peer_id: PeerId,
         /// Index of the chain the block relates to.
         chain_index: usize,
         announce: EncodedBlockAnnounce,
@@ -2291,25 +2192,25 @@ pub enum Event<'a, TNow> {
     /// purposes.
     ProtocolError {
         /// Peer that has caused the protocol error.
-        peer_id: peer_id::PeerId,
+        peer_id: PeerId,
         /// Error that happened.
         error: ProtocolError,
     },
 
     /// A remote has sent a request for identification information.
     ///
-    /// You are strongly encouraged to call [`IdentifyRequestIn::respond`].
+    /// You are strongly encouraged to call [`ChainNetwork::respond_identify`].
     IdentifyRequestIn {
         /// Remote that has sent the request.
         peer_id: PeerId,
-        /// Object allowing sending back the answer.
-        request: IdentifyRequestIn<'a, TNow>,
+        /// Identifier of the request. Necessary to send back the answer.
+        request_id: InRequestId,
     },
     /// A remote has sent a request for blocks.
     ///
     /// Can only happen for chains where [`ChainConfig::allow_inbound_block_requests`] is `true`.
     ///
-    /// You are strongly encouraged to call [`BlocksRequestIn::respond`].
+    /// You are strongly encouraged to call [`ChainNetwork::respond_blocks`].
     BlocksRequestIn {
         /// Remote that has sent the request.
         peer_id: PeerId,
@@ -2317,11 +2218,20 @@ pub enum Event<'a, TNow> {
         chain_index: usize,
         /// Information about the request.
         config: protocol::BlocksRequestConfig,
-        /// Object allowing sending back the answer.
-        request: BlocksRequestIn<'a, TNow>,
+        /// Identifier of the request. Necessary to send back the answer.
+        request_id: InRequestId,
+    },
+
+    RequestInCancel {
+        request_id: InRequestId,
+    },
+
+    KademliaDiscoveryResult {
+        operation_id: KademliaOperationId,
+        result: Result<Vec<(PeerId, Vec<multiaddr::Multiaddr>)>, DiscoveryError>,
     },
     /*Transactions {
-        peer_id: peer_id::PeerId,
+        peer_id: PeerId,
         transactions: EncodedTransactions,
     }*/
 }
@@ -2406,155 +2316,21 @@ impl fmt::Debug for EncodedGrandpaCommitMessage {
     }
 }
 
-/// Successful outcome to [`ChainNetwork::kademlia_discovery_round`].
-#[must_use]
-pub struct DiscoveryInsert<'a, TNow> {
-    service: &'a ChainNetwork<TNow>,
-    outcome: Vec<(peer_id::PeerId, Vec<multiaddr::Multiaddr>)>,
-
-    /// Index within [`Config::chains`] corresponding to the chain the nodes belong to.
-    chain_index: usize,
-}
-
-impl<'a, TNow> DiscoveryInsert<'a, TNow>
-where
-    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
-{
-    /// Returns the list of [`peer_id::PeerId`]s that will be inserted and their addresses.
-    pub fn discovered(
-        &self,
-    ) -> impl Iterator<
-        Item = (
-            &peer_id::PeerId,
-            impl Iterator<Item = &multiaddr::Multiaddr>,
-        ),
-    > {
-        self.outcome
-            .iter()
-            .map(|(peer_id, addrs)| (peer_id, addrs.iter()))
-    }
-
-    /// Insert the results in the [`ChainNetwork`].
-    pub async fn insert(self, now: &TNow) {
-        self.service
-            .discover(now, self.chain_index, self.outcome)
-            .await;
-    }
-}
-
-/// See [`Event::IdentifyRequestIn`].
-#[must_use]
-pub struct IdentifyRequestIn<'a, TNow> {
-    service: &'a ChainNetwork<TNow>,
-    request_id: peers::RequestId,
-    observed_addr: multiaddr::Multiaddr,
-}
-
-impl<'a, TNow> IdentifyRequestIn<'a, TNow>
-where
-    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
-{
-    /// Queue the response to send back. The future provided by [`ChainNetwork::read_write`] will
-    /// automatically be woken up.
-    ///
-    /// Has no effect if the connection that sends the request no longer exists.
-    pub async fn respond(self, agent_version: &str) {
-        let response = {
-            protocol::build_identify_response(protocol::IdentifyResponse {
-                protocol_version: "/substrate/1.0".into(), // TODO: same value as in Substrate
-                agent_version: agent_version.into(),
-                ed25519_public_key: Cow::Borrowed(
-                    self.service.inner.noise_key().libp2p_public_ed25519_key(),
-                ),
-                listen_addrs: iter::empty(), // TODO:
-                observed_addr: Cow::Borrowed(&self.observed_addr),
-                protocols: self
-                    .service
-                    .inner
-                    .request_response_protocols()
-                    .filter(|p| p.inbound_allowed)
-                    .map(|p| &p.name[..])
-                    .chain(
-                        self.service
-                            .inner
-                            .notification_protocols()
-                            .map(|p| &p.protocol_name[..]),
-                    ),
-            })
-            .fold(Vec::new(), |mut a, b| {
-                a.extend_from_slice(b.as_ref());
-                a
-            })
-        };
-
-        let _ = self
-            .service
-            .inner
-            .respond(self.request_id, Ok(response))
-            .await;
-    }
-}
-
-impl<'a, TNow> fmt::Debug for IdentifyRequestIn<'a, TNow> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("IdentifyRequestIn").finish()
-    }
-}
-
-/// See [`Event::BlocksRequestIn`].
-#[must_use]
-pub struct BlocksRequestIn<'a, TNow> {
-    service: &'a ChainNetwork<TNow>,
-    request_id: peers::RequestId,
-}
-
-impl<'a, TNow> BlocksRequestIn<'a, TNow>
-where
-    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
-{
-    /// Queue the response to send back. The future provided by [`ChainNetwork::read_write`] will
-    /// automatically be woken up.
-    ///
-    /// Pass `None` in order to deny the request. Do this if blocks aren't available locally.
-    ///
-    /// Has no effect if the connection that sends the request no longer exists.
-    pub async fn respond(self, response: Option<Vec<protocol::BlockData>>) {
-        let response = if let Some(response) = response {
-            Ok(
-                protocol::build_block_response(response).fold(Vec::new(), |mut a, b| {
-                    a.extend_from_slice(b.as_ref());
-                    a
-                }),
-            )
-        } else {
-            Err(())
-        };
-
-        let _ = self.service.inner.respond(self.request_id, response).await;
-    }
-}
-
-impl<'a, TNow> fmt::Debug for BlocksRequestIn<'a, TNow> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("BlocksRequestIn").finish()
-    }
-}
-
-/// Error during [`ChainNetwork::kademlia_discovery_round`].
+/// Error during [`ChainNetwork::start_kademlia_discovery_round`].
 #[derive(Debug, derive_more::Display)]
 pub enum DiscoveryError {
     NoPeer,
     FindNode(KademliaFindNodeError),
 }
 
-/// Error during [`ChainNetwork::kademlia_find_node`].
+/// Error during [`ChainNetwork::start_kademlia_find_node`].
 #[derive(Debug, derive_more::Display)]
 pub enum KademliaFindNodeError {
     RequestFailed(peers::RequestError),
     DecodeError(kademlia::DecodeFindNodeResponseError),
 }
 
-/// Error returned by [`ChainNetwork::blocks_request`].
+/// Error returned by [`ChainNetwork::start_blocks_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum BlocksRequestError {
     /// Error while waiting for the response from the peer.
@@ -2597,14 +2373,14 @@ pub enum BlocksRequestResponseEntryError {
     InvalidHash,
 }
 
-/// Error returned by [`ChainNetwork::storage_proof_request`].
+/// Error returned by [`ChainNetwork::start_storage_proof_request`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum StorageProofRequestError {
     Request(peers::RequestError),
     Decode(protocol::DecodeStorageProofResponseError),
 }
 
-/// Error returned by [`ChainNetwork::call_proof_request`].
+/// Error returned by [`ChainNetwork::start_call_proof_request`].
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum CallProofRequestError {
     Request(peers::RequestError),
@@ -2622,14 +2398,14 @@ impl CallProofRequestError {
     }
 }
 
-/// Error returned by [`ChainNetwork::grandpa_warp_sync_request`].
+/// Error returned by [`ChainNetwork::start_grandpa_warp_sync_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum GrandpaWarpSyncRequestError {
     Request(peers::RequestError),
     Decode(protocol::DecodeGrandpaWarpSyncResponseError),
 }
 
-/// Error returned by [`ChainNetwork::state_request_unchecked`].
+/// Error returned by [`ChainNetwork::start_state_request_unchecked`].
 #[derive(Debug, derive_more::Display)]
 pub enum StateRequestError {
     Request(peers::RequestError),
@@ -2651,4 +2427,94 @@ pub enum ProtocolError {
     BadIdentifyRequest,
     /// Error while decoding a received blocks request.
     BadBlocksRequest(protocol::DecodeBlockRequestError),
+}
+
+fn check_blocks_response(
+    config: protocol::BlocksRequestConfig,
+    result: &mut [protocol::BlockData],
+) -> Result<(), BlocksRequestError> {
+    if !config.fields.header {
+        return Err(BlocksRequestError::NotVerifiable);
+    }
+
+    if result.is_empty() {
+        return Err(BlocksRequestError::EmptyResponse);
+    }
+
+    // Verify validity of all the blocks.
+    for (block_index, block) in result.iter_mut().enumerate() {
+        if block.header.is_none() {
+            return Err(BlocksRequestError::Entry {
+                index: block_index,
+                error: BlocksRequestResponseEntryError::MissingField,
+            });
+        }
+
+        if block
+            .header
+            .as_ref()
+            .map_or(false, |h| header::decode(h).is_err())
+        {
+            return Err(BlocksRequestError::Entry {
+                index: block_index,
+                error: BlocksRequestResponseEntryError::InvalidHeader,
+            });
+        }
+
+        match (block.body.is_some(), config.fields.body) {
+            (false, true) => {
+                return Err(BlocksRequestError::Entry {
+                    index: block_index,
+                    error: BlocksRequestResponseEntryError::MissingField,
+                });
+            }
+            (true, false) => {
+                block.body = None;
+            }
+            _ => {}
+        }
+
+        // Note: the presence of a justification isn't checked and can't be checked, as not
+        // all blocks have a justification in the first place.
+
+        if block.header.as_ref().map_or(false, |h| {
+            header::hash_from_scale_encoded_header(&h) != block.hash
+        }) {
+            return Err(BlocksRequestError::Entry {
+                index: block_index,
+                error: BlocksRequestResponseEntryError::InvalidHash,
+            });
+        }
+
+        if let (Some(header), Some(body)) = (&block.header, &block.body) {
+            let decoded_header = header::decode(header).unwrap();
+            let expected = header::extrinsics_root(&body[..]);
+            if expected != *decoded_header.extrinsics_root {
+                return Err(BlocksRequestError::Entry {
+                    index: block_index,
+                    error: BlocksRequestResponseEntryError::InvalidExtrinsicsRoot {
+                        calculated: expected,
+                        in_header: *decoded_header.extrinsics_root,
+                    },
+                });
+            }
+        }
+    }
+
+    match config.start {
+        protocol::BlocksRequestConfigStart::Hash(hash) if result[0].hash != hash => {
+            return Err(BlocksRequestError::InvalidStart);
+        }
+        protocol::BlocksRequestConfigStart::Number(n)
+            if header::decode(result[0].header.as_ref().unwrap())
+                .unwrap()
+                .number
+                != n =>
+        {
+            return Err(BlocksRequestError::InvalidStart)
+        }
+        _ => {}
+    }
+
+    Ok(())
 }
