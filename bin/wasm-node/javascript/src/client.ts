@@ -579,6 +579,11 @@ export function start(options?: ClientOptions): Client {
       if (workerError)
         throw workerError;
 
+      // Passing a JSON object for the chain spec is an easy mistake, so we provide a more
+      // readable error.
+      if (!(typeof options.chainSpec === 'string'))
+        throw new Error("Chain specification must be a string");
+
       let potentialRelayChainsIds = [];
       if (!!options.potentialRelayChains) {
         for (const chain of options.potentialRelayChains) {
