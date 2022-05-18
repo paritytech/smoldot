@@ -1171,6 +1171,20 @@ where
         self.inner.respond_in_request(id.0, response)
     }
 
+    /// Returns `true` if there exists an established connection with the given peer.
+    pub fn has_established_connection(&self, peer_id: &PeerId) -> bool {
+        let peer_index = match self.peer_indices.get(peer_id) {
+            Some(idx) => *idx,
+            None => return false,
+        };
+
+        self.connections_by_peer
+            .range(
+                (peer_index, ConnectionId::min_value())..=(peer_index, ConnectionId::max_value()),
+            )
+            .any(|(_, established)| *established)
+    }
+
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
     /// with.
     pub fn peers_list(&self) -> impl Iterator<Item = &PeerId> {
