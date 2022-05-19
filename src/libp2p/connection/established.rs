@@ -795,7 +795,7 @@ where
         let already_queued = substream.queued_bytes();
         let from_substream = substream
             .into_user_data()
-            .as_mut()
+            .as_ref()
             .unwrap()
             .notification_substream_queued_bytes();
         already_queued + from_substream

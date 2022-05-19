@@ -937,12 +937,12 @@ impl<'a, T> SubstreamRef<'a, T> {
 
     /// Returns `true` if the remote has closed their writing side of this substream.
     pub fn is_remote_closed(&self) -> bool {
-        self.substream.get().remote_write_closed
+        self.substream.remote_write_closed
     }
 
     /// Returns `true` if [`SubstreamMut::close`] has been called on this substream.
     pub fn is_closed(&self) -> bool {
-        self.substream.get().local_write_closed
+        self.substream.local_write_closed
     }
 }
 
