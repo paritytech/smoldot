@@ -686,6 +686,17 @@ where
                 collection::Event::PingOutFailed { id } => {
                     // A failed ping leads to a disconnect.
                     self.inner.start_shutdown(id);
+
+                    // We need to perform the same clean up as if the remote started the
+                    // shutdown.
+                    // TODO: this is O(n)
+                    for (_, item) in &mut self.desired_out_notifications {
+                        if let Some((_, connection_id, _)) = item.as_ref() {
+                            if *connection_id == id {
+                                *item = None;
+                            }
+                        }
+                    }
                 }
             }
         }
