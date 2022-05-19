@@ -59,9 +59,7 @@ use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
 pub use super::peer_id::PeerId;
 pub use super::read_write::ReadWrite;
-pub use established::{
-    ConfigRequestResponse, ConfigRequestResponseIn, InboundError, NotificationsOutErr,
-};
+pub use established::{ConfigRequestResponse, ConfigRequestResponseIn, InboundError};
 
 /// Configuration for a [`Network`].
 pub struct Config {
@@ -807,8 +805,17 @@ where
                 {
                     self.outgoing_notification_substreams_by_connection
                         .remove(&(shutting_down_connection, substream_id));
-                    self.outgoing_notification_substreams.remove(&substream_id);
-                    return Some(Event::NotificationsOutReset { substream_id });
+                    let (_, state) = self
+                        .outgoing_notification_substreams
+                        .remove(&substream_id)
+                        .unwrap();
+                    return Some(match state {
+                        OutSubstreamState::Open => Event::NotificationsOutReset { substream_id },
+                        OutSubstreamState::Pending => Event::NotificationsOutResult {
+                            substream_id,
+                            result: Err(NotificationsOutErr::ConnectionShutdown),
+                        },
+                    });
                 }
 
                 // Ingoing notification substreams to close.
@@ -1666,7 +1673,8 @@ where
                             self.pending_messages.push_back(
                                 ConnectionToCoordinatorInner::NotificationsOutResult {
                                     id: outer_substream_id,
-                                    result: result.map_err(|(err, _)| err),
+                                    result: result
+                                        .map_err(|(err, _)| NotificationsOutErr::Substream(err)),
                                 },
                             );
                         }
@@ -1922,7 +1930,7 @@ enum ConnectionToCoordinatorInner {
     /// See the corresponding event in [`established::Event`].
     NotificationsOutResult {
         id: SubstreamId,
-        result: Result<Vec<u8>, established::NotificationsOutErr>,
+        result: Result<Vec<u8>, NotificationsOutErr>,
     },
     /// See the corresponding event in [`established::Event`].
     NotificationsOutCloseDemanded {
@@ -2156,6 +2164,15 @@ pub enum RequestError {
 
     /// Error happened in the context of the substream.
     Substream(established::RequestError),
+}
+
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum NotificationsOutErr {
+    /// Opening has been interrupted because the connection as a whole is being shut down.
+    ConnectionShutdown,
+
+    /// Error happened in the context of the substream.
+    Substream(established::NotificationsOutErr),
 }
 
 #[derive(Debug, derive_more::Display, Clone)]
