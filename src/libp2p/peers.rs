@@ -376,8 +376,17 @@ where
                     });
                 }
 
-                collection::Event::StartShutdown { .. } => {
+                collection::Event::StartShutdown { id, .. } => {
                     // TODO: mark connection as shutting down so that we don't start any new request or substream; in practice this can't happen right now because events are processed in a loop, but in theory the user could do something stupid and get a panic
+
+                    // TODO: this is O(n)
+                    for (_, item) in &mut self.desired_out_notifications {
+                        if let Some((_, connection_id, _)) = item.as_ref() {
+                            if *connection_id == id {
+                                *item = None;
+                            }
+                        }
+                    }
                 }
 
                 collection::Event::Shutdown {
