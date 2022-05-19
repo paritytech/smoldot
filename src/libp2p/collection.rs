@@ -1408,9 +1408,15 @@ where
                     outbound_substreams_mapping2,
                 },
             ) => {
-                let inner_substream_id = outbound_substreams_mapping.remove(&substream_id).unwrap();
-                outbound_substreams_mapping2.remove(&inner_substream_id);
-                established.close_notifications_substream(inner_substream_id);
+                // It is possible that the remote has closed the outbound notification substream
+                // while the `CloseOutNotifications` message was being delivered, or that the API
+                // user close the substream before the message about the substream being closed
+                // was delivered to the coordinator.
+                if let Some(inner_substream_id) = outbound_substreams_mapping.remove(&substream_id)
+                {
+                    outbound_substreams_mapping2.remove(&inner_substream_id);
+                    established.close_notifications_substream(inner_substream_id);
+                }
             }
             (
                 CoordinatorToConnectionInner::QueueNotification {
@@ -1453,12 +1459,14 @@ where
                 },
                 ConnectionInner::Established { established, .. },
             ) => {
+                // TODO: must verify that the substream is still valid
                 established.accept_in_notifications_substream(substream_id, handshake, ());
             }
             (
                 CoordinatorToConnectionInner::RejectInNotifications { substream_id },
                 ConnectionInner::Established { established, .. },
             ) => {
+                // TODO: must verify that the substream is still valid
                 established.reject_in_notifications_substream(substream_id);
             }
             (
