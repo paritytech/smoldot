@@ -1768,13 +1768,20 @@ where
         self.next_kademlia_operation_id.0 += 1;
 
         if let Some(queried_peer) = queried_peer {
-            self.start_kademlia_find_node_inner(
-                &queried_peer,
-                now,
-                chain_index,
-                random_peer_id.as_bytes(),
-                Some(kademlia_operation_id),
-            );
+            // TODO: this check for `has_established_connection` is a hack because the connected/disconnected state in the k-buckets doesn't actually reflect the state of connection even though it should; this if is normally not necessary at all
+            if self.inner.has_established_connection(&queried_peer) {
+                self.start_kademlia_find_node_inner(
+                    &queried_peer,
+                    now,
+                    chain_index,
+                    random_peer_id.as_bytes(),
+                    Some(kademlia_operation_id),
+                );
+            } else {
+                // TODO: the NoPeer error isn't appropriate, but as explained above this is a hack
+                self.pending_kademlia_errors
+                    .push_back((kademlia_operation_id, DiscoveryError::NoPeer))
+            }
         } else {
             self.pending_kademlia_errors
                 .push_back((kademlia_operation_id, DiscoveryError::NoPeer))
