@@ -165,34 +165,37 @@ pub struct Network<TConn, TNow> {
     /// that concern this connection before processing any other incoming message.
     shutting_down_connection: Option<ConnectionId>,
 
-    // TODO: review; maybe it's possible to remove data
+    /// List of all outgoing notification substreams that we have opened. Can be either pending
+    /// (waiting for the connection task to say whether it has been accepted or not) or fully
+    /// open.
     outgoing_notification_substreams:
         hashbrown::HashMap<SubstreamId, (ConnectionId, OutSubstreamState), fnv::FnvBuildHasher>,
 
-    // TODO: review; maybe it's possible to remove data
+    /// Always contains the same entries as [`Network::outgoing_notification_substreams`] but
+    /// ordered differently.
     outgoing_notification_substreams_by_connection: BTreeSet<(ConnectionId, SubstreamId)>,
 
-    // TODO: review; maybe it's possible to remove data
-    outgoing_requests: hashbrown::HashMap<SubstreamId, ConnectionId, fnv::FnvBuildHasher>,
+    /// List of all requests that have been started locally.
+    outgoing_requests: BTreeSet<(ConnectionId, SubstreamId)>,
 
-    /// Always contains the same entries as [`Network::outgoing_requests`] but ordered differently.
-    // TODO: review; maybe it's possible to remove data
-    outgoing_requests_by_connection: BTreeSet<(ConnectionId, SubstreamId)>,
-
-    // TODO: review; maybe it's possible to remove data
+    /// List in ingoing notification substreams that connections have received. Can be either
+    /// pending (waiting to be accepted/refused) or fully opened.
+    ///
+    /// The substream ID of the substream is allocated by the connection task, and thus we need
+    /// to keep a mapping of inner <-> substream IDs.
     ingoing_notification_substreams: hashbrown::HashMap<
         SubstreamId,
         (ConnectionId, InSubstreamState, established::SubstreamId),
         fnv::FnvBuildHasher,
     >,
 
-    // TODO: review; maybe it's possible to remove data
+    /// Always contains the same entries as [`Network::ingoing_notification_substreams`] but
+    /// ordered differently.
     ingoing_notification_substreams_by_connection:
         BTreeMap<(ConnectionId, established::SubstreamId), SubstreamId>,
 
     /// List of requests that connections have received and haven't been answered by the API user
     /// yet.
-    // TODO: review; maybe it's possible to remove data
     ingoing_requests: hashbrown::HashMap<
         SubstreamId,
         (ConnectionId, established::SubstreamId),
@@ -200,7 +203,6 @@ pub struct Network<TConn, TNow> {
     >,
 
     /// Always contains the same entries as [`Network::ingoing_requests`] but ordered differently.
-    // TODO: review; maybe it's possible to remove data
     ingoing_requests_by_connection: BTreeSet<(ConnectionId, SubstreamId)>,
 
     /// Generator for randomness seeds given to the established connections.
@@ -292,8 +294,7 @@ where
                 Default::default(),
             ),
             shutting_down_connection: None,
-            outgoing_requests: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()), // TODO: capacity?,
-            outgoing_requests_by_connection: BTreeSet::new(),
+            outgoing_requests: BTreeSet::new(),
             ingoing_requests: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()), // TODO: capacity?
             ingoing_requests_by_connection: BTreeSet::new(),
             outgoing_notification_substreams: hashbrown::HashMap::with_capacity_and_hasher(
@@ -475,11 +476,7 @@ where
         let substream_id = self.next_substream_id;
         self.next_substream_id.0 += 1;
 
-        let _prev_value = self.outgoing_requests.insert(substream_id, target);
-        debug_assert!(_prev_value.is_none());
-        let _was_inserted = self
-            .outgoing_requests_by_connection
-            .insert((target, substream_id));
+        let _was_inserted = self.outgoing_requests.insert((target, substream_id));
         debug_assert!(_was_inserted);
 
         self.messages_to_connections.push_back((
@@ -847,14 +844,12 @@ where
                 }
 
                 // Find outgoing requests to cancel.
-                for (_, substream_id) in self.outgoing_requests_by_connection.range(
+                for (_, substream_id) in self.outgoing_requests.range(
                     (shutting_down_connection, SubstreamId::min_value())
                         ..=(shutting_down_connection, SubstreamId::max_value()),
                 ) {
-                    let _connection_id = self.outgoing_requests.remove(substream_id).unwrap();
-                    debug_assert_eq!(_connection_id, shutting_down_connection);
                     let substream_id = *substream_id;
-                    self.outgoing_requests_by_connection
+                    self.outgoing_requests
                         .remove(&(shutting_down_connection, substream_id));
 
                     return Some(Event::Response {
@@ -1003,10 +998,8 @@ where
                         continue;
                     }
 
-                    let _was_in = self.outgoing_requests.remove(&substream_id).unwrap();
-                    debug_assert_eq!(_was_in, connection_id);
                     let _was_in = self
-                        .outgoing_requests_by_connection
+                        .outgoing_requests
                         .remove(&(connection_id, substream_id));
                     debug_assert!(_was_in);
 
