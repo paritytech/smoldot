@@ -397,6 +397,21 @@ where
         self.connections.len()
     }
 
+    /// Returns the state of the given connection.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the identifier is invalid or corresponds to a connection that has already
+    /// entirely shut down.
+    ///
+    pub fn connection_state(&self, connection_id: ConnectionId) -> ConnectionState {
+        let connection = self.connections.get(&connection_id).unwrap();
+        ConnectionState {
+            established: !connection.handshaking,
+            shutting_down: connection.shutting_down,
+        }
+    }
+
     /// Returns the Noise key originalled passed as [`Config::noise_key`].
     pub fn noise_key(&self) -> &NoiseKey {
         &self.noise_key
@@ -906,6 +921,7 @@ where
                 }
                 ConnectionToCoordinatorInner::ShutdownFinished => {
                     debug_assert!(connection.shutting_down);
+                    let was_established = !connection.handshaking;
                     let user_data = self.connections.remove(&connection_id).unwrap().user_data;
                     self.messages_to_connections.push_back((
                         connection_id,
@@ -913,6 +929,7 @@ where
                     ));
                     Event::Shutdown {
                         id: connection_id,
+                        was_established,
                         user_data,
                     }
                 }
@@ -1218,6 +1235,16 @@ impl<TConn, TNow> ops::IndexMut<ConnectionId> for Network<TConn, TNow> {
     fn index_mut(&mut self, id: ConnectionId) -> &mut TConn {
         &mut self.connections.get_mut(&id).unwrap().user_data
     }
+}
+
+/// See [`Network::connection_state`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ConnectionState {
+    /// If `true`, the connection has finished its handshaking phase.
+    pub established: bool,
+
+    /// If `true`, the connection is shutting down.
+    pub shutting_down: bool,
 }
 
 /// State machine dedicated to a single connection.
@@ -2053,7 +2080,11 @@ pub enum Event<TConn> {
     ///
     /// This [`ConnectionId`] is no longer valid, and using it will result in panics.
     // TODO: add reason for shutdown?
-    Shutdown { id: ConnectionId, user_data: TConn },
+    Shutdown {
+        id: ConnectionId,
+        was_established: bool,
+        user_data: TConn,
+    },
 
     /// Received an incoming substream, but this substream has produced an error.
     ///
