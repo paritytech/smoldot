@@ -417,8 +417,6 @@ impl<'a> ChainInformationRef<'a> {
             }
         }
 
-        // TODO: also check that babe_finalized_block_epoch_information is None if and only if block is in epoch #0
-
         Ok(())
     }
 }
