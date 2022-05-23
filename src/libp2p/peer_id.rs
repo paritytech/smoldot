@@ -243,10 +243,10 @@ impl hash::Hash for PeerId {
 }
 
 impl TryFrom<Vec<u8>> for PeerId {
-    type Error = (); // TODO: proper error
+    type Error = FromBytesError;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        PeerId::from_bytes(value).map_err(|_| ())
+        PeerId::from_bytes(value).map_err(|(err, _)| err)
     }
 }
 
