@@ -263,7 +263,10 @@ impl SerializedChainInformationV1 {
             },
         };
 
-        // TODO: consider checking integrity of the storage against the header
+        // We could in principle check the integrity of the storage against the state root hash
+        // in the header. However, doing so would require obtaining the state version from the
+        // runtime, which would be very CPU intensive. Checking the integrity of the storage isn't
+        // a bad idea, but it would be inappropriate to do so in the decoding code.
         let finalized_storage = self.finalized_storage.map(|storage| {
             storage
                 .into_iter()
