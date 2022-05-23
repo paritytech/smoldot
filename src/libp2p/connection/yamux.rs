@@ -249,7 +249,16 @@ impl<T> Yamux<T> {
 
     /// Returns a reference to a substream by its ID. Returns `None` if no substream with this ID
     /// is open.
-    pub fn substream_by_id(&mut self, id: SubstreamId) -> Option<SubstreamMut<T>> {
+    pub fn substream_by_id(&self, id: SubstreamId) -> Option<SubstreamRef<T>> {
+        Some(SubstreamRef {
+            id,
+            substream: self.substreams.get(&id.0)?,
+        })
+    }
+
+    /// Returns a reference to a substream by its ID. Returns `None` if no substream with this ID
+    /// is open.
+    pub fn substream_by_id_mut(&mut self, id: SubstreamId) -> Option<SubstreamMut<T>> {
         if let Entry::Occupied(e) = self.substreams.entry(id.0) {
             Some(SubstreamMut { substream: e })
         } else {
@@ -893,6 +902,48 @@ pub struct Config {
     /// Seed used for the randomness. Used to avoid HashDoS attack and determines the order in
     /// which the data on substreams is sent out.
     pub randomness_seed: [u8; 16],
+}
+
+/// Reference to a substream within the [`Yamux`].
+// TODO: Debug
+pub struct SubstreamRef<'a, T> {
+    id: SubstreamId,
+    substream: &'a Substream<T>,
+}
+
+impl<'a, T> SubstreamRef<'a, T> {
+    /// Identifier of the substream.
+    pub fn id(&self) -> SubstreamId {
+        self.id
+    }
+
+    /// Returns the user data associated to this substream.
+    pub fn user_data(&self) -> &T {
+        &self.substream.user_data
+    }
+
+    /// Returns the user data associated to this substream.
+    pub fn into_user_data(self) -> &'a T {
+        &self.substream.user_data
+    }
+
+    /// Returns the number of bytes queued for writing on this substream.
+    pub fn queued_bytes(&self) -> usize {
+        self.substream
+            .write_buffers
+            .iter()
+            .fold(0, |n, buf| n + buf.len())
+    }
+
+    /// Returns `true` if the remote has closed their writing side of this substream.
+    pub fn is_remote_closed(&self) -> bool {
+        self.substream.remote_write_closed
+    }
+
+    /// Returns `true` if [`SubstreamMut::close`] has been called on this substream.
+    pub fn is_closed(&self) -> bool {
+        self.substream.local_write_closed
+    }
 }
 
 /// Reference to a substream within the [`Yamux`].
