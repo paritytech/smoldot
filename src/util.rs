@@ -200,6 +200,7 @@ pub(crate) fn $fn_name<'a, E: nom::error::ParseError<&'a [u8]>>(
 }
 
 decode_scale_compact!(nom_scale_compact_usize, usize);
+decode_scale_compact!(nom_scale_compact_u64, u64);
 
 macro_rules! encode_scale_compact {
     ($fn_name:ident, $num_ty:ty) => {
