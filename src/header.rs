@@ -142,11 +142,9 @@ pub fn decode_partial(mut scale_encoded: &[u8]) -> Result<(HeaderRef, &[u8]), Er
     let parent_hash: &[u8; 32] = TryFrom::try_from(&scale_encoded[0..32]).unwrap();
     scale_encoded = &scale_encoded[32..];
 
-    // TODO: don't go through a usize when decoding the block number, otherwise 32 bits platforms can't support blocks about 4 billion
     let (mut scale_encoded, number) =
-        crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(scale_encoded)
+        crate::util::nom_scale_compact_u64::<nom::error::Error<&[u8]>>(scale_encoded)
             .map_err(|_| Error::BlockNumberDecodeError)?;
-    let number = u64::try_from(number).map_err(|_| Error::BlockNumberDecodeError)?;
 
     if scale_encoded.len() < 32 + 32 + 1 {
         return Err(Error::TooShort);

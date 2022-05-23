@@ -59,9 +59,7 @@ use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
 pub use super::peer_id::PeerId;
 pub use super::read_write::ReadWrite;
-pub use established::{
-    ConfigRequestResponse, ConfigRequestResponseIn, InboundError, NotificationsOutErr,
-};
+pub use established::{ConfigRequestResponse, ConfigRequestResponseIn, InboundError};
 
 /// Configuration for a [`Network`].
 pub struct Config {
@@ -167,34 +165,37 @@ pub struct Network<TConn, TNow> {
     /// that concern this connection before processing any other incoming message.
     shutting_down_connection: Option<ConnectionId>,
 
-    // TODO: review; maybe it's possible to remove data
+    /// List of all outgoing notification substreams that we have opened. Can be either pending
+    /// (waiting for the connection task to say whether it has been accepted or not) or fully
+    /// open.
     outgoing_notification_substreams:
         hashbrown::HashMap<SubstreamId, (ConnectionId, OutSubstreamState), fnv::FnvBuildHasher>,
 
-    // TODO: review; maybe it's possible to remove data
+    /// Always contains the same entries as [`Network::outgoing_notification_substreams`] but
+    /// ordered differently.
     outgoing_notification_substreams_by_connection: BTreeSet<(ConnectionId, SubstreamId)>,
 
-    // TODO: review; maybe it's possible to remove data
-    outgoing_requests: hashbrown::HashMap<SubstreamId, ConnectionId, fnv::FnvBuildHasher>,
+    /// List of all requests that have been started locally.
+    outgoing_requests: BTreeSet<(ConnectionId, SubstreamId)>,
 
-    /// Always contains the same entries as [`Network::outgoing_requests`] but ordered differently.
-    // TODO: review; maybe it's possible to remove data
-    outgoing_requests_by_connection: BTreeSet<(ConnectionId, SubstreamId)>,
-
-    // TODO: review; maybe it's possible to remove data
+    /// List in ingoing notification substreams that connections have received. Can be either
+    /// pending (waiting to be accepted/refused) or fully opened.
+    ///
+    /// The substream ID of the substream is allocated by the connection task, and thus we need
+    /// to keep a mapping of inner <-> substream IDs.
     ingoing_notification_substreams: hashbrown::HashMap<
         SubstreamId,
         (ConnectionId, InSubstreamState, established::SubstreamId),
         fnv::FnvBuildHasher,
     >,
 
-    // TODO: review; maybe it's possible to remove data
+    /// Always contains the same entries as [`Network::ingoing_notification_substreams`] but
+    /// ordered differently.
     ingoing_notification_substreams_by_connection:
         BTreeMap<(ConnectionId, established::SubstreamId), SubstreamId>,
 
     /// List of requests that connections have received and haven't been answered by the API user
     /// yet.
-    // TODO: review; maybe it's possible to remove data
     ingoing_requests: hashbrown::HashMap<
         SubstreamId,
         (ConnectionId, established::SubstreamId),
@@ -202,7 +203,6 @@ pub struct Network<TConn, TNow> {
     >,
 
     /// Always contains the same entries as [`Network::ingoing_requests`] but ordered differently.
-    // TODO: review; maybe it's possible to remove data
     ingoing_requests_by_connection: BTreeSet<(ConnectionId, SubstreamId)>,
 
     /// Generator for randomness seeds given to the established connections.
@@ -294,8 +294,7 @@ where
                 Default::default(),
             ),
             shutting_down_connection: None,
-            outgoing_requests: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()), // TODO: capacity?,
-            outgoing_requests_by_connection: BTreeSet::new(),
+            outgoing_requests: BTreeSet::new(),
             ingoing_requests: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()), // TODO: capacity?
             ingoing_requests_by_connection: BTreeSet::new(),
             outgoing_notification_substreams: hashbrown::HashMap::with_capacity_and_hasher(
@@ -477,11 +476,7 @@ where
         let substream_id = self.next_substream_id;
         self.next_substream_id.0 += 1;
 
-        let _prev_value = self.outgoing_requests.insert(substream_id, target);
-        debug_assert!(_prev_value.is_none());
-        let _was_inserted = self
-            .outgoing_requests_by_connection
-            .insert((target, substream_id));
+        let _was_inserted = self.outgoing_requests.insert((target, substream_id));
         debug_assert!(_was_inserted);
 
         self.messages_to_connections.push_back((
@@ -807,8 +802,17 @@ where
                 {
                     self.outgoing_notification_substreams_by_connection
                         .remove(&(shutting_down_connection, substream_id));
-                    self.outgoing_notification_substreams.remove(&substream_id);
-                    return Some(Event::NotificationsOutReset { substream_id });
+                    let (_, state) = self
+                        .outgoing_notification_substreams
+                        .remove(&substream_id)
+                        .unwrap();
+                    return Some(match state {
+                        OutSubstreamState::Open => Event::NotificationsOutReset { substream_id },
+                        OutSubstreamState::Pending => Event::NotificationsOutResult {
+                            substream_id,
+                            result: Err(NotificationsOutErr::ConnectionShutdown),
+                        },
+                    });
                 }
 
                 // Ingoing notification substreams to close.
@@ -840,14 +844,12 @@ where
                 }
 
                 // Find outgoing requests to cancel.
-                for (_, substream_id) in self.outgoing_requests_by_connection.range(
+                for (_, substream_id) in self.outgoing_requests.range(
                     (shutting_down_connection, SubstreamId::min_value())
                         ..=(shutting_down_connection, SubstreamId::max_value()),
                 ) {
-                    let _connection_id = self.outgoing_requests.remove(substream_id).unwrap();
-                    debug_assert_eq!(_connection_id, shutting_down_connection);
                     let substream_id = *substream_id;
-                    self.outgoing_requests_by_connection
+                    self.outgoing_requests
                         .remove(&(shutting_down_connection, substream_id));
 
                     return Some(Event::Response {
@@ -996,10 +998,8 @@ where
                         continue;
                     }
 
-                    let _was_in = self.outgoing_requests.remove(&substream_id).unwrap();
-                    debug_assert_eq!(_was_in, connection_id);
                     let _was_in = self
-                        .outgoing_requests_by_connection
+                        .outgoing_requests
                         .remove(&(connection_id, substream_id));
                     debug_assert!(_was_in);
 
@@ -1147,7 +1147,7 @@ where
 
                     // The substream might already have been destroyed if the user closed the
                     // substream while this message was pending in the queue.
-                    if self
+                    if !self
                         .outgoing_notification_substreams
                         .contains_key(&substream_id)
                     {
@@ -1408,9 +1408,15 @@ where
                     outbound_substreams_mapping2,
                 },
             ) => {
-                let inner_substream_id = outbound_substreams_mapping.remove(&substream_id).unwrap();
-                outbound_substreams_mapping2.remove(&inner_substream_id);
-                established.close_notifications_substream(inner_substream_id);
+                // It is possible that the remote has closed the outbound notification substream
+                // while the `CloseOutNotifications` message was being delivered, or that the API
+                // user close the substream before the message about the substream being closed
+                // was delivered to the coordinator.
+                if let Some(inner_substream_id) = outbound_substreams_mapping.remove(&substream_id)
+                {
+                    outbound_substreams_mapping2.remove(&inner_substream_id);
+                    established.close_notifications_substream(inner_substream_id);
+                }
             }
             (
                 CoordinatorToConnectionInner::QueueNotification {
@@ -1453,12 +1459,14 @@ where
                 },
                 ConnectionInner::Established { established, .. },
             ) => {
+                // TODO: must verify that the substream is still valid
                 established.accept_in_notifications_substream(substream_id, handshake, ());
             }
             (
                 CoordinatorToConnectionInner::RejectInNotifications { substream_id },
                 ConnectionInner::Established { established, .. },
             ) => {
+                // TODO: must verify that the substream is still valid
                 established.reject_in_notifications_substream(substream_id);
             }
             (
@@ -1658,7 +1666,8 @@ where
                             self.pending_messages.push_back(
                                 ConnectionToCoordinatorInner::NotificationsOutResult {
                                     id: outer_substream_id,
-                                    result: result.map_err(|(err, _)| err),
+                                    result: result
+                                        .map_err(|(err, _)| NotificationsOutErr::Substream(err)),
                                 },
                             );
                         }
@@ -1914,7 +1923,7 @@ enum ConnectionToCoordinatorInner {
     /// See the corresponding event in [`established::Event`].
     NotificationsOutResult {
         id: SubstreamId,
-        result: Result<Vec<u8>, established::NotificationsOutErr>,
+        result: Result<Vec<u8>, NotificationsOutErr>,
     },
     /// See the corresponding event in [`established::Event`].
     NotificationsOutCloseDemanded {
@@ -2148,6 +2157,15 @@ pub enum RequestError {
 
     /// Error happened in the context of the substream.
     Substream(established::RequestError),
+}
+
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum NotificationsOutErr {
+    /// Opening has been interrupted because the connection as a whole is being shut down.
+    ConnectionShutdown,
+
+    /// Error happened in the context of the substream.
+    Substream(established::NotificationsOutErr),
 }
 
 #[derive(Debug, derive_more::Display, Clone)]
