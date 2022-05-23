@@ -152,7 +152,7 @@ pub(crate) fn $fn_name<'a, E: nom::error::ParseError<&'a [u8]>>(
             Ok((&bytes[4..], value))
         }
         0b11 => {
-            let num_bytes = <$num_ty>::from(bytes[0] >> 2) + 4;
+            let num_bytes = usize::from(bytes[0] >> 2) + 4;
 
             if bytes.len() < num_bytes + 1 {
                 return Err(nom::Err::Error(nom::error::make_error(
