@@ -89,14 +89,14 @@ pub(crate) fn nom_bool_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 }
 
 macro_rules! decode_scale_compact {
-    () => {
-/// Decodes a SCALE-compact-encoded `usize`.
+    ($fn_name:ident, $num_ty:ty) => {
+/// Decodes a SCALE-compact-encoded integer.
 ///
 /// > **Note**: When using this function outside of a `nom` "context", you might have to explicit
 /// >           the type of `E`. Use `nom::error::Error<&[u8]>`.
-pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
+pub(crate) fn $fn_name<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
-) -> nom::IResult<&'a [u8], usize, E> {
+) -> nom::IResult<&'a [u8], $num_ty, E> {
     if bytes.is_empty() {
         return Err(nom::Err::Error(nom::error::make_error(
             bytes,
@@ -107,7 +107,7 @@ pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
     match bytes[0] & 0b11 {
         0b00 => {
             let value = bytes[0] >> 2;
-            Ok((&bytes[1..], usize::from(value)))
+            Ok((&bytes[1..], <$num_ty>::from(value)))
         }
         0b01 => {
             if bytes.len() < 2 {
@@ -120,7 +120,7 @@ pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
             let byte0 = u16::from(bytes[0] >> 2);
             let byte1 = u16::from(bytes[1]);
             let value = (byte1 << 6) | byte0;
-            Ok((&bytes[2..], usize::from(value)))
+            Ok((&bytes[2..], <$num_ty>::from(value)))
         }
         0b10 => {
             if bytes.len() < 4 {
@@ -140,7 +140,7 @@ pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
             let byte3 = u32::from(bytes[3]).checked_shl(22).unwrap();
 
             let value = byte3 | byte2 | byte1 | byte0;
-            let value = match usize::try_from(value) {
+            let value = match <$num_ty>::try_from(value) {
                 Ok(v) => v,
                 Err(_) => {
                     return Err(nom::Err::Error(nom::error::make_error(
@@ -152,7 +152,7 @@ pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
             Ok((&bytes[4..], value))
         }
         0b11 => {
-            let num_bytes = usize::from(bytes[0] >> 2) + 4;
+            let num_bytes = <$num_ty>::from(bytes[0] >> 2) + 4;
 
             if bytes.len() < num_bytes + 1 {
                 return Err(nom::Err::Error(nom::error::make_error(
@@ -172,9 +172,9 @@ pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
             let mut out_value = 0;
             let mut shift = 0u32;
             for byte_index in 1..=num_bytes {
-                out_value |= match 1usize
+                out_value |= match <$num_ty>::from(1u8)
                     .checked_shl(shift)
-                    .and_then(|shl| usize::from(bytes[byte_index]).checked_mul(shl))
+                    .and_then(|shl| <$num_ty>::from(bytes[byte_index]).checked_mul(shl))
                 {
                     Some(v) => v,
                     None => {
@@ -199,7 +199,7 @@ pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
     };
 }
 
-decode_scale_compact!();
+decode_scale_compact!(nom_scale_compact_usize, usize);
 
 macro_rules! encode_scale_compact {
     ($fn_name:ident, $num_ty:ty) => {
