@@ -1147,7 +1147,7 @@ where
 
                     // The substream might already have been destroyed if the user closed the
                     // substream while this message was pending in the queue.
-                    if self
+                    if !self
                         .outgoing_notification_substreams
                         .contains_key(&substream_id)
                     {
