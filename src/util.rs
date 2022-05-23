@@ -88,6 +88,8 @@ pub(crate) fn nom_bool_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     ))(bytes)
 }
 
+macro_rules! decode_scale_compact {
+    () => {
 /// Decodes a SCALE-compact-encoded `usize`.
 ///
 /// > **Note**: When using this function outside of a `nom` "context", you might have to explicit
@@ -194,6 +196,10 @@ pub(crate) fn nom_scale_compact_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
         _ => unreachable!(),
     }
 }
+    };
+}
+
+decode_scale_compact!();
 
 macro_rules! encode_scale_compact {
     ($fn_name:ident, $num_ty:ty) => {
