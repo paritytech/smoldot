@@ -90,112 +90,113 @@ pub(crate) fn nom_bool_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 
 macro_rules! decode_scale_compact {
     ($fn_name:ident, $num_ty:ty) => {
-/// Decodes a SCALE-compact-encoded integer.
-///
-/// > **Note**: When using this function outside of a `nom` "context", you might have to explicit
-/// >           the type of `E`. Use `nom::error::Error<&[u8]>`.
-pub(crate) fn $fn_name<'a, E: nom::error::ParseError<&'a [u8]>>(
-    bytes: &'a [u8],
-) -> nom::IResult<&'a [u8], $num_ty, E> {
-    if bytes.is_empty() {
-        return Err(nom::Err::Error(nom::error::make_error(
-            bytes,
-            nom::error::ErrorKind::Eof,
-        )));
-    }
-
-    match bytes[0] & 0b11 {
-        0b00 => {
-            let value = bytes[0] >> 2;
-            Ok((&bytes[1..], <$num_ty>::from(value)))
-        }
-        0b01 => {
-            if bytes.len() < 2 {
+        /// Decodes a SCALE-compact-encoded integer.
+        ///
+        /// > **Note**: When using this function outside of a `nom` "context", you might have to
+        /// >           explicit the type of `E`. Use `nom::error::Error<&[u8]>`.
+        pub(crate) fn $fn_name<'a, E: nom::error::ParseError<&'a [u8]>>(
+            bytes: &'a [u8],
+        ) -> nom::IResult<&'a [u8], $num_ty, E> {
+            if bytes.is_empty() {
                 return Err(nom::Err::Error(nom::error::make_error(
                     bytes,
                     nom::error::ErrorKind::Eof,
                 )));
             }
 
-            let byte0 = u16::from(bytes[0] >> 2);
-            let byte1 = u16::from(bytes[1]);
-            let value = (byte1 << 6) | byte0;
-            Ok((&bytes[2..], <$num_ty>::from(value)))
-        }
-        0b10 => {
-            if bytes.len() < 4 {
-                return Err(nom::Err::Error(nom::error::make_error(
-                    bytes,
-                    nom::error::ErrorKind::Eof,
-                )));
-            }
-
-            // The code below uses `checked_shl` because using plain `<<` sometimes panics with
-            // "attempt to shift left with overflow", even though it is mathematically impossible
-            // for this to happen. I strongly suspect a miscompilation when using `<<` instead of
-            // `checked_sub`, but haven't managed to isolate the problem in a reproducible case.
-            let byte0 = u32::from(bytes[0] >> 2);
-            let byte1 = u32::from(bytes[1]).checked_shl(6).unwrap();
-            let byte2 = u32::from(bytes[2]).checked_shl(14).unwrap();
-            let byte3 = u32::from(bytes[3]).checked_shl(22).unwrap();
-
-            let value = byte3 | byte2 | byte1 | byte0;
-            let value = match <$num_ty>::try_from(value) {
-                Ok(v) => v,
-                Err(_) => {
-                    return Err(nom::Err::Error(nom::error::make_error(
-                        bytes,
-                        nom::error::ErrorKind::Satisfy,
-                    )))
+            match bytes[0] & 0b11 {
+                0b00 => {
+                    let value = bytes[0] >> 2;
+                    Ok((&bytes[1..], <$num_ty>::from(value)))
                 }
-            };
-            Ok((&bytes[4..], value))
-        }
-        0b11 => {
-            let num_bytes = usize::from(bytes[0] >> 2) + 4;
+                0b01 => {
+                    if bytes.len() < 2 {
+                        return Err(nom::Err::Error(nom::error::make_error(
+                            bytes,
+                            nom::error::ErrorKind::Eof,
+                        )));
+                    }
 
-            if bytes.len() < num_bytes + 1 {
-                return Err(nom::Err::Error(nom::error::make_error(
-                    bytes,
-                    nom::error::ErrorKind::Eof,
-                )));
-            }
+                    let byte0 = u16::from(bytes[0] >> 2);
+                    let byte1 = u16::from(bytes[1]);
+                    let value = (byte1 << 6) | byte0;
+                    Ok((&bytes[2..], <$num_ty>::from(value)))
+                }
+                0b10 => {
+                    if bytes.len() < 4 {
+                        return Err(nom::Err::Error(nom::error::make_error(
+                            bytes,
+                            nom::error::ErrorKind::Eof,
+                        )));
+                    }
 
-            // Value is invalid if highest byte is 0.
-            if bytes[num_bytes] == 0 {
-                return Err(nom::Err::Error(nom::error::make_error(
-                    bytes,
-                    nom::error::ErrorKind::Satisfy,
-                )));
-            }
+                    // The code below uses `checked_shl` because using plain `<<` sometimes panics
+                    // with "attempt to shift left with overflow", even though it is
+                    // mathematically impossible for this to happen. I strongly suspect a
+                    // miscompilation when using `<<` instead of `checked_sub`, but haven't managed
+                    // to isolate the problem in a reproducible case.
+                    let byte0 = u32::from(bytes[0] >> 2);
+                    let byte1 = u32::from(bytes[1]).checked_shl(6).unwrap();
+                    let byte2 = u32::from(bytes[2]).checked_shl(14).unwrap();
+                    let byte3 = u32::from(bytes[3]).checked_shl(22).unwrap();
 
-            let mut out_value = 0;
-            let mut shift = 0u32;
-            for byte_index in 1..=num_bytes {
-                out_value |= match <$num_ty>::from(1u8)
-                    .checked_shl(shift)
-                    .and_then(|shl| <$num_ty>::from(bytes[byte_index]).checked_mul(shl))
-                {
-                    Some(v) => v,
-                    None => {
-                        // Overflow. The SCALE-encoded value is too large to fit a `usize`.
+                    let value = byte3 | byte2 | byte1 | byte0;
+                    let value = match <$num_ty>::try_from(value) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            return Err(nom::Err::Error(nom::error::make_error(
+                                bytes,
+                                nom::error::ErrorKind::Satisfy,
+                            )))
+                        }
+                    };
+                    Ok((&bytes[4..], value))
+                }
+                0b11 => {
+                    let num_bytes = usize::from(bytes[0] >> 2) + 4;
+
+                    if bytes.len() < num_bytes + 1 {
+                        return Err(nom::Err::Error(nom::error::make_error(
+                            bytes,
+                            nom::error::ErrorKind::Eof,
+                        )));
+                    }
+
+                    // Value is invalid if highest byte is 0.
+                    if bytes[num_bytes] == 0 {
                         return Err(nom::Err::Error(nom::error::make_error(
                             bytes,
                             nom::error::ErrorKind::Satisfy,
                         )));
                     }
-                };
 
-                // Overflows aren't properly handled because `out_value` is expected to overflow
-                // way sooner than `shift`.
-                shift += 8;
+                    let mut out_value = 0;
+                    let mut shift = 0u32;
+                    for byte_index in 1..=num_bytes {
+                        out_value |= match <$num_ty>::from(1u8)
+                            .checked_shl(shift)
+                            .and_then(|shl| <$num_ty>::from(bytes[byte_index]).checked_mul(shl))
+                        {
+                            Some(v) => v,
+                            None => {
+                                // Overflow. The SCALE-encoded value is too large to fit a `usize`.
+                                return Err(nom::Err::Error(nom::error::make_error(
+                                    bytes,
+                                    nom::error::ErrorKind::Satisfy,
+                                )));
+                            }
+                        };
+
+                        // Overflows aren't properly handled because `out_value` is expected to
+                        // overflow way sooner than `shift`.
+                        shift += 8;
+                    }
+
+                    Ok((&bytes[num_bytes + 1..], out_value))
+                }
+                _ => unreachable!(),
             }
-
-            Ok((&bytes[num_bytes + 1..], out_value))
         }
-        _ => unreachable!(),
-    }
-}
     };
 }
 
