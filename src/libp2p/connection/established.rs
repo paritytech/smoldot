@@ -549,21 +549,14 @@ where
                 protocol_index,
                 handshake,
             },
-            substream::Event::NotificationsInOpenCancel { protocol_index } => {
-                Event::NotificationsInOpenCancel {
-                    id: SubstreamId(substream_id),
-                    protocol_index,
-                }
-            }
+            substream::Event::NotificationsInOpenCancel => Event::NotificationsInOpenCancel {
+                id: SubstreamId(substream_id),
+            },
             substream::Event::NotificationIn { notification } => Event::NotificationIn {
                 notification,
                 id: SubstreamId(substream_id),
             },
-            substream::Event::NotificationsInClose {
-                protocol_index,
-                outcome,
-            } => Event::NotificationsInClose {
-                protocol_index,
+            substream::Event::NotificationsInClose { outcome } => Event::NotificationsInClose {
                 id: SubstreamId(substream_id),
                 outcome,
             },
@@ -949,12 +942,6 @@ pub enum Event<TRqUd, TNotifUd> {
     NotificationsInOpenCancel {
         /// Identifier of the substream.
         id: SubstreamId,
-        /// Index of the notifications protocol concerned by the substream.
-        ///
-        /// The index refers to the position of the protocol in
-        /// [`Config::notifications_protocols`].
-        // TODO: no longer necessary
-        protocol_index: usize,
     },
     /// Remote has sent a notification on an inbound notifications substream. Can only happen
     /// after the substream has been accepted.
@@ -972,12 +959,6 @@ pub enum Event<TRqUd, TNotifUd> {
         id: SubstreamId,
         /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
         outcome: Result<(), NotificationsInClosedErr>,
-        /// Index of the notifications protocol concerned by the substream.
-        ///
-        /// The index refers to the position of the protocol in
-        /// [`Config::notifications_protocols`].
-        // TODO: no longer necessary
-        protocol_index: usize,
     },
 
     /// Outcome of trying to open a substream with [`Established::open_notifications_substream`].

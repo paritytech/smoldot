@@ -852,7 +852,7 @@ where
                 } else {
                     (
                         Some(SubstreamInner::NotificationsInRefused),
-                        Some(Event::NotificationsInOpenCancel { protocol_index }),
+                        Some(Event::NotificationsInOpenCancel),
                     )
                 }
             }
@@ -884,10 +884,7 @@ where
                         read_write.close_write();
                         return (
                             Some(SubstreamInner::NotificationsInClosed),
-                            Some(Event::NotificationsInClose {
-                                protocol_index,
-                                outcome: Ok(()),
-                            }),
+                            Some(Event::NotificationsInClose { outcome: Ok(()) }),
                         );
                     }
                 };
@@ -929,7 +926,6 @@ where
                     Err(error) => (
                         Some(SubstreamInner::NotificationsInClosed),
                         Some(Event::NotificationsInClose {
-                            protocol_index,
                             outcome: Err(NotificationsInClosedErr::ProtocolError(error)),
                         }),
                     ),
@@ -1119,15 +1115,10 @@ where
                 response: Err(RequestError::SubstreamReset),
             }),
             SubstreamInner::NotificationsInHandshake { .. } => None,
-            SubstreamInner::NotificationsInWait { protocol_index, .. } => {
-                Some(Event::NotificationsInOpenCancel { protocol_index })
-            }
-            SubstreamInner::NotificationsIn { protocol_index, .. } => {
-                Some(Event::NotificationsInClose {
-                    protocol_index,
-                    outcome: Err(NotificationsInClosedErr::SubstreamReset),
-                })
-            }
+            SubstreamInner::NotificationsInWait { .. } => Some(Event::NotificationsInOpenCancel),
+            SubstreamInner::NotificationsIn { .. } => Some(Event::NotificationsInClose {
+                outcome: Err(NotificationsInClosedErr::SubstreamReset),
+            }),
             SubstreamInner::NotificationsInRefused => None,
             SubstreamInner::NotificationsInClosed => None,
             SubstreamInner::NotificationsOutNegotiating { user_data, .. }
@@ -1482,10 +1473,7 @@ pub enum Event<TRqUd, TNotifUd> {
     /// This can only happen after [`Event::NotificationsInOpen`].
     /// [`Substream::accept_in_notifications_substream`] or
     /// [`Substream::reject_in_notifications_substream`] should not be called on this substream.
-    NotificationsInOpenCancel {
-        /// Index of the notifications protocol concerned by the substream.
-        protocol_index: usize,
-    },
+    NotificationsInOpenCancel,
     /// Remote has sent a notification on an inbound notifications substream. Can only happen
     /// after the substream has been accepted.
     // TODO: give a way to back-pressure notifications
@@ -1500,8 +1488,6 @@ pub enum Event<TRqUd, TNotifUd> {
     NotificationsInClose {
         /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
         outcome: Result<(), NotificationsInClosedErr>,
-        /// Index of the notifications protocol concerned by the substream.
-        protocol_index: usize,
     },
 
     /// Remote has accepted or refused a substream opened with [`Substream::notifications_out`].
