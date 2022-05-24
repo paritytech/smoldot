@@ -884,9 +884,7 @@ where
                         read_write.close_write();
                         return (
                             Some(SubstreamInner::NotificationsInClosed),
-                            Some(Event::NotificationsInClose {
-                                outcome: Ok(()),
-                            }),
+                            Some(Event::NotificationsInClose { outcome: Ok(()) }),
                         );
                     }
                 };
@@ -1117,14 +1115,10 @@ where
                 response: Err(RequestError::SubstreamReset),
             }),
             SubstreamInner::NotificationsInHandshake { .. } => None,
-            SubstreamInner::NotificationsInWait { .. } => {
-                Some(Event::NotificationsInOpenCancel)
-            }
-            SubstreamInner::NotificationsIn { .. } => {
-                Some(Event::NotificationsInClose {
-                    outcome: Err(NotificationsInClosedErr::SubstreamReset),
-                })
-            }
+            SubstreamInner::NotificationsInWait { .. } => Some(Event::NotificationsInOpenCancel),
+            SubstreamInner::NotificationsIn { .. } => Some(Event::NotificationsInClose {
+                outcome: Err(NotificationsInClosedErr::SubstreamReset),
+            }),
             SubstreamInner::NotificationsInRefused => None,
             SubstreamInner::NotificationsInClosed => None,
             SubstreamInner::NotificationsOutNegotiating { user_data, .. }
