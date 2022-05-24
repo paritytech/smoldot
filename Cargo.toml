@@ -102,7 +102,7 @@ parity-scale-codec = { version = "3.1.2", features = ["derive"], default-feature
 wasmtime = { version = "0.36.0", default-features = false, features = ["async", "cranelift"], optional = true }
 
 [build-dependencies]
-prost-build = "0.10.0"
+prost-build = "0.10.4"
 
 [dev-dependencies]
 async-std = "1.11.0"
