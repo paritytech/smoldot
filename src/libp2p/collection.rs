@@ -169,7 +169,7 @@ pub struct Network<TConn, TNow> {
     /// (waiting for the connection task to say whether it has been accepted or not) or fully
     /// open.
     outgoing_notification_substreams:
-        hashbrown::HashMap<SubstreamId, (ConnectionId, OutSubstreamState), fnv::FnvBuildHasher>,
+        hashbrown::HashMap<SubstreamId, (ConnectionId, SubstreamState), fnv::FnvBuildHasher>,
 
     /// Always contains the same entries as [`Network::outgoing_notification_substreams`] but
     /// ordered differently.
@@ -185,7 +185,7 @@ pub struct Network<TConn, TNow> {
     /// to keep a mapping of inner <-> substream IDs.
     ingoing_notification_substreams: hashbrown::HashMap<
         SubstreamId,
-        (ConnectionId, InSubstreamState, established::SubstreamId),
+        (ConnectionId, SubstreamState, established::SubstreamId),
         fnv::FnvBuildHasher,
     >,
 
@@ -250,23 +250,13 @@ struct OverlayNetwork {
     config: NotificationProtocolConfig,
 }
 
-/// See [`Network::outgoing_notification_substreams`].
+/// See [`Network::outgoing_notification_substreams`] and
+/// [`Network::ingoing_notification_substreams`].
 ///
 /// > **Note**: There is no `Closed` variant, as this corresponds to a lack of entry in the map.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
-enum OutSubstreamState {
+enum SubstreamState {
     /// Substream hasn't been accepted or refused yet.
-    Pending,
-    Open,
-}
-
-/// See [`Network::ingoing_notification_substreams`].
-///
-/// > **Note**: There is no `Closed` variant, as this corresponds to a lack of entry in the map.
-// TODO: merge with out state
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
-enum InSubstreamState {
-    /// Substream hasn't been accepted or refused yet. Contains the overlay network index.
     Pending,
     Open,
 }
@@ -530,7 +520,7 @@ where
 
         let _prev_value = self
             .outgoing_notification_substreams
-            .insert(substream_id, (connection_id, OutSubstreamState::Pending));
+            .insert(substream_id, (connection_id, SubstreamState::Pending));
         debug_assert!(_prev_value.is_none());
         let _was_inserted = self
             .outgoing_notification_substreams_by_connection
@@ -624,7 +614,7 @@ where
             .outgoing_notification_substreams
             .get(&substream_id)
             .unwrap();
-        assert!(matches!(state, OutSubstreamState::Open));
+        assert!(matches!(state, SubstreamState::Open));
 
         //  TODO: add some back-pressure system and return a `QueueNotificationError` if full
 
@@ -657,7 +647,7 @@ where
             .ingoing_notification_substreams
             .get_mut(&substream_id)
             .unwrap();
-        assert!(matches!(state, InSubstreamState::Pending));
+        assert!(matches!(state, SubstreamState::Pending));
 
         self.messages_to_connections.push_back((
             *connection_id,
@@ -667,7 +657,7 @@ where
             },
         ));
 
-        *state = InSubstreamState::Open;
+        *state = SubstreamState::Open;
     }
 
     /// Rejects a request for an inbound notifications substream reported by an
@@ -686,7 +676,7 @@ where
     /// Panics if the [`SubstreamId`] doesn't correspond to an inbound notifications substream.
     ///
     pub fn reject_in_notifications(&mut self, substream_id: SubstreamId) {
-        if let Some((connection_id, InSubstreamState::Pending, inner_substream_id)) =
+        if let Some((connection_id, SubstreamState::Pending, inner_substream_id)) =
             self.ingoing_notification_substreams.remove(&substream_id)
         {
             let _was_in = self
@@ -807,8 +797,8 @@ where
                         .remove(&substream_id)
                         .unwrap();
                     return Some(match state {
-                        OutSubstreamState::Open => Event::NotificationsOutReset { substream_id },
-                        OutSubstreamState::Pending => Event::NotificationsOutResult {
+                        SubstreamState::Open => Event::NotificationsOutReset { substream_id },
+                        SubstreamState::Pending => Event::NotificationsOutResult {
                             substream_id,
                             result: Err(NotificationsOutErr::ConnectionShutdown),
                         },
@@ -1023,7 +1013,7 @@ where
 
                     self.ingoing_notification_substreams.insert(
                         substream_id,
-                        (connection_id, InSubstreamState::Pending, inner_substream_id),
+                        (connection_id, SubstreamState::Pending, inner_substream_id),
                     );
                     self.ingoing_notification_substreams_by_connection
                         .insert((connection_id, inner_substream_id), substream_id);
@@ -1118,10 +1108,10 @@ where
                         }
                     };
 
-                    debug_assert!(matches!(entry.get_mut().1, OutSubstreamState::Pending));
+                    debug_assert!(matches!(entry.get_mut().1, SubstreamState::Pending));
 
                     if result.is_ok() {
-                        entry.insert((connection_id, OutSubstreamState::Open));
+                        entry.insert((connection_id, SubstreamState::Open));
                     } else {
                         entry.remove();
 
