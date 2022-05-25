@@ -108,12 +108,12 @@ pub struct Peers<TConn, TNow> {
     peer_indices: hashbrown::HashMap<PeerId, usize, SipHasherBuild>,
 
     /// List of all established connections, as a tuple of `(peer_index, connection_id)`.
-    /// `peer_index` is the index in [`Peers::peers`]. Values are `bool` indicating whether the
-    /// connection is fully established: `true` if fully established, `false` if handshaking.
+    /// `peer_index` is the index in [`Peers::peers`]. Includes all connections even if they are
+    /// still handshaking or shutting down.
     ///
     /// Note that incoming handshaking connections are never in this list, as their expected
     /// peer id isn't known before the end of the handshake.
-    connections_by_peer: BTreeMap<(usize, collection::ConnectionId), bool>,
+    connections_by_peer: BTreeSet<(usize, collection::ConnectionId)>,
 
     /// Keys are combinations of `(peer_index, notifications_protocol_index)`. Contains all the
     /// inbound notification substreams that are either pending or accepted. Used in order to
@@ -205,7 +205,7 @@ where
                 handshake_timeout: config.handshake_timeout,
                 randomness_seed: randomness.sample(rand::distributions::Standard),
             }),
-            connections_by_peer: BTreeMap::new(),
+            connections_by_peer: BTreeSet::new(),
             peer_indices: hashbrown::HashMap::with_capacity_and_hasher(
                 config.peers_capacity,
                 SipHasherBuild::new(randomness.sample(rand::distributions::Standard)),
@@ -299,25 +299,20 @@ where
                             let _was_in = self
                                 .connections_by_peer
                                 .remove(&(expected_peer_index, connection_id));
-                            debug_assert_eq!(_was_in, Some(false));
-                            let _was_in = self
+                            debug_assert!(_was_in);
+                            let _inserted = self
                                 .connections_by_peer
-                                .insert((actual_peer_index, connection_id), true);
-                            debug_assert!(_was_in.is_none());
+                                .insert((actual_peer_index, connection_id));
+                            debug_assert!(_inserted);
                             self.inner[connection_id].peer_index = Some(actual_peer_index);
 
                             // TODO: report some kind of error on the outer API layers?
-                        } else {
-                            let _was_in = self
-                                .connections_by_peer
-                                .insert((actual_peer_index, connection_id), true);
-                            debug_assert_eq!(_was_in, Some(false));
                         }
                     } else {
-                        let _was_in = self
+                        let _inserted = self
                             .connections_by_peer
-                            .insert((actual_peer_index, connection_id), true);
-                        debug_assert!(_was_in.is_none());
+                            .insert((actual_peer_index, connection_id));
+                        debug_assert!(_inserted);
                         self.inner[connection_id].peer_index = Some(actual_peer_index);
                     }
 
@@ -328,7 +323,12 @@ where
                                 (actual_peer_index, collection::ConnectionId::min_value())
                                     ..=(actual_peer_index, collection::ConnectionId::max_value()),
                             )
-                            .filter(|(_, established)| **established)
+                            .filter(|(_, connection_id)| {
+                                // Note that connections that are shutting down are still counted,
+                                // as we report the disconnected event only at the end of the
+                                // shutdown.
+                                self.inner.connection_state(*connection_id).established
+                            })
                             .count();
                         NonZeroU32::new(u32::try_from(num).unwrap()).unwrap()
                     };
@@ -376,9 +376,7 @@ where
                     });
                 }
 
-                collection::Event::StartShutdown { id, .. } => {
-                    // TODO: mark connection as shutting down so that we don't start any new request or substream; in practice this can't happen right now because events are processed in a loop, but in theory the user could do something stupid and get a panic
-
+                collection::Event::StartShutdown { id } => {
                     // TODO: this is O(n)
                     for (_, item) in &mut self.desired_out_notifications {
                         if let Some((_, connection_id, _)) = item.as_ref() {
@@ -391,6 +389,7 @@ where
 
                 collection::Event::Shutdown {
                     id: connection_id,
+                    was_established,
                     user_data:
                         Connection {
                             peer_index: Some(expected_peer_index),
@@ -400,10 +399,10 @@ where
                     // `expected_peer_index` is `None` iff the connection was an incoming
                     // connection whose handshake isn't finished yet.
 
-                    let was_established = self
+                    let _was_in = self
                         .connections_by_peer
-                        .remove(&(expected_peer_index, connection_id))
-                        .unwrap();
+                        .remove(&(expected_peer_index, connection_id));
+                    debug_assert!(_was_in);
 
                     let peer_id = self.peers[expected_peer_index].peer_id.clone();
 
@@ -414,7 +413,12 @@ where
                                 (expected_peer_index, collection::ConnectionId::min_value())
                                     ..=(expected_peer_index, collection::ConnectionId::max_value()),
                             )
-                            .filter(|(_, established)| **established)
+                            .filter(|(_, connection_id)| {
+                                // Note that connections that are shutting down are still counted,
+                                // as we report the disconnected event only at the end of the
+                                // shutdown.
+                                self.inner.connection_state(*connection_id).established
+                            })
                             .count();
                         u32::try_from(num).unwrap()
                     };
@@ -750,11 +754,8 @@ where
             },
         );
 
-        debug_assert!(!self
-            .connections_by_peer
-            .contains_key(&(peer_index, connection_id)));
-        self.connections_by_peer
-            .insert((peer_index, connection_id), false);
+        let _inserted = self.connections_by_peer.insert((peer_index, connection_id));
+        debug_assert!(_inserted);
 
         (connection_id, connection_task)
     }
@@ -787,6 +788,9 @@ where
                     (peer_index, ConnectionId::min_value())
                         ..=(peer_index, ConnectionId::max_value()),
                 )
+                .filter(|(_, connection_id)| {
+                    !self.inner.connection_state(*connection_id).shutting_down
+                })
                 .count()
                 != 0
             {
@@ -1202,7 +1206,12 @@ where
             .range(
                 (peer_index, ConnectionId::min_value())..=(peer_index, ConnectionId::max_value()),
             )
-            .any(|(_, established)| *established)
+            .any(|(_, connection_id)| {
+                // Note that connections that are shutting down are still counted,
+                // as we report the disconnected event only at the end of the
+                // shutdown.
+                self.inner.connection_state(*connection_id).established
+            })
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
@@ -1216,9 +1225,12 @@ where
                         (*peer_index, ConnectionId::min_value())
                             ..=(*peer_index, ConnectionId::max_value()),
                     )
-                    .filter(|(_, established)| **established)
-                    .count()
-                    != 0
+                    .any(|(_, connection_id)| {
+                        // Note that connections that are shutting down are still counted,
+                        // as we report the disconnected event only at the end of the
+                        // shutdown.
+                        self.inner.connection_state(*connection_id).established
+                    })
             })
             .map(|(_, p)| &p.peer_id)
     }
@@ -1239,13 +1251,17 @@ where
     fn connection_id_for_peer(&self, target: &PeerId) -> Option<collection::ConnectionId> {
         let peer_index = *self.peer_indices.get(target)?;
 
-        if let Some(((_, connection_id), _)) = self
+        if let Some((_, connection_id)) = self
             .connections_by_peer
             .range(
                 (peer_index, collection::ConnectionId::min_value())
                     ..=(peer_index, collection::ConnectionId::max_value()),
             )
-            .find(|(_, established)| **established)
+            .find(|(_, connection_id)| {
+                let state = self.inner.connection_state(*connection_id);
+                // TODO: this is wrong because shutting down connections do not immediately lead to a Disconnect event in the public API, meaning that the user can get a panic despite using the API correctly
+                state.established && !state.shutting_down
+            })
         {
             return Some(*connection_id);
         }
