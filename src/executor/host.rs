@@ -1056,8 +1056,8 @@ impl ReadyToRun {
                     if let Ok(public_key) = public_key {
                         let signature =
                             ed25519_zebra::Signature::from(expect_pointer_constant_size!(0, 64));
-                        let message = expect_pointer_size!(1).as_ref().to_owned(); // TODO: to_owned() :-/
-                        public_key.verify(&signature, &message).is_ok()
+                        let message = expect_pointer_size!(1);
+                        public_key.verify(&signature, message.as_ref()).is_ok()
                     } else {
                         false
                     }
@@ -1079,11 +1079,15 @@ impl ReadyToRun {
                         schnorrkel::PublicKey::from_bytes(&expect_pointer_constant_size!(2, 32))
                             .unwrap();
 
-                    let message = expect_pointer_size!(1).as_ref().to_owned(); // TODO: to_owned() :-/
                     let signature = expect_pointer_constant_size!(0, 64);
+                    let message = expect_pointer_size!(1);
 
                     signing_public_key
-                        .verify_simple_preaudit_deprecated(b"substrate", &message, &signature)
+                        .verify_simple_preaudit_deprecated(
+                            b"substrate",
+                            message.as_ref(),
+                            &signature,
+                        )
                         .is_ok()
                 };
 

@@ -314,7 +314,7 @@ where
                         }
 
                         // It might be that the substream has been closed in `process_substream`.
-                        if self.inner.yamux.substream_by_id(substream_id).is_none() {
+                        if self.inner.yamux.substream_by_id_mut(substream_id).is_none() {
                             break;
                         }
                     }
@@ -403,7 +403,7 @@ where
         let mut total_read = 0;
 
         loop {
-            let mut substream = inner.yamux.substream_by_id(substream_id).unwrap();
+            let mut substream = inner.yamux.substream_by_id_mut(substream_id).unwrap();
 
             let read_is_closed = substream.is_remote_closed();
             let write_is_closed = substream.is_closed();
@@ -452,7 +452,11 @@ where
                 Some(s) => *substream.user_data() = Some(s),
                 None => {
                     // TODO: only reset if not already closed
-                    inner.yamux.substream_by_id(substream_id).unwrap().reset();
+                    inner
+                        .yamux
+                        .substream_by_id_mut(substream_id)
+                        .unwrap()
+                        .reset();
                 }
             };
 
@@ -461,7 +465,7 @@ where
                 Some(substream::Event::InboundNegotiated(protocol)) => {
                     let substream = inner
                         .yamux
-                        .substream_by_id(substream_id)
+                        .substream_by_id_mut(substream_id)
                         .unwrap()
                         .into_user_data()
                         .as_mut()
@@ -545,21 +549,14 @@ where
                 protocol_index,
                 handshake,
             },
-            substream::Event::NotificationsInOpenCancel { protocol_index } => {
-                Event::NotificationsInOpenCancel {
-                    id: SubstreamId(substream_id),
-                    protocol_index,
-                }
-            }
+            substream::Event::NotificationsInOpenCancel => Event::NotificationsInOpenCancel {
+                id: SubstreamId(substream_id),
+            },
             substream::Event::NotificationIn { notification } => Event::NotificationIn {
                 notification,
                 id: SubstreamId(substream_id),
             },
-            substream::Event::NotificationsInClose {
-                protocol_index,
-                outcome,
-            } => Event::NotificationsInClose {
-                protocol_index,
+            substream::Event::NotificationsInClose { outcome } => Event::NotificationsInClose {
                 id: SubstreamId(substream_id),
                 outcome,
             },
@@ -650,7 +647,7 @@ where
     ) -> Option<&mut TNotifUd> {
         self.inner
             .yamux
-            .substream_by_id(id.0)?
+            .substream_by_id_mut(id.0)?
             .into_user_data()
             .as_mut()
             .unwrap()
@@ -719,7 +716,7 @@ where
                                                       // TODO: self.inner.notifications_protocols[protocol_index].max_notification_size;
         self.inner
             .yamux
-            .substream_by_id(substream_id.0)
+            .substream_by_id_mut(substream_id.0)
             .unwrap()
             .into_user_data()
             .as_mut()
@@ -737,7 +734,7 @@ where
     pub fn reject_in_notifications_substream(&mut self, substream_id: SubstreamId) {
         self.inner
             .yamux
-            .substream_by_id(substream_id.0)
+            .substream_by_id_mut(substream_id.0)
             .unwrap()
             .into_user_data()
             .as_mut()
@@ -769,7 +766,7 @@ where
     ) {
         self.inner
             .yamux
-            .substream_by_id(substream_id.0)
+            .substream_by_id_mut(substream_id.0)
             .unwrap()
             .into_user_data()
             .as_mut()
@@ -786,13 +783,12 @@ where
     /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
     /// notifications substream isn't in the appropriate state.
     ///
-    // TODO: shouldn't require `&mut self`
-    pub fn notification_substream_queued_bytes(&mut self, substream_id: SubstreamId) -> usize {
+    pub fn notification_substream_queued_bytes(&self, substream_id: SubstreamId) -> usize {
         let substream = self.inner.yamux.substream_by_id(substream_id.0).unwrap();
         let already_queued = substream.queued_bytes();
         let from_substream = substream
             .into_user_data()
-            .as_mut()
+            .as_ref()
             .unwrap()
             .notification_substream_queued_bytes();
         already_queued + from_substream
@@ -813,7 +809,7 @@ where
     pub fn close_notifications_substream(&mut self, substream_id: SubstreamId) {
         self.inner
             .yamux
-            .substream_by_id(substream_id.0)
+            .substream_by_id_mut(substream_id.0)
             .unwrap()
             .into_user_data()
             .as_mut()
@@ -833,7 +829,7 @@ where
     ) -> Result<(), RespondInRequestError> {
         self.inner
             .yamux
-            .substream_by_id(substream_id.0)
+            .substream_by_id_mut(substream_id.0)
             .ok_or(RespondInRequestError::SubstreamClosed)?
             .into_user_data()
             .as_mut()
@@ -846,7 +842,11 @@ where
     fn queue_ping(&mut self, timeout: TNow) {
         // It might be that the remote has reset the ping substream, in which case the out ping
         // substream no longer exists and we immediately consider the ping as failed.
-        if let Some(substream) = self.inner.yamux.substream_by_id(self.inner.outgoing_pings) {
+        if let Some(substream) = self
+            .inner
+            .yamux
+            .substream_by_id_mut(self.inner.outgoing_pings)
+        {
             substream
                 .into_user_data()
                 .as_mut()
@@ -942,12 +942,6 @@ pub enum Event<TRqUd, TNotifUd> {
     NotificationsInOpenCancel {
         /// Identifier of the substream.
         id: SubstreamId,
-        /// Index of the notifications protocol concerned by the substream.
-        ///
-        /// The index refers to the position of the protocol in
-        /// [`Config::notifications_protocols`].
-        // TODO: no longer necessary
-        protocol_index: usize,
     },
     /// Remote has sent a notification on an inbound notifications substream. Can only happen
     /// after the substream has been accepted.
@@ -965,12 +959,6 @@ pub enum Event<TRqUd, TNotifUd> {
         id: SubstreamId,
         /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
         outcome: Result<(), NotificationsInClosedErr>,
-        /// Index of the notifications protocol concerned by the substream.
-        ///
-        /// The index refers to the position of the protocol in
-        /// [`Config::notifications_protocols`].
-        // TODO: no longer necessary
-        protocol_index: usize,
     },
 
     /// Outcome of trying to open a substream with [`Established::open_notifications_substream`].
