@@ -103,7 +103,10 @@ struct Inner<TNow, TRqUd, TNotifUd> {
     /// When to start the next ping attempt.
     next_ping: TNow,
     /// Source of randomness to generate ping payloads.
-    ping_payload_randomness: rand_chacha::ChaCha8Rng,
+    ///
+    /// Note that we use ChaCha20 because the rest of the code base also uses ChaCha20. This avoids
+    /// unnecessary code being included in the binary and reduces the binary size.
+    ping_payload_randomness: rand_chacha::ChaCha20Rng,
 
     /// See [`Config::request_protocols`].
     request_protocols: Vec<ConfigRequestResponse>,
@@ -1032,7 +1035,7 @@ impl ConnectionPrototype {
     {
         // TODO: check conflicts between protocol names?
 
-        let mut randomness = rand_chacha::ChaCha8Rng::from_seed(config.randomness_seed);
+        let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
 
         let mut yamux = yamux::Yamux::new(yamux::Config {
             is_initiator: self.encryption.is_initiator(),
