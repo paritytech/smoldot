@@ -6,6 +6,10 @@
 
 - The networking code has been considerably refactored. Due to the large size of the change it is possible that unintended changes in behaviour have been introduced. ([#2264](https://github.com/paritytech/smoldot/pull/2264))
 
+### Fixed
+
+- Fix a panic in case of a Noise message with an invalid length. ([#2219](https://github.com/paritytech/smoldot/pull/2219))
+
 ## 0.6.16 - 2022-05-16
 
 ### Added
