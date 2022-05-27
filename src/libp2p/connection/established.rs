@@ -58,6 +58,7 @@ use core::{
 };
 
 pub mod substream;
+mod tests;
 
 pub use substream::{
     InboundError, NotificationsInClosedErr, NotificationsOutErr, RequestError,
