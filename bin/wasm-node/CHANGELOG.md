@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fix a panic in case of a Noise message with an invalid length. ([#2219](https://github.com/paritytech/smoldot/pull/2219))
+- Fix a panic in case of a Noise message with an invalid length. ([#2321](https://github.com/paritytech/smoldot/pull/2321))
 
 ## 0.6.16 - 2022-05-16
 
