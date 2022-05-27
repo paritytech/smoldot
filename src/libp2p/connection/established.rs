@@ -850,13 +850,15 @@ where
             .yamux
             .substream_by_id_mut(self.inner.outgoing_pings)
         {
-            substream.into_user_data().as_mut().unwrap().queue_ping(
-                &self
-                    .inner
-                    .ping_payload_randomness
-                    .sample(rand::distributions::Standard),
-                timeout,
-            );
+            let payload = self
+                .inner
+                .ping_payload_randomness
+                .sample(rand::distributions::Standard);
+            substream
+                .into_user_data()
+                .as_mut()
+                .unwrap()
+                .queue_ping(&payload, timeout);
         } else {
             self.inner.pending_events.push_back(Event::PingOutFailed);
         }
