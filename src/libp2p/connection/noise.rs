@@ -272,9 +272,12 @@ impl Noise {
             // Allocate the space to decode to.
             // Each frame consists of the payload plus 16 bytes of authentication data, therefore
             // the payload size is `expected_len - 16`.
+            // We use `saturating_sub` in order to avoid panicking in case the `expected_len` is
+            // invalid. An invalid `expected_len` should trigger an error when decoding the
+            // message below.
             let len_before = self.rx_buffer_decrypted.len();
             self.rx_buffer_decrypted
-                .resize(len_before + expected_len - 16, 0);
+                .resize(len_before + expected_len.saturating_sub(16), 0);
 
             // Finally decoding the data.
             let written = self
