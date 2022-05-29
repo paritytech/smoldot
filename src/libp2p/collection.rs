@@ -1252,7 +1252,7 @@ enum ConnectionInner<TNow> {
         /// state when the handshake is over. While it seems a bit dangerous to leave a randomness
         /// seed in plain memory, the randomness isn't used for anything critical or related to
         /// cryptography, but only for example to avoid hash collision attacks.
-        randomness_seed: [u8; 16],
+        randomness_seed: [u8; 32],
 
         /// When the handshake phase times out.
         timeout: TNow,

@@ -683,7 +683,9 @@ impl HandshakeInProgress {
             // Decoding the first two bytes, which are the length of the handshake message.
             let expected_len =
                 u16::from_be_bytes(<[u8; 2]>::try_from(&self.rx_buffer_encrypted[..2]).unwrap());
-            debug_assert!(self.rx_buffer_encrypted.len() < 2 + usize::from(expected_len));
+            debug_assert!(
+                expected_len == 0 || self.rx_buffer_encrypted.len() < 2 + usize::from(expected_len)
+            );
 
             // Copy as much data as possible from `payload` to `self.rx_buffer_encrypted`, without
             // copying more than the handshake message.
