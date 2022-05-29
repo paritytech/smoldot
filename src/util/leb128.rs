@@ -71,7 +71,7 @@ pub fn encode(value: impl Into<u64>) -> impl ExactSizeIterator<Item = u8> + Clon
 /// Returns an LEB128-encoded `usize` as a list of bytes.
 ///
 /// See also [`encode`].
-pub fn encode_usize(value: usize) -> impl ExactSizeIterator<Item = u8> {
+pub fn encode_usize(value: usize) -> impl ExactSizeIterator<Item = u8> + Clone {
     encode(u64::try_from(value).unwrap())
 }
 

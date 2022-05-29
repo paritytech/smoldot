@@ -15,11 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::{schema, ProtobufDecodeError};
+use crate::util::protobuf;
 
 use alloc::vec::Vec;
-use core::iter;
-use prost::Message as _;
 
 /// Description of a call proof request that can be sent to a peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,47 +31,51 @@ pub struct CallProofRequestConfig<'a, I> {
     pub parameter_vectored: I,
 }
 
+// See https://github.com/paritytech/substrate/blob/c8653447fc8ef8d95a92fe164c96dffb37919e85/client/network/light/src/schema/light.v1.proto
+// for protocol definition.
+
 /// Builds the bytes corresponding to a call proof request.
-pub fn build_call_proof_request(
-    config: CallProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
-) -> impl Iterator<Item = impl AsRef<[u8]>> {
-    // Note: while the API of this function allows for a zero-cost implementation, the protobuf
-    // library doesn't permit to avoid allocations.
+pub fn build_call_proof_request<'a>(
+    config: CallProofRequestConfig<'a, impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a>,
+) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+    // TODO: don't allocate here
+    let parameter = config.parameter_vectored.fold(Vec::new(), |mut a, b| {
+        a.extend_from_slice(b.as_ref());
+        a
+    });
 
-    let request = schema::Request {
-        request: Some(schema::request::Request::RemoteCallRequest(
-            schema::RemoteCallRequest {
-                block: config.block_hash.to_vec(),
-                method: config.method.into(),
-                data: config.parameter_vectored.fold(Vec::new(), |mut a, b| {
-                    a.extend_from_slice(b.as_ref());
-                    a
-                }),
-            },
-        )),
-    };
-
-    let request_bytes = {
-        let mut buf = Vec::with_capacity(request.encoded_len());
-        request.encode(&mut buf).unwrap();
-        buf
-    };
-
-    iter::once(request_bytes)
+    protobuf::message_tag_encode(
+        1,
+        protobuf::bytes_tag_encode(2, config.block_hash)
+            .map(either::Left)
+            .chain(
+                protobuf::string_tag_encode(3, config.method)
+                    .map(either::Left)
+                    .map(either::Right),
+            )
+            .chain(
+                protobuf::bytes_tag_encode(4, parameter)
+                    .map(either::Right)
+                    .map(either::Right),
+            ),
+    )
 }
 
 /// Decodes a response to a call proof request.
-// TODO: should have a more zero-cost API, but we're limited by the protobuf library for that
+// TODO: should have a more zero-cost API
 pub fn decode_call_proof_response(
     response_bytes: &[u8],
 ) -> Result<Vec<Vec<u8>>, DecodeCallProofResponseError> {
-    let response = schema::Response::decode(response_bytes)
-        .map_err(ProtobufDecodeError)
-        .map_err(DecodeCallProofResponseError::ProtobufDecode)?;
+    let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
+        protobuf::message_decode((protobuf::message_tag_decode(
+            1,
+            protobuf::message_decode((protobuf::bytes_tag_decode(2),)),
+        ),)),
+    );
 
-    let proof = match response.response {
-        Some(schema::response::Response::RemoteCallResponse(rsp)) => rsp.proof,
-        _ => return Err(DecodeCallProofResponseError::BadResponseTy),
+    let proof: &[u8] = match nom::Finish::finish(parser(response_bytes)) {
+        Ok((_, ((((b,),),),))) => b,
+        Err(_) => return Err(DecodeCallProofResponseError::ProtobufDecode),
     };
 
     // The proof itself is a SCALE-encoded `Vec<Vec<u8>>`.
@@ -87,7 +89,7 @@ pub fn decode_call_proof_response(
                 nom::combinator::map(crate::util::nom_bytes_decode, |b| b.to_vec()),
             )
         },
-    ))(&proof)
+    ))(proof)
     .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
         DecodeCallProofResponseError::ProofDecodeError
     })?;
@@ -99,7 +101,7 @@ pub fn decode_call_proof_response(
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum DecodeCallProofResponseError {
     /// Error while decoding the Protobuf encoding.
-    ProtobufDecode(ProtobufDecodeError),
+    ProtobufDecode,
     /// Response isn't a response to a call proof request.
     BadResponseTy,
     /// Failed to decode response as a call proof.
