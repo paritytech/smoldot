@@ -272,9 +272,12 @@ impl Noise {
             // Allocate the space to decode to.
             // Each frame consists of the payload plus 16 bytes of authentication data, therefore
             // the payload size is `expected_len - 16`.
+            // We use `saturating_sub` in order to avoid panicking in case the `expected_len` is
+            // invalid. An invalid `expected_len` should trigger an error when decoding the
+            // message below.
             let len_before = self.rx_buffer_decrypted.len();
             self.rx_buffer_decrypted
-                .resize(len_before + expected_len - 16, 0);
+                .resize(len_before + expected_len.saturating_sub(16), 0);
 
             // Finally decoding the data.
             let written = self
@@ -680,7 +683,9 @@ impl HandshakeInProgress {
             // Decoding the first two bytes, which are the length of the handshake message.
             let expected_len =
                 u16::from_be_bytes(<[u8; 2]>::try_from(&self.rx_buffer_encrypted[..2]).unwrap());
-            debug_assert!(self.rx_buffer_encrypted.len() < 2 + usize::from(expected_len));
+            debug_assert!(
+                expected_len == 0 || self.rx_buffer_encrypted.len() < 2 + usize::from(expected_len)
+            );
 
             // Copy as much data as possible from `payload` to `self.rx_buffer_encrypted`, without
             // copying more than the handshake message.
