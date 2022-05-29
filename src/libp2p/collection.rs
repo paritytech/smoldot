@@ -797,13 +797,14 @@ where
             // is no request or notification substream in progress/open anymore.
             if let Some(shutting_down_connection) = self.shutting_down_connection {
                 // Outgoing notification substreams to close.
-                for (_, substream_id) in self
+                if let Some((_, substream_id)) = self
                     .outgoing_notification_substreams_by_connection
                     .range(
                         (shutting_down_connection, SubstreamId::min_value())
                             ..=(shutting_down_connection, SubstreamId::max_value()),
                     )
                     .cloned()
+                    .next()
                 {
                     self.outgoing_notification_substreams_by_connection
                         .remove(&(shutting_down_connection, substream_id));
@@ -821,7 +822,7 @@ where
                 }
 
                 // Ingoing notification substreams to close.
-                for (key, substream_id) in self
+                if let Some((key, substream_id)) = self
                     .ingoing_notification_substreams_by_connection
                     .range(
                         (
@@ -834,6 +835,7 @@ where
                             ),
                     )
                     .map(|(k, v)| (*k, *v))
+                    .next()
                 {
                     self.ingoing_notification_substreams
                         .remove(&substream_id)
@@ -849,10 +851,14 @@ where
                 }
 
                 // Find outgoing requests to cancel.
-                for (_, substream_id) in self.outgoing_requests.range(
-                    (shutting_down_connection, SubstreamId::min_value())
-                        ..=(shutting_down_connection, SubstreamId::max_value()),
-                ) {
+                if let Some((_, substream_id)) = self
+                    .outgoing_requests
+                    .range(
+                        (shutting_down_connection, SubstreamId::min_value())
+                            ..=(shutting_down_connection, SubstreamId::max_value()),
+                    )
+                    .next()
+                {
                     let substream_id = *substream_id;
                     self.outgoing_requests
                         .remove(&(shutting_down_connection, substream_id));
@@ -864,10 +870,14 @@ where
                 }
 
                 // Find ingoing requests to cancel.
-                for (_, substream_id) in self.ingoing_requests_by_connection.range(
-                    (shutting_down_connection, SubstreamId::min_value())
-                        ..=(shutting_down_connection, SubstreamId::max_value()),
-                ) {
+                if let Some((_, substream_id)) = self
+                    .ingoing_requests_by_connection
+                    .range(
+                        (shutting_down_connection, SubstreamId::min_value())
+                            ..=(shutting_down_connection, SubstreamId::max_value()),
+                    )
+                    .next()
+                {
                     let substream_id = *substream_id;
 
                     let _was_in = self.ingoing_requests.remove(&substream_id);
