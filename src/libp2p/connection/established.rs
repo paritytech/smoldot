@@ -56,6 +56,7 @@ use core::{
     ops::{Add, Sub},
     time::Duration,
 };
+use rand::{Rng as _, SeedableRng as _};
 
 pub mod substream;
 
@@ -101,6 +102,11 @@ struct Inner<TNow, TRqUd, TNotifUd> {
     outgoing_pings: yamux::SubstreamId,
     /// When to start the next ping attempt.
     next_ping: TNow,
+    /// Source of randomness to generate ping payloads.
+    ///
+    /// Note that we use ChaCha20 because the rest of the code base also uses ChaCha20. This avoids
+    /// unnecessary code being included in the binary and reduces the binary size.
+    ping_payload_randomness: rand_chacha::ChaCha20Rng,
 
     /// See [`Config::request_protocols`].
     request_protocols: Vec<ConfigRequestResponse>,
@@ -847,11 +853,15 @@ where
             .yamux
             .substream_by_id_mut(self.inner.outgoing_pings)
         {
+            let payload = self
+                .inner
+                .ping_payload_randomness
+                .sample(rand::distributions::Standard);
             substream
                 .into_user_data()
                 .as_mut()
                 .unwrap()
-                .queue_ping(&[0xff; 32], timeout); // TODO: proper random payload
+                .queue_ping(&payload, timeout);
         } else {
             self.inner.pending_events.push_back(Event::PingOutFailed);
         }
@@ -1025,10 +1035,12 @@ impl ConnectionPrototype {
     {
         // TODO: check conflicts between protocol names?
 
+        let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
+
         let mut yamux = yamux::Yamux::new(yamux::Config {
             is_initiator: self.encryption.is_initiator(),
             capacity: 64, // TODO: ?
-            randomness_seed: config.randomness_seed,
+            randomness_seed: randomness.sample(rand::distributions::Standard),
         });
 
         let outgoing_pings = yamux
@@ -1044,6 +1056,7 @@ impl ConnectionPrototype {
                 yamux,
                 outgoing_pings,
                 next_ping: config.first_out_ping,
+                ping_payload_randomness: randomness,
                 request_protocols: config.request_protocols,
                 notifications_protocols: config.notifications_protocols,
                 ping_protocol: config.ping_protocol,
@@ -1078,7 +1091,7 @@ pub struct Config<TNow> {
     /// Time after which an outgoing ping is considered failed.
     pub ping_timeout: Duration,
     /// Entropy used for the randomness specific to this connection.
-    pub randomness_seed: [u8; 16],
+    pub randomness_seed: [u8; 32],
 }
 
 /// Configuration for a request-response protocol.
