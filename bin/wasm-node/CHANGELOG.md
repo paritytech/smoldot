@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fix a panic in case of a Noise message with an invalid length. ([#2321](https://github.com/paritytech/smoldot/pull/2321))
+- Fix a panic in case of a carefully-crafted LEB128 length. ([#2326](https://github.com/paritytech/smoldot/pull/2326))
 
 ## 0.6.16 - 2022-05-16
 

@@ -19,10 +19,6 @@ use super::leb128;
 use alloc::vec::Vec;
 use core::{iter, str};
 
-pub(crate) fn tag_encode(field: u64, wire_ty: u8) -> impl Iterator<Item = u8> + Clone {
-    leb128::encode((field << 3) | u64::from(wire_ty))
-}
-
 pub(crate) fn bool_tag_encode(
     field: u64,
     bool_value: bool,
@@ -87,6 +83,10 @@ pub(crate) fn string_tag_encode<'a>(
     }
 
     bytes_tag_encode(field, Wrapper(data))
+}
+
+pub(crate) fn tag_encode(field: u64, wire_ty: u8) -> impl Iterator<Item = u8> + Clone {
+    leb128::encode((field << 3) | u64::from(wire_ty))
 }
 
 pub(crate) fn varint_zigzag_tag_encode(field: u64, value: u64) -> impl Iterator<Item = u8> + Clone {
@@ -364,5 +364,90 @@ impl<T> MessageDecodeFieldOutput for Option<T> {
 
     fn finish(value: Option<T>) -> Option<Option<T>> {
         Some(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn encode_decode_bool() {
+        let encoded = super::bool_tag_encode(504, true).fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        });
+
+        assert_eq!(&encoded, &[192, 31, 1]);
+
+        let decoded = super::bool_tag_decode::<nom::error::Error<&[u8]>>(504)(&encoded)
+            .unwrap()
+            .1;
+        assert_eq!(decoded, true);
+    }
+
+    #[test]
+    fn encode_decode_uint32() {
+        let encoded = super::uint32_tag_encode(8670, 93701).fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        });
+
+        assert_eq!(&encoded, &[240, 157, 4, 133, 220, 5]);
+
+        let decoded = super::uint32_tag_decode::<nom::error::Error<&[u8]>>(8670)(&encoded)
+            .unwrap()
+            .1;
+        assert_eq!(decoded, 93701);
+    }
+
+    #[test]
+    fn encode_decode_enum() {
+        let encoded = super::enum_tag_encode(107, 935237).fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        });
+
+        assert_eq!(&encoded, &[216, 6, 197, 138, 57]);
+
+        let decoded = super::enum_tag_decode::<nom::error::Error<&[u8]>>(107)(&encoded)
+            .unwrap()
+            .1;
+        assert_eq!(decoded, 935237);
+    }
+
+    #[test]
+    fn encode_decode_string() {
+        let encoded = super::string_tag_encode(490, "hello world").fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        });
+
+        assert_eq!(&encoded, &[210, 30, 11, 104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100]);
+
+        let decoded = super::string_tag_decode::<nom::error::Error<&[u8]>>(490)(&encoded)
+            .unwrap()
+            .1;
+        assert_eq!(decoded, "hello world");
+    }
+
+    #[test]
+    fn encode_decode_bytes() {
+        let encoded = super::bytes_tag_encode(2, b"test").fold(Vec::new(), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        });
+
+        assert_eq!(&encoded, &[18, 4, 116, 101, 115, 116]);
+
+        let decoded = super::bytes_tag_decode::<nom::error::Error<&[u8]>>(2)(&encoded)
+            .unwrap()
+            .1;
+        assert_eq!(decoded, b"test");
+    }
+
+    #[test]
+    fn large_values_dont_crash() {
+        // Payload starts with a LEB128 that corresponds to a very very large field identifier.
+        let encoded = (0..256).map(|_| 129).collect::<Vec<_>>();
+        assert!(super::tag_value_skip_decode::<nom::error::Error<&[u8]>>(&encoded).is_err());
     }
 }
