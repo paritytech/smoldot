@@ -131,11 +131,13 @@ lto = true
 # See https://github.com/rust-lang/rust/issues/47745
 # https://doc.rust-lang.org/rustc/codegen-options/index.html#codegen-units
 codegen-units = 1
+incremental = false
 #strip = "symbols"      # TODO: uncomment once stable
 
 [profile.min-size-release]
 inherits = "release"
 opt-level = "z"
+incremental = false
 
 [[bench]]
 name = "header"
