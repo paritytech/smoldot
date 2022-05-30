@@ -39,10 +39,12 @@ pub fn build_call_proof_request<'a>(
     config: CallProofRequestConfig<'a, impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a>,
 ) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
     // TODO: don't allocate here
-    let parameter = config.parameter_vectored.fold(Vec::with_capacity(512), |mut a, b| {
-        a.extend_from_slice(b.as_ref());
-        a
-    });
+    let parameter = config
+        .parameter_vectored
+        .fold(Vec::with_capacity(512), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        });
 
     protobuf::message_tag_encode(
         1,
