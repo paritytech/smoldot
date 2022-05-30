@@ -172,15 +172,8 @@ impl UnsignedNoiseKey {
             PublicKey::Ed25519(libp2p_public_ed25519_key).to_protobuf_encoding();
 
         let handshake_message = {
-            /* The protobuf format is as follows:
-
-            message NoiseHandshakePayload {
-                bytes identity_key = 1;
-                bytes identity_sig = 2;
-                bytes data         = 3;
-            }
-            */
-
+            // Protobuf message format can be found here:
+            // https://github.com/libp2p/specs/tree/master/noise#the-libp2p-handshake-payload
             let mut msg =
                 Vec::with_capacity(2 + libp2p_pubkey_protobuf.len() + 2 + signature.len());
 
@@ -748,6 +741,7 @@ impl HandshakeInProgress {
 
             if payload_expected {
                 // The decoded handshake is a protobuf message.
+                // See https://github.com/libp2p/specs/tree/master/noise#the-libp2p-handshake-payload
                 let (identity_key, identity_sig) = {
                     let mut parser =
                         nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
