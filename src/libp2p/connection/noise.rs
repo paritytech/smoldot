@@ -174,8 +174,10 @@ impl UnsignedNoiseKey {
         let handshake_message = {
             // Protobuf message format can be found here:
             // https://github.com/libp2p/specs/tree/master/noise#the-libp2p-handshake-payload
+
+            // The capacity is arbitrary but large enough to avoid Vec reallocations.
             let mut msg =
-                Vec::with_capacity(2 + libp2p_pubkey_protobuf.len() + 2 + signature.len());
+                Vec::with_capacity(32 + libp2p_pubkey_protobuf.len() + signature.len());
 
             for slice in protobuf::bytes_tag_encode(1, &libp2p_pubkey_protobuf) {
                 msg.extend_from_slice(slice.as_ref());

@@ -49,7 +49,8 @@ impl Default for Kademlia {
 /// return the nodes closest to the parameter.
 // TODO: parameter type?
 pub fn build_find_node_request(peer_id: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
+    // The capacity is arbitrary but large enough to avoid Vec reallocations.
+    let mut out = Vec::with_capacity(64 + peer_id.len());
     for slice in protobuf::enum_tag_encode(1, 4) {
         out.extend_from_slice(slice.as_ref());
     }
