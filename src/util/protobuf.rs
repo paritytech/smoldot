@@ -421,7 +421,10 @@ mod tests {
             a
         });
 
-        assert_eq!(&encoded, &[210, 30, 11, 104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100]);
+        assert_eq!(
+            &encoded,
+            &[210, 30, 11, 104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100]
+        );
 
         let decoded = super::string_tag_decode::<nom::error::Error<&[u8]>>(490)(&encoded)
             .unwrap()
