@@ -38,6 +38,7 @@ jobs:
     container:
       image: rust:1.60
     steps:
+    - run: apt-get update && apt install -y libc6-dev-i386
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
     - run: rustup target add i686-unknown-linux-gnu
