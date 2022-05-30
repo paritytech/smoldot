@@ -62,6 +62,7 @@ jobs:
     container:
       image: rust:1.60
     steps:
+    - run: apt-get update && apt install -y cmake # TODO: remove; temporarily needed to build the `prost-build` library in the "before" comparison
     - uses: actions/checkout@v3
       with:
         fetch-depth: 0  # Necessary to fetch pull request base below
