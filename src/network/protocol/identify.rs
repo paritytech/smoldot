@@ -30,19 +30,19 @@
 //!
 //! See also [the official specification](https://github.com/libp2p/specs/tree/69e57d59dc5d59d3979d79842b577ec2c483f7fa/identify).
 
-use super::{schema, ProtobufDecodeError};
-use crate::libp2p::{
-    peer_id::{FromProtobufEncodingError, PublicKey},
-    Multiaddr,
+use crate::{
+    libp2p::{
+        peer_id::{FromProtobufEncodingError, PublicKey},
+        Multiaddr,
+    },
+    util::protobuf,
 };
 
 use alloc::{
-    borrow::{Cow, ToOwned as _},
-    string::String,
+    borrow::Cow,
+    string::{String, ToString as _},
     vec::{self, Vec},
 };
-use core::iter;
-use prost::Message as _;
 
 /// Description of a response to an identify request.
 // TODO: the Cows in there should be slices once the response decoding is zero cost
@@ -61,69 +61,115 @@ pub struct IdentifyResponse<'a, TLaIter, TProtoIter> {
     pub protocols: TProtoIter,
 }
 
+// See https://github.com/libp2p/specs/tree/master/identify#the-identify-message for the protobuf
+// message format.
+
 /// Builds the bytes corresponding to a block request.
 pub fn build_identify_response<'a>(
     config: IdentifyResponse<
         'a,
-        impl Iterator<Item = &'a Multiaddr>,
-        impl Iterator<Item = &'a str>,
+        impl Iterator<Item = &'a Multiaddr> + 'a,
+        impl Iterator<Item = &'a str> + 'a,
     >,
-) -> impl Iterator<Item = impl AsRef<[u8]>> {
-    // Note: while the API of this function allows for a zero-cost implementation, the protobuf
-    // library doesn't permit to avoid allocations.
-
-    let protobuf = schema::Identify {
-        protocol_version: Some(config.protocol_version.into_owned()),
-        agent_version: Some(config.agent_version.into_owned()),
-        public_key: Some(PublicKey::Ed25519(*config.ed25519_public_key).to_protobuf_encoding()),
-        listen_addrs: config.listen_addrs.map(|addr| addr.to_vec()).collect(),
-        observed_addr: Some(config.observed_addr.to_vec()),
-        protocols: config.protocols.map(|p| p.to_owned()).collect(),
-    };
-
-    let request_bytes = {
-        let mut buf = Vec::with_capacity(protobuf.encoded_len());
-        protobuf.encode(&mut buf).unwrap();
-        buf
-    };
-
-    iter::once(request_bytes)
+) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+    protobuf::string_tag_encode(5, config.protocol_version)
+        .map(either::Left)
+        .map(either::Left)
+        .map(either::Left)
+        .chain(
+            protobuf::string_tag_encode(6, config.agent_version)
+                .map(either::Right)
+                .map(either::Left)
+                .map(either::Left),
+        )
+        .chain(
+            protobuf::bytes_tag_encode(
+                1,
+                PublicKey::Ed25519(*config.ed25519_public_key).to_protobuf_encoding(),
+            )
+            .map(either::Left)
+            .map(either::Right)
+            .map(either::Left),
+        )
+        .chain(
+            config
+                .listen_addrs
+                .flat_map(|addr| protobuf::bytes_tag_encode(2, addr))
+                .map(either::Right)
+                .map(either::Right)
+                .map(either::Left),
+        )
+        .chain(
+            protobuf::bytes_tag_encode(4, config.observed_addr.clone().into_owned()) // TODO: clone? :-/
+                .map(either::Left)
+                .map(either::Right),
+        )
+        .chain(
+            config
+                .protocols
+                .flat_map(|p| protobuf::string_tag_encode(3, p))
+                .map(either::Right)
+                .map(either::Right),
+        )
 }
 
 /// Decodes a response to an identify request.
-// TODO: should have a more zero-cost API, but we're limited by the protobuf library for that
+// TODO: should have a more zero-cost API
 pub fn decode_identify_response(
     response_bytes: &[u8],
 ) -> Result<
     IdentifyResponse<'static, vec::IntoIter<Multiaddr>, vec::IntoIter<String>>,
     DecodeIdentifyResponseError,
 > {
-    let response = schema::Identify::decode(response_bytes)
-        .map_err(ProtobufDecodeError)
-        .map_err(DecodeIdentifyResponseError::ProtobufDecode)?;
+    let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
+        protobuf::message_decode((
+            protobuf::string_tag_decode(5),
+            protobuf::string_tag_decode(6),
+            protobuf::bytes_tag_decode(1),
+            protobuf::bytes_tag_decode(2),
+            protobuf::bytes_tag_decode(4),
+            protobuf::string_tag_decode(3),
+        )),
+    );
+
+    let (
+        protocol_version,
+        agent_version,
+        ed25519_public_key,
+        listen_addrs,
+        observed_addr,
+        protocols,
+    ): (Option<_>, Option<_>, Option<_>, Vec<_>, Option<_>, Vec<_>) =
+        match nom::Finish::finish(parser(response_bytes)) {
+            Ok((_, (a, b, c, d, e, f))) => (a, b, c, d, e, f),
+            Err(_) => return Err(DecodeIdentifyResponseError::ProtobufDecode),
+        };
 
     Ok(IdentifyResponse {
-        agent_version: response.agent_version.unwrap_or_default().into(),
-        protocol_version: response.protocol_version.unwrap_or_default().into(),
+        agent_version: agent_version.unwrap_or_default().to_string().into(),
+        protocol_version: protocol_version.unwrap_or_default().to_string().into(),
         ed25519_public_key: match PublicKey::from_protobuf_encoding(
-            &response.public_key.unwrap_or_default(),
+            &ed25519_public_key.unwrap_or_default(),
         )
         .map_err(DecodeIdentifyResponseError::InvalidPublicKey)?
         {
             PublicKey::Ed25519(key) => Cow::Owned(key),
         },
-        listen_addrs: response
-            .listen_addrs
+        listen_addrs: listen_addrs
             .into_iter()
-            .map(Multiaddr::try_from)
+            .map(|a| Multiaddr::try_from(a.to_vec()))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| DecodeIdentifyResponseError::InvalidMultiaddr)?
             .into_iter(),
         observed_addr: Cow::Owned(
-            Multiaddr::try_from(response.observed_addr.unwrap_or_default())
+            Multiaddr::try_from(observed_addr.unwrap_or_default().to_vec())
                 .map_err(|_| DecodeIdentifyResponseError::InvalidMultiaddr)?,
         ),
-        protocols: response.protocols.into_iter(),
+        protocols: protocols
+            .into_iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .into_iter(), // TODO: weird; needs API change
     })
 }
 
@@ -131,7 +177,7 @@ pub fn decode_identify_response(
 #[derive(Debug, derive_more::Display)]
 pub enum DecodeIdentifyResponseError {
     /// Error while decoding the Protobuf encoding.
-    ProtobufDecode(ProtobufDecodeError),
+    ProtobufDecode,
     /// Couldn't decode one of the multiaddresses.
     InvalidMultiaddr,
     /// Couldn't decode the public key of the remote.

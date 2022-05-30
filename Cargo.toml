@@ -67,7 +67,6 @@ num-bigint = { version = "0.4.3", default-features = false }
 num-rational = { version = "0.4.0", default-features = false, features = ["num-bigint"] }
 num-traits = { version = "0.2.15", default-features = false }
 pbkdf2 = { version = "0.11.0", default-features = false }
-prost = { version = "0.10.4", default-features = false, features = ["prost-derive"] }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }  # TODO: rand is used in hack-y ways at the moment ; these features should be removed
 rand_chacha = { version = "0.3.1", default-features = false }
 ruzstd = { version = "0.2.4" }  # TODO: doesn't support no_std :-/
@@ -100,9 +99,6 @@ parity-scale-codec = { version = "3.1.2", features = ["derive"], default-feature
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # `std` feature
 wasmtime = { version = "0.36.0", default-features = false, features = ["async", "cranelift"], optional = true }
-
-[build-dependencies]
-prost-build = "0.10.4"
 
 [dev-dependencies]
 async-std = "1.11.0"
