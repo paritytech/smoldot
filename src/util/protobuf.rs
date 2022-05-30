@@ -144,13 +144,6 @@ pub(crate) fn uint32_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     })
 }
 
-/// Decodes a protobuf tag of the given field number, and value where the data type is "uint64".
-pub(crate) fn uint64_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
-    field: u64,
-) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], u64, E> {
-    varint_zigzag_tag_decode(field)
-}
-
 /// Decodes a protobuf tag of the given field number, and value where the data type is "bool".
 pub(crate) fn bool_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     field: u64,
