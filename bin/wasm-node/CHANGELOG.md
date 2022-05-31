@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.17 - 2022-05-31
+
 ### Changed
 
 - The networking code has been considerably refactored. Due to the large size of the change it is possible that unintended changes in behaviour have been introduced. ([#2264](https://github.com/paritytech/smoldot/pull/2264))
