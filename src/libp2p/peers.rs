@@ -61,9 +61,10 @@ use core::{
 use rand::{Rng as _, SeedableRng as _};
 
 pub use collection::{
-    ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, SingleStreamConnectionTask,
-    ConnectionToCoordinator, CoordinatorToConnection, InboundError, NotificationProtocolConfig,
-    NotificationsInClosedErr, NotificationsOutErr, ReadWrite, RequestError, SubstreamId,
+    ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionToCoordinator,
+    CoordinatorToConnection, InboundError, MultiStreamConnectionTask, NotificationProtocolConfig,
+    NotificationsInClosedErr, NotificationsOutErr, ReadWrite, RequestError,
+    SingleStreamConnectionTask, SubstreamId,
 };
 
 /// Configuration for a [`Peers`].
@@ -756,6 +757,35 @@ where
 
         let _inserted = self.connections_by_peer.insert((peer_index, connection_id));
         debug_assert!(_inserted);
+
+        (connection_id, connection_task)
+    }
+
+    /// Inserts a multi-stream outgoing connection in the state machine.
+    ///
+    /// The [`PeerId`] of the remote must already be known when this function is called. If it
+    /// was in `unfulfilled_desired_peers`, then after this function returns the provided
+    /// [`PeerId`] will no longer be part of the return value of
+    /// [`Peers::unfulfilled_desired_peers`].
+    ///
+    /// No [`Event::Connected`] will be generated. Calling this function implicitly acts as if
+    /// this event was generated.
+    pub fn add_multi_stream_outgoing_connection<TSubId>(
+        &mut self,
+        peer_id: &PeerId,
+        user_data: TConn,
+    ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>) {
+        let peer_index = self.peer_index_or_insert(peer_id);
+
+        let (connection_id, connection_task) = self.inner.insert_multi_stream(Connection {
+            peer_index: Some(peer_index),
+            user_data,
+        });
+
+        let _inserted = self.connections_by_peer.insert((peer_index, connection_id));
+        debug_assert!(_inserted);
+
+        // TODO: must immediately open all desired substreams
 
         (connection_id, connection_task)
     }

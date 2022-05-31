@@ -43,7 +43,7 @@ pub use crate::libp2p::{
     collection::ReadWrite,
     peers::{
         ConnectionId, ConnectionToCoordinator, CoordinatorToConnection, InRequestId, InboundError,
-        OutRequestId, SingleStreamConnectionTask,
+        MultiStreamConnectionTask, OutRequestId, SingleStreamConnectionTask,
     },
 };
 
@@ -843,6 +843,59 @@ where
             expected_peer_id,
             multiaddr.clone(),
         );
+
+        // Update `self.peers`.
+        {
+            let value = self.num_pending_per_peer.get_mut(expected_peer_id).unwrap();
+            if let Some(new_value) = NonZeroUsize::new(value.get() - 1) {
+                *value = new_value;
+            } else {
+                self.num_pending_per_peer.remove(expected_peer_id).unwrap();
+            }
+        }
+
+        // Update the list of addresses.
+        // TODO: O(n)
+        for chain in &mut self.chains {
+            if let Some(addrs) = chain.kbuckets.get_mut(expected_peer_id) {
+                addrs.set_connected(multiaddr);
+            }
+        }
+
+        self.pending_ids.remove(id.0);
+
+        (connection_id, connection_task)
+    }
+
+    /// After calling [`ChainNetwork::next_start_connect`], notifies the [`ChainNetwork`] of the
+    /// success of the dialing attempt.
+    ///
+    /// See also [`ChainNetwork::pending_outcome_err`].
+    ///
+    /// No [`Event::Connected`] will be generated. Calling this function implicitly acts as if
+    /// this event was generated.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`PendingId`] is invalid.
+    ///
+    // TODO: not generating the Connected event is tricky, as the user needs to do an extra effort to know if there was already a connection to that peer
+    pub fn pending_outcome_ok_multi_stream<TSubId>(
+        &mut self,
+        id: PendingId,
+        peer_id: &PeerId,
+    ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>) {
+        // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
+        // the user cancels the future returned by `add_outgoing_connection`.
+        let (expected_peer_id, multiaddr, _when_connected) = self.pending_ids.get(id.0).unwrap();
+
+        if expected_peer_id != peer_id {
+            todo!() // TODO: return an error or something
+        }
+
+        let (connection_id, connection_task) = self
+            .inner
+            .add_multi_stream_outgoing_connection(peer_id, multiaddr.clone());
 
         // Update `self.peers`.
         {
