@@ -305,24 +305,24 @@ where
         }
     }
 
-    /// Adds a new connection to the collection.
+    /// Adds a new single stream connection to the collection.
     ///
     /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
     /// to determine when the handshake timeout expires.
     ///
     /// `is_initiator` must be `true` if the connection has been initiated locally, or `false` if
     /// it has been initiated by the remote.
-    pub fn insert(
+    pub fn insert_single_stream(
         &mut self,
         when_connected: TNow,
         is_initiator: bool,
         user_data: TConn,
-    ) -> (ConnectionId, ConnectionTask<TNow>) {
+    ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         let connection_id = self.next_connection_id;
         self.next_connection_id.0 += 1;
 
-        let connection_task = ConnectionTask {
-            connection: ConnectionInner::Handshake {
+        let connection_task = SingleStreamConnectionTask {
+            connection: SingleStreamConnectionTaskInner::Handshake {
                 handshake: handshake::HealthyHandshake::new(is_initiator),
                 randomness_seed: self.randomness_seeds.gen(),
                 timeout: when_connected + self.handshake_timeout,
@@ -1241,9 +1241,9 @@ pub struct ConnectionState {
 }
 
 /// State machine dedicated to a single connection.
-pub struct ConnectionTask<TNow> {
+pub struct SingleStreamConnectionTask<TNow> {
     /// State machine of the underlying connection.
-    connection: ConnectionInner<TNow>,
+    connection: SingleStreamConnectionTaskInner<TNow>,
 
     /// Buffer of messages destined to the coordinator.
     ///
@@ -1251,7 +1251,7 @@ pub struct ConnectionTask<TNow> {
     pending_messages: VecDeque<ConnectionToCoordinatorInner>,
 }
 
-enum ConnectionInner<TNow> {
+enum SingleStreamConnectionTaskInner<TNow> {
     /// Connection is still in its handshake phase.
     Handshake {
         handshake: handshake::HealthyHandshake,
@@ -1316,7 +1316,7 @@ enum ConnectionInner<TNow> {
     Poisoned,
 }
 
-impl<TNow> ConnectionTask<TNow>
+impl<TNow> SingleStreamConnectionTask<TNow>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
@@ -1362,7 +1362,10 @@ where
             .map(|inner| ConnectionToCoordinator { inner });
 
         // The `ShutdownAcked` state causes the task to exit.
-        let self_ret = if !matches!(self.connection, ConnectionInner::ShutdownAcked { .. }) {
+        let self_ret = if !matches!(
+            self.connection,
+            SingleStreamConnectionTaskInner::ShutdownAcked { .. }
+        ) {
             Some(self)
         } else {
             None
@@ -1385,7 +1388,7 @@ where
                     protocol_index,
                     substream_id,
                 },
-                ConnectionInner::Established {
+                SingleStreamConnectionTaskInner::Established {
                     established,
                     outbound_substreams_mapping,
                     outbound_substreams_mapping2,
@@ -1407,7 +1410,7 @@ where
                     overlay_network_index,
                     substream_id: outer_substream_id,
                 },
-                ConnectionInner::Established {
+                SingleStreamConnectionTaskInner::Established {
                     established,
                     outbound_substreams_mapping,
                     outbound_substreams_mapping2,
@@ -1429,7 +1432,7 @@ where
             }
             (
                 CoordinatorToConnectionInner::CloseOutNotifications { substream_id },
-                ConnectionInner::Established {
+                SingleStreamConnectionTaskInner::Established {
                     established,
                     outbound_substreams_mapping,
                     outbound_substreams_mapping2,
@@ -1450,7 +1453,7 @@ where
                     substream_id,
                     notification,
                 },
-                ConnectionInner::Established {
+                SingleStreamConnectionTaskInner::Established {
                     established,
                     outbound_substreams_mapping,
                     ..
@@ -1472,7 +1475,7 @@ where
                     substream_id,
                     response,
                 },
-                ConnectionInner::Established { established, .. },
+                SingleStreamConnectionTaskInner::Established { established, .. },
             ) => match established.respond_in_request(substream_id, response) {
                 Ok(()) => {}
                 Err(established::RespondInRequestError::SubstreamClosed) => {
@@ -1484,28 +1487,29 @@ where
                     substream_id,
                     handshake,
                 },
-                ConnectionInner::Established { established, .. },
+                SingleStreamConnectionTaskInner::Established { established, .. },
             ) => {
                 // TODO: must verify that the substream is still valid
                 established.accept_in_notifications_substream(substream_id, handshake, ());
             }
             (
                 CoordinatorToConnectionInner::RejectInNotifications { substream_id },
-                ConnectionInner::Established { established, .. },
+                SingleStreamConnectionTaskInner::Established { established, .. },
             ) => {
                 // TODO: must verify that the substream is still valid
                 established.reject_in_notifications_substream(substream_id);
             }
             (
                 CoordinatorToConnectionInner::StartShutdown { .. },
-                ConnectionInner::Established { .. } | ConnectionInner::Handshake { .. },
+                SingleStreamConnectionTaskInner::Established { .. }
+                | SingleStreamConnectionTaskInner::Handshake { .. },
             ) => {
                 // TODO: implement proper shutdown
                 self.pending_messages
                     .push_back(ConnectionToCoordinatorInner::StartShutdown);
                 self.pending_messages
                     .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
-                self.connection = ConnectionInner::ShutdownWaitingAck {
+                self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
                     was_api_reset: false,
                 };
             }
@@ -1516,7 +1520,8 @@ where
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
                 | CoordinatorToConnectionInner::CloseOutNotifications { .. }
                 | CoordinatorToConnectionInner::QueueNotification { .. },
-                ConnectionInner::Handshake { .. } | ConnectionInner::ShutdownAcked { .. },
+                SingleStreamConnectionTaskInner::Handshake { .. }
+                | SingleStreamConnectionTaskInner::ShutdownAcked { .. },
             ) => unreachable!(),
             (
                 CoordinatorToConnectionInner::AcceptInNotifications { .. }
@@ -1525,7 +1530,7 @@ where
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
                 | CoordinatorToConnectionInner::CloseOutNotifications { .. }
                 | CoordinatorToConnectionInner::QueueNotification { .. },
-                ConnectionInner::ShutdownWaitingAck { .. },
+                SingleStreamConnectionTaskInner::ShutdownWaitingAck { .. },
             ) => {
                 // There might still be some messages coming from the coordinator after the
                 // connection task has sent a message indicating that it has shut down. This is
@@ -1534,11 +1539,11 @@ where
             }
             (
                 CoordinatorToConnectionInner::ShutdownFinishedAck,
-                ConnectionInner::ShutdownWaitingAck {
+                SingleStreamConnectionTaskInner::ShutdownWaitingAck {
                     was_api_reset: was_reset,
                 },
             ) => {
-                self.connection = ConnectionInner::ShutdownAcked {
+                self.connection = SingleStreamConnectionTaskInner::ShutdownAcked {
                     was_api_reset: *was_reset,
                 };
             }
@@ -1564,10 +1569,10 @@ where
     ///
     pub fn reset(&mut self) {
         // It is illegal to call `reset` a second time. Verify that the user didn't do this.
-        if let ConnectionInner::ShutdownWaitingAck {
+        if let SingleStreamConnectionTaskInner::ShutdownWaitingAck {
             was_api_reset: true,
         }
-        | ConnectionInner::ShutdownAcked {
+        | SingleStreamConnectionTaskInner::ShutdownAcked {
             was_api_reset: true,
         } = self.connection
         {
@@ -1578,7 +1583,7 @@ where
             .push_back(ConnectionToCoordinatorInner::StartShutdown);
         self.pending_messages
             .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
-        self.connection = ConnectionInner::ShutdownWaitingAck {
+        self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
             was_api_reset: true,
         };
     }
@@ -1603,8 +1608,11 @@ where
             return;
         }
 
-        match mem::replace(&mut self.connection, ConnectionInner::Poisoned) {
-            ConnectionInner::Established {
+        match mem::replace(
+            &mut self.connection,
+            SingleStreamConnectionTaskInner::Poisoned,
+        ) {
+            SingleStreamConnectionTaskInner::Established {
                 established,
                 mut outbound_substreams_mapping,
                 mut outbound_substreams_mapping2,
@@ -1616,7 +1624,7 @@ where
                             .push_back(ConnectionToCoordinatorInner::StartShutdown);
                         self.pending_messages
                             .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
-                        self.connection = ConnectionInner::ShutdownWaitingAck {
+                        self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
                             was_api_reset: false,
                         };
                         return;
@@ -1728,7 +1736,7 @@ where
                         None => {}
                     }
 
-                    self.connection = ConnectionInner::Established {
+                    self.connection = SingleStreamConnectionTaskInner::Established {
                         established: connection,
                         outbound_substreams_mapping,
                         outbound_substreams_mapping2,
@@ -1740,13 +1748,13 @@ where
                         .push_back(ConnectionToCoordinatorInner::StartShutdown);
                     self.pending_messages
                         .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
-                    self.connection = ConnectionInner::ShutdownWaitingAck {
+                    self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
                         was_api_reset: false,
                     };
                 }
             },
 
-            ConnectionInner::Handshake {
+            SingleStreamConnectionTaskInner::Handshake {
                 mut handshake,
                 randomness_seed,
                 timeout,
@@ -1772,7 +1780,7 @@ where
                         .push_back(ConnectionToCoordinatorInner::StartShutdown);
                     self.pending_messages
                         .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
-                    self.connection = ConnectionInner::ShutdownWaitingAck {
+                    self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
                         was_api_reset: false,
                     };
                     return;
@@ -1794,7 +1802,7 @@ where
                                 .push_back(ConnectionToCoordinatorInner::StartShutdown);
                             self.pending_messages
                                 .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
-                            self.connection = ConnectionInner::ShutdownWaitingAck {
+                            self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
                                 was_api_reset: false,
                             };
                             return;
@@ -1806,7 +1814,7 @@ where
                             if (read_before, written_before)
                                 == (read_write.read_bytes, read_write.written_bytes) =>
                         {
-                            self.connection = ConnectionInner::Handshake {
+                            self.connection = SingleStreamConnectionTaskInner::Handshake {
                                 handshake: updated_handshake,
                                 randomness_seed,
                                 timeout,
@@ -1828,7 +1836,7 @@ where
                                 ConnectionToCoordinatorInner::HandshakeFinished(remote_peer_id),
                             );
 
-                            self.connection = ConnectionInner::Established {
+                            self.connection = SingleStreamConnectionTaskInner::Established {
                                 established: connection.into_connection(established::Config {
                                     notifications_protocols: notification_protocols
                                         .iter()
@@ -1874,10 +1882,10 @@ where
                 }
             }
 
-            c @ (ConnectionInner::ShutdownWaitingAck {
+            c @ (SingleStreamConnectionTaskInner::ShutdownWaitingAck {
                 was_api_reset: false,
             }
-            | ConnectionInner::ShutdownAcked {
+            | SingleStreamConnectionTaskInner::ShutdownAcked {
                 was_api_reset: false,
             }) => {
                 // The user might legitimately call this function after the connection has
@@ -1889,17 +1897,17 @@ where
                 read_write.close_write();
             }
 
-            ConnectionInner::ShutdownWaitingAck {
+            SingleStreamConnectionTaskInner::ShutdownWaitingAck {
                 was_api_reset: true,
             }
-            | ConnectionInner::ShutdownAcked {
+            | SingleStreamConnectionTaskInner::ShutdownAcked {
                 was_api_reset: true,
             } => {
                 // As documented, it is illegal to call this function after calling `reset()`.
                 panic!()
             }
 
-            ConnectionInner::Poisoned => unreachable!(),
+            SingleStreamConnectionTaskInner::Poisoned => unreachable!(),
         }
     }
 }

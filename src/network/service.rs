@@ -42,8 +42,8 @@ use rand::{seq::SliceRandom as _, Rng as _, SeedableRng as _};
 pub use crate::libp2p::{
     collection::ReadWrite,
     peers::{
-        ConnectionId, ConnectionTask, ConnectionToCoordinator, CoordinatorToConnection,
-        InRequestId, InboundError, OutRequestId,
+        ConnectionId, ConnectionToCoordinator, CoordinatorToConnection, InRequestId, InboundError,
+        OutRequestId, SingleStreamConnectionTask,
     },
 };
 
@@ -416,7 +416,7 @@ where
         self.inner.noise_key()
     }
 
-    /// Adds an incoming connection to the state machine.
+    /// Adds a single-stream incoming connection to the state machine.
     ///
     /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
     /// yet.
@@ -427,13 +427,13 @@ where
     /// The `remote_addr` is the address used to reach back the remote. In the case of TCP, it
     /// contains the TCP dialing port of the remote. The remote can ask, through the `identify`
     /// libp2p protocol, its own address, in which case we send it.
-    pub fn add_incoming_connection(
+    pub fn add_single_stream_incoming_connection(
         &mut self,
         when_connected: TNow,
         remote_addr: multiaddr::Multiaddr,
-    ) -> (ConnectionId, ConnectionTask<TNow>) {
+    ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         self.inner
-            .add_incoming_connection(when_connected, remote_addr)
+            .add_single_stream_incoming_connection(when_connected, remote_addr)
     }
 
     pub fn pull_message_to_connection(
@@ -830,12 +830,15 @@ where
     ///
     /// Panics if the [`PendingId`] is invalid.
     ///
-    pub fn pending_outcome_ok(&mut self, id: PendingId) -> (ConnectionId, ConnectionTask<TNow>) {
+    pub fn pending_outcome_ok_single_stream(
+        &mut self,
+        id: PendingId,
+    ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
         // the user cancels the future returned by `add_outgoing_connection`.
         let (expected_peer_id, multiaddr, when_connected) = self.pending_ids.get(id.0).unwrap();
 
-        let (connection_id, connection_task) = self.inner.add_outgoing_connection(
+        let (connection_id, connection_task) = self.inner.add_single_stream_outgoing_connection(
             when_connected.clone(),
             expected_peer_id,
             multiaddr.clone(),

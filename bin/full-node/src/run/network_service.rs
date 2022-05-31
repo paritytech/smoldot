@@ -405,7 +405,7 @@ impl NetworkService {
                             let mut guarded = inner.guarded.lock().await;
                             let (connection_id, connection_task) = guarded
                                 .network
-                                .add_incoming_connection(Instant::now(), multiaddr.clone());
+                                .add_single_stream_incoming_connection(Instant::now(), multiaddr.clone());
 
                             let (tx, rx) = mpsc::channel(16); // TODO: ?!
                             guarded.active_connections.insert(connection_id, tx);
@@ -1031,7 +1031,7 @@ async fn opening_connection_task(
     // has succeeded.
     let mut guarded = inner.guarded.lock().await;
     guarded.num_pending_out_attempts -= 1;
-    let (connection_id, connection_task) = guarded.network.pending_outcome_ok(start_connect.id);
+    let (connection_id, connection_task) = guarded.network.pending_outcome_ok_single_stream(start_connect.id);
     inner.wake_up_main_background_task.notify(1);
 
     let (tx, rx) = mpsc::channel(16); // TODO: ?!
@@ -1065,7 +1065,7 @@ async fn established_connection_task(
     tcp_socket: async_std::net::TcpStream,
     inner: Arc<Inner>,
     connection_id: service::ConnectionId,
-    mut connection_task: service::ConnectionTask<Instant>,
+    mut connection_task: service::SingleStreamConnectionTask<Instant>,
     coordinator_to_connection: mpsc::Receiver<service::CoordinatorToConnection<Instant>>,
     mut connection_to_coordinator: mpsc::Sender<(
         service::ConnectionId,

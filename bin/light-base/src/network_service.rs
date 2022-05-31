@@ -1359,7 +1359,7 @@ async fn connection_task<TPlat: Platform>(
 
     // Connection process is successful. Notify the network state machine.
     let mut guarded = shared.guarded.lock().await;
-    let (connection_id, connec_task) = guarded.network.pending_outcome_ok(start_connect.id);
+    let (connection_id, connec_task) = guarded.network.pending_outcome_ok_single_stream(start_connect.id);
     log::debug!(
         target: "connections",
         "Pending({:?}, {}) => Connection through {}",
@@ -1393,7 +1393,7 @@ async fn open_connection_task<TPlat: Platform>(
     mut websocket: TPlat::Connection,
     shared: Arc<Shared<TPlat>>,
     connection_id: service::ConnectionId,
-    mut connection_task: service::ConnectionTask<TPlat::Instant>,
+    mut connection_task: service::SingleStreamConnectionTask<TPlat::Instant>,
     coordinator_to_connection: mpsc::Receiver<service::CoordinatorToConnection<TPlat::Instant>>,
     mut connection_to_coordinator: mpsc::Sender<(
         service::ConnectionId,

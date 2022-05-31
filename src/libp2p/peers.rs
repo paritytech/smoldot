@@ -61,7 +61,7 @@ use core::{
 use rand::{Rng as _, SeedableRng as _};
 
 pub use collection::{
-    ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionTask,
+    ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, SingleStreamConnectionTask,
     ConnectionToCoordinator, CoordinatorToConnection, InboundError, NotificationProtocolConfig,
     NotificationsInClosedErr, NotificationsOutErr, ReadWrite, RequestError, SubstreamId,
 };
@@ -706,19 +706,19 @@ where
         }
     }
 
-    /// Inserts an incoming connection in the state machine.
+    /// Inserts a single-stream incoming connection in the state machine.
     ///
     /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
     /// yet.
     ///
     /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
     /// to determine when the handshake timeout expires.
-    pub fn add_incoming_connection(
+    pub fn add_single_stream_incoming_connection(
         &mut self,
         when_connected: TNow,
         user_data: TConn,
-    ) -> (ConnectionId, ConnectionTask<TNow>) {
-        self.inner.insert(
+    ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
+        self.inner.insert_single_stream(
             when_connected,
             false,
             Connection {
@@ -728,7 +728,7 @@ where
         )
     }
 
-    /// Inserts an outgoing connection in the state machine.
+    /// Inserts a single-stream outgoing connection in the state machine.
     ///
     /// This connection hasn't finished handshaking, and the [`PeerId`] of the remote isn't known
     /// yet, but it is expected to be in `unfulfilled_desired_peers`. After this function has been
@@ -737,15 +737,15 @@ where
     ///
     /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
     /// to determine when the handshake timeout expires.
-    pub fn add_outgoing_connection(
+    pub fn add_single_stream_outgoing_connection(
         &mut self,
         when_connected: TNow,
         expected_peer_id: &PeerId,
         user_data: TConn,
-    ) -> (ConnectionId, ConnectionTask<TNow>) {
+    ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         let peer_index = self.peer_index_or_insert(expected_peer_id);
 
-        let (connection_id, connection_task) = self.inner.insert(
+        let (connection_id, connection_task) = self.inner.insert_single_stream(
             when_connected,
             true,
             Connection {
