@@ -32,7 +32,7 @@ pub struct Multiaddr {
 
 impl Multiaddr {
     /// Creates a new empty `Multiaddr`.
-    pub fn new() -> Self {
+    pub fn empty() -> Self {
         Multiaddr { bytes: Vec::new() }
     }
 

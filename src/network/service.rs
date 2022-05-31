@@ -1850,10 +1850,7 @@ where
     /// called if this timeout is reached.
     // TODO: give more control, with number of slots and node choice
     // TODO: this API with now is a bit hacky?
-    pub fn next_start_connect<'a>(
-        &mut self,
-        now: impl FnOnce() -> TNow,
-    ) -> Option<StartConnect<TNow>> {
+    pub fn next_start_connect(&mut self, now: impl FnOnce() -> TNow) -> Option<StartConnect<TNow>> {
         // Ask the underlying state machine which nodes are desired but don't have any
         // associated connection attempt yet.
         // Since the underlying state machine is only made aware of connections when
