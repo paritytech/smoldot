@@ -160,7 +160,7 @@ pub fn decode_block_request(
     Ok(BlocksRequestConfig {
         start: match (hash, number) {
             (Some(h), None) => BlocksRequestConfigStart::Hash(
-                <[u8; 32]>::try_from(&h[..])
+                <[u8; 32]>::try_from(h)
                     .map_err(|_| DecodeBlockRequestError::InvalidBlockHashLength)?,
             ),
             (None, Some(n)) => {
@@ -288,7 +288,7 @@ pub fn decode_block_response(
         }
 
         blocks_out.push(BlockData {
-            hash: <[u8; 32]>::try_from(&hash[..]).unwrap(),
+            hash: <[u8; 32]>::try_from(hash).unwrap(),
             header: if !header.is_empty() {
                 Some(header.to_vec())
             } else {
@@ -298,7 +298,7 @@ pub fn decode_block_response(
             body: Some(body.into_iter().map(|tx| tx.to_vec()).collect()),
             justifications: if let Some(justifications) = justifications {
                 let result: nom::IResult<_, _> =
-                    nom::combinator::all_consuming(decode_justifications)(&justifications);
+                    nom::combinator::all_consuming(decode_justifications)(justifications);
                 match result {
                     Ok((_, out)) => Some(out),
                     Err(nom::Err::Error(_) | nom::Err::Failure(_)) => {

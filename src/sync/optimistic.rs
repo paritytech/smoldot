@@ -706,7 +706,7 @@ impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
             .inner
             .best_runtime
             .as_ref()
-            .unwrap_or(self.inner.inner.finalized_runtime.as_ref().unwrap())
+            .unwrap_or_else(|| self.inner.inner.finalized_runtime.as_ref().unwrap())
     }
 
     /// Returns the storage value at the given key. `None` if this key doesn't have any value.

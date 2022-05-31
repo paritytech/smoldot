@@ -664,7 +664,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             .blocks
             .contains_unverified_block(announced_header_number, &announced_header_hash)
         {
-            return BlockAnnounceOutcome::Unknown(AnnouncedBlockUnknown {
+            BlockAnnounceOutcome::Unknown(AnnouncedBlockUnknown {
                 inner: self,
                 announced_header_hash,
                 announced_header_number,
@@ -672,9 +672,9 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 announced_header_encoded: announced_header.into(),
                 source_id,
                 is_best,
-            });
+            })
         } else {
-            return BlockAnnounceOutcome::Known(AnnouncedBlockKnown {
+            BlockAnnounceOutcome::Known(AnnouncedBlockKnown {
                 inner: self,
                 announced_header_hash,
                 announced_header_number,
@@ -683,7 +683,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 is_in_chain: false,
                 source_id,
                 is_best,
-            });
+            })
         }
     }
 
@@ -1073,7 +1073,7 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
                     &self.inner.expected_next_hash,
                 );
             if block_user_data.header.is_none() {
-                block_user_data.header = Some(self.decoded_header.clone().into());
+                block_user_data.header = Some(self.decoded_header.clone());
                 // TODO: copying bytes :-/
             }
 
@@ -1132,7 +1132,7 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
                 parent_hash: self.decoded_header.parent_hash,
             },
             PendingBlock {
-                header: Some(self.decoded_header.clone().into()),
+                header: Some(self.decoded_header.clone()),
                 justifications: self.justifications,
                 user_data,
             },

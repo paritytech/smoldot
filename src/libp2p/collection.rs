@@ -383,6 +383,11 @@ where
             .push_back((connection_id, CoordinatorToConnectionInner::StartShutdown));
     }
 
+    /// Returns true if the collection doesn't contain any connection.
+    pub fn is_empty(&self) -> bool {
+        self.connections.is_empty()
+    }
+
     /// Returns the number of connections in the collection.
     pub fn len(&self) -> usize {
         self.connections.len()
