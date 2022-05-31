@@ -25,7 +25,6 @@ use crate::network::{kademlia, protocol};
 use crate::util::{self, SipHasherBuild};
 
 use alloc::{
-    borrow::Cow,
     collections::VecDeque,
     format,
     string::{String, ToString as _},
@@ -1983,13 +1982,11 @@ where
 
         let response = {
             protocol::build_identify_response(protocol::IdentifyResponse {
-                protocol_version: "/substrate/1.0".into(), // TODO: same value as in Substrate
-                agent_version: agent_version.into(),
-                ed25519_public_key: Cow::Borrowed(
-                    self.inner.noise_key().libp2p_public_ed25519_key(),
-                ),
+                protocol_version: "/substrate/1.0", // TODO: same value as in Substrate
+                agent_version,
+                ed25519_public_key: *self.inner.noise_key().libp2p_public_ed25519_key(),
                 listen_addrs: iter::empty(), // TODO:
-                observed_addr: Cow::Borrowed(&observed_addr),
+                observed_addr,
                 protocols: self
                     .inner
                     .request_response_protocols()
