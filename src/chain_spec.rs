@@ -98,7 +98,7 @@ impl ChainSpec {
             .value(b":code")
             .ok_or(FromGenesisStorageError::RuntimeNotFound)?;
         let heap_pages =
-            executor::storage_heap_pages_to_value(genesis_storage.value(b":heappages").as_deref())
+            executor::storage_heap_pages_to_value(genesis_storage.value(b":heappages"))
                 .map_err(FromGenesisStorageError::HeapPagesDecode)?;
         let vm_prototype = executor::host::HostVmPrototype::new(executor::host::Config {
             module: &wasm_code,

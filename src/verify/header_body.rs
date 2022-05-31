@@ -702,7 +702,7 @@ fn check_check_inherents_output(output: &[u8]) -> Result<(), Error> {
                     }),
                     crate::util::nom_bytes_decode,
                 )),
-                || Vec::new(),
+                Vec::new,
                 |mut errors, (module, error)| {
                     if module != *b"auraslot" && module != *b"babeslot" {
                         errors.push((module, error.to_vec()));
