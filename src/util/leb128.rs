@@ -71,7 +71,7 @@ pub fn encode(value: impl Into<u64>) -> impl ExactSizeIterator<Item = u8> + Clon
 /// Returns an LEB128-encoded `usize` as a list of bytes.
 ///
 /// See also [`encode`].
-pub fn encode_usize(value: usize) -> impl ExactSizeIterator<Item = u8> {
+pub fn encode_usize(value: usize) -> impl ExactSizeIterator<Item = u8> + Clone {
     encode(u64::try_from(value).unwrap())
 }
 
@@ -85,6 +85,13 @@ pub(crate) fn nom_leb128_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
     let mut out = 0usize;
 
     for (n, byte) in bytes.iter().enumerate() {
+        if (7 * n) >= usize::try_from(usize::BITS).unwrap() {
+            return Err(nom::Err::Error(nom::error::make_error(
+                bytes,
+                nom::error::ErrorKind::LengthValue,
+            )));
+        }
+
         match usize::from(*byte & 0b111_1111).checked_mul(1 << (7 * n)) {
             Some(o) => out |= o,
             None => {
@@ -269,6 +276,14 @@ mod tests {
             let obtained = iter.count();
             assert_eq!(expected, obtained);
         }
+    }
+
+    #[test]
+    fn decode_large_value() {
+        // Carefully crafted LEB128 that overflows the left shift before overflowing the
+        // encoded size.
+        let encoded = (0..256).map(|_| 129).collect::<Vec<_>>();
+        assert!(super::nom_leb128_usize::<nom::error::Error<&[u8]>>(&encoded).is_err());
     }
 
     // TODO: more tests

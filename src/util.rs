@@ -21,6 +21,7 @@
 use core::str;
 
 pub(crate) mod leb128;
+pub(crate) mod protobuf;
 
 /// Implementation of the `BuildHasher` trait for the sip hasher.
 ///
