@@ -38,25 +38,20 @@ use crate::{
     util::protobuf,
 };
 
-use alloc::{
-    borrow::Cow,
-    string::{String, ToString as _},
-    vec::{self, Vec},
-};
+use alloc::vec::{self, Vec};
 
 /// Description of a response to an identify request.
-// TODO: the Cows in there should be slices once the response decoding is zero cost
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentifyResponse<'a, TLaIter, TProtoIter> {
-    pub protocol_version: Cow<'a, str>,
-    pub agent_version: Cow<'a, str>,
+    pub protocol_version: &'a str,
+    pub agent_version: &'a str,
     /// Ed25519 public key of the local node.
-    pub ed25519_public_key: Cow<'a, [u8; 32]>,
+    pub ed25519_public_key: [u8; 32],
     /// List of addresses the local node is listening on. This should include first and foremost
     /// addresses that are publicly-reachable.
     pub listen_addrs: TLaIter,
     /// Address of the sender of the identify request, as seen from the receiver.
-    pub observed_addr: Cow<'a, Multiaddr>,
+    pub observed_addr: Multiaddr,
     /// Names of the protocols supported by the local node.
     pub protocols: TProtoIter,
 }
@@ -85,7 +80,7 @@ pub fn build_identify_response<'a>(
         .chain(
             protobuf::bytes_tag_encode(
                 1,
-                PublicKey::Ed25519(*config.ed25519_public_key).to_protobuf_encoding(),
+                PublicKey::Ed25519(config.ed25519_public_key).to_protobuf_encoding(),
             )
             .map(either::Left)
             .map(either::Right)
@@ -100,7 +95,7 @@ pub fn build_identify_response<'a>(
                 .map(either::Left),
         )
         .chain(
-            protobuf::bytes_tag_encode(4, config.observed_addr.clone().into_owned()) // TODO: clone? :-/
+            protobuf::bytes_tag_encode(4, config.observed_addr)
                 .map(either::Left)
                 .map(either::Right),
         )
@@ -114,11 +109,10 @@ pub fn build_identify_response<'a>(
 }
 
 /// Decodes a response to an identify request.
-// TODO: should have a more zero-cost API
 pub fn decode_identify_response(
-    response_bytes: &[u8],
+    response_bytes: &'_ [u8],
 ) -> Result<
-    IdentifyResponse<'static, vec::IntoIter<Multiaddr>, vec::IntoIter<String>>,
+    IdentifyResponse<'_, vec::IntoIter<Multiaddr>, vec::IntoIter<&'_ str>>,
     DecodeIdentifyResponseError,
 > {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
@@ -146,14 +140,14 @@ pub fn decode_identify_response(
         };
 
     Ok(IdentifyResponse {
-        agent_version: agent_version.unwrap_or_default().to_string().into(),
-        protocol_version: protocol_version.unwrap_or_default().to_string().into(),
+        agent_version: agent_version.unwrap_or_default(),
+        protocol_version: protocol_version.unwrap_or_default(),
         ed25519_public_key: match PublicKey::from_protobuf_encoding(
-            &ed25519_public_key.unwrap_or_default(),
+            ed25519_public_key.unwrap_or_default(),
         )
         .map_err(DecodeIdentifyResponseError::InvalidPublicKey)?
         {
-            PublicKey::Ed25519(key) => Cow::Owned(key),
+            PublicKey::Ed25519(key) => key,
         },
         listen_addrs: listen_addrs
             .into_iter()
@@ -161,15 +155,9 @@ pub fn decode_identify_response(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| DecodeIdentifyResponseError::InvalidMultiaddr)?
             .into_iter(),
-        observed_addr: Cow::Owned(
-            Multiaddr::try_from(observed_addr.unwrap_or_default().to_vec())
-                .map_err(|_| DecodeIdentifyResponseError::InvalidMultiaddr)?,
-        ),
-        protocols: protocols
-            .into_iter()
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>()
-            .into_iter(), // TODO: weird; needs API change
+        observed_addr: Multiaddr::try_from(observed_addr.unwrap_or_default().to_vec())
+            .map_err(|_| DecodeIdentifyResponseError::InvalidMultiaddr)?,
+        protocols: protocols.into_iter(),
     })
 }
 
