@@ -305,7 +305,7 @@ where
         }
     }
 
-    /// Adds a new single stream connection to the collection.
+    /// Adds a new single-stream connection to the collection.
     ///
     /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
     /// to determine when the handshake timeout expires.
@@ -336,6 +336,30 @@ where
                 4
             }),
         };
+
+        let _previous_value = self.connections.insert(
+            connection_id,
+            Connection {
+                handshaking: true,
+                shutting_down: false,
+                start_shutdown_called: false,
+                user_data,
+            },
+        );
+        debug_assert!(_previous_value.is_none());
+
+        (connection_id, connection_task)
+    }
+
+    /// Adds a new multi-stream connection to the collection.
+    pub fn insert_multi_stream<TSubId>(
+        &mut self,
+        user_data: TConn,
+    ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>) {
+        let connection_id = self.next_connection_id;
+        self.next_connection_id.0 += 1;
+
+        let connection_task = MultiStreamConnectionTask { foo: todo!() };
 
         let _previous_value = self.connections.insert(
             connection_id,
@@ -1240,7 +1264,7 @@ pub struct ConnectionState {
     pub shutting_down: bool,
 }
 
-/// State machine dedicated to a single connection.
+/// State machine dedicated to a single single-stream connection.
 pub struct SingleStreamConnectionTask<TNow> {
     /// State machine of the underlying connection.
     connection: SingleStreamConnectionTaskInner<TNow>,
@@ -1909,6 +1933,142 @@ where
 
             SingleStreamConnectionTaskInner::Poisoned => unreachable!(),
         }
+    }
+}
+
+/// State machine dedicated to a single multi-stream connection.
+pub struct MultiStreamConnectionTask<TNow, TSubId> {
+    foo: (TNow, TSubId),
+}
+
+impl<TNow, TSubId> MultiStreamConnectionTask<TNow, TSubId>
+where
+    TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
+{
+    /// Pulls a message to send back to the coordinator.
+    ///
+    /// This function takes ownership of `self` and optionally yields it back. If the first
+    /// option contains `None`, then no more message will be generated and the [`ConnectionTask`]
+    /// has vanished. This will happen after the connection has been shut down or reset.
+    /// It is possible for `self` to not be yielded back even if the [`ReadWrite`] that was last
+    /// passed to [`ConnectionTask::read_write`] is still fully open, in which case the API user
+    /// should abruptly reset the connection, for example by sending a TCP RST flag. This can
+    /// happen for exemple if the connection seems unresponsive and that an attempt at closing
+    /// the connection in a clean way is futile.
+    ///
+    /// If any message is returned, it is the responsibility of the API user to send it to the
+    /// coordinator by calling [`Network::inject_connection_message`].
+    /// Do not attempt to buffer the message being returned, as it would work against the
+    /// back-pressure strategy used internally. As soon as a message is returned, it should be
+    /// delivered. If the coordinator is busy at the moment a message should be delivered, then
+    /// the entire thread of execution dedicated to this [`ConnectionTask`] should be paused until
+    /// the coordinator is ready and the message delivered.
+    ///
+    /// Messages aren't generated spontaneously. In other words, you don't need to periodically
+    /// call this function just in case there's a new message. Messages are always generated after
+    /// either [`ConnectionTask::read_write`] or [`ConnectionTask::reset`] has been called.
+    /// Multiple messages can happen in a row.
+    ///
+    /// Because this function frees space in a buffer, calling [`ConnectionTask::read_write`]
+    /// again after it has returned might read/write more data and generate an event again. In
+    /// other words, the API user should call [`ConnectionTask::read_write`] and
+    /// [`ConnectionTask::pull_message_to_coordinator`] repeatedly in a loop until no more
+    /// message is generated.
+    pub fn pull_message_to_coordinator(
+        mut self,
+    ) -> (Option<Self>, Option<ConnectionToCoordinator>) {
+        todo!()
+    }
+
+    /// Injects a message that has been pulled using [`Network::pull_message_to_connection`].
+    ///
+    /// Calling this function might generate data to send to the connection. You should call
+    /// [`ConnectionTask::read_write`] after this function has returned (unless you have called
+    /// [`ConnectionTask::reset`] in the past).
+    pub fn inject_coordinator_message(&mut self, message: CoordinatorToConnection<TNow>) {
+        match message.inner {
+            _ => todo!(), // TODO:
+        }
+    }
+
+    /// Returns the number of new outbound substreams that the state machine would like to see
+    /// opened.
+    ///
+    /// This value doesn't change automatically over time but only after a call to
+    /// [`MultiStreamConnectionTask::substream_read_write`],
+    /// [`MultiStreamConnectionTask::inject_coordinator_message`],
+    /// [`MultiStreamConnectionTask::add_substream`], or
+    /// [`MultiStreamConnectionTask::reset_substream`].
+    ///
+    /// Note that the user is expected to track the number of substreams that are currently being
+    /// opened. For example, if this function returns 2 and there are already 2 substreams
+    /// currently being opened, then there is no need to open any additional one.
+    pub fn desired_outbound_substreams(&self) -> u32 {
+        0 // TODO:
+    }
+
+    /// Notifies the state machine that a new substream has been opened.
+    ///
+    /// `inbound` indicates whether the substream has been opened by the remote (`true`) or
+    /// locally (`false`).
+    ///
+    /// If `inbound` is `false`, then the value returned by
+    /// [`MultiStreamConnectionTask::desired_outbound_substreams`] will decrease by one.
+    ///
+    /// # Panic
+    ///
+    /// Panics if there already exists a substream with an identical identifier.
+    ///
+    pub fn add_substream(&mut self, id: TSubId, inbound: bool) {
+        todo!()
+    }
+
+    /// Returns a list of substreams that the state machine would like to see reset. The user is
+    /// encouraged to call [`MultiStreamConnectionTask::substream_read_write`] with this list of
+    /// substream.
+    ///
+    /// This value doesn't change automatically over time but only after a call to
+    /// [`MultiStreamConnectionTask::substream_read_write`],
+    /// [`MultiStreamConnectionTask::inject_coordinator_message`],
+    /// [`MultiStreamConnectionTask::add_substream`], or
+    /// [`MultiStreamConnectionTask::reset_substream`].
+    ///
+    /// > **Note**: An example situation is: a notification is queued, which leads to a message
+    /// >           being sent to a connection task, which, once injected, leads to a notifications
+    /// >           substream being "ready" because it needs to send more data.
+    pub fn ready_substreams(&self) -> impl Iterator<Item = &TSubId> {
+        iter::empty() // TODO:
+    }
+
+    /// Immediately destroys the substream with the given identifier.
+    ///
+    /// The given identifier is now considered invalid by the state machine.
+    ///
+    /// # Panic
+    ///
+    /// Panics if there is no substream with that identifier.
+    ///
+    pub fn reset_substream(&mut self, substream_id: &TSubId) {
+        todo!()
+    }
+
+    /// Reads/writes data on the substream.
+    ///
+    /// If the method returns `true`, then the substream is now considered dead according to the
+    /// state machine and its identifier is now invalid. If the reading or writing side of the
+    /// substream was still open, then the user should reset that substream.
+    ///
+    /// # Panic
+    ///
+    /// Panics if there is no substream with that identifier.
+    ///
+    // TODO: better return value
+    pub fn substream_read_write(
+        &mut self,
+        substream_id: &TSubId,
+        read_write: &'_ mut ReadWrite<'_, TNow>,
+    ) -> bool {
+        false // TODO:
     }
 }
 
