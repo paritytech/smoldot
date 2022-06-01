@@ -50,7 +50,8 @@
 
 use super::{
     super::{super::read_write::ReadWrite, noise, yamux},
-    substream, Config, ConfigNotifications, ConfigRequestResponse, ConfigRequestResponseIn, Event,
+    substream::{self, RespondInRequestError},
+    Config, ConfigNotifications, ConfigRequestResponse, ConfigRequestResponseIn, Event,
 };
 
 use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
@@ -60,11 +61,6 @@ use core::{
     time::Duration,
 };
 use rand::{Rng as _, SeedableRng as _};
-
-pub use substream::{
-    InboundError, NotificationsInClosedErr, NotificationsOutErr, RequestError,
-    RespondInRequestError,
-};
 
 /// State machine of a fully-established connection.
 pub struct Established<TNow, TRqUd, TNotifUd> {

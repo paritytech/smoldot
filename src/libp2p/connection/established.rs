@@ -22,6 +22,10 @@ use alloc::{string::String, vec::Vec};
 use core::time::Duration;
 
 pub use single_stream::*;
+pub use substream::{
+    InboundError, NotificationsInClosedErr, NotificationsOutErr, RequestError,
+    RespondInRequestError,
+};
 
 /// Event that happened on the connection. See [`Established::read_write`].
 #[must_use]
