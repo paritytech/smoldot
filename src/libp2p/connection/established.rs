@@ -21,7 +21,7 @@ pub mod substream;
 use alloc::{string::String, vec::Vec};
 use core::time::Duration;
 
-pub use single_stream::*;
+pub use single_stream::{ConnectionPrototype, Error, Established, SubstreamId};
 pub use substream::{
     InboundError, NotificationsInClosedErr, NotificationsOutErr, RequestError,
     RespondInRequestError,
