@@ -48,7 +48,10 @@
 
 // TODO: expand docs ^
 
-use super::{super::read_write::ReadWrite, noise, yamux};
+use super::{
+    super::{super::read_write::ReadWrite, noise, yamux},
+    substream,
+};
 
 use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
 use core::{
@@ -57,8 +60,6 @@ use core::{
     time::Duration,
 };
 use rand::{Rng as _, SeedableRng as _};
-
-pub mod substream;
 
 pub use substream::{
     InboundError, NotificationsInClosedErr, NotificationsOutErr, RequestError,
