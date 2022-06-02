@@ -48,6 +48,8 @@
 
 // TODO: expand docs ^
 
+// TODO: consider implementing on top of multi_stream
+
 use super::{
     super::{super::read_write::ReadWrite, noise, yamux},
     substream::{self, RespondInRequestError},
