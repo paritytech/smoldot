@@ -38,9 +38,18 @@ pub(crate) struct Platform;
 impl smoldot_light_base::Platform for Platform {
     type Delay = Delay;
     type Instant = crate::Instant;
-    type Connection = Pin<Box<Connection>>;
-    type ConnectFuture = future::BoxFuture<'static, Result<Self::Connection, ConnectError>>;
-    type ConnectionDataFuture = future::BoxFuture<'static, ()>;
+    type Connection = core::convert::Infallible;
+    type Stream = Pin<Box<Connection>>;
+    type ConnectFuture = future::BoxFuture<
+        'static,
+        Result<
+            smoldot_light_base::PlatformConnection<Self::Stream, Self::Connection>,
+            ConnectError,
+        >,
+    >;
+    type StreamDataFuture = future::BoxFuture<'static, ()>;
+    type NextSubstreamFuture =
+        future::Pending<Option<(Self::Stream, smoldot_light_base::PlatformSubstreamDirection)>>;
 
     fn now_from_unix_epoch() -> Duration {
         Duration::from_secs_f64(unsafe { bindings::unix_time_ms() } / 1000.0)
@@ -124,7 +133,9 @@ impl smoldot_light_base::Platform for Platform {
             }
 
             if pointer.open {
-                Ok(pointer)
+                Ok(smoldot_light_base::PlatformConnection::SingleStream(
+                    pointer,
+                ))
             } else {
                 debug_assert!(pointer.closed_message.is_some());
                 Err(ConnectError {
@@ -136,7 +147,15 @@ impl smoldot_light_base::Platform for Platform {
         .boxed()
     }
 
-    fn wait_more_data(connection: &mut Self::Connection) -> Self::ConnectionDataFuture {
+    fn next_substream(_connection: &mut Self::Connection) -> Self::NextSubstreamFuture {
+        unreachable!()
+    }
+
+    fn open_out_substream(_connection: &mut Self::Connection) {
+        unreachable!()
+    }
+
+    fn wait_more_data(connection: &mut Self::Stream) -> Self::StreamDataFuture {
         if !connection.messages_queue.is_empty() || connection.closed_message.is_some() {
             return future::ready(()).boxed();
         }
@@ -150,7 +169,7 @@ impl smoldot_light_base::Platform for Platform {
         listener.boxed()
     }
 
-    fn read_buffer(connection: &mut Self::Connection) -> Option<&[u8]> {
+    fn read_buffer(connection: &mut Self::Stream) -> Option<&[u8]> {
         if let Some(buffer) = connection.messages_queue.front() {
             debug_assert!(!buffer.is_empty());
             debug_assert!(connection.messages_queue_first_offset < buffer.len());
@@ -162,7 +181,7 @@ impl smoldot_light_base::Platform for Platform {
         }
     }
 
-    fn advance_read_cursor(connection: &mut Self::Connection, bytes: usize) {
+    fn advance_read_cursor(connection: &mut Self::Stream, bytes: usize) {
         let this = unsafe { Pin::get_unchecked_mut(connection.as_mut()) };
 
         this.messages_queue_first_offset += bytes;
@@ -178,7 +197,7 @@ impl smoldot_light_base::Platform for Platform {
         };
     }
 
-    fn send(connection: &mut Self::Connection, data: &[u8]) {
+    fn send(connection: &mut Self::Stream, data: &[u8]) {
         unsafe {
             let this = Pin::get_unchecked_mut(connection.as_mut());
 

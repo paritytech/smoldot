@@ -36,7 +36,7 @@
 //! [`NetworkService::new`]. These channels inform the foreground about updates to the network
 //! connectivity.
 
-use crate::Platform;
+use crate::{Platform, PlatformConnection};
 
 use core::{cmp, num::NonZeroUsize, task::Poll, time::Duration};
 use futures::{
@@ -1339,7 +1339,7 @@ async fn connection_task<TPlat: Platform>(
         }
 
         match result {
-            Ok(ws) => ws,
+            Ok(connection) => connection,
             Err(err) => {
                 let mut guarded = shared.guarded.lock().await;
                 guarded.network.pending_outcome_err(
@@ -1357,9 +1357,17 @@ async fn connection_task<TPlat: Platform>(
         }
     };
 
+    // TODO: multistream not implemented
+    let socket = match socket {
+        PlatformConnection::SingleStream(s) => s,
+        _ => panic!(),
+    };
+
     // Connection process is successful. Notify the network state machine.
     let mut guarded = shared.guarded.lock().await;
-    let (connection_id, connec_task) = guarded.network.pending_outcome_ok_single_stream(start_connect.id);
+    let (connection_id, connec_task) = guarded
+        .network
+        .pending_outcome_ok_single_stream(start_connect.id);
     log::debug!(
         target: "connections",
         "Pending({:?}, {}) => Connection through {}",
@@ -1390,7 +1398,7 @@ async fn connection_task<TPlat: Platform>(
 /// Asynchronous task managing a specific connection after it's been open.
 // TODO: a lot of logging disappeared
 async fn open_connection_task<TPlat: Platform>(
-    mut websocket: TPlat::Connection,
+    mut websocket: TPlat::Stream,
     shared: Arc<Shared<TPlat>>,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<TPlat::Instant>,
