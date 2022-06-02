@@ -52,6 +52,7 @@ use super::{
     super::{super::read_write::ReadWrite, noise, yamux},
     substream::{self, RespondInRequestError},
     Config, ConfigNotifications, ConfigRequestResponse, ConfigRequestResponseIn, Event,
+    SubstreamId, SubstreamIdInner,
 };
 
 use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
@@ -532,7 +533,7 @@ where
                 protocol_index,
                 request,
             } => Event::RequestIn {
-                id: SubstreamId(substream_id),
+                id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
                 protocol_index,
                 request,
             },
@@ -540,7 +541,7 @@ where
                 response,
                 user_data,
             } => Event::Response {
-                id: SubstreamId(substream_id),
+                id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
                 response,
                 user_data,
             },
@@ -548,32 +549,32 @@ where
                 protocol_index,
                 handshake,
             } => Event::NotificationsInOpen {
-                id: SubstreamId(substream_id),
+                id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
                 protocol_index,
                 handshake,
             },
             substream::Event::NotificationsInOpenCancel => Event::NotificationsInOpenCancel {
-                id: SubstreamId(substream_id),
+                id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
             },
             substream::Event::NotificationIn { notification } => Event::NotificationIn {
                 notification,
-                id: SubstreamId(substream_id),
+                id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
             },
             substream::Event::NotificationsInClose { outcome } => Event::NotificationsInClose {
-                id: SubstreamId(substream_id),
+                id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
                 outcome,
             },
             substream::Event::NotificationsOutResult { result } => Event::NotificationsOutResult {
-                id: SubstreamId(substream_id),
+                id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
                 result,
             },
             substream::Event::NotificationsOutCloseDemanded => {
                 Event::NotificationsOutCloseDemanded {
-                    id: SubstreamId(substream_id),
+                    id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
                 }
             }
             substream::Event::NotificationsOutReset { user_data } => Event::NotificationsOutReset {
-                id: SubstreamId(substream_id),
+                id: SubstreamId(SubstreamIdInner::SingleStream(substream_id)),
                 user_data,
             },
             substream::Event::PingOutSuccess => Event::PingOutSuccess,
@@ -638,7 +639,7 @@ where
 
         // TODO: ? do this? substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
 
-        SubstreamId(substream.id())
+        SubstreamId(SubstreamIdInner::SingleStream(substream.id()))
     }
 
     /// Returns the user data associated to a notifications substream.
@@ -648,9 +649,13 @@ where
         &mut self,
         id: SubstreamId,
     ) -> Option<&mut TNotifUd> {
+        let id = match id.0 {
+            SubstreamIdInner::SingleStream(id) => id,
+        };
+
         self.inner
             .yamux
-            .substream_by_id_mut(id.0)?
+            .substream_by_id_mut(id)?
             .into_user_data()
             .as_mut()
             .unwrap()
@@ -699,7 +704,7 @@ where
                     user_data,
                 )));
 
-        SubstreamId(substream.id())
+        SubstreamId(SubstreamIdInner::SingleStream(substream.id()))
     }
 
     /// Accepts an inbound notifications protocol. Must be called in response to a
@@ -715,11 +720,15 @@ where
         handshake: Vec<u8>,
         user_data: TNotifUd,
     ) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::SingleStream(id) => id,
+        };
+
         let max_notification_size = 16 * 1024 * 1024; // TODO: hack
                                                       // TODO: self.inner.notifications_protocols[protocol_index].max_notification_size;
         self.inner
             .yamux
-            .substream_by_id_mut(substream_id.0)
+            .substream_by_id_mut(substream_id)
             .unwrap()
             .into_user_data()
             .as_mut()
@@ -735,9 +744,13 @@ where
     /// Panics if the substream id is not valid or the substream is of the wrong type.
     ///
     pub fn reject_in_notifications_substream(&mut self, substream_id: SubstreamId) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::SingleStream(id) => id,
+        };
+
         self.inner
             .yamux
-            .substream_by_id_mut(substream_id.0)
+            .substream_by_id_mut(substream_id)
             .unwrap()
             .into_user_data()
             .as_mut()
@@ -767,9 +780,13 @@ where
         substream_id: SubstreamId,
         notification: Vec<u8>,
     ) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::SingleStream(id) => id,
+        };
+
         self.inner
             .yamux
-            .substream_by_id_mut(substream_id.0)
+            .substream_by_id_mut(substream_id)
             .unwrap()
             .into_user_data()
             .as_mut()
@@ -787,7 +804,11 @@ where
     /// notifications substream isn't in the appropriate state.
     ///
     pub fn notification_substream_queued_bytes(&self, substream_id: SubstreamId) -> usize {
-        let substream = self.inner.yamux.substream_by_id(substream_id.0).unwrap();
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::SingleStream(id) => id,
+        };
+
+        let substream = self.inner.yamux.substream_by_id(substream_id).unwrap();
         let already_queued = substream.queued_bytes();
         let from_substream = substream
             .into_user_data()
@@ -810,9 +831,13 @@ where
     /// notifications substream isn't in the appropriate state.
     ///
     pub fn close_notifications_substream(&mut self, substream_id: SubstreamId) {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::SingleStream(id) => id,
+        };
+
         self.inner
             .yamux
-            .substream_by_id_mut(substream_id.0)
+            .substream_by_id_mut(substream_id)
             .unwrap()
             .into_user_data()
             .as_mut()
@@ -830,9 +855,13 @@ where
         substream_id: SubstreamId,
         response: Result<Vec<u8>, ()>,
     ) -> Result<(), RespondInRequestError> {
+        let substream_id = match substream_id.0 {
+            SubstreamIdInner::SingleStream(id) => id,
+        };
+
         self.inner
             .yamux
-            .substream_by_id_mut(substream_id.0)
+            .substream_by_id_mut(substream_id)
             .ok_or(RespondInRequestError::SubstreamClosed)?
             .into_user_data()
             .as_mut()
@@ -873,22 +902,6 @@ where
         f.debug_map()
             .entries(self.inner.yamux.user_datas())
             .finish()
-    }
-}
-
-/// Identifier of a request or a notifications substream.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SubstreamId(yamux::SubstreamId);
-
-impl SubstreamId {
-    /// Returns the value that compares inferior or equal to all possible values.
-    pub fn min_value() -> Self {
-        Self(yamux::SubstreamId::min_value())
-    }
-
-    /// Returns the value that compares superior or equal to all possible values.
-    pub fn max_value() -> Self {
-        Self(yamux::SubstreamId::max_value())
     }
 }
 

@@ -19,14 +19,40 @@ mod multi_stream;
 mod single_stream;
 pub mod substream;
 
+use super::yamux;
 use alloc::{string::String, vec::Vec};
 use core::time::Duration;
 
-pub use single_stream::{ConnectionPrototype, Error, Established, SubstreamId};
+pub use single_stream::{ConnectionPrototype, Error, Established};
 pub use substream::{
     InboundError, NotificationsInClosedErr, NotificationsOutErr, RequestError,
     RespondInRequestError,
 };
+
+/// Identifier of a request or a notifications substream.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SubstreamId(SubstreamIdInner);
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum SubstreamIdInner {
+    SingleStream(yamux::SubstreamId),
+}
+
+impl SubstreamId {
+    /// Returns the value that compares inferior or equal to all possible values.
+    pub fn min_value() -> Self {
+        Self(SubstreamIdInner::SingleStream(
+            yamux::SubstreamId::min_value(),
+        ))
+    }
+
+    /// Returns the value that compares superior or equal to all possible values.
+    pub fn max_value() -> Self {
+        Self(SubstreamIdInner::SingleStream(
+            yamux::SubstreamId::max_value(),
+        ))
+    }
+}
 
 /// Event that happened on the connection. See [`Established::read_write`].
 #[must_use]
