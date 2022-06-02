@@ -651,6 +651,7 @@ where
     ) -> Option<&mut TNotifUd> {
         let id = match id.0 {
             SubstreamIdInner::SingleStream(id) => id,
+            _ => return None,
         };
 
         self.inner
@@ -722,6 +723,7 @@ where
     ) {
         let substream_id = match substream_id.0 {
             SubstreamIdInner::SingleStream(id) => id,
+            _ => panic!(),
         };
 
         let max_notification_size = 16 * 1024 * 1024; // TODO: hack
@@ -746,6 +748,7 @@ where
     pub fn reject_in_notifications_substream(&mut self, substream_id: SubstreamId) {
         let substream_id = match substream_id.0 {
             SubstreamIdInner::SingleStream(id) => id,
+            _ => panic!(),
         };
 
         self.inner
@@ -782,6 +785,7 @@ where
     ) {
         let substream_id = match substream_id.0 {
             SubstreamIdInner::SingleStream(id) => id,
+            _ => panic!(),
         };
 
         self.inner
@@ -806,6 +810,7 @@ where
     pub fn notification_substream_queued_bytes(&self, substream_id: SubstreamId) -> usize {
         let substream_id = match substream_id.0 {
             SubstreamIdInner::SingleStream(id) => id,
+            _ => panic!(),
         };
 
         let substream = self.inner.yamux.substream_by_id(substream_id).unwrap();
@@ -833,6 +838,7 @@ where
     pub fn close_notifications_substream(&mut self, substream_id: SubstreamId) {
         let substream_id = match substream_id.0 {
             SubstreamIdInner::SingleStream(id) => id,
+            _ => panic!(),
         };
 
         self.inner
@@ -857,6 +863,7 @@ where
     ) -> Result<(), RespondInRequestError> {
         let substream_id = match substream_id.0 {
             SubstreamIdInner::SingleStream(id) => id,
+            _ => return Err(RespondInRequestError::SubstreamClosed),
         };
 
         self.inner

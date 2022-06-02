@@ -36,11 +36,17 @@ pub struct SubstreamId(SubstreamIdInner);
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum SubstreamIdInner {
     SingleStream(yamux::SubstreamId),
+    MultiStream(u32),
 }
 
 impl SubstreamId {
     /// Returns the value that compares inferior or equal to all possible values.
     pub fn min_value() -> Self {
+        debug_assert!(
+            SubstreamIdInner::SingleStream(yamux::SubstreamId::max_value())
+                < SubstreamIdInner::MultiStream(0)
+        );
+
         Self(SubstreamIdInner::SingleStream(
             yamux::SubstreamId::min_value(),
         ))
@@ -48,9 +54,12 @@ impl SubstreamId {
 
     /// Returns the value that compares superior or equal to all possible values.
     pub fn max_value() -> Self {
-        Self(SubstreamIdInner::SingleStream(
-            yamux::SubstreamId::max_value(),
-        ))
+        debug_assert!(
+            SubstreamIdInner::MultiStream(0)
+                > SubstreamIdInner::SingleStream(yamux::SubstreamId::max_value())
+        );
+
+        Self(SubstreamIdInner::MultiStream(u32::max_value()))
     }
 }
 
