@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix another panic in case of a carefully-crafted LEB128 length. ([#2337](https://github.com/paritytech/smoldot/pull/2337))
+
 ## 0.6.17 - 2022-05-31
 
 ### Changed
