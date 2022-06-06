@@ -107,3 +107,15 @@ name = "protocol-storage-proof-response-decode"
 path = "fuzz_targets/protocol-storage-proof-response-decode.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "wasm-module-ahead"
+path = "fuzz_targets/wasm-module-ahead.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wasm-module-untrusted"
+path = "fuzz_targets/wasm-module-untrusted.rs"
+test = false
+doc = false
