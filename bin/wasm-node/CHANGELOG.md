@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix a panic when decoding a block header containing a large number of Aura authorities. ([#2338](https://github.com/paritytech/smoldot/pull/2338))
+
 ## 0.6.17 - 2022-05-31
 
 ### Changed
