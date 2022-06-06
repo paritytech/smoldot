@@ -19,6 +19,12 @@ path = "../.."
 members = ["."]
 
 [[bin]]
+name = "chain-spec"
+path = "fuzz_targets/chain-spec.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "grandpa-justification-parse"
 path = "fuzz_targets/grandpa-justification-parse.rs"
 test = false
@@ -33,5 +39,11 @@ doc = false
 [[bin]]
 name = "network-connection-raw"
 path = "fuzz_targets/network-connection-raw.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "proof-node-decode"
+path = "fuzz_targets/proof-node-decode.rs"
 test = false
 doc = false
