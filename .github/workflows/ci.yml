@@ -106,10 +106,12 @@ jobs:
 
   fuzzing-binaries-compile:
     runs-on: ubuntu-latest
-    container:
-      image: rust:nightly
     steps:
     - uses: actions/checkout@v3
+    - uses: actions-rs/toolchain@v1
+      with:
+        toolchain: nightly
+        override: true
     - uses: baptiste0928/cargo-install@v1  # This action ensures that the compilation is cached.
       with:
         crate: cargo-fuzz
