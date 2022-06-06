@@ -49,6 +49,18 @@ test = false
 doc = false
 
 [[bin]]
+name = "protocol-block-announce-decode"
+path = "fuzz_targets/protocol-block-announce-decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "protocol-block-announces-handshake-decode"
+path = "fuzz_targets/protocol-block-announces-handshake-decode.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "protocol-blocks-request-decode"
 path = "fuzz_targets/protocol-blocks-request-decode.rs"
 test = false
@@ -57,5 +69,41 @@ doc = false
 [[bin]]
 name = "protocol-blocks-response-decode"
 path = "fuzz_targets/protocol-blocks-response-decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "protocol-call-proof-response-decode"
+path = "fuzz_targets/protocol-call-proof-response-decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "protocol-grandpa-warp-sync-response-decode"
+path = "fuzz_targets/protocol-grandpa-warp-sync-response-decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "protocol-grandpa-notification-decode"
+path = "fuzz_targets/protocol-grandpa-notification-decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "protocol-identify-response-decode"
+path = "fuzz_targets/protocol-identify-response-decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "protocol-state-response-decode"
+path = "fuzz_targets/protocol-state-response-decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "protocol-storage-proof-response-decode"
+path = "fuzz_targets/protocol-storage-proof-response-decode.rs"
 test = false
 doc = false
