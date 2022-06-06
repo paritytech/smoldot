@@ -54,6 +54,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{
+    hash::Hash,
     num::NonZeroU32,
     ops::{self, Add, Sub},
     time::Duration,
@@ -772,15 +773,22 @@ where
     /// this event was generated.
     pub fn add_multi_stream_outgoing_connection<TSubId>(
         &mut self,
+        now: TNow,
         peer_id: &PeerId,
         user_data: TConn,
-    ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>) {
+    ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
+    where
+        TSubId: Clone + PartialEq + Eq + Hash,
+    {
         let peer_index = self.peer_index_or_insert(peer_id);
 
-        let (connection_id, connection_task) = self.inner.insert_multi_stream(Connection {
-            peer_index: Some(peer_index),
-            user_data,
-        });
+        let (connection_id, connection_task) = self.inner.insert_multi_stream(
+            now,
+            Connection {
+                peer_index: Some(peer_index),
+                user_data,
+            },
+        );
 
         let _inserted = self.connections_by_peer.insert((peer_index, connection_id));
         debug_assert!(_inserted);

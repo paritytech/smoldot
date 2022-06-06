@@ -1370,9 +1370,12 @@ async fn connection_task<TPlat: Platform>(
             (id, either::Left((socket, task)))
         }
         PlatformConnection::MultiStream(socket, peer_id) => {
-            let (id, task) = guarded
-                .network
-                .pending_outcome_ok_multi_stream(start_connect.id, &peer_id);
+            let (id, task) = guarded.network.pending_outcome_ok_multi_stream(
+                start_connect.id,
+                TPlat::now(),
+                &peer_id,
+            );
+
             (id, either::Right((socket, task)))
         }
     };

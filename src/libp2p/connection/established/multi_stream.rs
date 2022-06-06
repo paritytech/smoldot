@@ -110,7 +110,7 @@ where
     TSubId: Clone + PartialEq + Eq + Hash,
 {
     /// Creates a new connection from the given configuration.
-    pub fn new(self, config: Config<TNow>) -> MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
+    pub fn new(config: Config<TNow>) -> MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
         // TODO: check conflicts between protocol names?
 
         let num_expected_substreams =

@@ -50,6 +50,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{
+    hash::Hash,
     iter, mem,
     ops::{self, Add, Sub},
     time::Duration,
@@ -354,12 +355,52 @@ where
     /// Adds a new multi-stream connection to the collection.
     pub fn insert_multi_stream<TSubId>(
         &mut self,
+        now: TNow,
         user_data: TConn,
-    ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>) {
+    ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
+    where
+        TSubId: Clone + PartialEq + Eq + Hash,
+    {
         let connection_id = self.next_connection_id;
         self.next_connection_id.0 += 1;
 
-        let connection_task = MultiStreamConnectionTask { foo: todo!() };
+        let connection_task = MultiStreamConnectionTask {
+            connection: MultiStreamConnectionTaskInner::Established {
+                established: established::MultiStream::new(established::Config {
+                    notifications_protocols: self
+                        .notification_protocols
+                        .iter()
+                        .flat_map(|net| {
+                            let max_handshake_size = net.config.max_handshake_size;
+                            let max_notification_size = net.config.max_notification_size;
+                            iter::once(&net.config.protocol_name)
+                                .chain(net.config.fallback_protocol_names.iter())
+                                .map(move |name| {
+                                    established::ConfigNotifications {
+                                        name: name.clone(), // TODO: cloning :-/
+                                        max_handshake_size,
+                                        max_notification_size,
+                                    }
+                                })
+                        })
+                        .collect(),
+                    request_protocols: self.request_response_protocols.to_vec(), // TODO: overhead
+                    randomness_seed: self.randomness_seeds.gen(),
+                    ping_protocol: self.ping_protocol.to_string(), // TODO: cloning :-/
+                    ping_interval: Duration::from_secs(20),        // TODO: hardcoded
+                    ping_timeout: Duration::from_secs(10),         // TODO: hardcoded
+                    first_out_ping: now + Duration::from_secs(2),  // TODO: hardcoded
+                }),
+                outbound_substreams_mapping: hashbrown::HashMap::with_capacity_and_hasher(
+                    0,
+                    Default::default(),
+                ), // TODO: capacity?
+                outbound_substreams_mapping2: hashbrown::HashMap::with_capacity_and_hasher(
+                    0,
+                    Default::default(),
+                ), // TODO: capacity?
+            },
+        };
 
         let _previous_value = self.connections.insert(
             connection_id,
@@ -1938,12 +1979,49 @@ where
 
 /// State machine dedicated to a single multi-stream connection.
 pub struct MultiStreamConnectionTask<TNow, TSubId> {
-    foo: (TNow, TSubId),
+    connection: MultiStreamConnectionTaskInner<TNow, TSubId>,
+}
+enum MultiStreamConnectionTaskInner<TNow, TSubId> {
+    /// Connection has been fully established.
+    Established {
+        // TODO: user data of request redundant with the substreams mapping below
+        established: established::MultiStream<TNow, TSubId, SubstreamId, ()>,
+
+        /// Because outgoing substream ids are assigned by the coordinator, we maintain a mapping
+        /// of the "outer ids" to "inner ids".
+        outbound_substreams_mapping:
+            hashbrown::HashMap<SubstreamId, established::SubstreamId, fnv::FnvBuildHasher>,
+
+        /// Reverse mapping.
+        // TODO: could be user datas in established?
+        outbound_substreams_mapping2:
+            hashbrown::HashMap<established::SubstreamId, SubstreamId, fnv::FnvBuildHasher>,
+    },
+
+    /// Connection has finished its shutdown. A [`ConnectionToCoordinatorInner::ShutdownFinished`]
+    /// message has been sent and is waiting to be acknowledged.
+    ShutdownWaitingAck {
+        /// If true, [`ConnectionTask::reset`] has been called. This doesn't modify any of the
+        /// behavior but is used to make sure that the API is used correctly.
+        was_api_reset: bool,
+    },
+
+    /// Connection has finished its shutdown and its shutdown has been acknowledged. There is
+    /// nothing more to do except stop the connection task.
+    ShutdownAcked {
+        /// If true, [`ConnectionTask::reset`] has been called. This doesn't modify any of the
+        /// behavior but is used to make sure that the API is used correctly.
+        was_api_reset: bool,
+    },
+
+    /// Temporary state used to statisfy the borrow checker during state transitions.
+    Poisoned,
 }
 
 impl<TNow, TSubId> MultiStreamConnectionTask<TNow, TSubId>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
+    TSubId: Clone + PartialEq + Eq + Hash,
 {
     /// Pulls a message to send back to the coordinator.
     ///
@@ -1986,7 +2064,171 @@ where
     /// [`ConnectionTask::read_write`] after this function has returned (unless you have called
     /// [`ConnectionTask::reset`] in the past).
     pub fn inject_coordinator_message(&mut self, message: CoordinatorToConnection<TNow>) {
-        match message.inner {
+        match (message.inner, &mut self.connection) {
+            (
+                CoordinatorToConnectionInner::StartRequest {
+                    request_data,
+                    timeout,
+                    protocol_index,
+                    substream_id,
+                },
+                MultiStreamConnectionTaskInner::Established {
+                    established,
+                    outbound_substreams_mapping,
+                    outbound_substreams_mapping2,
+                },
+            ) => {
+                let inner_substream_id =
+                    established.add_request(protocol_index, request_data, timeout, substream_id);
+                let _prev_value =
+                    outbound_substreams_mapping.insert(substream_id, inner_substream_id);
+                debug_assert!(_prev_value.is_none());
+                let _prev_value =
+                    outbound_substreams_mapping2.insert(inner_substream_id, substream_id);
+                debug_assert!(_prev_value.is_none());
+            }
+            (
+                CoordinatorToConnectionInner::OpenOutNotifications {
+                    handshake,
+                    now,
+                    overlay_network_index,
+                    substream_id: outer_substream_id,
+                },
+                MultiStreamConnectionTaskInner::Established {
+                    established,
+                    outbound_substreams_mapping,
+                    outbound_substreams_mapping2,
+                },
+            ) => {
+                let inner_substream_id = established.open_notifications_substream(
+                    now,
+                    overlay_network_index,
+                    handshake,
+                    (),
+                );
+
+                let _prev_value =
+                    outbound_substreams_mapping.insert(outer_substream_id, inner_substream_id);
+                debug_assert!(_prev_value.is_none());
+                let _prev_value =
+                    outbound_substreams_mapping2.insert(inner_substream_id, outer_substream_id);
+                debug_assert!(_prev_value.is_none());
+            }
+            (
+                CoordinatorToConnectionInner::CloseOutNotifications { substream_id },
+                MultiStreamConnectionTaskInner::Established {
+                    established,
+                    outbound_substreams_mapping,
+                    outbound_substreams_mapping2,
+                },
+            ) => {
+                // It is possible that the remote has closed the outbound notification substream
+                // while the `CloseOutNotifications` message was being delivered, or that the API
+                // user close the substream before the message about the substream being closed
+                // was delivered to the coordinator.
+                if let Some(inner_substream_id) = outbound_substreams_mapping.remove(&substream_id)
+                {
+                    outbound_substreams_mapping2.remove(&inner_substream_id);
+                    established.close_notifications_substream(inner_substream_id);
+                }
+            }
+            (
+                CoordinatorToConnectionInner::QueueNotification {
+                    substream_id,
+                    notification,
+                },
+                MultiStreamConnectionTaskInner::Established {
+                    established,
+                    outbound_substreams_mapping,
+                    ..
+                },
+            ) => {
+                // It is possible that the remote has closed the outbound notification substream
+                // while a `QueueNotification` message was being delivered, or that the API user
+                // queued a notification before the message about the substream being closed was
+                // delivered to the coordinator.
+                // If that happens, we intentionally silently discard the message, causing the
+                // notification to not be sent. This is consistent with the guarantees about
+                // notifications delivered that are documented in the public API.
+                if let Some(inner_substream_id) = outbound_substreams_mapping.get(&substream_id) {
+                    established.write_notification_unbounded(*inner_substream_id, notification);
+                }
+            }
+            (
+                CoordinatorToConnectionInner::AnswerRequest {
+                    substream_id,
+                    response,
+                },
+                MultiStreamConnectionTaskInner::Established { established, .. },
+            ) => match established.respond_in_request(substream_id, response) {
+                Ok(()) => {}
+                Err(established::RespondInRequestError::SubstreamClosed) => {
+                    // As documented, answering an obsolete request is simply ignored.
+                }
+            },
+            (
+                CoordinatorToConnectionInner::AcceptInNotifications {
+                    substream_id,
+                    handshake,
+                },
+                MultiStreamConnectionTaskInner::Established { established, .. },
+            ) => {
+                // TODO: must verify that the substream is still valid
+                established.accept_in_notifications_substream(substream_id, handshake, ());
+            }
+            (
+                CoordinatorToConnectionInner::RejectInNotifications { substream_id },
+                MultiStreamConnectionTaskInner::Established { established, .. },
+            ) => {
+                // TODO: must verify that the substream is still valid
+                established.reject_in_notifications_substream(substream_id);
+            }
+            (
+                CoordinatorToConnectionInner::StartShutdown { .. },
+                MultiStreamConnectionTaskInner::Established { .. },
+            ) => {
+                // TODO: implement proper shutdown
+                self.pending_messages
+                    .push_back(ConnectionToCoordinatorInner::StartShutdown);
+                self.pending_messages
+                    .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
+                self.connection = MultiStreamConnectionTaskInner::ShutdownWaitingAck {
+                    was_api_reset: false,
+                };
+            }
+            (
+                CoordinatorToConnectionInner::AcceptInNotifications { .. }
+                | CoordinatorToConnectionInner::RejectInNotifications { .. }
+                | CoordinatorToConnectionInner::AnswerRequest { .. }
+                | CoordinatorToConnectionInner::OpenOutNotifications { .. }
+                | CoordinatorToConnectionInner::CloseOutNotifications { .. }
+                | CoordinatorToConnectionInner::QueueNotification { .. },
+                MultiStreamConnectionTaskInner::ShutdownAcked { .. },
+            ) => unreachable!(),
+            (
+                CoordinatorToConnectionInner::AcceptInNotifications { .. }
+                | CoordinatorToConnectionInner::RejectInNotifications { .. }
+                | CoordinatorToConnectionInner::AnswerRequest { .. }
+                | CoordinatorToConnectionInner::OpenOutNotifications { .. }
+                | CoordinatorToConnectionInner::CloseOutNotifications { .. }
+                | CoordinatorToConnectionInner::QueueNotification { .. },
+                MultiStreamConnectionTaskInner::ShutdownWaitingAck { .. },
+            ) => {
+                // There might still be some messages coming from the coordinator after the
+                // connection task has sent a message indicating that it has shut down. This is
+                // due to the concurrent nature of the API and doesn't indicate a bug. These
+                // messages are simply ignored by the connection task.
+            }
+            (
+                CoordinatorToConnectionInner::ShutdownFinishedAck,
+                MultiStreamConnectionTaskInner::ShutdownWaitingAck {
+                    was_api_reset: was_reset,
+                },
+            ) => {
+                self.connection = MultiStreamConnectionTaskInner::ShutdownAcked {
+                    was_api_reset: *was_reset,
+                };
+            }
             _ => todo!(), // TODO:
         }
     }
@@ -2004,7 +2246,12 @@ where
     /// opened. For example, if this function returns 2 and there are already 2 substreams
     /// currently being opened, then there is no need to open any additional one.
     pub fn desired_outbound_substreams(&self) -> u32 {
-        0 // TODO:
+        match &self.connection {
+            MultiStreamConnectionTaskInner::Established { established, .. } => {
+                established.desired_outbound_substreams()
+            }
+            _ => 0,
+        }
     }
 
     /// Notifies the state machine that a new substream has been opened.
@@ -2020,7 +2267,14 @@ where
     /// Panics if there already exists a substream with an identical identifier.
     ///
     pub fn add_substream(&mut self, id: TSubId, inbound: bool) {
-        todo!()
+        match &mut self.connection {
+            MultiStreamConnectionTaskInner::Established { established, .. } => {
+                established.add_substream(id, inbound)
+            }
+            _ => {
+                // TODO: reset the substream or something?
+            }
+        }
     }
 
     /// Returns a list of substreams that the state machine would like to see reset. The user is
@@ -2037,7 +2291,12 @@ where
     /// >           being sent to a connection task, which, once injected, leads to a notifications
     /// >           substream being "ready" because it needs to send more data.
     pub fn ready_substreams(&self) -> impl Iterator<Item = &TSubId> {
-        iter::empty() // TODO:
+        match &self.connection {
+            MultiStreamConnectionTaskInner::Established { established, .. } => {
+                either::Left(established.ready_substreams())
+            }
+            _ => either::Right(iter::empty()),
+        }
     }
 
     /// Immediately destroys the substream with the given identifier.
@@ -2049,7 +2308,14 @@ where
     /// Panics if there is no substream with that identifier.
     ///
     pub fn reset_substream(&mut self, substream_id: &TSubId) {
-        todo!()
+        match &mut self.connection {
+            MultiStreamConnectionTaskInner::Established { established, .. } => {
+                established.reset_substream(substream_id)
+            }
+            _ => {
+                // TODO: panic if substream id invalid?
+            }
+        }
     }
 
     /// Reads/writes data on the substream.
@@ -2068,7 +2334,15 @@ where
         substream_id: &TSubId,
         read_write: &'_ mut ReadWrite<'_, TNow>,
     ) -> bool {
-        false // TODO:
+        match &mut self.connection {
+            MultiStreamConnectionTaskInner::Established { established, .. } => {
+                established.substream_read_write(substream_id, read_write)
+            }
+            _ => {
+                // TODO: panic if substream id invalid?
+                true
+            }
+        }
     }
 }
 

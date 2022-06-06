@@ -32,7 +32,9 @@ use alloc::{
     vec::Vec,
 };
 use core::{
-    fmt, iter,
+    fmt,
+    hash::Hash,
+    iter,
     num::NonZeroUsize,
     ops::{Add, Sub},
     time::Duration,
@@ -883,8 +885,12 @@ where
     pub fn pending_outcome_ok_multi_stream<TSubId>(
         &mut self,
         id: PendingId,
+        now: TNow,
         peer_id: &PeerId,
-    ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>) {
+    ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
+    where
+        TSubId: Clone + PartialEq + Eq + Hash,
+    {
         // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
         // the user cancels the future returned by `add_outgoing_connection`.
         let (expected_peer_id, multiaddr, _when_connected) = self.pending_ids.get(id.0).unwrap();
@@ -893,9 +899,9 @@ where
             todo!() // TODO: return an error or something
         }
 
-        let (connection_id, connection_task) = self
-            .inner
-            .add_multi_stream_outgoing_connection(peer_id, multiaddr.clone());
+        let (connection_id, connection_task) =
+            self.inner
+                .add_multi_stream_outgoing_connection(now, peer_id, multiaddr.clone());
 
         // Update `self.peers`.
         {
