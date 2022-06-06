@@ -43,6 +43,24 @@ test = false
 doc = false
 
 [[bin]]
+name = "multiaddr-bytes"
+path = "fuzz_targets/multiaddr-bytes.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "multiaddr-text"
+path = "fuzz_targets/multiaddr-text.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "multihash"
+path = "fuzz_targets/multihash.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "network-connection-encrypted"
 path = "fuzz_targets/network-connection-encrypted.rs"
 test = false
@@ -51,6 +69,12 @@ doc = false
 [[bin]]
 name = "network-connection-raw"
 path = "fuzz_targets/network-connection-raw.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "peer-id"
+path = "fuzz_targets/peer-id.rs"
 test = false
 doc = false
 
