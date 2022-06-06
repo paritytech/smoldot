@@ -37,6 +37,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "network-connection-encrypted"
+path = "fuzz_targets/network-connection-encrypted.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "network-connection-raw"
 path = "fuzz_targets/network-connection-raw.rs"
 test = false
