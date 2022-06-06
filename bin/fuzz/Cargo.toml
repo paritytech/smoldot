@@ -47,3 +47,15 @@ name = "proof-node-decode"
 path = "fuzz_targets/proof-node-decode.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "protocol-blocks-request-decode"
+path = "fuzz_targets/protocol-blocks-request-decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "protocol-blocks-response-decode"
+path = "fuzz_targets/protocol-blocks-response-decode.rs"
+test = false
+doc = false
