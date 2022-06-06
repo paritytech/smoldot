@@ -404,3 +404,12 @@ fn decode_justifications<'a, E: nom::error::ParseError<&'a [u8]>>(
         )
     })(bytes)
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn regression_2339() {
+        // Regression test for https://github.com/paritytech/smoldot/issues/2339.
+        let _ = super::decode_block_request(&[26, 10]);
+    }
+}
