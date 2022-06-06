@@ -615,6 +615,7 @@ impl NetworkService {
                 Duration::from_secs(12),
             );
 
+            // TODO: somehow cancel the request if the `rx` is dropped?
             guarded.blocks_requests.insert(request_id, tx);
 
             self.inner.wake_up_main_background_task.notify(1);
