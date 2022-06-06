@@ -130,7 +130,11 @@ pub struct PrevoteRef<'a> {
 pub fn decode_grandpa_notification(
     scale_encoded: &[u8],
 ) -> Result<GrandpaNotificationRef, DecodeGrandpaNotificationError> {
-    match nom::combinator::all_consuming(grandpa_notification)(scale_encoded).finish() {
+    match nom::combinator::all_consuming(nom::combinator::complete(grandpa_notification))(
+        scale_encoded,
+    )
+    .finish()
+    {
         Ok((_, notif)) => Ok(notif),
         Err(err) => Err(DecodeGrandpaNotificationError(err.code)),
     }
