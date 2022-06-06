@@ -46,10 +46,10 @@
 //! zstandard-compressed and must also export a global symbol named `__heap_base`.
 //! More details below.
 //!
-//! ## Zstandard compression
+//! ## `Zstandard` compression
 //!
 //! The runtime code passed as parameter to [`HostVmPrototype::new`] can be compressed using the
-//! [zstd](https://en.wikipedia.org/wiki/Zstandard) algorithm.
+//! [`zstd`](https://en.wikipedia.org/wiki/Zstandard) algorithm.
 //!
 //! If the code starts with the magic bytes `[82, 188, 83, 118, 70, 219, 142, 5]`, then it is
 //! assumed that the rest of the data is a zstandard-compressed WebAssembly module.
@@ -63,7 +63,7 @@
 //! WebAssembly code is normally intended to perform its own heap-management logic internally, and
 //! use the `memory.grow` instruction if more memory is needed.
 //!
-//! In order to minimize the size of the runtime binary, and in order to accomodate for the API of
+//! In order to minimize the size of the runtime binary, and in order to accommodate for the API of
 //! the host functions that return a buffer of variable length, the Substrate/Polkadot runtimes,
 //! however, do not perform their heap management internally. Instead, they use the
 //! `ext_allocator_malloc_version_1` and `ext_allocator_free_version_1` host functions for this
@@ -88,7 +88,7 @@
 //! parameters into the Wasm virtual machine's memory, then pass a pointer and length of this
 //! buffer as the parameters of the entry point.
 //!
-//! The function returns a 64bits number. The 32 less significant bits represent a pointer to the
+//! The function returns a 64 bits number. The 32 less significant bits represent a pointer to the
 //! Wasm virtual machine's memory, and the 32 most significant bits a length. This pointer and
 //! length designate a buffer containing the actual return value.
 //!
@@ -334,7 +334,7 @@ impl HostVmPrototype {
         self.run_vectored(function_to_call, iter::once(data))
     }
 
-    /// Same as [`HostVmPrototype::run`], except that the function desn't need any parameter.
+    /// Same as [`HostVmPrototype::run`], except that the function doesn't need any parameter.
     pub fn run_no_param(self, function_to_call: &str) -> Result<ReadyToRun, (StartErr, Self)> {
         self.run_vectored(function_to_call, iter::empty::<Vec<u8>>())
     }
@@ -461,7 +461,7 @@ pub enum HostVm {
     /// Need to provide the storage key that follows a specific one.
     #[from]
     ExternalStorageNextKey(ExternalStorageNextKey),
-    /// Must the set value of an offchain storage entry.
+    /// Must the set value of an off-chain storage entry.
     #[from]
     ExternalOffchainStorageSet(ExternalOffchainStorageSet),
     /// Need to call `Core_version` on the given Wasm code and return the raw output (i.e.
@@ -791,8 +791,8 @@ impl ReadyToRun {
         macro_rules! expect_state_version {
             ($num:expr) => {{
                 match &params[$num] {
-                    vm::WasmValue::I32(0) => 0,
-                    vm::WasmValue::I32(1) => 1,
+                    vm::WasmValue::I32(0) => trie::TrieEntryVersion::V0,
+                    vm::WasmValue::I32(1) => trie::TrieEntryVersion::V1,
                     v => {
                         return HostVm::Error {
                             error: Error::WrongParamTy {
@@ -932,9 +932,10 @@ impl ReadyToRun {
             HostFunction::ext_storage_root_version_2 => {
                 let state_version = expect_state_version!(0);
                 match state_version {
-                    0 => HostVm::ExternalStorageRoot(ExternalStorageRoot { inner: self.inner }),
-                    1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
-                    _ => unreachable!(),
+                    trie::TrieEntryVersion::V0 => {
+                        HostVm::ExternalStorageRoot(ExternalStorageRoot { inner: self.inner })
+                    }
+                    trie::TrieEntryVersion::V1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
                 }
             }
             HostFunction::ext_storage_changes_root_version_1 => {
@@ -1055,8 +1056,8 @@ impl ReadyToRun {
                     if let Ok(public_key) = public_key {
                         let signature =
                             ed25519_zebra::Signature::from(expect_pointer_constant_size!(0, 64));
-                        let message = expect_pointer_size!(1).as_ref().to_owned(); // TODO: to_owned() :-/
-                        public_key.verify(&signature, &message).is_ok()
+                        let message = expect_pointer_size!(1);
+                        public_key.verify(&signature, message.as_ref()).is_ok()
                     } else {
                         false
                     }
@@ -1078,11 +1079,15 @@ impl ReadyToRun {
                         schnorrkel::PublicKey::from_bytes(&expect_pointer_constant_size!(2, 32))
                             .unwrap();
 
-                    let message = expect_pointer_size!(1).as_ref().to_owned(); // TODO: to_owned() :-/
                     let signature = expect_pointer_constant_size!(0, 64);
+                    let message = expect_pointer_size!(1);
 
                     signing_public_key
-                        .verify_simple_preaudit_deprecated(b"substrate", &message, &signature)
+                        .verify_simple_preaudit_deprecated(
+                            b"substrate",
+                            message.as_ref(),
+                            &signature,
+                        )
                         .is_ok()
                 };
 
@@ -1481,13 +1486,12 @@ impl ReadyToRun {
             HostFunction::ext_sandbox_get_global_val_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_trie_blake2_256_root_version_1
             | HostFunction::ext_trie_blake2_256_root_version_2 => {
-                if matches!(host_fn, HostFunction::ext_trie_blake2_256_root_version_2) {
-                    match expect_state_version!(1) {
-                        0 => {}
-                        1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
-                        _ => unreachable!(),
-                    }
-                }
+                let state_version =
+                    if matches!(host_fn, HostFunction::ext_trie_blake2_256_root_version_2) {
+                        expect_state_version!(1)
+                    } else {
+                        trie::TrieEntryVersion::V0
+                    };
 
                 let result = {
                     let input = expect_pointer_size!(0);
@@ -1514,7 +1518,7 @@ impl ReadyToRun {
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {
-                        Ok(elements) => Ok(trie::trie_root(&elements[..])),
+                        Ok(elements) => Ok(trie::trie_root(state_version, &elements[..])),
                         Err(_) => Err(()),
                     }
                 };
@@ -1531,16 +1535,14 @@ impl ReadyToRun {
             }
             HostFunction::ext_trie_blake2_256_ordered_root_version_1
             | HostFunction::ext_trie_blake2_256_ordered_root_version_2 => {
-                if matches!(
+                let state_version = if matches!(
                     host_fn,
                     HostFunction::ext_trie_blake2_256_ordered_root_version_2
                 ) {
-                    match expect_state_version!(1) {
-                        0 => {}
-                        1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
-                        _ => unreachable!(),
-                    }
-                }
+                    expect_state_version!(1)
+                } else {
+                    trie::TrieEntryVersion::V0
+                };
 
                 let result = {
                     let input = expect_pointer_size!(0);
@@ -1561,7 +1563,7 @@ impl ReadyToRun {
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {
-                        Ok(elements) => Ok(trie::ordered_root(&elements[..])),
+                        Ok(elements) => Ok(trie::ordered_root(state_version, &elements[..])),
                         Err(_) => Err(()),
                     }
                 };
@@ -1990,7 +1992,7 @@ impl fmt::Debug for ExternalStorageSet {
 ///
 /// This change consists in taking an existing value and assuming that it is a SCALE-encoded
 /// container. This can be done as decoding a SCALE-compact-encoded number at the start of
-/// the existing encoded value. One most then increment that number and puting `value` at the
+/// the existing encoded value. One most then increments that number and puts `value` at the
 /// end of the encoded value.
 ///
 /// It is not necessary to decode `value` as is assumed that is already encoded in the same
@@ -2075,7 +2077,7 @@ impl ExternalStorageClearPrefix {
 
     /// Resumes execution after having cleared the values.
     ///
-    /// Must be passed how many keys have been cleared, and whether some keys remaing to be
+    /// Must be passed how many keys have been cleared, and whether some keys remaining to be
     /// cleared.
     pub fn resume(self, num_cleared: u32, some_keys_remain: bool) -> HostVm {
         if self.is_v2 {
@@ -2221,7 +2223,7 @@ impl fmt::Debug for CallRuntimeVersion {
     }
 }
 
-/// Must set the value of the offchain storage.
+/// Must set the value of the off-chain storage.
 pub struct ExternalOffchainStorageSet {
     inner: Inner,
 
@@ -2271,7 +2273,7 @@ impl fmt::Debug for ExternalOffchainStorageSet {
 
 /// Report about a log entry being emitted.
 ///
-/// Use the implementation of [`fmt::Display`] to obtain the log entry. For exmaple, you can
+/// Use the implementation of [`fmt::Display`] to obtain the log entry. For example, you can
 /// call [`alloc::string::ToString::to_string`] to turn it into a `String`.
 pub struct LogEmit {
     inner: Inner,
@@ -2390,15 +2392,15 @@ struct Inner {
 
 impl Inner {
     /// Uses the memory allocator to allocate some memory for the given data, writes the data in
-    /// memory, and returns an [`HostVm`] ready for the Wasm host_fn return.
+    /// memory, and returns an [`HostVm`] ready for the Wasm `host_fn` return.
     ///
-    /// The data is passed as a list of chunks. These chunks will be laid out lineraly in memory.
+    /// The data is passed as a list of chunks. These chunks will be laid out linearly in memory.
     ///
     /// The function name passed as parameter is used for error-reporting reasons.
     ///
     /// # Panic
     ///
-    /// Must only be called while the Wasm is handling an host_fn.
+    /// Must only be called while the Wasm is handling an `host_fn`.
     ///
     fn alloc_write_and_return_pointer_size(
         mut self,
@@ -2439,15 +2441,15 @@ impl Inner {
     }
 
     /// Uses the memory allocator to allocate some memory for the given data, writes the data in
-    /// memory, and returns an [`HostVm`] ready for the Wasm host_fn return.
+    /// memory, and returns an [`HostVm`] ready for the Wasm `host_fn` return.
     ///
-    /// The data is passed as a list of chunks. These chunks will be laid out lineraly in memory.
+    /// The data is passed as a list of chunks. These chunks will be laid out linearly in memory.
     ///
     /// The function name passed as parameter is used for error-reporting reasons.
     ///
     /// # Panic
     ///
-    /// Must only be called while the Wasm is handling an host_fn.
+    /// Must only be called while the Wasm is handling an `host_fn`.
     ///
     fn alloc_write_and_return_pointer(
         mut self,
@@ -2491,7 +2493,7 @@ impl Inner {
     ///
     /// # Panic
     ///
-    /// Must only be called while the Wasm is handling an host_fn.
+    /// Must only be called while the Wasm is handling an `host_fn`.
     ///
     fn alloc(&mut self, function_name: &'static str, size: u32) -> Result<u32, Error> {
         // Use the allocator to decide where the value will be written.
@@ -2602,7 +2604,7 @@ pub enum Error {
         /// Size of the virtual memory.
         memory_size: u32,
     },
-    /// An host_fn wants to returns a certain value, but the Wasm code expects a different one.
+    /// An `host_fn` wants to returns a certain value, but the Wasm code expects a different one.
     // TODO: indicate function and actual/expected types
     ReturnValueTypeMismatch,
     /// Called a function that is unknown to the host.
@@ -2718,7 +2720,7 @@ pub enum Error {
         pointer
     )]
     FreeError {
-        /// Pointer that was expected to be free'd.
+        /// Pointer that was expected to be freed.
         pointer: u32,
     },
     /// The host function isn't implemented.

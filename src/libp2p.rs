@@ -25,16 +25,16 @@
 //! # Network identity
 //!
 //! In order to join the peer-to-peer network, one must first generate a *network identity*. A
-//! network identity is a small struct containing a cryptographic public key (typically ed25519,
+//! network identity is a small struct containing a cryptographic public key (typically Ed25519,
 //! but other algorithms might be used) or the hash of a cryptographic public key. A network
 //! identity is represented with the [`PeerId`] struct.
 //!
 //! Network identities primarily have a binary encoding. When displayed for UI purposes, the
-//! string representation, which consists in the base58 encoding of the binary encoding, is used.
+//! string representation, which consists in the Base58 encoding of the binary encoding, is used.
 //! Example string representation: `12D3KooWR3UGwwSP5wdBMk2JXXuzXoscPSudv8hmQkzfZTBzSbeE`.
 //!
 //! In order to generate a network identity, fill a [`peer_id::PublicKey::Ed25519`] with an
-//! ed25519 public key, then use [`PeerId::from_public_key`].
+//! Ed25519 public key, then use [`PeerId::from_public_key`].
 //!
 //! When establishing a connection to another member the peer-to-peer network, a Diffie-Hellman
 //! handshake is performed in order to ensure that the remote indeed possesses the private key
@@ -42,7 +42,7 @@
 //!
 //! See also the documentation of [`peer_id`] for more information.
 //!
-//! # The ReadWrite object
+//! # The `ReadWrite` object
 //!
 //! One of the most important objects in this module is the [`read_write::ReadWrite`] struct.
 //!
@@ -64,8 +64,8 @@
 //! summary, contains:
 //!
 //! - A list of handshaking and established connections, that the API user must manually
-//! synchronize by calling [`peers::Peers::read_write`]. When inserting a new outgoing connection,
-//! the API user can specify which [`PeerId`] this connection is expected to reach.
+//! synchronize by calling [`peers::ConnectionTask::read_write`]. When inserting a new outgoing
+//! connection, the API user can specify which [`PeerId`] this connection is expected to reach.
 //! - A list of [`̀PeerId`]s that have been marked by the API user as desired. The [`peers::Peers`]
 //! is then able to provide the list of [`PeerId`]s that have been marked as desired but that no
 //! existing connection reaches or tries to reach.
@@ -79,8 +79,8 @@
 //!
 //! It is also the responsibility of the API user to call [`peers::Peers::next_event`] in order to
 //! react to the activity on the various connections, and user the various other methods of the
-//! [`peers::Peers`] state machine, such as for example [`peers::Peers::request`], to interact
-//! with the remotes.
+//! [`peers::Peers`] state machine, such as for example [`peers::Peers::start_request`], to
+//! interact with the remotes.
 //!
 //! See also the documentation of [`peers`] for more information.
 //!

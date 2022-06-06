@@ -78,8 +78,6 @@ use std::{
     time::Duration,
 };
 
-mod sub_utils;
-
 /// Configuration for a runtime service.
 pub struct Config<TPlat: Platform> {
     /// Name of the chain, for logging purposes.
@@ -181,13 +179,14 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// This function only returns once the runtime of the current finalized block is known. This
     /// might take a long time.
     ///
-    /// Contrary to [`RuntimeService::subscribe_best`], *all* new blocks are reported. Only up to
-    /// `buffer_size` block notifications are buffered in the channel. If the channel is full
-    /// when a new notification is attempted to be pushed, the channel gets closed.
+    /// Only up to `buffer_size` block notifications are buffered in the channel. If the channel
+    /// is full when a new notification is attempted to be pushed, the channel gets closed.
     ///
     /// A maximum number of pinned blocks must be passed, indicating the maximum number of blocks
     /// that the runtime service will pin at the same time for this subscription. If this maximum
-    /// is reached, the channel will get closed.
+    /// is reached, the channel will get closed. In situations where the subscriber is guaranteed
+    /// to always properly unpin blocks, a value of `usize::max_value()` can be passed in order
+    /// to ignore this maximum.
     ///
     /// The channel also gets closed if a gap in the finality happens, such as after a Grandpa
     /// warp syncing.
@@ -198,18 +197,10 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         buffer_size: usize,
         max_pinned_blocks: usize,
     ) -> SubscribeAll<TPlat> {
-        Self::subscribe_all_inner(&self.guarded, buffer_size, max_pinned_blocks).await
-    }
-
-    async fn subscribe_all_inner(
-        guarded: &Arc<Mutex<Guarded<TPlat>>>,
-        buffer_size: usize,
-        max_pinned_blocks: usize,
-    ) -> SubscribeAll<TPlat> {
         // First, lock `guarded` and wait for the tree to be in `FinalizedBlockRuntimeKnown` mode.
         // This can take a long time.
         let mut guarded_lock = loop {
-            let guarded_lock = guarded.lock().await;
+            let guarded_lock = self.guarded.lock().await;
 
             match &guarded_lock.tree {
                 GuardedInner::FinalizedBlockRuntimeKnown { .. } => break guarded_lock,
@@ -348,7 +339,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             new_blocks: Subscription {
                 subscription_id,
                 channel: new_blocks_channel,
-                guarded: guarded.clone(),
+                guarded: self.guarded.clone(),
             },
         }
     }
@@ -596,7 +587,7 @@ impl<TPlat: Platform> Subscription<TPlat> {
 pub enum Notification {
     /// A non-finalized block has been finalized.
     Finalized {
-        /// Blake2 hash of the header of the block that has been finalized.
+        /// BLAKE2 hash of the header of the block that has been finalized.
         ///
         /// A block with this hash is guaranteed to have earlier been reported in a
         /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
@@ -621,7 +612,7 @@ pub enum Notification {
         /// or in a [`Notification::Block`].
         best_block_hash: [u8; 32],
 
-        /// List of blake2 hashes of the headers of the blocks that have been discarded because
+        /// List of BLAKE2 hashes of the headers of the blocks that have been discarded because
         /// they're not descendants of the newly-finalized block.
         ///
         /// This list contains all the siblings of the newly-finalized block and all their
@@ -644,7 +635,7 @@ pub struct BlockNotification {
     /// SCALE-encoded header of the block.
     pub scale_encoded_header: Vec<u8>,
 
-    /// Blake2 hash of the header of the parent of this block.
+    /// BLAKE2 hash of the header of the parent of this block.
     ///
     ///
     /// A block with this hash is guaranteed to have earlier been reported in a
@@ -708,10 +699,10 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
     }
 
     /// Returns the specification of the given runtime.
-    pub fn specification(&mut self) -> Result<executor::CoreVersion, RuntimeCallError> {
+    pub fn specification(&self) -> Result<executor::CoreVersion, RuntimeError> {
         match self.runtime.runtime.as_ref() {
             Ok(r) => Ok(r.runtime_spec.clone()),
-            Err(err) => Err(RuntimeCallError::InvalidRuntime(err.clone())),
+            Err(err) => Err(err.clone()),
         }
     }
 
@@ -841,7 +832,11 @@ impl<'a> RuntimeCallLock<'a> {
             })
             .map_err(RuntimeCallError::StorageRetrieval)?;
 
-            if node_info.storage_value.is_some() {
+            if matches!(
+                node_info.storage_value,
+                proof_verify::StorageValue::Known(_)
+                    | proof_verify::StorageValue::HashKnownValueMissing(_)
+            ) {
                 assert_eq!(key.len() % 2, 0);
                 output.push(trie::nibbles_to_bytes_extend(key.iter().copied()).collect::<Vec<_>>());
             }
@@ -1059,7 +1054,7 @@ async fn run_background<TPlat: Platform>(
     loop {
         // The buffer size should be large enough so that, if the CPU is busy, it doesn't
         // become full before the execution of the runtime service resumes.
-        let subscription = sync_service.subscribe_all(16, true).await;
+        let subscription = sync_service.subscribe_all(32, true).await;
 
         log::debug!(
             target: &log_target,
@@ -1134,6 +1129,16 @@ async fn run_background<TPlat: Platform>(
                     }
                 }
 
+                log::debug!(
+                    target: &log_target,
+                    "Worker => RuntimeKnown(finalized_hash={})",
+                    HashDisplay(&finalized_block_hash)
+                );
+
+                if let GuardedInner::FinalizedBlockRuntimeUnknown { when_known, .. } = &lock.tree {
+                    when_known.notify(usize::max_value());
+                }
+
                 lock.tree = GuardedInner::FinalizedBlockRuntimeKnown {
                     all_blocks_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
                         32,
@@ -1183,6 +1188,10 @@ async fn run_background<TPlat: Platform>(
                     },
                 };
             } else {
+                if let GuardedInner::FinalizedBlockRuntimeUnknown { when_known, .. } = &lock.tree {
+                    when_known.notify(usize::max_value());
+                }
+
                 lock.tree = GuardedInner::FinalizedBlockRuntimeUnknown {
                     when_known: event_listener::Event::new(),
                     tree: {
@@ -1634,7 +1643,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             .map_or(new_finalized.hash, |idx| tree.block_user_data(idx).hash);
                         log::debug!(
                             target: &self.log_target,
-                            "Worker => OutputFinalized(hash={}, best={})",
+                            "Worker => RuntimeKnown(finalized_hash={}, best={})",
                             HashDisplay(&new_finalized.hash), HashDisplay(&best_block_hash)
                         );
 

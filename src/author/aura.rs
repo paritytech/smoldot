@@ -32,7 +32,7 @@ pub struct Config<'a, TLocAuth> {
     /// authorities list change digest item.
     pub current_authorities: header::AuraAuthoritiesIter<'a>,
 
-    /// Iterator to the list of sr25519 public keys available locally.
+    /// Iterator to the list of Sr25519 public keys available locally.
     ///
     /// Must implement `Iterator<Item = &[u8; 32]>`.
     pub local_authorities: TLocAuth,

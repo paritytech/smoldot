@@ -18,11 +18,9 @@
 // TODO: also implement the "proof" way to request the state
 // TODO: support child trie requests
 
-use super::{schema, ProtobufDecodeError};
+use crate::util::protobuf;
 
-use alloc::{vec, vec::Vec};
-use core::iter;
-use prost::Message as _;
+use alloc::vec::Vec;
 
 /// Description of a state request that can be sent to a peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,42 +36,56 @@ pub struct StateRequestConfig {
     pub start_key: Vec<u8>,
 }
 
+// See https://github.com/paritytech/substrate/blob/c8653447fc8ef8d95a92fe164c96dffb37919e85/client/network/light/src/schema/light.v1.proto
+// for protocol definition.
+
 /// Builds the bytes corresponding to a state request.
 pub fn build_state_request(config: StateRequestConfig) -> impl Iterator<Item = impl AsRef<[u8]>> {
-    // Note: while the API of this function allows for a zero-cost implementation, the protobuf
-    // library doesn't permit to avoid allocations.
-
-    let request = schema::StateRequest {
-        block: config.block_hash.to_vec(),
-        start: vec![config.start_key],
-        no_proof: true,
-    };
-
-    let request_bytes = {
-        let mut buf = Vec::with_capacity(request.encoded_len());
-        request.encode(&mut buf).unwrap();
-        buf
-    };
-
-    iter::once(request_bytes)
+    protobuf::bytes_tag_encode(1, config.block_hash)
+        .map(either::Right)
+        .map(either::Right)
+        .chain(
+            protobuf::bytes_tag_encode(2, config.start_key)
+                .map(either::Left)
+                .map(either::Right),
+        )
+        .chain(protobuf::bool_tag_encode(3, true).map(either::Left))
 }
 
 /// Decodes a response to a state request.
-// TODO: should have a more zero-cost API, but we're limited by the protobuf library for that
+// TODO: should have a more zero-cost API
 pub fn decode_state_response(
     response_bytes: &[u8],
 ) -> Result<Vec<StateResponseEntry>, DecodeStateResponseError> {
-    let response = schema::StateResponse::decode(response_bytes)
-        .map_err(ProtobufDecodeError)
-        .map_err(DecodeStateResponseError::ProtobufDecode)?;
+    let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
+        protobuf::message_decode((protobuf::message_tag_decode(
+            1,
+            protobuf::message_decode((
+                protobuf::bytes_tag_decode(1),
+                protobuf::message_tag_decode(
+                    2,
+                    protobuf::message_decode((
+                        protobuf::bytes_tag_decode(1),
+                        protobuf::bytes_tag_decode(2),
+                    )),
+                ),
+                protobuf::bool_tag_decode(3),
+            )),
+        ),)),
+    );
 
-    let entries = response
-        .entries
+    let entries: Vec<((&[u8],), Vec<((&[u8],), (&[u8],))>, (bool,))> =
+        match nom::Finish::finish(parser(response_bytes)) {
+            Ok((_, (entries,))) => entries,
+            Err(_) => return Err(DecodeStateResponseError::ProtobufDecode),
+        };
+
+    let entries = entries
         .into_iter()
-        .flat_map(|e| e.entries.into_iter())
-        .map(|entry| StateResponseEntry {
-            key: entry.key,
-            value: entry.value,
+        .flat_map(|(_, entries, _)| entries.into_iter())
+        .map(|((key,), (value,))| StateResponseEntry {
+            key: key.to_vec(),
+            value: value.to_vec(),
         })
         .collect();
 
@@ -95,6 +107,6 @@ pub struct StateResponseEntry {
 /// Error potentially returned by [`decode_state_response`].
 #[derive(Debug, derive_more::Display)]
 pub enum DecodeStateResponseError {
-    /// Error while decoding the protobuf encoding.
-    ProtobufDecode(ProtobufDecodeError),
+    /// Error while decoding the Protobuf encoding.
+    ProtobufDecode,
 }

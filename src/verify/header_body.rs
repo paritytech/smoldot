@@ -113,7 +113,7 @@ pub struct Success {
     /// List of changes to the storage top trie that the block performs.
     pub storage_top_trie_changes: storage_diff::StorageDiff,
 
-    /// List of changes to the offchain storage that this block performs.
+    /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::StorageDiff,
 
     /// Cache used for calculating the top trie root.
@@ -702,7 +702,7 @@ fn check_check_inherents_output(output: &[u8]) -> Result<(), Error> {
                     }),
                     crate::util::nom_bytes_decode,
                 )),
-                || Vec::new(),
+                Vec::new,
                 |mut errors, (module, error)| {
                     if module != *b"auraslot" && module != *b"babeslot" {
                         errors.push((module, error.to_vec()));

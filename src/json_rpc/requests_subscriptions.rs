@@ -18,7 +18,7 @@
 //! The [`RequestsSubscriptions`] state machine holds a list of clients, pending outgoing messages,
 //! pending requests, and active subscriptions.
 //!
-//! The code in this module is the frontline of the JSON-RPC server. It can be subject to DoS
+//! The code in this module is the front line of the JSON-RPC server. It can be subject to DoS
 //! attacks, and is therefore designed to properly distribute resources between JSON-RPC clients.
 //! If you use this data structure as intended, your design is safe from DoS attacks.
 //!
@@ -36,7 +36,7 @@
 //! There should be:
 //!
 //! - One lightweight task for each client currently connected to the server.
-//! - A fixed number of lightweight tasks (e.g. 16) dedicated to answering reqsuests.
+//! - A fixed number of lightweight tasks (e.g. 16) dedicated to answering requests.
 //!
 //! ## Clients
 //!
@@ -223,7 +223,7 @@ impl RequestsSubscriptions {
     /// [`RequestsSubscriptions::remove_client`].
     ///
     /// > **Note**: This function can typically be used at runtime to adjust the maximum number
-    /// >           of clients based on the resource consumptions of the binary.
+    /// >           of clients based on the resource consumption of the binary.
     pub fn set_max_clients(&self, max_clients: usize) {
         self.max_clients.store(max_clients, Ordering::Relaxed);
     }
@@ -683,7 +683,7 @@ impl RequestsSubscriptions {
     /// JSON-RPC client.
     ///
     /// For some JSON-RPC functions, the value of this constant can easily be deduced from the
-    /// logic of the function. For other functions, the value of this constant should be hardcoded.
+    /// logic of the function. For other functions, the value of this constant should be hard coded.
     pub async fn start_subscription(
         &self,
         client: &RequestId,

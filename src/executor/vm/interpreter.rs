@@ -178,7 +178,10 @@ impl InterpreterPrototype {
                 Err(err) => return Err(NewErr::ModuleError(ModuleError(err.to_string()))),
             }
         };
-        // TODO: explain `assert_no_start`
+
+        if not_started.has_start() {
+            return Err(NewErr::StartFunctionNotSupported);
+        }
         let module = not_started.assert_no_start();
 
         let memory = if let Some(import_memory) = import_memory {

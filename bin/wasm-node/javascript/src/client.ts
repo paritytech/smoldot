@@ -408,6 +408,8 @@ export function start(options?: ClientOptions): Client {
       globalThis.clearTimeout(livenessTimeout);
     livenessTimeout = globalThis.setTimeout(() => {
       livenessTimeout = null;
+      if (workerError)
+        return; // The unresponsiveness is due to a crash. No need to print more warnings.
       console.warn(
         "Smoldot appears unresponsive" +
         (workerCurrentTask.name ? (" while executing task `" + workerCurrentTask.name + "`") : "") +
@@ -576,6 +578,11 @@ export function start(options?: ClientOptions): Client {
     addChain: (options: AddChainOptions): Promise<Chain> => {
       if (workerError)
         throw workerError;
+
+      // Passing a JSON object for the chain spec is an easy mistake, so we provide a more
+      // readable error.
+      if (!(typeof options.chainSpec === 'string'))
+        throw new Error("Chain specification must be a string");
 
       let potentialRelayChainsIds = [];
       if (!!options.potentialRelayChains) {

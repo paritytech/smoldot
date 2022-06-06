@@ -138,7 +138,7 @@ pub struct Config<TBannedBlocksIter> {
     /// Maximum number of simultaneous pending requests made towards the same block.
     ///
     /// Should be set according to the failure rate of requests. For example if requests have a
-    /// 10% chance of failing, then setting to value to `2` gives a 1% chance that downloading
+    /// `10%` chance of failing, then setting to value to `2` gives a `1%` chance that downloading
     /// this block will overall fail and has to be attempted again.
     ///
     /// Also keep in mind that sources might maliciously take a long time to answer requests. A
@@ -664,7 +664,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             .blocks
             .contains_unverified_block(announced_header_number, &announced_header_hash)
         {
-            return BlockAnnounceOutcome::Unknown(AnnouncedBlockUnknown {
+            BlockAnnounceOutcome::Unknown(AnnouncedBlockUnknown {
                 inner: self,
                 announced_header_hash,
                 announced_header_number,
@@ -672,9 +672,9 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 announced_header_encoded: announced_header.into(),
                 source_id,
                 is_best,
-            });
+            })
         } else {
-            return BlockAnnounceOutcome::Known(AnnouncedBlockKnown {
+            BlockAnnounceOutcome::Known(AnnouncedBlockKnown {
                 inner: self,
                 announced_header_hash,
                 announced_header_number,
@@ -683,7 +683,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 is_in_chain: false,
                 source_id,
                 is_best,
-            });
+            })
         }
     }
 
@@ -987,7 +987,7 @@ pub enum AddBlock<TBl, TRq, TSrc> {
     AlreadyInChain(AddBlockOccupied<TBl, TRq, TSrc>),
 }
 
-/// See [`FinishAncestrySearch::add_block`] and ̀[`AddBlock`].
+/// See [`FinishAncestrySearch::add_block`] and [`AddBlock`].
 pub struct AddBlockOccupied<TBl, TRq, TSrc> {
     inner: FinishAncestrySearch<TBl, TRq, TSrc>,
     decoded_header: header::Header,
@@ -1073,7 +1073,7 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
                     &self.inner.expected_next_hash,
                 );
             if block_user_data.header.is_none() {
-                block_user_data.header = Some(self.decoded_header.clone().into());
+                block_user_data.header = Some(self.decoded_header.clone());
                 // TODO: copying bytes :-/
             }
 
@@ -1100,7 +1100,7 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
     }
 }
 
-/// See [`FinishAncestrySearch::add_block`] and ̀[`AddBlock`].
+/// See [`FinishAncestrySearch::add_block`] and [`AddBlock`].
 pub struct AddBlockVacant<TBl, TRq, TSrc> {
     inner: FinishAncestrySearch<TBl, TRq, TSrc>,
     decoded_header: header::Header,
@@ -1132,7 +1132,7 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
                 parent_hash: self.decoded_header.parent_hash,
             },
             PendingBlock {
-                header: Some(self.decoded_header.clone().into()),
+                header: Some(self.decoded_header.clone()),
                 justifications: self.justifications,
                 user_data,
             },

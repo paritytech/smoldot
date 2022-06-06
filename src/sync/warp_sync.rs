@@ -938,7 +938,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
         )
     }
 
-    /// Set the code and heappages from storage using the keys `:code` and `:heappages`
+    /// Set the code and heap pages from storage using the keys `:code` and `:heappages`
     /// respectively. Also allows setting an execution hint for the virtual machine.
     pub fn set_virtual_machine_params(
         self,

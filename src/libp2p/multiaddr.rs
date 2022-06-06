@@ -31,12 +31,12 @@ pub struct Multiaddr {
 }
 
 impl Multiaddr {
-    /// Creates a new empty multiaddr.
-    pub fn new() -> Self {
+    /// Creates a new empty `Multiaddr`.
+    pub fn empty() -> Self {
         Multiaddr { bytes: Vec::new() }
     }
 
-    /// Pushes a protocol at the end of this multiaddr.
+    /// Pushes a protocol at the end of this `Multiaddr`.
     pub fn push(&mut self, protocol: ProtocolRef) {
         for slice in protocol.as_bytes() {
             self.bytes.extend(slice.as_ref());
@@ -48,7 +48,7 @@ impl Multiaddr {
         self.bytes.shrink_to_fit();
     }
 
-    /// Returns the serialized version of this multiaddr.
+    /// Returns the serialized version of this `Multiaddr`.
     pub fn to_vec(&self) -> Vec<u8> {
         self.bytes.clone()
     }
@@ -64,7 +64,7 @@ impl Multiaddr {
     ///
     /// # Panic
     ///
-    /// Panics if the multiaddr is empty.
+    /// Panics if the `Multiaddr` is empty.
     ///
     pub fn pop(&mut self) {
         let remain = {
@@ -184,6 +184,7 @@ pub enum ParseError {
     NotBase58,
     InvalidDomainName,
     InvalidMultihash(multihash::FromBytesError),
+    InvalidMemoryPayload,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,6 +203,8 @@ pub enum ProtocolRef<'a> {
     Ws,
     // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
     Wss,
+    // TODO: unclear what the payload is; see https://github.com/multiformats/multiaddr/issues/127
+    Memory(u64),
 }
 
 impl<'a> ProtocolRef<'a> {
@@ -261,6 +264,14 @@ impl<'a> ProtocolRef<'a> {
             }
             "ws" => Ok(ProtocolRef::Ws),
             "wss" => Ok(ProtocolRef::Wss),
+            "memory" => {
+                let payload = iter.next().ok_or(ParseError::UnexpectedEof)?;
+                Ok(ProtocolRef::Memory(
+                    payload
+                        .parse()
+                        .map_err(|_| ParseError::InvalidMemoryPayload)?,
+                ))
+            }
             _ => Err(ParseError::UnrecognizedProtocol),
         }
     }
@@ -282,6 +293,7 @@ impl<'a> ProtocolRef<'a> {
             ProtocolRef::Udp(_) => 273,
             ProtocolRef::Ws => 477,
             ProtocolRef::Wss => 478,
+            ProtocolRef::Memory(_) => 777,
         };
 
         // TODO: optimize by not allocating a Vec
@@ -305,6 +317,7 @@ impl<'a> ProtocolRef<'a> {
                 out
             }
             ProtocolRef::Tcp(port) | ProtocolRef::Udp(port) => port.to_be_bytes().to_vec(),
+            ProtocolRef::Memory(payload) => payload.to_be_bytes().to_vec(),
             _ => Vec::new(),
         };
 
@@ -335,6 +348,7 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
             ProtocolRef::Udp(port) => write!(f, "/udp/{}", port),
             ProtocolRef::Ws => write!(f, "/ws"),
             ProtocolRef::Wss => write!(f, "/wss"),
+            ProtocolRef::Memory(payload) => write!(f, "/memory/{}", payload),
         }
     }
 }
@@ -468,6 +482,8 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             460 => Ok((bytes, ProtocolRef::Quic)),
             477 => Ok((bytes, ProtocolRef::Ws)),
             478 => Ok((bytes, ProtocolRef::Wss)),
+            // TODO: unclear what the /memory payload is, see https://github.com/multiformats/multiaddr/issues/127
+            777 => nom::combinator::map(nom::number::complete::be_u64, ProtocolRef::Memory)(bytes),
             _ => Err(nom::Err::Error(nom::error::make_error(
                 bytes,
                 nom::error::ErrorKind::Tag,
@@ -510,6 +526,7 @@ mod tests {
         check_valid("/dns4/example.com./tcp/55");
         check_valid("/dns6//tcp/55");
         check_valid("/dnsaddr/./tcp/55");
+        check_valid("/memory/1234567890");
 
         check_invalid("/");
         check_invalid("ip4/1.2.3.4");

@@ -29,7 +29,7 @@
 //! 3- When sending a notification.
 //! 4- When receiving a request and sending back a response.
 //! 5- When receiving a notification.
-//! // TODO: 6- on yamux ping frames
+//! // TODO: 6- on Yamux ping frames
 //!
 //! In order to solve 1-, there exists a maximum number of simultaneous substreams allowed by the
 //! protocol, thereby guaranteeing that the memory consumption doesn't exceed a certain bound.
@@ -56,6 +56,7 @@ use core::{
     ops::{Add, Sub},
     time::Duration,
 };
+use rand::{Rng as _, SeedableRng as _};
 
 pub mod substream;
 
@@ -101,6 +102,11 @@ struct Inner<TNow, TRqUd, TNotifUd> {
     outgoing_pings: yamux::SubstreamId,
     /// When to start the next ping attempt.
     next_ping: TNow,
+    /// Source of randomness to generate ping payloads.
+    ///
+    /// Note that we use ChaCha20 because the rest of the code base also uses ChaCha20. This avoids
+    /// unnecessary code being included in the binary and reduces the binary size.
+    ping_payload_randomness: rand_chacha::ChaCha20Rng,
 
     /// See [`Config::request_protocols`].
     request_protocols: Vec<ConfigRequestResponse>,
@@ -280,16 +286,12 @@ where
                         read_bytes: 0,
                         written_bytes: 0,
                         wake_up_after: None,
-                        wake_up_future: None,
                     };
 
                     let (_, _event) = state_machine.read_write(&mut substream_read_write);
 
                     if let Some(wake_up_after) = substream_read_write.wake_up_after {
                         read_write.wake_up_after(&wake_up_after);
-                    }
-                    if let Some(future) = substream_read_write.wake_up_future {
-                        read_write.wake_up_when_boxed(future);
                     }
 
                     // TODO: finish here
@@ -318,7 +320,7 @@ where
                         }
 
                         // It might be that the substream has been closed in `process_substream`.
-                        if self.inner.yamux.substream_by_id(substream_id).is_none() {
+                        if self.inner.yamux.substream_by_id_mut(substream_id).is_none() {
                             break;
                         }
                     }
@@ -407,7 +409,7 @@ where
         let mut total_read = 0;
 
         loop {
-            let mut substream = inner.yamux.substream_by_id(substream_id).unwrap();
+            let mut substream = inner.yamux.substream_by_id_mut(substream_id).unwrap();
 
             let read_is_closed = substream.is_remote_closed();
             let write_is_closed = substream.is_closed();
@@ -428,7 +430,6 @@ where
                 read_bytes: 0,
                 written_bytes: 0,
                 wake_up_after: None,
-                wake_up_future: None,
             };
 
             let (substream_update, event) = substream
@@ -440,9 +441,6 @@ where
             total_read += substream_read_write.read_bytes;
             if let Some(wake_up_after) = substream_read_write.wake_up_after {
                 outer_read_write.wake_up_after(&wake_up_after);
-            }
-            if let Some(wake_up_future) = substream_read_write.wake_up_future {
-                outer_read_write.wake_up_when_boxed(wake_up_future);
             }
 
             let closed_after = substream_read_write.outgoing_buffer.is_none();
@@ -460,7 +458,11 @@ where
                 Some(s) => *substream.user_data() = Some(s),
                 None => {
                     // TODO: only reset if not already closed
-                    inner.yamux.substream_by_id(substream_id).unwrap().reset();
+                    inner
+                        .yamux
+                        .substream_by_id_mut(substream_id)
+                        .unwrap()
+                        .reset();
                 }
             };
 
@@ -469,7 +471,7 @@ where
                 Some(substream::Event::InboundNegotiated(protocol)) => {
                     let substream = inner
                         .yamux
-                        .substream_by_id(substream_id)
+                        .substream_by_id_mut(substream_id)
                         .unwrap()
                         .into_user_data()
                         .as_mut()
@@ -553,21 +555,14 @@ where
                 protocol_index,
                 handshake,
             },
-            substream::Event::NotificationsInOpenCancel { protocol_index } => {
-                Event::NotificationsInOpenCancel {
-                    id: SubstreamId(substream_id),
-                    protocol_index,
-                }
-            }
+            substream::Event::NotificationsInOpenCancel => Event::NotificationsInOpenCancel {
+                id: SubstreamId(substream_id),
+            },
             substream::Event::NotificationIn { notification } => Event::NotificationIn {
                 notification,
                 id: SubstreamId(substream_id),
             },
-            substream::Event::NotificationsInClose {
-                protocol_index,
-                outcome,
-            } => Event::NotificationsInClose {
-                protocol_index,
+            substream::Event::NotificationsInClose { outcome } => Event::NotificationsInClose {
                 id: SubstreamId(substream_id),
                 outcome,
             },
@@ -649,7 +644,7 @@ where
         SubstreamId(substream.id())
     }
 
-    /// Returns the user dat associated to a notifications substream.
+    /// Returns the user data associated to a notifications substream.
     ///
     /// Returns `None` if the substream doesn't exist or isn't a notifications substream.
     pub fn notifications_substream_user_data_mut(
@@ -658,7 +653,7 @@ where
     ) -> Option<&mut TNotifUd> {
         self.inner
             .yamux
-            .substream_by_id(id.0)?
+            .substream_by_id_mut(id.0)?
             .into_user_data()
             .as_mut()
             .unwrap()
@@ -727,7 +722,7 @@ where
                                                       // TODO: self.inner.notifications_protocols[protocol_index].max_notification_size;
         self.inner
             .yamux
-            .substream_by_id(substream_id.0)
+            .substream_by_id_mut(substream_id.0)
             .unwrap()
             .into_user_data()
             .as_mut()
@@ -745,7 +740,7 @@ where
     pub fn reject_in_notifications_substream(&mut self, substream_id: SubstreamId) {
         self.inner
             .yamux
-            .substream_by_id(substream_id.0)
+            .substream_by_id_mut(substream_id.0)
             .unwrap()
             .into_user_data()
             .as_mut()
@@ -777,7 +772,7 @@ where
     ) {
         self.inner
             .yamux
-            .substream_by_id(substream_id.0)
+            .substream_by_id_mut(substream_id.0)
             .unwrap()
             .into_user_data()
             .as_mut()
@@ -794,13 +789,12 @@ where
     /// Panics if the [`SubstreamId`] doesn't correspond to a notifications substream, or if the
     /// notifications substream isn't in the appropriate state.
     ///
-    // TODO: shouldn't require `&mut self`
-    pub fn notification_substream_queued_bytes(&mut self, substream_id: SubstreamId) -> usize {
+    pub fn notification_substream_queued_bytes(&self, substream_id: SubstreamId) -> usize {
         let substream = self.inner.yamux.substream_by_id(substream_id.0).unwrap();
         let already_queued = substream.queued_bytes();
         let from_substream = substream
             .into_user_data()
-            .as_mut()
+            .as_ref()
             .unwrap()
             .notification_substream_queued_bytes();
         already_queued + from_substream
@@ -821,7 +815,7 @@ where
     pub fn close_notifications_substream(&mut self, substream_id: SubstreamId) {
         self.inner
             .yamux
-            .substream_by_id(substream_id.0)
+            .substream_by_id_mut(substream_id.0)
             .unwrap()
             .into_user_data()
             .as_mut()
@@ -841,7 +835,7 @@ where
     ) -> Result<(), RespondInRequestError> {
         self.inner
             .yamux
-            .substream_by_id(substream_id.0)
+            .substream_by_id_mut(substream_id.0)
             .ok_or(RespondInRequestError::SubstreamClosed)?
             .into_user_data()
             .as_mut()
@@ -854,12 +848,20 @@ where
     fn queue_ping(&mut self, timeout: TNow) {
         // It might be that the remote has reset the ping substream, in which case the out ping
         // substream no longer exists and we immediately consider the ping as failed.
-        if let Some(substream) = self.inner.yamux.substream_by_id(self.inner.outgoing_pings) {
+        if let Some(substream) = self
+            .inner
+            .yamux
+            .substream_by_id_mut(self.inner.outgoing_pings)
+        {
+            let payload = self
+                .inner
+                .ping_payload_randomness
+                .sample(rand::distributions::Standard);
             substream
                 .into_user_data()
                 .as_mut()
                 .unwrap()
-                .queue_ping(&[0xff; 32], timeout); // TODO: proper random payload
+                .queue_ping(&payload, timeout);
         } else {
             self.inner.pending_events.push_back(Event::PingOutFailed);
         }
@@ -950,11 +952,6 @@ pub enum Event<TRqUd, TNotifUd> {
     NotificationsInOpenCancel {
         /// Identifier of the substream.
         id: SubstreamId,
-        /// Index of the notifications protocol concerned by the substream.
-        ///
-        /// The index refers to the position of the protocol in
-        /// [`Config::notifications_protocols`].
-        protocol_index: usize,
     },
     /// Remote has sent a notification on an inbound notifications substream. Can only happen
     /// after the substream has been accepted.
@@ -972,11 +969,6 @@ pub enum Event<TRqUd, TNotifUd> {
         id: SubstreamId,
         /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
         outcome: Result<(), NotificationsInClosedErr>,
-        /// Index of the notifications protocol concerned by the substream.
-        ///
-        /// The index refers to the position of the protocol in
-        /// [`Config::notifications_protocols`].
-        protocol_index: usize,
     },
 
     /// Outcome of trying to open a substream with [`Established::open_notifications_substream`].
@@ -1018,7 +1010,7 @@ pub enum Event<TRqUd, TNotifUd> {
 pub enum Error {
     /// Error in the noise cipher. Data has most likely been corrupted.
     Noise(noise::CipherError),
-    /// Error in the yamux multiplexing protocol.
+    /// Error in the Yamux multiplexing protocol.
     Yamux(yamux::Error),
 }
 
@@ -1043,10 +1035,12 @@ impl ConnectionPrototype {
     {
         // TODO: check conflicts between protocol names?
 
+        let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
+
         let mut yamux = yamux::Yamux::new(yamux::Config {
             is_initiator: self.encryption.is_initiator(),
             capacity: 64, // TODO: ?
-            randomness_seed: config.randomness_seed,
+            randomness_seed: randomness.sample(rand::distributions::Standard),
         });
 
         let outgoing_pings = yamux
@@ -1062,6 +1056,7 @@ impl ConnectionPrototype {
                 yamux,
                 outgoing_pings,
                 next_ping: config.first_out_ping,
+                ping_payload_randomness: randomness,
                 request_protocols: config.request_protocols,
                 notifications_protocols: config.notifications_protocols,
                 ping_protocol: config.ping_protocol,
@@ -1096,7 +1091,7 @@ pub struct Config<TNow> {
     /// Time after which an outgoing ping is considered failed.
     pub ping_timeout: Duration,
     /// Entropy used for the randomness specific to this connection.
-    pub randomness_seed: [u8; 16],
+    pub randomness_seed: [u8; 32],
 }
 
 /// Configuration for a request-response protocol.

@@ -167,7 +167,7 @@ impl Sender {
         if log::log_enabled!(log::Level::Debug) {
             log::debug!(
                 target: &self.log_target,
-                "JSON-RPC => {}",
+                "PendingRequestsQueue <= {}",
                 crate::util::truncate_str_iter(
                     json_rpc_request.chars().filter(|c| !c.is_control()),
                     100,
@@ -407,8 +407,8 @@ struct Background<TPlat: Platform> {
     chain_properties_json: String,
     /// Whether the chain is a live network. Found in the chain specification.
     chain_is_live: bool,
-    /// See [`StartConfig::peer_id`]. The only use for this field is to send the base58 encoding of
-    /// the [`PeerId`]. Consequently, we store the conversion to base58 ahead of time.
+    /// See [`StartConfig::peer_id`]. The only use for this field is to send the Base58 encoding of
+    /// the [`PeerId`]. Consequently, we store the conversion to Base58 ahead of time.
     peer_id_base58: String,
     /// Value to return when the `system_name` RPC is called.
     system_name: String,
@@ -572,7 +572,11 @@ impl<TPlat: Platform> Background<TPlat> {
             tasks.push(
                 async move {
                     loop {
-                        me.handle_request().await
+                        me.handle_request().await;
+
+                        // We yield once between each request in order to politely let other tasks
+                        // do some work and not monopolize the CPU.
+                        crate::util::yield_once().await;
                     }
                 }
                 .boxed(),
@@ -591,9 +595,14 @@ impl<TPlat: Platform> Background<TPlat> {
 
                     // Subscribe to new runtime service blocks in order to push them in the
                     // cache as soon as they are available.
+                    // The buffer size should be large enough so that, if the CPU is busy, it
+                    // doesn't become full before the execution of this task resumes.
+                    // The maximum number of pinned block is ignored, as this maximum is a way to
+                    // avoid malicious behaviors. This code is by definition not considered
+                    // malicious.
                     let mut subscribe_all = me
                         .runtime_service
-                        .subscribe_all(8, cache.recent_pinned_blocks.cap())
+                        .subscribe_all(32, usize::max_value())
                         .await;
 
                     cache.subscription_id = Some(subscribe_all.new_blocks.id());
@@ -671,13 +680,15 @@ impl<TPlat: Platform> Background<TPlat> {
     async fn handle_request(self: &Arc<Self>) {
         let (json_rpc_request, state_machine_request_id) =
             self.requests_subscriptions.next_request().await;
+        log::debug!(target: &self.log_target, "PendingRequestsQueue => {}", 
+            crate::util::truncate_str_iter(
+                json_rpc_request.chars().filter(|c| !c.is_control()),
+                100,
+            ).collect::<String>());
 
         // Check whether the JSON-RPC request is correct, and bail out if it isn't.
         let (request_id, call) = match methods::parse_json_call(&json_rpc_request) {
-            Ok((request_id, call)) => {
-                log::debug!(target: &self.log_target, "Handler <= Request(id_json={:?}, method={})", request_id, call.name());
-                (request_id, call)
-            }
+            Ok((request_id, call)) => (request_id, call),
             Err(methods::ParseError::Method { request_id, error }) => {
                 log::warn!(
                     target: &self.log_target,

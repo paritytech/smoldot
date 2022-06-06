@@ -63,7 +63,7 @@
 //!   MiB will be put into the bucket of 4 MiB. Therefore, any allocation of size `(N, 2N]` will
 //!   take up to `2N`, thus assuming a uniform distribution of allocation sizes, the average amount
 //!   in use of a `2N` space on the heap will be `(3N + ε) / 2`. So average utilization is going to
-//!   be around 75% (`(3N + ε) / 2 / 2N`) meaning that around 25% of the space in allocation will be
+//!   be around `75%` (`(3N + ε) / 2 / 2N`) meaning that around `25%` of the space in allocation will be
 //!   wasted. This is more pronounced (in terms of absolute heap amounts) with larger allocation
 //!   sizes.
 
@@ -95,7 +95,7 @@ pub const MAX_POSSIBLE_ALLOCATION: u32 = 33_554_432; // 2^25 bytes, 32 MiB
 /// The minimal alignment guaranteed by this allocator.
 ///
 /// The alignment of 8 is chosen because it is the maximum size of a primitive type supported by the
-/// target version of wasm32: i64's natural alignment is 8.
+/// target version of `wasm32`: `i64's` natural alignment is 8.
 const ALIGNMENT: u32 = 8;
 
 // Each pointer is prefixed with 8 bytes, which identify the list index
@@ -123,7 +123,7 @@ const MIN_POSSIBLE_ALLOCATION: u32 = 8; // 2^3 bytes, 8 bytes
 ///
 /// This way, if `MIN_POSSIBLE_ALLOCATION == 8`, we would get:
 ///
-/// power_of_two_size | order
+/// `power_of_two_size` | order
 /// 8                 | 0
 /// 16                | 1
 /// 32                | 2
@@ -209,7 +209,7 @@ impl Link {
         }
     }
 
-    /// Converts this link into a raw u32.
+    /// Converts this link into a raw `u32`.
     fn into_raw(self) -> u32 {
         match self {
             Self::Nil => NIL_MARKER,
@@ -506,12 +506,12 @@ impl FreeingBumpHeapAllocator {
 /// A wasm linear memory behaves similarly to a vector. The address space doesn't have holes and is
 /// accessible up to the reported size.
 ///
-/// The linear memory can grow in size with the wasm page granularity (64KiB), but it cannot shrink.
+/// The linear memory can grow in size with the wasm page granularity (`64KiB`), but it cannot shrink.
 pub trait Memory {
-    /// Read a u64 from the heap in LE form. Returns an error if any of the bytes read are out of
+    /// Read a `u64` from the heap in LE form. Returns an error if any of the bytes read are out of
     /// bounds.
     fn read_le_u64(&self, ptr: u32) -> Result<u64, Error>;
-    /// Write a u64 to the heap in LE form. Returns an error if any of the bytes written are out of
+    /// Write a `u64` to the heap in LE form. Returns an error if any of the bytes written are out of
     /// bounds.
     fn write_le_u64(&mut self, ptr: u32, val: u64) -> Result<(), Error>;
     /// Returns the full size of the memory in bytes.

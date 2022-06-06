@@ -25,7 +25,7 @@
 //! follows:
 //!
 //! - The transaction gets built, in other words the bytes that encode the transaction are
-//! generated. This can be done for example through a UI, through an offchain worker, or other. A
+//! generated. This can be done for example through a UI, through an off-chain worker, or other. A
 //! transaction can be either signed (i.e. have a signature attached to it) or unsigned, depending
 //! on the action to be performed. A balance transfer, for example, generally always requires a
 //! signature.
@@ -76,7 +76,7 @@
 //! >           in the best chain, without even attempting to re-validate it (but re-inserts
 //! >           transactions in the pool if a block gets reverted).
 //!
-//! However, this is in theory not the correct behaviour. A legitimate (but in practice very
+//! However, this is in theory not the correct behavior. A legitimate (but in practice very
 //! uncommon) use-case for runtimes is to consider a transaction as invalid right after it has
 //! been included, but then valid again some time in the future.
 //!

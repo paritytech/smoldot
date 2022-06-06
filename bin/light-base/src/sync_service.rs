@@ -546,9 +546,11 @@ impl<TPlat: Platform> SyncService<TPlat> {
             match result {
                 Ok(value) if !value.is_empty() => return Ok(value),
                 // TODO: this check of emptiness is a bit of a hack; it is necessary because Substrate responds to requests about blocks it doesn't know with an empty proof
-                Ok(_) => outcome_errors.push(service::CallProofRequestError::Request(
-                    smoldot::libp2p::peers::RequestError::Connection(
-                        smoldot::libp2p::connection::established::RequestError::SubstreamClosed,
+                Ok(_) => outcome_errors.push(network_service::CallProofRequestError::Request(
+                    service::CallProofRequestError::Request(
+                        smoldot::libp2p::peers::RequestError::Substream(
+                            smoldot::libp2p::connection::established::RequestError::SubstreamClosed,
+                        ),
                     ),
                 )),
                 Err(err) => {
@@ -576,8 +578,19 @@ impl StorageQueryError {
     /// issue.
     pub fn is_network_problem(&self) -> bool {
         self.errors.iter().all(|err| match err {
-            StorageQueryErrorDetail::Network(service::StorageProofRequestError::Request(_)) => true,
-            StorageQueryErrorDetail::Network(service::StorageProofRequestError::Decode(_)) => false,
+            StorageQueryErrorDetail::Network(
+                network_service::StorageProofRequestError::Request(
+                    service::StorageProofRequestError::Request(_),
+                ),
+            )
+            | StorageQueryErrorDetail::Network(
+                network_service::StorageProofRequestError::NoConnection,
+            ) => true,
+            StorageQueryErrorDetail::Network(
+                network_service::StorageProofRequestError::Request(
+                    service::StorageProofRequestError::Decode(_),
+                ),
+            ) => false,
             // TODO: as a temporary hack, we consider `TrieRootNotFound` as the remote not knowing about the requested block; see https://github.com/paritytech/substrate/pull/8046
             StorageQueryErrorDetail::ProofVerification(proof_verify::Error::TrieRootNotFound) => {
                 true
@@ -606,7 +619,7 @@ impl fmt::Display for StorageQueryError {
 pub enum StorageQueryErrorDetail {
     /// Error during the network request.
     #[display(fmt = "{}", _0)]
-    Network(service::StorageProofRequestError),
+    Network(network_service::StorageProofRequestError),
     /// Error verifying the proof.
     #[display(fmt = "{}", _0)]
     ProofVerification(proof_verify::Error),
@@ -617,7 +630,7 @@ pub enum StorageQueryErrorDetail {
 pub struct CallProofQueryError {
     /// Contains one error per peer that has been contacted. If this list is empty, then we
     /// aren't connected to any node.
-    pub errors: Vec<service::CallProofRequestError>,
+    pub errors: Vec<network_service::CallProofRequestError>,
 }
 
 impl CallProofQueryError {
@@ -688,7 +701,7 @@ pub struct FinalizedBlockRuntime {
 pub enum Notification {
     /// A non-finalized block has been finalized.
     Finalized {
-        /// Blake2 hash of the block that has been finalized.
+        /// BLAKE2 hash of the block that has been finalized.
         ///
         /// A block with this hash is guaranteed to have earlier been reported in a
         /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
@@ -726,7 +739,7 @@ pub struct BlockNotification {
     /// SCALE-encoded header of the block.
     pub scale_encoded_header: Vec<u8>,
 
-    /// Blake2 hash of the header of the parent of this block.
+    /// BLAKE2 hash of the header of the parent of this block.
     ///
     ///
     /// A block with this hash is guaranteed to have earlier been reported in a

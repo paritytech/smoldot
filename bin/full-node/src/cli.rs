@@ -30,7 +30,13 @@
 //!
 // TODO: I believe this example isn't tested ^ which kills the point of having it
 
-use smoldot::{identity::seed_phrase, libp2p::multiaddr::Multiaddr};
+use smoldot::{
+    identity::seed_phrase,
+    libp2p::{
+        multiaddr::{Multiaddr, ProtocolRef},
+        PeerId,
+    },
+};
 use std::{net::SocketAddr, path::PathBuf};
 
 // Note: the doc-comments applied to this struct and its field are visible when the binary is
@@ -41,32 +47,20 @@ use std::{net::SocketAddr, path::PathBuf};
 pub enum CliOptions {
     /// Connects to the chain and synchronizes the local database with the network.
     Run(CliOptionsRun),
-    /// Connects to an IP address and prints some information about the node.
-    NodeInfo(CliOptionsNodeInfo),
-    /// Computes the 64bits blake2 hash of a string payload and prints the hexadecimal-encoded hash.
+    /// Computes the 64 bits BLAKE2 hash of a string payload and prints the hexadecimal-encoded hash.
     #[structopt(name = "blake2-64bits-hash")]
     Blake264BitsHash(CliOptionsBlake264Hash),
 }
 
 #[derive(Debug, clap::StructOpt)]
-pub struct CliOptionsNodeInfo {
-    /// IP address to connect to (format: `<ip>:<port>`).
-    // Note: we accept a String rather than a SocketAddr in order to allow for DNS addresses.
-    pub address: String,
-    /// Ed25519 private key of network identity (as a seed phrase).
-    #[structopt(long, parse(try_from_str = decode_ed25519_private_key))]
-    pub libp2p_key: Option<[u8; 32]>,
-}
-
-#[derive(Debug, clap::StructOpt)]
 pub struct CliOptionsRun {
-    /// Chain to connect to ("polkadot", "kusama", "westend", or a file path).
+    /// Chain to connect to ("Polkadot", "Kusama", "Westend", or a file path).
     #[structopt(long, default_value = "polkadot")]
     pub chain: CliChain,
     /// Output to stdout: auto, none, informant, logs, logs-json.
     #[structopt(long, default_value = "auto")]
     pub output: Output,
-    /// Log filter. Example: foo=trace
+    /// Log filter. Example: `foo=trace`
     #[structopt(long)]
     pub log: Vec<tracing_subscriber::filter::Directive>,
     /// Coloring: auto, always, never
@@ -75,12 +69,12 @@ pub struct CliOptionsRun {
     /// Ed25519 private key of network identity (as a seed phrase).
     #[structopt(long, parse(try_from_str = decode_ed25519_private_key))]
     pub libp2p_key: Option<[u8; 32]>,
-    /// Multiaddr to listen on.
+    /// `Multiaddr` to listen on.
     #[structopt(long, parse(try_from_str = decode_multiaddr))]
     pub listen_addr: Vec<Multiaddr>,
-    /// Multiaddr of an additional node to try to connect to on startup.
-    #[structopt(long)]
-    pub additional_bootnode: Vec<String>, // TODO: parse the value here
+    /// `Multiaddr` of an additional node to try to connect to on startup.
+    #[structopt(long, parse(try_from_str = parse_bootnode))]
+    pub additional_bootnode: Vec<Bootnode>,
     /// Bind point of the JSON-RPC server ("none" or <ip>:<port>).
     #[structopt(long, default_value = "127.0.0.1:9944", parse(try_from_str = parse_json_rpc_address))]
     pub json_rpc_address: JsonRpcAddress,
@@ -202,6 +196,24 @@ fn parse_json_rpc_address(string: &str) -> Result<JsonRpcAddress, String> {
     }
 
     Err("Failed to parse JSON-RPC server address".into())
+}
+
+#[derive(Debug)]
+pub struct Bootnode {
+    pub address: Multiaddr,
+    pub peer_id: PeerId,
+}
+
+fn parse_bootnode(string: &str) -> Result<Bootnode, String> {
+    let mut address = string.parse::<Multiaddr>().map_err(|err| err.to_string())?;
+    if let Some(ProtocolRef::P2p(peer_id)) = address.iter().last() {
+        let peer_id = PeerId::from_bytes(peer_id.to_vec())
+            .map_err(|(err, _)| format!("Failed to parse PeerId in bootnode: {}", err))?;
+        address.pop();
+        Ok(Bootnode { address, peer_id })
+    } else {
+        Err("Bootnode address must end with /p2p/...".into())
+    }
 }
 
 // `clap` requires error types to implement the `std::error::Error` trait.

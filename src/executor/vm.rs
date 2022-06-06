@@ -18,7 +18,7 @@
 //! General-purpose WebAssembly virtual machine.
 //!
 //! Contains code related to running a WebAssembly virtual machine. Contrary to
-//! (`HostVm`)[super::host::HostVm], this module isn't aware of any of the host
+//! (`HostVm`)[`super::host::HostVm`], this module isn't aware of any of the host
 //! functions available to Substrate runtimes. It only contains the code required to run a virtual
 //! machine, with some adjustments explained below.
 //!
@@ -348,7 +348,7 @@ pub enum ExecHint {
 
 /// Number of heap pages available to the Wasm code.
 ///
-/// Each page is 64kiB.
+/// Each page is `64kiB`.
 #[derive(
     Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, derive_more::Add, derive_more::Sub,
 )]
@@ -641,6 +641,10 @@ pub enum NewErr {
         /// Name of module associated with the unresolved function.
         module_name: String,
     },
+    /// Smoldot doesn't support wasm runtime that have a start function. It is unclear whether
+    /// this is allowed in the Substrate/Polkadot specification.
+    // TODO: figure this out
+    StartFunctionNotSupported,
     /// If a "memory" symbol is provided, it must be a memory.
     #[display(fmt = "If a \"memory\" symbol is provided, it must be a memory.")]
     MemoryIsntMemory,
@@ -650,7 +654,7 @@ pub enum NewErr {
     NoMemory,
     /// Wasm module both imports and exports a memory.
     TwoMemories,
-    /// If a "__indirect_function_table" symbol is provided, it must be a table.
+    /// If a `__indirect_function_table` symbol is provided, it must be a table.
     #[display(fmt = "If a \"__indirect_function_table\" symbol is provided, it must be a table.")]
     IndirectTableIsntTable,
     /// Failed to allocate memory for the virtual machine.

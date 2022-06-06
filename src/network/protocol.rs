@@ -44,15 +44,3 @@ pub use self::grandpa_warp_sync::*;
 pub use self::identify::*;
 pub use self::state_request::*;
 pub use self::storage_proof::*;
-
-// Protobuf schemas are gathered here.
-mod schema {
-    include!(concat!(env!("OUT_DIR"), "/api.v1.rs"));
-    include!(concat!(env!("OUT_DIR"), "/api.v1.light.rs"));
-    include!(concat!(env!("OUT_DIR"), "/structs.rs"));
-}
-
-/// Error while decoding the protobuf encoding.
-#[derive(Debug, Clone, derive_more::Display)]
-#[display(fmt = "{}", _0)]
-pub struct ProtobufDecodeError(prost::DecodeError);
