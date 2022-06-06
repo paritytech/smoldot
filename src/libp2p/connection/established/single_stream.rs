@@ -22,7 +22,7 @@
 //! In order to avoid DoS attacks, it is important, in networking code, to make sure that the
 //! amount of memory allocated directly or indirectly by a connection stays bounded.
 //!
-//! The situations in the [`Established`] that lead to an increase in memory consumption are:
+//! The situations in the [`SingleStream`] that lead to an increase in memory consumption are:
 //!
 //! 1- On incoming or outgoing substreams.
 //! 2- When sending a request or receiving a response in a request-response protocol.
@@ -38,10 +38,10 @@
 //! Request-response protocols enforce a limit to the size of the request and response, again
 //! guaranteeing a bound on the memory consumption.
 //!
-//! In order to solve 3-, always use [`Established::notification_substream_queued_bytes`] in order
+//! In order to solve 3-, always use [`SingleStream::notification_substream_queued_bytes`] in order
 //! to check the current amount of buffered data before calling
-//! [`Established::write_notification_unbounded`]. See the documentation of
-//! [`Established::write_notification_unbounded`] for more details.
+//! [`SingleStream::write_notification_unbounded`]. See the documentation of
+//! [`SingleStream::write_notification_unbounded`] for more details.
 //!
 //! In order to solve 5-, // TODO: .
 //!
@@ -66,7 +66,7 @@ use core::{
 use rand::{Rng as _, SeedableRng as _};
 
 /// State machine of a fully-established connection.
-pub struct Established<TNow, TRqUd, TNotifUd> {
+pub struct SingleStream<TNow, TRqUd, TNotifUd> {
     /// Encryption layer applied directly on top of the incoming data and outgoing data.
     /// In addition to the cipher state, also contains a buffer of data received from the socket,
     /// decoded but yet to be parsed.
@@ -79,7 +79,7 @@ pub struct Established<TNow, TRqUd, TNotifUd> {
 
 /// Extra fields. Segregated in order to solve borrowing questions.
 struct Inner<TNow, TRqUd, TNotifUd> {
-    /// Events that should be yielded from [`Established::read_write`] as soon as possible.
+    /// Events that should be yielded from [`SingleStream::read_write`] as soon as possible.
     // TODO: remove this field; it is necessary because of limitations in the yamux implementation
     pending_events: VecDeque<Event<TRqUd, TNotifUd>>,
 
@@ -130,7 +130,7 @@ struct Inner<TNow, TRqUd, TNotifUd> {
     intermediary_buffer: Box<[u8]>,
 }
 
-impl<TNow, TRqUd, TNotifUd> Established<TNow, TRqUd, TNotifUd>
+impl<TNow, TRqUd, TNotifUd> SingleStream<TNow, TRqUd, TNotifUd>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
 {
@@ -150,7 +150,7 @@ where
         read_write: &'_ mut ReadWrite<'_, TNow>,
     ) -> Result<
         (
-            Established<TNow, TRqUd, TNotifUd>,
+            SingleStream<TNow, TRqUd, TNotifUd>,
             Option<Event<TRqUd, TNotifUd>>,
         ),
         Error,
@@ -593,7 +593,7 @@ where
     /// Must pass the index of the protocol within [`Config::request_protocols`].
     ///
     /// This method only inserts the request into the connection object. Use
-    /// [`Established::read_write`] in order to actually send out the request.
+    /// [`SingleStream::read_write`] in order to actually send out the request.
     ///
     /// Assuming that the remote is using the same implementation, an [`Event::RequestIn`] will
     /// be generated on its side.
@@ -674,7 +674,7 @@ where
     /// on it.
     ///
     /// This method only inserts the opening handshake into the connection object. Use
-    /// [`Established::read_write`] in order to actually send out the request.
+    /// [`SingleStream::read_write`] in order to actually send out the request.
     ///
     /// Assuming that the remote is using the same implementation, an
     /// [`Event::NotificationsInOpen`] will be generated on its side.
@@ -772,7 +772,7 @@ where
     /// an unbounded increase in memory.
     ///
     /// As such, you are encouraged to call this method only if the amount of queued data (as
-    /// determined by calling [`Established::notification_substream_queued_bytes`]) is below a
+    /// determined by calling [`SingleStream::notification_substream_queued_bytes`]) is below a
     /// certain threshold. If above, the notification should be silently discarded.
     ///
     /// # Panic
@@ -802,7 +802,7 @@ where
 
     /// Returns the number of bytes waiting to be sent out on that substream.
     ///
-    /// See the documentation of [`Established::write_notification_unbounded`] for context.
+    /// See the documentation of [`SingleStream::write_notification_unbounded`] for context.
     ///
     /// # Panic
     ///
@@ -827,7 +827,7 @@ where
 
     /// Closes a notifications substream opened after a successful
     /// [`Event::NotificationsOutResult`] or that was accepted using
-    /// [`Established::accept_in_notifications_substream`].
+    /// [`SingleStream::accept_in_notifications_substream`].
     ///
     /// In the case of an outbound substream, this can be done even when in the negotiation phase,
     /// in other words before the remote has accepted/refused the substream.
@@ -903,7 +903,7 @@ where
     }
 }
 
-impl<TNow, TRqUd, TNotifUd> fmt::Debug for Established<TNow, TRqUd, TNotifUd>
+impl<TNow, TRqUd, TNotifUd> fmt::Debug for SingleStream<TNow, TRqUd, TNotifUd>
 where
     TRqUd: fmt::Debug,
 {
@@ -923,7 +923,7 @@ pub enum Error {
     Yamux(yamux::Error),
 }
 
-/// Successfully negotiated connection. Ready to be turned into a [`Established`].
+/// Successfully negotiated connection. Ready to be turned into a [`SingleStream`].
 pub struct ConnectionPrototype {
     encryption: noise::Noise,
 }
@@ -938,7 +938,7 @@ impl ConnectionPrototype {
     pub fn into_connection<TNow, TRqUd, TNotifUd>(
         self,
         config: Config<TNow>,
-    ) -> Established<TNow, TRqUd, TNotifUd>
+    ) -> SingleStream<TNow, TRqUd, TNotifUd>
     where
         TNow: Clone + Ord,
     {
@@ -958,7 +958,7 @@ impl ConnectionPrototype {
             )))
             .id();
 
-        Established {
+        SingleStream {
             encryption: self.encryption,
             inner: Inner {
                 pending_events: Default::default(),

@@ -23,7 +23,7 @@ use super::yamux;
 use alloc::{string::String, vec::Vec};
 use core::time::Duration;
 
-pub use single_stream::{ConnectionPrototype, Error, Established};
+pub use single_stream::{ConnectionPrototype, Error, SingleStream};
 pub use substream::{
     InboundError, NotificationsInClosedErr, NotificationsOutErr, RequestError,
     RespondInRequestError,
@@ -63,7 +63,8 @@ impl SubstreamId {
     }
 }
 
-/// Event that happened on the connection. See [`Established::read_write`].
+/// Event that happened on the connection. See [`SingleStream::read_write`] and
+/// [`MultiStream::read_write`].
 #[must_use]
 #[derive(Debug)]
 pub enum Event<TRqUd, TNotifUd> {
@@ -89,16 +90,19 @@ pub enum Event<TRqUd, TNotifUd> {
     Response {
         /// Bytes of the response. Its interpretation is out of scope of this module.
         response: Result<Vec<u8>, RequestError>,
-        /// Identifier of the request. Value that was returned by [`Established::add_request`].
+        /// Identifier of the request. Value that was returned by [`SingleStream::add_request`]
+        /// or [`MultiStream::add_request`].
         id: SubstreamId,
-        /// Value that was passed to [`Established::add_request`].
+        /// Value that was passed to [`SingleStream::add_request`] or [`MultiStream::add_request`].
         user_data: TRqUd,
     },
 
     /// Remote has opened an inbound notifications substream.
     ///
-    /// Either [`Established::accept_in_notifications_substream`] or
-    /// [`Established::reject_in_notifications_substream`] must be called in the near future in
+    /// Either [`SingleStream::accept_in_notifications_substream`] or
+    /// [`SingleStream::reject_in_notifications_substream`], or
+    /// [`MultiStream::accept_in_notifications_substream`] or
+    /// [`MultiStream::reject_in_notifications_substream`] must be called in the near future in
     /// order to accept or reject this substream.
     NotificationsInOpen {
         /// Identifier of the substream. Needs to be provided back when accept or rejecting the
@@ -115,8 +119,10 @@ pub enum Event<TRqUd, TNotifUd> {
     /// Remote has canceled an inbound notifications substream opening.
     ///
     /// This can only happen after [`Event::NotificationsInOpen`].
-    /// [`Established::accept_in_notifications_substream`] or
-    /// [`Established::reject_in_notifications_substream`] should not be called on this substream.
+    /// [`SingleStream::accept_in_notifications_substream`] or
+    /// [`SingleStream::reject_in_notifications_substream`], or
+    /// [`MultiStream::accept_in_notifications_substream`] or
+    /// [`MultiStream::reject_in_notifications_substream`] should not be called on this substream.
     NotificationsInOpenCancel {
         /// Identifier of the substream.
         id: SubstreamId,
@@ -139,13 +145,15 @@ pub enum Event<TRqUd, TNotifUd> {
         outcome: Result<(), NotificationsInClosedErr>,
     },
 
-    /// Outcome of trying to open a substream with [`Established::open_notifications_substream`].
+    /// Outcome of trying to open a substream with [`SingleStream::open_notifications_substream`]
+    /// or [`MultiStream::open_notifications_substream`].
     ///
     /// If `Ok`, it is now possible to send notifications on this substream.
     /// If `Err`, the substream no longer exists.
     NotificationsOutResult {
         /// Identifier of the substream. Value that was returned by
-        /// [`Established::open_notifications_substream`].
+        /// [`SingleStream::open_notifications_substream`] or
+        /// [`MultiStream::open_notifications_substream`].
         id: SubstreamId,
         /// If `Ok`, contains the handshake sent back by the remote. Its interpretation is out of
         /// scope of this module.
@@ -155,15 +163,17 @@ pub enum Event<TRqUd, TNotifUd> {
     /// of the substream.
     NotificationsOutCloseDemanded {
         /// Identifier of the substream. Value that was returned by
-        /// [`Established::open_notifications_substream`].
+        /// [`SingleStream::open_notifications_substream`] or
+        /// [`MultiStream::open_notifications_substream`].
         id: SubstreamId,
     },
     /// Remote has reset an outgoing notifications substream. The substream is instantly closed.
     NotificationsOutReset {
         /// Identifier of the substream. Value that was returned by
-        /// [`Established::open_notifications_substream`].
+        /// [`SingleStream::open_notifications_substream`].
         id: SubstreamId,
-        /// Value that was passed to [`Established::open_notifications_substream`].
+        /// Value that was passed to [`SingleStream::open_notifications_substream`] or
+        /// [`MultiStream::open_notifications_substream`].
         user_data: TNotifUd,
     },
 
@@ -173,7 +183,7 @@ pub enum Event<TRqUd, TNotifUd> {
     PingOutFailed,
 }
 
-/// Configuration to turn a [`ConnectionPrototype`] into a [`Established`].
+/// Configuration to turn a [`ConnectionPrototype`] into a [`SingleStream`] or [`MultiStream`].
 // TODO: this struct isn't zero-cost, but making it zero-cost is kind of hard and annoying
 #[derive(Debug, Clone)]
 pub struct Config<TNow> {

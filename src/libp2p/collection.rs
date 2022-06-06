@@ -1307,7 +1307,7 @@ enum SingleStreamConnectionTaskInner<TNow> {
     /// Connection has been fully established.
     Established {
         // TODO: user data of request redundant with the substreams mapping below
-        established: established::Established<TNow, SubstreamId, ()>,
+        established: established::SingleStream<TNow, SubstreamId, ()>,
 
         /// Because outgoing substream ids are assigned by the coordinator, we maintain a mapping
         /// of the "outer ids" to "inner ids".

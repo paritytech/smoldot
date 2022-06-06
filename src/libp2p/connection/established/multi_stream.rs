@@ -34,8 +34,8 @@ use core::{
 use rand::{Rng as _, SeedableRng as _};
 
 /// State machine of a fully-established connection where substreams are handled externally.
-pub struct Established<TNow, TSubId, TRqUd, TNotifUd> {
-    /// Events that should be yielded from [`Established::read_write`] as soon as possible.
+pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
+    /// Events that should be yielded from [`MultiStream::read_write`] as soon as possible.
     // TODO: is this necessary?
     pending_events: VecDeque<Event<TRqUd, TNotifUd>>,
 
@@ -104,13 +104,13 @@ pub struct Established<TNow, TSubId, TRqUd, TNotifUd> {
     intermediary_buffer: Box<[u8]>,
 }
 
-impl<TNow, TSubId, TRqUd, TNotifUd> Established<TNow, TSubId, TRqUd, TNotifUd>
+impl<TNow, TSubId, TRqUd, TNotifUd> MultiStream<TNow, TSubId, TRqUd, TNotifUd>
 where
     TNow: Clone + Add<Duration, Output = TNow> + Sub<TNow, Output = Duration> + Ord,
     TSubId: Clone + PartialEq + Eq + Hash,
 {
     /// Creates a new connection from the given configuration.
-    pub fn new(self, config: Config<TNow>) -> Established<TNow, TSubId, TRqUd, TNotifUd> {
+    pub fn new(self, config: Config<TNow>) -> MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
         // TODO: check conflicts between protocol names?
 
         let num_expected_substreams =
@@ -118,7 +118,7 @@ where
 
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
 
-        Established {
+        MultiStream {
             pending_events: Default::default(),
             in_substreams: hashbrown::HashMap::with_capacity_and_hasher(
                 num_expected_substreams,
@@ -146,8 +146,8 @@ where
     /// opened.
     ///
     /// This value doesn't change automatically over time but only after a call to
-    /// [`Established::substream_read_write`], [`Established::inject_coordinator_message`],
-    /// [`Established::add_substream`], or [`Established::reset_substream`].
+    /// [`MultiStream::substream_read_write`], [`MultiStream::inject_coordinator_message`],
+    /// [`MultiStream::add_substream`], or [`MultiStream::reset_substream`].
     ///
     /// Note that the user is expected to track the number of substreams that are currently being
     /// opened. For example, if this function returns 2 and there are already 2 substreams
@@ -164,7 +164,7 @@ where
     /// locally (`false`).
     ///
     /// If `inbound` is `false`, then the value returned by
-    /// [`Established::desired_outbound_substreams`] will decrease by one.
+    /// [`MultiStream::desired_outbound_substreams`] will decrease by one.
     ///
     /// # Panic
     ///
@@ -214,12 +214,12 @@ where
     }
 
     /// Returns a list of substreams that the state machine would like to see reset. The user is
-    /// encouraged to call [`Established::substream_read_write`] with this list of
+    /// encouraged to call [`MultiStream::substream_read_write`] with this list of
     /// substream.
     ///
     /// This value doesn't change automatically over time but only after a call to
-    /// [`Established::substream_read_write`], [`Established::inject_coordinator_message`],
-    /// [`Established::add_substream`], or [`Established::reset_substream`].
+    /// [`MultiStream::substream_read_write`], [`MultiStream::inject_coordinator_message`],
+    /// [`MultiStream::add_substream`], or [`MultiStream::reset_substream`].
     ///
     /// > **Note**: An example situation is: a notification is queued, which leads to a message
     /// >           being sent to a connection task, which, once injected, leads to a notifications
@@ -413,7 +413,7 @@ where
     /// Must pass the index of the protocol within [`Config::request_protocols`].
     ///
     /// This method only inserts the request into the connection object. Use
-    /// [`Established::read_write`] in order to actually send out the request.
+    /// [`MultiStream::read_write`] in order to actually send out the request.
     ///
     /// Assuming that the remote is using the same implementation, an [`Event::RequestIn`] will
     /// be generated on its side.
@@ -497,7 +497,7 @@ where
     /// on it.
     ///
     /// This method only inserts the opening handshake into the connection object. Use
-    /// [`Established::read_write`] in order to actually send out the request.
+    /// [`MultiStream::read_write`] in order to actually send out the request.
     ///
     /// Assuming that the remote is using the same implementation, an
     /// [`Event::NotificationsInOpen`] will be generated on its side.
@@ -594,7 +594,7 @@ where
     /// an unbounded increase in memory.
     ///
     /// As such, you are encouraged to call this method only if the amount of queued data (as
-    /// determined by calling [`Established::notification_substream_queued_bytes`]) is below a
+    /// determined by calling [`MultiStream::notification_substream_queued_bytes`]) is below a
     /// certain threshold. If above, the notification should be silently discarded.
     ///
     /// # Panic
@@ -623,7 +623,7 @@ where
 
     /// Returns the number of bytes waiting to be sent out on that substream.
     ///
-    /// See the documentation of [`Established::write_notification_unbounded`] for context.
+    /// See the documentation of [`MultiStream::write_notification_unbounded`] for context.
     ///
     /// # Panic
     ///
@@ -647,7 +647,7 @@ where
 
     /// Closes a notifications substream opened after a successful
     /// [`Event::NotificationsOutResult`] or that was accepted using
-    /// [`Established::accept_in_notifications_substream`].
+    /// [`MultiStream::accept_in_notifications_substream`].
     ///
     /// In the case of an outbound substream, this can be done even when in the negotiation phase,
     /// in other words before the remote has accepted/refused the substream.
@@ -697,7 +697,7 @@ where
     }
 }
 
-impl<TNow, TSubId, TRqUd, TNotifUd> fmt::Debug for Established<TNow, TSubId, TRqUd, TNotifUd> {
+impl<TNow, TSubId, TRqUd, TNotifUd> fmt::Debug for MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("Established").finish()
     }
