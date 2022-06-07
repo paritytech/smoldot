@@ -133,14 +133,14 @@ export default function (config: Config): compat.WasmModuleImports {
 
         // Must create a new connection object. This implementation stores the created object in
         // `connections`.
-        connection_new: (id: number, addrPtr: number, addrLen: number, errorPtrPtr: number) => {
+        connection_new: (connectionId: number, addrPtr: number, addrLen: number, errorPtrPtr: number) => {
             const instance = config.instance!;
 
             addrPtr >>>= 0;
             addrLen >>>= 0;
             errorPtrPtr >>>= 0;
 
-            if (!!connections[id]) {
+            if (!!connections[connectionId]) {
                 throw new Error("internal error: connection already allocated");
             }
 
@@ -155,22 +155,22 @@ export default function (config: Config): compat.WasmModuleImports {
                     forbidNonLocalWs: config.forbidNonLocalWs,
                     forbidWss: config.forbidWss,
                     onOpen: () => {
-                        instance.exports.connection_open(id);
+                        instance.exports.connection_open_single_stream(connectionId);
                     },
                     onClose: (message: string) => {
                         const len = Buffer.byteLength(message, 'utf8');
                         const ptr = instance.exports.alloc(len) >>> 0;
                         Buffer.from(instance.exports.memory.buffer).write(message, ptr);
-                        instance.exports.connection_closed(id, ptr, len);
+                        instance.exports.connection_closed(connectionId, ptr, len);
                     },
                     onMessage: (message: Buffer) => {
                         const ptr = instance.exports.alloc(message.length) >>> 0;
                         message.copy(Buffer.from(instance.exports.memory.buffer), ptr);
-                        instance.exports.connection_message(id, ptr, message.length);
+                        instance.exports.stream_message(connectionId, 0, ptr, message.length);
                     }
                 });
 
-                connections[id] = connec;
+                connections[connectionId] = connec;
                 return 0;
 
             } catch (error) {
@@ -191,22 +191,28 @@ export default function (config: Config): compat.WasmModuleImports {
         },
 
         // Must close and destroy the connection object.
-        connection_close: (id: number) => {
-            const connection = connections[id]!;
+        connection_close: (connectionId: number) => {
+            const connection = connections[connectionId]!;
             connection.close();
-            delete connections[id];
+            delete connections[connectionId];
+        },
+
+        // Opens a new substream on a multi-stream connection
+        connection_stream_open: (_connectionId: number) => {
+            // Given that multi-stream connections are never opened at the moment, this function
+            // should never be called.
         },
 
         // Must queue the data found in the WebAssembly memory at the given pointer. It is assumed
         // that this function is called only when the connection is in an open state.
-        connection_send: (id: number, ptr: number, len: number) => {
+        stream_send: (connectionId: number, _streamId: number, ptr: number, len: number) => {
             const instance = config.instance!;
 
             ptr >>>= 0;
             len >>>= 0;
 
             const data = Buffer.from(instance.exports.memory.buffer).slice(ptr, ptr + len);
-            const connection = connections[id]!;
+            const connection = connections[connectionId]!;
             connection.send(data);
         },
 

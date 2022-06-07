@@ -208,8 +208,9 @@ impl smoldot_light_base::Platform for Platform {
 
             TOTAL_BYTES_SENT.fetch_add(data.len(), Ordering::Relaxed);
 
-            bindings::connection_send(
+            bindings::stream_send(
                 this.id.unwrap(),
+                0,
                 u32::try_from(data.as_ptr() as usize).unwrap(),
                 u32::try_from(data.len()).unwrap(),
             );
@@ -255,14 +256,33 @@ impl Drop for Connection {
     }
 }
 
-pub(crate) fn connection_open(id: u32) {
-    let connection = unsafe { &mut *(usize::try_from(id).unwrap() as *mut Connection) };
+pub(crate) fn connection_open_single_stream(connection_id: u32) {
+    let connection = unsafe { &mut *(usize::try_from(connection_id).unwrap() as *mut Connection) };
     connection.open = true;
     connection.something_happened.notify(usize::max_value());
 }
 
-pub(crate) fn connection_message(id: u32, ptr: u32, len: u32) {
-    let connection = unsafe { &mut *(usize::try_from(id).unwrap() as *mut Connection) };
+pub(crate) fn connection_open_multi_stream(connection_id: u32, peer_id_ptr: u32, peer_id_len: u32) {
+    let connection = unsafe { &mut *(usize::try_from(connection_id).unwrap() as *mut Connection) };
+    connection.open = true;
+    connection.something_happened.notify(usize::max_value());
+
+    let peer_id: Box<[u8]> = {
+        let peer_id_ptr = usize::try_from(peer_id_ptr).unwrap();
+        let peer_id_len = usize::try_from(peer_id_len).unwrap();
+        unsafe {
+            Box::from_raw(slice::from_raw_parts_mut(
+                peer_id_ptr as *mut u8,
+                peer_id_len,
+            ))
+        }
+    };
+
+    todo!()
+}
+
+pub(crate) fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: u32) {
+    let connection = unsafe { &mut *(usize::try_from(connection_id).unwrap() as *mut Connection) };
 
     let ptr = usize::try_from(ptr).unwrap();
     let len = usize::try_from(len).unwrap();
@@ -287,8 +307,12 @@ pub(crate) fn connection_message(id: u32, ptr: u32, len: u32) {
     connection.something_happened.notify(usize::max_value());
 }
 
-pub(crate) fn connection_closed(id: u32, ptr: u32, len: u32) {
-    let connection = unsafe { &mut *(usize::try_from(id).unwrap() as *mut Connection) };
+pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbound: u32) {
+    todo!()
+}
+
+pub(crate) fn connection_closed(connection_id: u32, ptr: u32, len: u32) {
+    let connection = unsafe { &mut *(usize::try_from(connection_id).unwrap() as *mut Connection) };
 
     connection.closed_message = Some({
         let ptr = usize::try_from(ptr).unwrap();
@@ -299,4 +323,8 @@ pub(crate) fn connection_closed(id: u32, ptr: u32, len: u32) {
     });
 
     connection.something_happened.notify(usize::max_value());
+}
+
+pub(crate) fn stream_closed(connection_id: u32, stream_id: u32) {
+    todo!()
 }
