@@ -29,7 +29,7 @@
 
 use crate::run::{database_thread, jaeger_service};
 
-use core::{cmp, task::Poll, time::Duration};
+use core::{cmp, mem, task::Poll, time::Duration};
 use futures::{
     channel::{mpsc, oneshot},
     lock::Mutex,
@@ -555,6 +555,35 @@ impl NetworkService {
         chain_index: usize,
         config: protocol::BlocksRequestConfig,
     ) -> Result<Vec<protocol::BlockData>, BlocksRequestError> {
+        tracing::debug!(
+            peer_id = %target, %chain_index,
+            start = %match &config.start {
+                protocol::BlocksRequestConfigStart::Hash(h) => either::Left(HashDisplay(h)),
+                protocol::BlocksRequestConfigStart::Number(n) => either::Right(n),
+            },
+            desired_count = config.desired_count,
+            direction = match config.direction {
+                protocol::BlocksRequestDirection::Ascending => "ascending",
+                protocol::BlocksRequestDirection::Descending => "descending",
+            },
+            "blocks-request-start"
+        );
+
+        // Setup a guard that will print a log message in case it is dropped silently.
+        // This lets us detect if the request is cancelled.
+        struct LogIfCancel(PeerId, usize);
+        impl Drop for LogIfCancel {
+            fn drop(&mut self) {
+                tracing::debug!(
+                    peer_id = %self.0,
+                    chain_index = %self.1,
+                    outcome = "cancelled",
+                    "blocks-request-ended"
+                );
+            }
+        }
+        let _log_if_cancel = LogIfCancel(target.clone(), chain_index);
+
         let _jaeger_span = self.inner.jaeger_service.outgoing_block_request_span(
             &self.inner.local_peer_id,
             &target,
@@ -586,13 +615,38 @@ impl NetworkService {
                 Duration::from_secs(12),
             );
 
+            // TODO: somehow cancel the request if the `rx` is dropped?
             guarded.blocks_requests.insert(request_id, tx);
 
             self.inner.wake_up_main_background_task.notify(1);
             rx
         };
 
-        rx.await.unwrap().map_err(BlocksRequestError::Request)
+        let result = rx.await.unwrap().map_err(BlocksRequestError::Request);
+
+        // Requet has finished. Print the log and prevent the cancellation message from being
+        // printed.
+        mem::forget(_log_if_cancel);
+        match &result {
+            Ok(success) => {
+                tracing::debug!(
+                    peer_id = %target, %chain_index,
+                    outcome = "success",
+                    response_blocks = success.len(),
+                    "blocks-request-ended"
+                );
+            }
+            Err(err) => {
+                tracing::debug!(
+                    peer_id = %target, %chain_index,
+                    outcome = "failure",
+                    error = %err,
+                    "blocks-request-ended"
+                );
+            }
+        }
+
+        result
     }
 }
 

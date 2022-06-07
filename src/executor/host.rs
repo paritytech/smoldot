@@ -486,7 +486,6 @@ pub enum HostVm {
         /// Object used to resume execution.
         resume: EndStorageTransaction,
         /// If true, changes must be rolled back.
-        #[must_use]
         rollback: bool,
     },
     /// Need to provide the maximum log level.

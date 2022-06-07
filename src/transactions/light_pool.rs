@@ -464,7 +464,7 @@ where
             (None, Some(_)) => false,
             (Some(b), Some(i)) => self.blocks_tree.is_ancestor(i, b),
         };
-        debug_assert!(!(!block_is_in_best_chain && block_is_finalized));
+        debug_assert!(block_is_in_best_chain || !block_is_finalized);
 
         // Convert the validation result into something more concise and useful for this data
         // structure.

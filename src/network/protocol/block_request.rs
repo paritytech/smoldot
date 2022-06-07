@@ -142,13 +142,17 @@ pub fn decode_block_request(
     request_bytes: &[u8],
 ) -> Result<BlocksRequestConfig, DecodeBlockRequestError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
-        protobuf::message_decode::<((_,), Option<_>, Option<_>, (_,), Option<_>), _, _>((
+        nom::combinator::complete(protobuf::message_decode::<
+            ((_,), Option<_>, Option<_>, (_,), Option<_>),
+            _,
+            _,
+        >((
             protobuf::uint32_tag_decode(1),
             protobuf::bytes_tag_decode(2),
             protobuf::bytes_tag_decode(3),
             protobuf::enum_tag_decode(5),
             protobuf::uint32_tag_decode(6),
-        )),
+        ))),
     );
 
     let ((fields,), hash, number, (direction,), max_blocks) =
@@ -160,7 +164,7 @@ pub fn decode_block_request(
     Ok(BlocksRequestConfig {
         start: match (hash, number) {
             (Some(h), None) => BlocksRequestConfigStart::Hash(
-                <[u8; 32]>::try_from(&h[..])
+                <[u8; 32]>::try_from(h)
                     .map_err(|_| DecodeBlockRequestError::InvalidBlockHashLength)?,
             ),
             (None, Some(n)) => {
@@ -265,7 +269,7 @@ pub fn decode_block_response(
     response_bytes: &[u8],
 ) -> Result<Vec<BlockData>, DecodeBlockResponseError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
-        protobuf::message_decode((protobuf::message_tag_decode(
+        nom::combinator::complete(protobuf::message_decode((protobuf::message_tag_decode(
             1,
             protobuf::message_decode::<((_,), (_,), Vec<_>, Option<_>), _, _>((
                 protobuf::bytes_tag_decode(1),
@@ -273,7 +277,7 @@ pub fn decode_block_response(
                 protobuf::bytes_tag_decode(3),
                 protobuf::bytes_tag_decode(8),
             )),
-        ),)),
+        ),))),
     );
 
     let blocks: Vec<_> = match nom::Finish::finish(parser(response_bytes)) {
@@ -288,7 +292,7 @@ pub fn decode_block_response(
         }
 
         blocks_out.push(BlockData {
-            hash: <[u8; 32]>::try_from(&hash[..]).unwrap(),
+            hash: <[u8; 32]>::try_from(hash).unwrap(),
             header: if !header.is_empty() {
                 Some(header.to_vec())
             } else {
@@ -298,7 +302,7 @@ pub fn decode_block_response(
             body: Some(body.into_iter().map(|tx| tx.to_vec()).collect()),
             justifications: if let Some(justifications) = justifications {
                 let result: nom::IResult<_, _> =
-                    nom::combinator::all_consuming(decode_justifications)(&justifications);
+                    nom::combinator::all_consuming(decode_justifications)(justifications);
                 match result {
                     Ok((_, out)) => Some(out),
                     Err(nom::Err::Error(_) | nom::Err::Failure(_)) => {
@@ -399,4 +403,13 @@ fn decode_justifications<'a, E: nom::error::ParseError<&'a [u8]>>(
             ),
         )
     })(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn regression_2339() {
+        // Regression test for https://github.com/paritytech/smoldot/issues/2339.
+        let _ = super::decode_block_request(&[26, 10]);
+    }
 }

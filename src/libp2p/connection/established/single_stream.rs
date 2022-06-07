@@ -934,6 +934,11 @@ impl ConnectionPrototype {
         ConnectionPrototype { encryption }
     }
 
+    /// Extracts the Noise state machine from this prototype.
+    pub fn into_noise_state_machine(self) -> noise::Noise {
+        self.encryption
+    }
+
     /// Turns this prototype into an actual connection.
     pub fn into_connection<TNow, TRqUd, TNotifUd>(
         self,

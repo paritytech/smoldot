@@ -25,7 +25,6 @@ use crate::network::{kademlia, protocol};
 use crate::util::{self, SipHasherBuild};
 
 use alloc::{
-    borrow::Cow,
     collections::VecDeque,
     format,
     string::{String, ToString as _},
@@ -1912,10 +1911,7 @@ where
     /// called if this timeout is reached.
     // TODO: give more control, with number of slots and node choice
     // TODO: this API with now is a bit hacky?
-    pub fn next_start_connect<'a>(
-        &mut self,
-        now: impl FnOnce() -> TNow,
-    ) -> Option<StartConnect<TNow>> {
+    pub fn next_start_connect(&mut self, now: impl FnOnce() -> TNow) -> Option<StartConnect<TNow>> {
         // Ask the underlying state machine which nodes are desired but don't have any
         // associated connection attempt yet.
         // Since the underlying state machine is only made aware of connections when
@@ -2045,13 +2041,11 @@ where
 
         let response = {
             protocol::build_identify_response(protocol::IdentifyResponse {
-                protocol_version: "/substrate/1.0".into(), // TODO: same value as in Substrate
-                agent_version: agent_version.into(),
-                ed25519_public_key: Cow::Borrowed(
-                    self.inner.noise_key().libp2p_public_ed25519_key(),
-                ),
+                protocol_version: "/substrate/1.0", // TODO: same value as in Substrate
+                agent_version,
+                ed25519_public_key: *self.inner.noise_key().libp2p_public_ed25519_key(),
                 listen_addrs: iter::empty(), // TODO:
-                observed_addr: Cow::Borrowed(&observed_addr),
+                observed_addr,
                 protocols: self
                     .inner
                     .request_response_protocols()
@@ -2477,16 +2471,24 @@ pub enum StateRequestError {
 #[derive(Debug, derive_more::Display)]
 pub enum ProtocolError {
     /// Error in an incoming substream.
+    #[display(fmt = "Error in an incoming substream: {}", _0)]
     InboundError(InboundError),
     /// Error while decoding the handshake of the block announces substream.
+    #[display(
+        fmt = "Error while decoding the handshake of the block announces substream: {}",
+        _0
+    )]
     BadBlockAnnouncesHandshake(protocol::BlockAnnouncesHandshakeDecodeError),
     /// Error while decoding a received block announce.
+    #[display(fmt = "Error while decoding a received block announce: {}", _0)]
     BadBlockAnnounce(protocol::DecodeBlockAnnounceError),
     /// Error while decoding a received Grandpa notification.
+    #[display(fmt = "Error while decoding a received Grandpa notification: {}", _0)]
     BadGrandpaNotification(protocol::DecodeGrandpaNotificationError),
     /// Received an invalid identify request.
     BadIdentifyRequest,
     /// Error while decoding a received blocks request.
+    #[display(fmt = "Error while decoding a received blocks request: {}", _0)]
     BadBlocksRequest(protocol::DecodeBlockRequestError),
 }
 
