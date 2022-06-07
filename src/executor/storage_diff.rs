@@ -38,7 +38,7 @@
 
 // TODO: more docs
 
-use alloc::{borrow::ToOwned as _, collections::BTreeMap, vec::Vec};
+use alloc::{collections::BTreeMap, vec::Vec};
 use core::{cmp, fmt, iter, ops};
 use hashbrown::HashMap;
 
@@ -182,7 +182,10 @@ impl StorageDiff {
         }
 
         // Find the diff entry that immediately follows `key`.
-        let in_diff = self.btree.range(ExcludedBound(key)).next();
+        let in_diff = self
+            .btree
+            .range::<[u8], _>((ops::Bound::Excluded(key), ops::Bound::Unbounded))
+            .next();
 
         match (in_parent_next_key, in_diff) {
             (Some(a), Some((b, true))) if a <= &b[..] => StorageNextKey::Found(Some(a)),
@@ -211,7 +214,7 @@ impl StorageDiff {
                 debug_assert!(&b[..] > key);
                 let found = self
                     .btree
-                    .range(ExcludedBound(&b[..]))
+                    .range::<[u8], _>((ops::Bound::Excluded(&b[..]), ops::Bound::Unbounded))
                     .find(|(_, value)| **value)
                     .map(|(key, _)| &key[..]);
                 StorageNextKey::Found(found)
@@ -239,7 +242,7 @@ impl StorageDiff {
 
         let mut diff_inserted = self
             .btree
-            .range(prefix.to_owned()..) // TODO: this to_owned() is a bit stupid
+            .range::<[u8], _>((ops::Bound::Included(prefix), ops::Bound::Unbounded))
             .take_while(|(k, _)| k.starts_with(prefix))
             .filter(|(_, v)| **v)
             .map(|(k, _)| &k[..])
@@ -314,17 +317,4 @@ impl FromIterator<(Vec<u8>, Option<Vec<u8>>)> for StorageDiff {
 pub enum StorageNextKey<'a> {
     Found(Option<&'a [u8]>),
     NextOf(&'a [u8]),
-}
-
-// Excluded start bound and unbounded end. There is no such thing in the stdlib.
-struct ExcludedBound<'a>(&'a [u8]);
-
-impl<'a> ops::RangeBounds<[u8]> for ExcludedBound<'a> {
-    fn start_bound(&self) -> ops::Bound<&'a [u8]> {
-        ops::Bound::Excluded(self.0)
-    }
-
-    fn end_bound(&self) -> ops::Bound<&'a [u8]> {
-        ops::Bound::Unbounded
-    }
 }
