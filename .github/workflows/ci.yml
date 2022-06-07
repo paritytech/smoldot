@@ -104,6 +104,20 @@ jobs:
     - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features std
     - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features database-sqlite --features std
 
+  fuzzing-binaries-compile:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions-rs/toolchain@v1
+      with:
+        toolchain: nightly
+        override: true
+    - uses: baptiste0928/cargo-install@v1  # This action ensures that the compilation is cached.
+      with:
+        crate: cargo-fuzz
+    - uses: Swatinem/rust-cache@v1
+    - run: cargo fuzz build --fuzz-dir ./bin/fuzz
+
   check-rustdoc-links:
     runs-on: ubuntu-latest
     container:
@@ -127,6 +141,11 @@ jobs:
         with:
           command: fmt
           args: --all -- --check
+      - uses: actions-rs/cargo@v1
+        # The fuzzing targets are in a different package and thus need to be checked separately.
+        with:
+          command: fmt
+          args: --manifest-path ./bin/fuzz/Cargo.toml --all -- --check
 
   # TODO: as explained in the official repo (https://github.com/actions-rs/clippy), this action uses unstable GH actions features, but has the huge advantage of not requiring `GITHUB_TOKEN` and working on PRs from forked repositories ; should eventually replace `actions-rs/clippy@master` with a specific version
   clippy:
@@ -189,7 +208,7 @@ jobs:
   all-ci:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [test-64bits, test-32bits, wasm-node-check, wasm-node-size-diff, check-features, check-rustdoc-links, fmt, clippy, cargo-deny, cargo-spellcheck, wasm-node-versions-match]
+    needs: [test-64bits, test-32bits, wasm-node-check, wasm-node-size-diff, check-features, fuzzing-binaries-compile, check-rustdoc-links, fmt, clippy, cargo-deny, cargo-spellcheck, wasm-node-versions-match]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success

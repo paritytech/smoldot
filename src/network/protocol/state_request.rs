@@ -58,7 +58,7 @@ pub fn decode_state_response(
     response_bytes: &[u8],
 ) -> Result<Vec<StateResponseEntry>, DecodeStateResponseError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
-        protobuf::message_decode((protobuf::message_tag_decode(
+        nom::combinator::complete(protobuf::message_decode((protobuf::message_tag_decode(
             1,
             protobuf::message_decode((
                 protobuf::bytes_tag_decode(1),
@@ -71,7 +71,7 @@ pub fn decode_state_response(
                 ),
                 protobuf::bool_tag_decode(3),
             )),
-        ),)),
+        ),))),
     );
 
     let entries: Vec<((&[u8],), Vec<((&[u8],), (&[u8],))>, (bool,))> =

@@ -93,7 +93,7 @@ pub fn encode_block_announce(
 /// Decodes a block announcement.
 pub fn decode_block_announce(bytes: &[u8]) -> Result<BlockAnnounceRef, DecodeBlockAnnounceError> {
     let result: Result<_, nom::error::Error<_>> =
-        nom::combinator::all_consuming(nom::combinator::map(
+        nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
             nom::sequence::tuple((
                 nom::combinator::recognize(|enc_hdr| match header::decode_partial(enc_hdr) {
                     Ok((hdr, rest)) => Ok((rest, hdr)),
@@ -112,7 +112,7 @@ pub fn decode_block_announce(bytes: &[u8]) -> Result<BlockAnnounceRef, DecodeBlo
                 scale_encoded_header,
                 is_best,
             },
-        ))(bytes)
+        )))(bytes)
         .finish();
 
     match result {
@@ -150,7 +150,7 @@ pub fn decode_block_announces_handshake(
     handshake: &[u8],
 ) -> Result<BlockAnnouncesHandshakeRef, BlockAnnouncesHandshakeDecodeError> {
     let result: Result<_, nom::error::Error<_>> =
-        nom::combinator::all_consuming(nom::combinator::map(
+        nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
             nom::sequence::tuple((
                 nom::branch::alt((
                     nom::combinator::map(nom::bytes::complete::tag(&[0b1]), |_| Role::Full),
@@ -167,7 +167,7 @@ pub fn decode_block_announces_handshake(
                 best_hash: TryFrom::try_from(best_hash).unwrap(),
                 genesis_hash: TryFrom::try_from(genesis_hash).unwrap(),
             },
-        ))(handshake)
+        )))(handshake)
         .finish();
 
     match result {
