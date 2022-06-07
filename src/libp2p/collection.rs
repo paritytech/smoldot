@@ -2067,7 +2067,11 @@ where
         mut self,
     ) -> (Option<Self>, Option<ConnectionToCoordinator>) {
         match &mut self.connection {
-            MultiStreamConnectionTaskInner::Established { established, .. } => {
+            MultiStreamConnectionTaskInner::Established {
+                established,
+                outbound_substreams_mapping,
+                outbound_substreams_mapping2,
+            } => {
                 let event = match established.pull_event() {
                     Some(established::Event::InboundError(err)) => {
                         Some(ConnectionToCoordinatorInner::InboundError(err))
@@ -2086,11 +2090,10 @@ where
                         outbound_substreams_mapping
                             .remove(&outer_substream_id)
                             .unwrap();
-                        self.pending_messages
-                            .push_back(ConnectionToCoordinatorInner::Response {
-                                response,
-                                id: outer_substream_id,
-                            });
+                        Some(ConnectionToCoordinatorInner::Response {
+                            response,
+                            id: outer_substream_id,
+                        })
                     }
                     Some(established::Event::NotificationsInOpen {
                         id,
@@ -2118,30 +2121,25 @@ where
                             outbound_substreams_mapping2.remove(&id);
                         }
 
-                        self.pending_messages.push_back(
-                            ConnectionToCoordinatorInner::NotificationsOutResult {
-                                id: outer_substream_id,
-                                result: result
-                                    .map_err(|(err, _)| NotificationsOutErr::Substream(err)),
-                            },
-                        );
+                        Some(ConnectionToCoordinatorInner::NotificationsOutResult {
+                            id: outer_substream_id,
+                            result: result.map_err(|(err, _)| NotificationsOutErr::Substream(err)),
+                        })
                     }
                     Some(established::Event::NotificationsOutCloseDemanded { id }) => {
                         let outer_substream_id = *outbound_substreams_mapping2.get(&id).unwrap();
-                        self.pending_messages.push_back(
+                        Some(
                             ConnectionToCoordinatorInner::NotificationsOutCloseDemanded {
                                 id: outer_substream_id,
                             },
-                        );
+                        )
                     }
                     Some(established::Event::NotificationsOutReset { id, .. }) => {
                         let outer_substream_id = outbound_substreams_mapping2.remove(&id).unwrap();
                         outbound_substreams_mapping.remove(&outer_substream_id);
-                        self.pending_messages.push_back(
-                            ConnectionToCoordinatorInner::NotificationsOutReset {
-                                id: outer_substream_id,
-                            },
-                        );
+                        Some(ConnectionToCoordinatorInner::NotificationsOutReset {
+                            id: outer_substream_id,
+                        })
                     }
                     Some(established::Event::PingOutSuccess) => {
                         Some(ConnectionToCoordinatorInner::PingOutSuccess)
