@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fix a panic when decoding a block header containing a large number of Aura authorities. ([#2338](https://github.com/paritytech/smoldot/pull/2338))
+- Fix multiple panics when decoding network messages in case where these messages were truncated. ([#2340](https://github.com/paritytech/smoldot/pull/2340))
 
 ## 0.6.17 - 2022-05-31
 
