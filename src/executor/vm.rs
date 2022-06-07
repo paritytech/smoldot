@@ -111,9 +111,12 @@ impl Module {
                 ExecHint::CompileAheadOfTime => {
                     ModuleInner::Interpreter(interpreter::Module::new(module)?)
                 }
-                ExecHint::Oneshot | ExecHint::Untrusted => {
+                ExecHint::Oneshot | ExecHint::Untrusted | ExecHint::ForceWasmi => {
                     ModuleInner::Interpreter(interpreter::Module::new(module)?)
                 }
+
+                #[cfg(all(target_arch = "x86_64", feature = "std"))]
+                ExecHint::ForceWasmtime => ModuleInner::Jit(jit::Module::new(module)?),
             },
         })
     }
@@ -344,6 +347,17 @@ pub enum ExecHint {
     Oneshot,
     /// The WebAssembly code running through this VM is untrusted.
     Untrusted,
+
+    /// Forces using the `wasmi` backend.
+    ///
+    /// This variant is useful for testing purposes.
+    ForceWasmi,
+    /// Forces using the `wasmtime` backend.
+    ///
+    /// This variant is useful for testing purposes.
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "x86_64", feature = "std"))))]
+    ForceWasmtime,
 }
 
 /// Number of heap pages available to the Wasm code.

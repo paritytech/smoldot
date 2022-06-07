@@ -145,13 +145,13 @@ test = false
 doc = false
 
 [[bin]]
-name = "wasm-module-ahead"
-path = "fuzz_targets/wasm-module-ahead.rs"
+name = "wasm-module-wasmi"
+path = "fuzz_targets/wasm-module-wasmi.rs"
 test = false
 doc = false
 
 [[bin]]
-name = "wasm-module-untrusted"
-path = "fuzz_targets/wasm-module-untrusted.rs"
+name = "wasm-module-wasmtime"
+path = "fuzz_targets/wasm-module-wasmtime.rs"
 test = false
 doc = false
