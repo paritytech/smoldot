@@ -127,7 +127,11 @@ impl<'a> AuraAuthoritiesIter<'a> {
         let (data, num_items) = util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(data)
             .map_err(|_| Error::TooShort)?;
 
-        if data.len() != num_items * 32 {
+        if data.len()
+            != num_items
+                .checked_mul(32)
+                .ok_or(Error::BadAuraAuthoritiesListLen)?
+        {
             return Err(Error::BadAuraAuthoritiesListLen);
         }
 

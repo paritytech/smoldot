@@ -54,10 +54,10 @@ pub fn decode_storage_proof_response(
     response_bytes: &[u8],
 ) -> Result<Vec<Vec<u8>>, DecodeStorageProofResponseError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
-        protobuf::message_decode((protobuf::message_tag_decode(
+        nom::combinator::complete(protobuf::message_decode((protobuf::message_tag_decode(
             2,
             protobuf::message_decode((protobuf::bytes_tag_decode(2),)),
-        ),)),
+        ),))),
     );
 
     let proof: &[u8] = match nom::Finish::finish(parser(response_bytes)) {
