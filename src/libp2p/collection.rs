@@ -2004,6 +2004,14 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
         /// If true, [`ConnectionTask::reset`] has been called. This doesn't modify any of the
         /// behavior but is used to make sure that the API is used correctly.
         was_api_reset: bool,
+
+        /// `true` if the [`ConnectionToCoordinatorInner::StartShutdown`] message has already
+        /// been sent to the coordinator.
+        start_shutdown_message_sent: bool,
+
+        /// `true` if the [`ConnectionToCoordinatorInner::ShutdownFinished`] message has already
+        /// been sent to the coordinator.
+        shutdown_finish_message_sent: bool,
     },
 
     /// Connection has finished its shutdown and its shutdown has been acknowledged. There is
@@ -2013,9 +2021,6 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
         /// behavior but is used to make sure that the API is used correctly.
         was_api_reset: bool,
     },
-
-    /// Temporary state used to statisfy the borrow checker during state transitions.
-    Poisoned,
 }
 
 impl<TNow, TSubId> MultiStreamConnectionTask<TNow, TSubId>
@@ -2044,18 +2049,138 @@ where
     ///
     /// Messages aren't generated spontaneously. In other words, you don't need to periodically
     /// call this function just in case there's a new message. Messages are always generated after
-    /// either [`ConnectionTask::read_write`] or [`ConnectionTask::reset`] has been called.
-    /// Multiple messages can happen in a row.
+    /// either [`ConnectionTask::substrema_read_write`] or [`ConnectionTask::reset`] has been
+    /// called. Multiple messages can happen in a row.
     ///
-    /// Because this function frees space in a buffer, calling [`ConnectionTask::read_write`]
-    /// again after it has returned might read/write more data and generate an event again. In
-    /// other words, the API user should call [`ConnectionTask::read_write`] and
+    /// Because this function frees space in a buffer, calling
+    /// [`ConnectionTask::substream_read_write`] again after it has returned might read/write more
+    /// data and generate an event again. In other words, the API user should call
+    /// [`ConnectionTask::substream_read_write`] and
     /// [`ConnectionTask::pull_message_to_coordinator`] repeatedly in a loop until no more
     /// message is generated.
     pub fn pull_message_to_coordinator(
         mut self,
     ) -> (Option<Self>, Option<ConnectionToCoordinator>) {
-        todo!()
+        match &mut self.connection {
+            MultiStreamConnectionTaskInner::Established { established, .. } => {
+                let event = match established.pull_event() {
+                    Some(established::Event::InboundError(err)) => {
+                        Some(ConnectionToCoordinatorInner::InboundError(err))
+                    }
+                    Some(established::Event::RequestIn {
+                        id,
+                        protocol_index,
+                        request,
+                    }) => Some(ConnectionToCoordinatorInner::RequestIn {
+                        id,
+                        protocol_index,
+                        request,
+                    }),
+                    Some(established::Event::Response { id, response, .. }) => {
+                        let outer_substream_id = outbound_substreams_mapping2.remove(&id).unwrap();
+                        outbound_substreams_mapping
+                            .remove(&outer_substream_id)
+                            .unwrap();
+                        self.pending_messages
+                            .push_back(ConnectionToCoordinatorInner::Response {
+                                response,
+                                id: outer_substream_id,
+                            });
+                    }
+                    Some(established::Event::NotificationsInOpen {
+                        id,
+                        protocol_index,
+                        handshake,
+                    }) => Some(ConnectionToCoordinatorInner::NotificationsInOpen {
+                        id,
+                        protocol_index,
+                        handshake,
+                    }),
+                    Some(established::Event::NotificationsInOpenCancel { id, .. }) => {
+                        Some(ConnectionToCoordinatorInner::NotificationsInOpenCancel { id })
+                    }
+                    Some(established::Event::NotificationIn { id, notification }) => {
+                        Some(ConnectionToCoordinatorInner::NotificationIn { id, notification })
+                    }
+                    Some(established::Event::NotificationsInClose { id, outcome, .. }) => {
+                        Some(ConnectionToCoordinatorInner::NotificationsInClose { id, outcome })
+                    }
+                    Some(established::Event::NotificationsOutResult { id, result }) => {
+                        let outer_substream_id = *outbound_substreams_mapping2.get(&id).unwrap();
+
+                        if result.is_err() {
+                            outbound_substreams_mapping.remove(&outer_substream_id);
+                            outbound_substreams_mapping2.remove(&id);
+                        }
+
+                        self.pending_messages.push_back(
+                            ConnectionToCoordinatorInner::NotificationsOutResult {
+                                id: outer_substream_id,
+                                result: result
+                                    .map_err(|(err, _)| NotificationsOutErr::Substream(err)),
+                            },
+                        );
+                    }
+                    Some(established::Event::NotificationsOutCloseDemanded { id }) => {
+                        let outer_substream_id = *outbound_substreams_mapping2.get(&id).unwrap();
+                        self.pending_messages.push_back(
+                            ConnectionToCoordinatorInner::NotificationsOutCloseDemanded {
+                                id: outer_substream_id,
+                            },
+                        );
+                    }
+                    Some(established::Event::NotificationsOutReset { id, .. }) => {
+                        let outer_substream_id = outbound_substreams_mapping2.remove(&id).unwrap();
+                        outbound_substreams_mapping.remove(&outer_substream_id);
+                        self.pending_messages.push_back(
+                            ConnectionToCoordinatorInner::NotificationsOutReset {
+                                id: outer_substream_id,
+                            },
+                        );
+                    }
+                    Some(established::Event::PingOutSuccess) => {
+                        Some(ConnectionToCoordinatorInner::PingOutSuccess)
+                    }
+                    Some(established::Event::PingOutFailed) => {
+                        Some(ConnectionToCoordinatorInner::PingOutFailed)
+                    }
+                    None => None,
+                };
+
+                (
+                    Some(self),
+                    event.map(|ev| ConnectionToCoordinator { inner: ev }),
+                )
+            }
+            MultiStreamConnectionTaskInner::ShutdownWaitingAck {
+                start_shutdown_message_sent,
+                shutdown_finish_message_sent,
+                ..
+            } => {
+                if !*start_shutdown_message_sent {
+                    debug_assert!(!*shutdown_finish_message_sent);
+                    *start_shutdown_message_sent = true;
+                    (
+                        Some(self),
+                        Some(ConnectionToCoordinator {
+                            inner: ConnectionToCoordinatorInner::StartShutdown,
+                        }),
+                    )
+                } else if !*shutdown_finish_message_sent {
+                    debug_assert!(*start_shutdown_message_sent);
+                    *shutdown_finish_message_sent = true;
+                    (
+                        Some(self),
+                        Some(ConnectionToCoordinator {
+                            inner: ConnectionToCoordinatorInner::ShutdownFinished,
+                        }),
+                    )
+                } else {
+                    (Some(self), None)
+                }
+            }
+            MultiStreamConnectionTaskInner::ShutdownAcked { .. } => (None, None),
+        }
     }
 
     /// Injects a message that has been pulled using [`Network::pull_message_to_connection`].
@@ -2188,11 +2313,9 @@ where
                 MultiStreamConnectionTaskInner::Established { .. },
             ) => {
                 // TODO: implement proper shutdown
-                self.pending_messages
-                    .push_back(ConnectionToCoordinatorInner::StartShutdown);
-                self.pending_messages
-                    .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
                 self.connection = MultiStreamConnectionTaskInner::ShutdownWaitingAck {
+                    start_shutdown_message_sent: false,
+                    shutdown_finish_message_sent: false,
                     was_api_reset: false,
                 };
             }
@@ -2222,9 +2345,12 @@ where
             (
                 CoordinatorToConnectionInner::ShutdownFinishedAck,
                 MultiStreamConnectionTaskInner::ShutdownWaitingAck {
+                    start_shutdown_message_sent,
+                    shutdown_finish_message_sent,
                     was_api_reset: was_reset,
                 },
             ) => {
+                debug_assert!(*start_shutdown_message_sent && *shutdown_finish_message_sent);
                 self.connection = MultiStreamConnectionTaskInner::ShutdownAcked {
                     was_api_reset: *was_reset,
                 };

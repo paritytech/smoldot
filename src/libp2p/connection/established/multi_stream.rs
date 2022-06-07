@@ -35,8 +35,7 @@ use rand::{Rng as _, SeedableRng as _};
 
 /// State machine of a fully-established connection where substreams are handled externally.
 pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
-    /// Events that should be yielded from [`MultiStream::read_write`] as soon as possible.
-    // TODO: is this necessary?
+    /// Events that should be yielded from [`MultiStream::pull_event`].
     pending_events: VecDeque<Event<TRqUd, TNotifUd>>,
 
     /// List of all open substreams, both inbound and outbound.
@@ -92,17 +91,9 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     ping_interval: Duration,
     /// See [`Config::ping_timeout`].
     ping_timeout: Duration,
-
-    /// Buffer used for intermediary data. When it is necessary, data is first copied here before
-    /// being turned into a `Vec`.
-    ///
-    /// While in theory this intermediary buffer could be shared between multiple different
-    /// connections, since data present in this buffer isn't always zero-ed, it could be possible
-    /// for a bug to cause data destined for connection A to be sent to connection B. Sharing this
-    /// buffer is too dangerous.
-    // TODO: remove; needs a lot of refactoring of noise and yamux
-    intermediary_buffer: Box<[u8]>,
 }
+
+const MAX_PENDING_EVENTS: usize = 4;
 
 impl<TNow, TSubId, TRqUd, TNotifUd> MultiStream<TNow, TSubId, TRqUd, TNotifUd>
 where
@@ -119,7 +110,16 @@ where
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
 
         MultiStream {
-            pending_events: Default::default(),
+            pending_events: {
+                // Note that the capacity is higher than `MAX_PENDING_EVENTS` because resetting
+                // substreams can unconditionally queue an event, and the API doesn't give the
+                // possibility to not reset a substream (as that would introduce too much
+                // complexity). For this reason, we reserve enough for the events that can happen
+                // by reading/writing substreams plus events that can happen by resetting
+                // substreams.
+                let cap = MAX_PENDING_EVENTS + num_expected_substreams;
+                VecDeque::with_capacity(cap)
+            },
             in_substreams: hashbrown::HashMap::with_capacity_and_hasher(
                 num_expected_substreams,
                 util::SipHasherBuild::new(randomness.sample(rand::distributions::Standard)),
@@ -138,8 +138,15 @@ where
             ping_protocol: config.ping_protocol,
             ping_interval: config.ping_interval,
             ping_timeout: config.ping_timeout,
-            intermediary_buffer: vec![0u8; 2048].into_boxed_slice(),
         }
+    }
+
+    /// Removes an event from the queue of events and returns it.
+    ///
+    /// This method should be called after [`MultiStream::substream_read_write`] or
+    /// [`MultiStream::reset_substream`] is called.
+    pub fn pull_event(&mut self) -> Option<Event<TRqUd, TNotifUd>> {
+        self.pending_events.pop_front()
     }
 
     /// Returns the number of new outbound substreams that the state machine would like to see
@@ -255,6 +262,9 @@ where
     /// state machine and its identifier is now invalid. If the reading or writing side of the
     /// substream was still open, then the user should reset that substream.
     ///
+    /// This method will refuse to accept data if too many events are already queued. Use
+    /// [`MultiStream::pull_event`] to empty the queue of events between calls to this method.
+    ///
     /// # Panic
     ///
     /// Panics if there is no substream with that identifier.
@@ -265,6 +275,11 @@ where
         read_write: &'_ mut ReadWrite<'_, TNow>,
     ) -> bool {
         loop {
+            // Don't process any more data before events are pulled.
+            if self.pending_events.len() >= MAX_PENDING_EVENTS {
+                return false;
+            }
+
             // TODO: not great to remove then insert back the substream
             let (substream_id, (mut substream, out_substream_id)) =
                 self.in_substreams.remove_entry(substream_id).unwrap();
