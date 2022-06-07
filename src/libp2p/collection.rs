@@ -2428,6 +2428,43 @@ where
         }
     }
 
+    /// Sets the state of the connection to "reset".
+    ///
+    /// This should be called if the remote abruptly closes the connection, such as with a TCP/IP
+    /// RST flag.
+    ///
+    /// After this function has been called, it is illegal to call
+    /// [`MultiStreamConnectionTask::substream_read_write`] or
+    /// [`MultiStreamConnectionTask::reset`] again.
+    ///
+    /// Calling this function might have generated messages for the coordinator.
+    /// [`MultiStreamConnectionTask::pull_message_to_coordinator`] should be called afterwards in
+    /// order to process these messages.
+    ///
+    /// # Panic
+    ///
+    /// Panics if [`MultiStreamConnectionTask::reset`] has been called in the past.
+    ///
+    pub fn reset(&mut self) {
+        // It is illegal to call `reset` a second time. Verify that the user didn't do this.
+        if let MultiStreamConnectionTaskInner::ShutdownWaitingAck {
+            was_api_reset: true,
+            ..
+        }
+        | MultiStreamConnectionTaskInner::ShutdownAcked {
+            was_api_reset: true,
+        } = self.connection
+        {
+            panic!()
+        }
+
+        self.connection = MultiStreamConnectionTaskInner::ShutdownWaitingAck {
+            was_api_reset: true,
+            shutdown_finish_message_sent: false,
+            start_shutdown_message_sent: false,
+        };
+    }
+
     /// Immediately destroys the substream with the given identifier.
     ///
     /// The given identifier is now considered invalid by the state machine.
