@@ -116,14 +116,14 @@ pub fn decode_identify_response(
     DecodeIdentifyResponseError,
 > {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
-        protobuf::message_decode((
+        nom::combinator::complete(protobuf::message_decode((
             protobuf::string_tag_decode(5),
             protobuf::string_tag_decode(6),
             protobuf::bytes_tag_decode(1),
             protobuf::bytes_tag_decode(2),
             protobuf::bytes_tag_decode(4),
             protobuf::string_tag_decode(3),
-        )),
+        ))),
     );
 
     let (
