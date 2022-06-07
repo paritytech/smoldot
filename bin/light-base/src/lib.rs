@@ -101,7 +101,7 @@ pub trait Platform: Send + 'static {
 
     /// A multi-stream connection.
     ///
-    /// This object is merely a handler. The underlying connection should be dropped only after
+    /// This object is merely a handle. The underlying connection should be dropped only after
     /// the `Connection` and all its associated substream objects ([`Platform::Stream`]) have
     /// been dropped.
     type Connection: Send + Sync + 'static;
@@ -191,14 +191,23 @@ pub trait Platform: Send + 'static {
     fn send(stream: &mut Self::Stream, data: &[u8]);
 }
 
+/// Type of opened connection. See [`Platform::connect`].
 #[derive(Debug)]
 pub enum PlatformConnection<TStream, TConnection> {
+    /// The connection is a single stream on top of which encryption and multiplexing should be
+    /// negotiatied. The division in multiple substreams is handled internally.
     SingleStream(TStream),
+    /// The connection is made of multiple substreams. The encryption and multiplexing are handled
+    /// externally.
     MultiStream(TConnection, peer_id::PeerId),
 }
 
+/// Direction in which a substream has been opened. See [`Platform::next_substream`].
+#[derive(Debug)]
 pub enum PlatformSubstreamDirection {
+    /// Substream has been opened by the remote.
     Inbound,
+    /// Substream has been opened locally in response to [`Platform::open_out_substream`].
     Outbound,
 }
 

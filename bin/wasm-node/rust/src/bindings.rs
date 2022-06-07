@@ -193,11 +193,10 @@ extern "C" {
     /// [`connection_open_multi_stream`] must be called.
     ///
     /// There exists two kind of connections: single-stream and multi-stream. Single-stream
-    /// connections are assumed to have a single stream open at all time. Multi-stream connections
-    /// open and close streams over time using [`connection_stream_opened`] and [`stream_closed`].
-    /// Note that single-stream connections also use multiple streams internally. The difference
-    /// with multi-stream connections is that the multiple streams of multi-stream connections
-    /// are opened by the user of these bindings rather than by smoldot's internals.
+    /// connections are assumed to have a single stream open at all time and the encryption and
+    /// multiplexing are handled internally by smoldot. Multi-stream connections open and close
+    /// streams over time using [`connection_stream_opened`] and [`stream_closed`], and the
+    /// encryption and multiplexing are handled by the user of these bindings.
     pub fn connection_new(id: u32, addr_ptr: u32, addr_len: u32, error_ptr_ptr: u32) -> u32;
 
     /// Close a connection previously initialized with [`connection_new`].
