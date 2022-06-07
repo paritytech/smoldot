@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix multiple panics when decoding network messages in case where these messages were truncated. ([#2340](https://github.com/paritytech/smoldot/pull/2340))
+
 ## 0.6.17 - 2022-05-31
 
 ### Changed
