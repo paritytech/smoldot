@@ -116,6 +116,8 @@ jobs:
       with:
         crate: cargo-fuzz
     - uses: Swatinem/rust-cache@v1
+      with:
+        working-directory: ./bin/fuzz
     - run: cargo fuzz build --fuzz-dir ./bin/fuzz
 
   check-rustdoc-links:
