@@ -627,7 +627,6 @@ impl NetworkService {
         // Requet has finished. Print the log and prevent the cancellation message from being
         // printed.
         mem::forget(_log_if_cancel);
-        // TODO: print something if the request is cancelled?
         match &result {
             Ok(success) => {
                 tracing::debug!(
