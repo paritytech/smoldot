@@ -23,7 +23,7 @@ use super::{
 };
 use crate::util;
 
-use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
+use alloc::{collections::VecDeque, string::String, vec::Vec};
 use core::{
     fmt,
     hash::Hash,
