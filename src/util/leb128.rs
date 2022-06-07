@@ -166,6 +166,10 @@ impl FramedInProgress {
             let mut out = 0usize;
 
             for (n, byte) in buffer.iter().enumerate() {
+                if (7 * n) >= usize::try_from(usize::BITS).unwrap() {
+                    return Some(Err(FramedError::LengthPrefixTooLarge));
+                }
+
                 match usize::from(*byte & 0b111_1111).checked_mul(1 << (7 * n)) {
                     Some(o) => out |= o,
                     None => return Some(Err(FramedError::LengthPrefixTooLarge)),
