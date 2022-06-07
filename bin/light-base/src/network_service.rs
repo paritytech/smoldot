@@ -1620,6 +1620,7 @@ async fn multi_stream_connection_task<TPlat: Platform>(
 
     // When reading/writing substreams, the substream can ask to be woken up after a certain time.
     // This variable stores the earliest time when we should be waking up.
+    // TODO: this is wrong; this code assumes that substreams will be found in `ready_substreams` while it is not the case now; however it seems more appropriate to modify `ready_substreams` rather than accomodate this limitation here
     let mut wake_up_after = None;
 
     loop {
