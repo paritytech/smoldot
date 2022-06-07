@@ -26,7 +26,7 @@
 
 use crate::run::{database_thread, jaeger_service, network_service};
 
-use core::num::NonZeroU32;
+use core::{num::NonZeroU32, ops};
 use futures::{lock::Mutex, prelude::*};
 use hashbrown::HashSet;
 use smoldot::{
@@ -699,7 +699,10 @@ impl SyncBackground {
                             .prefix_keys_ordered(
                                 prefix_key.prefix().as_ref(),
                                 self.finalized_block_storage
-                                    .range((prefix_key.prefix().as_ref().to_vec())..)
+                                    .range::<[u8], _>((
+                                        ops::Bound::Included(prefix_key.prefix().as_ref()),
+                                        ops::Bound::Unbounded,
+                                    ))
                                     .take_while(|(k, _)| {
                                         k.starts_with(prefix_key.prefix().as_ref())
                                     })
@@ -1057,23 +1060,27 @@ impl SyncBackground {
                                 verify = req.inject_value(value);
                             }
                             all::BlockVerification::FinalizedStorageNextKey(req) => {
-                                // TODO: to_vec() :-/
+                                // TODO: to_vec() :-/ range() immediately calculates the range of keys so there's no borrowing issue, but the take_while needs to keep req borrowed, which isn't possible
                                 let req_key = req.key().as_ref().to_vec();
-                                // TODO: to_vec() :-/
                                 let next_key = self
                                     .finalized_block_storage
-                                    .range(req.key().as_ref().to_vec()..)
+                                    .range::<[u8], _>((
+                                        ops::Bound::Included(req.key().as_ref()),
+                                        ops::Bound::Unbounded,
+                                    ))
                                     .find(move |(k, _)| k[..] > req_key[..])
                                     .map(|(k, _)| k);
                                 verify = req.inject_key(next_key);
                             }
                             all::BlockVerification::FinalizedStoragePrefixKeys(req) => {
-                                // TODO: to_vec() :-/
+                                // TODO: to_vec() :-/ range() immediately calculates the range of keys so there's no borrowing issue, but the take_while needs to keep req borrowed, which isn't possible
                                 let prefix = req.prefix().as_ref().to_vec();
-                                // TODO: to_vec() :-/
                                 let keys = self
                                     .finalized_block_storage
-                                    .range(req.prefix().as_ref().to_vec()..)
+                                    .range::<[u8], _>((
+                                        ops::Bound::Included(req.prefix().as_ref()),
+                                        ops::Bound::Unbounded,
+                                    ))
                                     .take_while(|(k, _)| k.starts_with(&prefix))
                                     .map(|(k, _)| k);
                                 verify = req.inject_keys_ordered(keys);
