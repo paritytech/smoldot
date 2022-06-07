@@ -267,7 +267,7 @@ pub(crate) fn connection_open_multi_stream(connection_id: u32, peer_id_ptr: u32,
     connection.open = true;
     connection.something_happened.notify(usize::max_value());
 
-    let peer_id: Box<[u8]> = {
+    let _peer_id: Box<[u8]> = {
         let peer_id_ptr = usize::try_from(peer_id_ptr).unwrap();
         let peer_id_len = usize::try_from(peer_id_len).unwrap();
         unsafe {
@@ -281,7 +281,7 @@ pub(crate) fn connection_open_multi_stream(connection_id: u32, peer_id_ptr: u32,
     todo!()
 }
 
-pub(crate) fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: u32) {
+pub(crate) fn stream_message(connection_id: u32, _stream_id: u32, ptr: u32, len: u32) {
     let connection = unsafe { &mut *(usize::try_from(connection_id).unwrap() as *mut Connection) };
 
     let ptr = usize::try_from(ptr).unwrap();
@@ -307,7 +307,7 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: 
     connection.something_happened.notify(usize::max_value());
 }
 
-pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbound: u32) {
+pub(crate) fn connection_stream_opened(_connection_id: u32, _stream_id: u32, _outbound: u32) {
     todo!()
 }
 
@@ -325,6 +325,6 @@ pub(crate) fn connection_closed(connection_id: u32, ptr: u32, len: u32) {
     connection.something_happened.notify(usize::max_value());
 }
 
-pub(crate) fn stream_closed(connection_id: u32, stream_id: u32) {
+pub(crate) fn stream_closed(_connection_id: u32, _stream_id: u32) {
     todo!()
 }
