@@ -18,6 +18,8 @@
 #![no_main]
 
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {
+    // Note that this fuzzing test will not compile on platforms where wasmtime isn't available.
+    // This is intentional.
     let _ = smoldot::executor::host::HostVmPrototype::new(smoldot::executor::host::Config {
         module: data,
         heap_pages: smoldot::executor::DEFAULT_HEAP_PAGES,

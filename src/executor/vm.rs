@@ -360,6 +360,21 @@ pub enum ExecHint {
     ForceWasmtime,
 }
 
+impl ExecHint {
+    /// Returns `ForceWasmtime` if it is available on the current platform, and `None` otherwise.
+    pub fn force_wasmtime_if_available() -> Option<ExecHint> {
+        #[cfg(all(target_arch = "x86_64", feature = "std"))]
+        fn value() -> Option<ExecHint> {
+            Some(ExecHint::ForceWasmtime)
+        }
+        #[cfg(not(all(target_arch = "x86_64", feature = "std")))]
+        fn value() -> Option<ExecHint> {
+            None
+        }
+        value()
+    }
+}
+
 /// Number of heap pages available to the Wasm code.
 ///
 /// Each page is `64kiB`.

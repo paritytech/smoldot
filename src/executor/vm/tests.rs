@@ -63,7 +63,9 @@ fn basic_seems_to_work() {
     }
 
     test(super::ExecHint::ForceWasmi);
-    test(super::ExecHint::ForceWasmtime);
+    if let Some(exec_hint) = super::ExecHint::force_wasmtime_if_available() {
+        test(exec_hint);
+    }
 }
 
 #[test]
@@ -73,8 +75,10 @@ fn out_of_memory_access() {
         0x01, 0x00, 0x41, 0x03, 0x0b, 0x00,
     ];
 
-    let module1 = super::Module::new(input, super::ExecHint::ForceWasmtime).unwrap();
-    assert!(super::VirtualMachinePrototype::new(&module1, |_, _, _| Ok(0)).is_err());
+    if let Some(exec_hint) = super::ExecHint::force_wasmtime_if_available() {
+        let module1 = super::Module::new(input, exec_hint).unwrap();
+        assert!(super::VirtualMachinePrototype::new(&module1, |_, _, _| Ok(0)).is_err());
+    }
 
     let module2 = super::Module::new(input, super::ExecHint::ForceWasmi).unwrap();
     assert!(super::VirtualMachinePrototype::new(&module2, |_, _, _| Ok(0)).is_err());
@@ -87,8 +91,10 @@ fn has_start_function() {
         0x09, 0x01, 0x01, 0x71, 0x03, 0x69, 0x6d, 0x70, 0x00, 0x00, 0x08, 0x01, 0x00,
     ];
 
-    let module1 = super::Module::new(input, super::ExecHint::ForceWasmtime).unwrap();
-    assert!(super::VirtualMachinePrototype::new(&module1, |_, _, _| Ok(0)).is_err());
+    if let Some(exec_hint) = super::ExecHint::force_wasmtime_if_available() {
+        let module1 = super::Module::new(input, exec_hint).unwrap();
+        assert!(super::VirtualMachinePrototype::new(&module1, |_, _, _| Ok(0)).is_err());
+    }
 
     let module2 = super::Module::new(input, super::ExecHint::ForceWasmi).unwrap();
     assert!(super::VirtualMachinePrototype::new(&module2, |_, _, _| Ok(0)).is_err());
@@ -101,8 +107,10 @@ fn unsupported_type() {
         0x02, 0x0d, 0x01, 0x04, 0x74, 0x65, 0x73, 0x74, 0x04, 0x66, 0x75, 0x6e, 0x63, 0x00, 0x00,
     ];
 
-    if let Ok(module1) = super::Module::new(input, super::ExecHint::ForceWasmtime) {
-        assert!(super::VirtualMachinePrototype::new(&module1, |_, _, _| Ok(0)).is_err());
+    if let Some(exec_hint) = super::ExecHint::force_wasmtime_if_available() {
+        if let Ok(module1) = super::Module::new(input, exec_hint) {
+            assert!(super::VirtualMachinePrototype::new(&module1, |_, _, _| Ok(0)).is_err());
+        }
     }
 
     if let Ok(module2) = super::Module::new(input, super::ExecHint::ForceWasmi) {
