@@ -154,6 +154,7 @@ pub enum InvalidTransaction {
     /// left in the current block.
     ExhaustsResources,
     /// Any other custom invalid validity that is not covered by this enum.
+    #[display(fmt = "Other reason (code: {})", _0)]
     Custom(u8),
     /// An extrinsic with a Mandatory dispatch resulted in Error. This is indicative of either a
     /// malicious validator or a buggy `provide_inherent`. In any case, it can result in dangerously
@@ -172,7 +173,7 @@ pub enum UnknownTransaction {
     /// No validator found for the given unsigned transaction.
     NoUnsignedValidator,
     /// Any other custom unknown validity that is not covered by this enum.
-    #[display(fmt = "Custom unknown validity code (code: {})", _0)]
+    #[display(fmt = "Other reason (code: {})", _0)]
     Custom(u8),
 }
 
