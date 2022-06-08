@@ -840,6 +840,7 @@ pub enum BlocksRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
+    #[display(fmt = "{}", _0)]
     Request(service::BlocksRequestError),
 }
 
@@ -849,6 +850,7 @@ pub enum GrandpaWarpSyncRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
+    #[display(fmt = "{}", _0)]
     Request(service::GrandpaWarpSyncRequestError),
 }
 
@@ -858,6 +860,7 @@ pub enum StorageProofRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
+    #[display(fmt = "{}", _0)]
     Request(service::StorageProofRequestError),
 }
 
@@ -867,6 +870,7 @@ pub enum CallProofRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
+    #[display(fmt = "{}", _0)]
     Request(service::CallProofRequestError),
 }
 
@@ -887,6 +891,7 @@ pub enum QueueNotificationError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the queuing.
+    #[display(fmt = "{}", _0)]
     Queue(peers::QueueNotificationError),
 }
 

@@ -2192,6 +2192,7 @@ pub enum RequestError {
     ConnectionShutdown,
 
     /// Error happened in the context of the substream.
+    #[display(fmt = "{}", _0)]
     Substream(established::RequestError),
 }
 
@@ -2201,6 +2202,7 @@ pub enum NotificationsOutErr {
     ConnectionShutdown,
 
     /// Error happened in the context of the substream.
+    #[display(fmt = "{}", _0)]
     Substream(established::NotificationsOutErr),
 }
 
@@ -2210,6 +2212,7 @@ pub enum NotificationsInClosedErr {
     ConnectionShutdown,
 
     /// Error happened in the context of the substream.
+    #[display(fmt = "{}", _0)]
     Substream(established::NotificationsInClosedErr),
 }
 

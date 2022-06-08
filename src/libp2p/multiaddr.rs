@@ -170,9 +170,11 @@ impl fmt::Display for Multiaddr {
     }
 }
 
+// TODO: more doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
 pub struct FromVecError {}
 
+// TODO: more doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum ParseError {
     /// A multiaddress must always start with `/`.

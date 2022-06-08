@@ -1157,16 +1157,21 @@ pub enum IncomingDataDetail<T> {
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
     /// Unknown version number in a header.
+    #[display(fmt = "Unknown version number in a header")]
     UnknownVersion(u8),
     /// Unrecognized value for the type of frame as indicated in the header.
+    #[display(fmt = "Unrecognized value for the type of frame as indicated in the header")]
     BadFrameType(u8),
     /// Received flags whose meaning is unknown.
+    #[display(fmt = "Received flags whose meaning is unknown")]
     UnknownFlags(u16),
     /// Received a PING frame with invalid flags.
+    #[display(fmt = "Received a PING frame with invalid flags")]
     BadPingFlags(u16),
     /// Substream ID was zero in a data of window update frame.
     ZeroSubstreamId,
     /// Received a SYN flag with a known substream ID.
+    #[display(fmt = "Received a SYN flag with a known substream ID")]
     UnexpectedSyn(NonZeroU32),
     /// Remote tried to send more data than it was allowed to.
     CreditsExceeded,

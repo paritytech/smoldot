@@ -253,6 +253,7 @@ pub enum SignError {
 
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum SignVrfError {
+    #[display(fmt = "{}", _0)]
     Sign(SignError),
     WrongKeyAlgorithm,
 }

@@ -511,6 +511,7 @@ impl LightSyncState {
 
 /// Error that can happen when parsing a chain spec JSON.
 #[derive(Debug, derive_more::Display)]
+#[display(fmt = "Failed to parse chain spec")]
 pub struct ParseError(ParseErrorInner);
 
 #[derive(Debug, derive_more::Display)]
@@ -525,16 +526,22 @@ pub enum FromGenesisStorageError {
     /// Runtime couldn't be found in the storage.
     RuntimeNotFound,
     /// Failed to decode heap pages from the storage.
+    #[display(fmt = "Failed to decode heap pages from the storage: {}", _0)]
     HeapPagesDecode(executor::InvalidHeapPagesError),
     /// Error when initializing the virtual machine.
+    #[display(fmt = "Error when initializing the virtual machine: {}", _0)]
     VmInitialization(executor::host::NewErr),
     /// Error when retrieving the GrandPa configuration.
+    #[display(fmt = "Error when retrieving the GrandPa configuration: {}", _0)]
     GrandpaConfigLoad(grandpa_genesis_config::FromVmPrototypeError),
     /// Error when retrieving the Aura algorithm configuration.
+    #[display(fmt = "Error when retrieving the Aura configuration: {}", _0)]
     AuraConfigLoad(aura_config::FromVmPrototypeError),
     /// Error when retrieving the Babe algorithm configuration.
+    #[display(fmt = "Error when retrieving the Babe configuration: {}", _0)]
     BabeConfigLoad(babe_genesis_config::FromVmPrototypeError),
     /// Failed to retrieve the core version of the runtime.
+    #[display(fmt = "Failed to retrieve the core version of the runtime: {}", _0)]
     CoreVersionLoad(executor::CoreVersionError),
     /// State version in runtime specification is not supported.
     UnknownStateVersion,
