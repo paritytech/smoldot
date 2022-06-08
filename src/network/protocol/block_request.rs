@@ -415,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn regression_incomplete_data() {
+    fn regression_incomplete_justification() {
         let _ = super::decode_block_response(&[
             200, 200, 255, 255, 10, 8, 0, 47, 0, 1, 26, 0, 88, 88, 88, 88, 88, 88, 88, 88, 88, 88,
             88, 88, 88, 88, 88, 88, 1, 10, 1, 255, 2, 0, 0, 1, 255, 2, 10, 0, 36, 1, 8, 105, 105,
