@@ -71,6 +71,7 @@ pub struct GrandpaWarpSyncResponseFragment {
 
 /// Error potentially returned by [`decode_grandpa_warp_sync_response`].
 #[derive(Debug, derive_more::Display)]
+#[display(fmt = "Failed to decode response")]
 pub struct DecodeGrandpaWarpSyncResponseError;
 
 /// Decodes a SCALE-encoded GrandPa warp sync response.

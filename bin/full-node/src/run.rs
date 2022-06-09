@@ -103,6 +103,13 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             .expect("Failed to decode chain specs")
     };
 
+    // This warning message should be removed if/when the full node becomes mature.
+    tracing::warn!(
+        "Please note that this full node is experimental. It is not feature complete and is \
+        known to panic often. Please report any panic you might encounter to \
+        <https://github.com/paritytech/smoldot/issues>."
+    );
+
     // TODO: don't unwrap?
     let genesis_chain_information = chain_spec.as_chain_information().unwrap().0;
 
@@ -378,14 +385,16 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     // are connected to the JSON-RPC endpoint of the node while they are in reality connected to
     // something else.
     let _json_rpc_service = if let Some(bind_address) = cli_options.json_rpc_address.0 {
-        Some(
-            json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
-                tasks_executor: { &mut move |task| threads_pool.spawn_ok(task) },
-                bind_address,
-            })
-            .await
-            .unwrap(),
-        )
+        let result = json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
+            tasks_executor: { &mut move |task| threads_pool.spawn_ok(task) },
+            bind_address,
+        })
+        .await;
+
+        Some(match result {
+            Ok(service) => service,
+            Err(err) => panic!("failed to initialize JSON-RPC endpoint: {}", err),
+        })
     } else {
         None
     };

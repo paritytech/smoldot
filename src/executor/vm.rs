@@ -672,6 +672,7 @@ pub enum NewErr {
     },
     /// Smoldot doesn't support wasm runtime that have a start function. It is unclear whether
     /// this is allowed in the Substrate/Polkadot specification.
+    #[display(fmt = "Start function not supported")]
     // TODO: figure this out
     StartFunctionNotSupported,
     /// If a "memory" symbol is provided, it must be a memory.

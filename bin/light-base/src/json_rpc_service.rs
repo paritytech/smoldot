@@ -1433,6 +1433,7 @@ enum StorageQueryError {
     StorageRetrieval(sync_service::StorageQueryError),
 }
 
+// TODO: doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone)]
 enum RuntimeCallError {
     Call(runtime_service::RuntimeCallError),

@@ -154,6 +154,7 @@ pub enum InvalidTransaction {
     /// left in the current block.
     ExhaustsResources,
     /// Any other custom invalid validity that is not covered by this enum.
+    #[display(fmt = "Other reason (code: {})", _0)]
     Custom(u8),
     /// An extrinsic with a Mandatory dispatch resulted in Error. This is indicative of either a
     /// malicious validator or a buggy `provide_inherent`. In any case, it can result in dangerously
@@ -172,6 +173,7 @@ pub enum UnknownTransaction {
     /// No validator found for the given unsigned transaction.
     NoUnsignedValidator,
     /// Any other custom unknown validity that is not covered by this enum.
+    #[display(fmt = "Other reason (code: {})", _0)]
     Custom(u8),
 }
 
@@ -179,8 +181,10 @@ pub enum UnknownTransaction {
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum Error {
     /// Error while decoding the block header against which to make the call.
+    #[display(fmt = "Failed to decode block header: {}", _0)]
     InvalidHeader(header::Error),
     /// Failed to determine the runtime version of the runtime.
+    #[display(fmt = "Failed to determine runtime version: {}", _0)]
     RuntimeVersion(executor::CoreVersionError),
     /// Transaction validation API version unrecognized.
     UnknownApiVersion,
@@ -209,8 +213,10 @@ pub struct DecodeError();
 #[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
 pub enum TransactionValidityError {
     /// The transaction is invalid.
+    #[display(fmt = "Invalid transaction: {}", _0)]
     Invalid(InvalidTransaction),
     /// Transaction validity can't be determined.
+    #[display(fmt = "Transaction validity couldn't be determined: {}", _0)]
     Unknown(UnknownTransaction),
 }
 
