@@ -4,7 +4,7 @@
 
 ### Added
 
-- The `relay_chain` and `para_id` fields in chain specifications can now alternatively be named respectively `relayChain` and `paraId`. This brings consistency with the other fields of chain specifications, which are all camelCase.
+- The `relay_chain` and `para_id` fields in chain specifications can now alternatively be named respectively `relayChain` and `paraId`. This increases consistency with the other fields of chain specifications, which are all camelCase.
 
 ### Fixed
 
