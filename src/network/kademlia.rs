@@ -112,12 +112,15 @@ pub fn decode_find_node_response(
 #[derive(Debug, derive_more::Display)]
 pub enum DecodeFindNodeResponseError {
     /// Error while decoding the Protobuf encoding.
+    #[display(fmt = "Error decoding the response: {}", _0)]
     ProtobufDecode(ProtobufDecodeError),
     /// Response isn't a response to a find node request.
     BadResponseTy,
     /// Error while parsing a [`peer_id::PeerId`] in the response.
+    #[display(fmt = "Invalid PeerId: {}", _0)]
     BadPeerId(peer_id::FromBytesError),
     /// Error while parsing a [`multiaddr::Multiaddr`] in the response.
+    #[display(fmt = "Invalid multiaddress: {}", _0)]
     BadMultiaddr(multiaddr::FromVecError),
 }
 

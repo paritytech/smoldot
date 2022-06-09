@@ -184,6 +184,7 @@ pub enum Error {
     /// Error while decoding a digest item.
     DigestItemDecodeError,
     /// Digest log item with an unrecognized type.
+    #[display(fmt = "Digest log with an unrecognized type {}", _0)]
     UnknownDigestLogType(u8),
     /// Found a seal that isn't the last item in the list.
     SealIsntLastItem,

@@ -37,15 +37,26 @@ pub struct JsonRpcService {
 
 impl JsonRpcService {
     /// Initializes a new [`JsonRpcService`].
-    pub async fn new(config: Config<'_>) -> Result<Self, io::Error> {
-        let server = websocket_server::WsServer::new(websocket_server::Config {
-            bind_address: config.bind_address,
-            capacity: 1,
-            max_frame_size: 4096,
-            send_buffer_len: 16384,
-        })
-        .await
-        .unwrap();
+    pub async fn new(config: Config<'_>) -> Result<Self, InitError> {
+        let server = {
+            let result = websocket_server::WsServer::new(websocket_server::Config {
+                bind_address: config.bind_address,
+                capacity: 1,
+                max_frame_size: 4096,
+                send_buffer_len: 16384,
+            })
+            .await;
+
+            match result {
+                Ok(server) => server,
+                Err(error) => {
+                    return Err(InitError::ListenError {
+                        bind_address: config.bind_address,
+                        error,
+                    })
+                }
+            }
+        };
 
         let (_server_keep_alive, client_still_alive) = oneshot::channel();
 
@@ -62,6 +73,19 @@ impl JsonRpcService {
 
         Ok(JsonRpcService { _server_keep_alive })
     }
+}
+
+/// Error potentially retuend by [`JsonRpcService::new`].
+#[derive(Debug, derive_more::Display)]
+pub enum InitError {
+    /// Failed to listen on the server address.
+    #[display(fmt = "Failed to listen on TCP address {}: {}", bind_address, error)]
+    ListenError {
+        /// Address that was attempted.
+        bind_address: SocketAddr,
+        /// Error returned by the operating system.
+        error: io::Error,
+    },
 }
 
 struct JsonRpcBackground {
