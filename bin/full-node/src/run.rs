@@ -103,6 +103,13 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             .expect("Failed to decode chain specs")
     };
 
+    // This warning message should be removed if the full node becomes mature.
+    tracing::warn!(
+        "Please note that this full node is experimental. It is not feature complete and is \
+        known to panic often. Please report any panic you might encounter to \
+        <https://github.com/paritytech/smoldot/issues>."
+    );
+
     // TODO: don't unwrap?
     let genesis_chain_information = chain_spec.as_chain_information().unwrap().0;
 
