@@ -264,6 +264,15 @@ macro_rules! message_decode_fields {
                     $(
                         match nom::Parser::parse($field, bytes) {
                             Ok((rest, out)) => {
+                                if bytes == rest {
+                                    // The field parser didn't consume any byte. This will lead
+                                    // to an infinite loop. Return an error to prevent this from
+                                    // happening.
+                                    return Result::Err(nom::Err::Error(
+                                        Err::from_error_kind(rest, nom::error::ErrorKind::Alt)
+                                    ));
+                                }
+
                                 bytes = rest;
                                 <$out as MessageDecodeFieldOutput>::append($out, out);
                                 continue;
@@ -282,6 +291,7 @@ macro_rules! message_decode_fields {
                     // Skip the field as it might simply be unknown.
                     match tag_value_skip_decode(bytes) {
                         Ok((rest, ())) => {
+                            debug_assert_ne!(bytes, rest);
                             bytes = rest;
                             continue;
                         }
