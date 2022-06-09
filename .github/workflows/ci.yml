@@ -110,7 +110,10 @@ jobs:
     - uses: actions/checkout@v3
     - uses: actions-rs/toolchain@v1
       with:
-        toolchain: nightly
+        # Since build artifacts are specific to a nightly version, we pin the specific nightly
+        # version to use in order to not invalidate the build cache every day. The exact version
+        # is completely arbitrary.
+        toolchain: nightly-2022-06-05
         override: true
     - uses: baptiste0928/cargo-install@v1  # This action ensures that the compilation is cached.
       with:
