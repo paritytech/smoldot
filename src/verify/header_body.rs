@@ -192,6 +192,7 @@ pub enum Error {
     /// Block being verified has erased the `:code` key from the storage.
     CodeKeyErased,
     /// Block has modified the `:heappages` key in a way that fails to parse.
+    #[display(fmt = "Block has modified `:heappages` key in invalid way: {}", _0)]
     HeapPagesParseError(executor::InvalidHeapPagesError),
     /// Block has modified the `:heappages` key without modifying the `:code` key. This isn't
     /// supported by smoldot.

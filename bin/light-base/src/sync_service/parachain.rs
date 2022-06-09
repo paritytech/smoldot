@@ -601,6 +601,7 @@ async fn parahead<TPlat: Platform>(
     }
 }
 
+// TODO: document and properly derive Display
 #[derive(Debug, derive_more::Display)]
 enum ParaheadError {
     Call(runtime_service::RuntimeCallError),

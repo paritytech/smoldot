@@ -169,5 +169,6 @@ pub enum DecodeIdentifyResponseError {
     /// Couldn't decode one of the multiaddresses.
     InvalidMultiaddr,
     /// Couldn't decode the public key of the remote.
+    #[display(fmt = "Failed to decode remote public key: {}", _0)]
     InvalidPublicKey(FromProtobufEncodingError),
 }

@@ -831,6 +831,7 @@ pub enum AccessError {
     ///
     /// While these corruption errors are probably unrecoverable, the inner error might however
     /// be useful for debugging purposes.
+    #[display(fmt = "Database corrupted: {}", _0)]
     Corrupted(CorruptedError),
 }
 
@@ -838,10 +839,12 @@ pub enum AccessError {
 #[derive(Debug, derive_more::Display, derive_more::From)]
 pub enum InsertError {
     /// Error accessing the database.
+    #[display(fmt = "{}", _0)]
     Access(AccessError),
     /// Block was already in the database.
     Duplicate,
     /// Error when decoding the header to import.
+    #[display(fmt = "Failed to decode header: {}", _0)]
     BadHeader(header::Error),
     /// Parent of the block to insert isn't in the database.
     MissingParent,
@@ -881,6 +884,7 @@ pub enum CorruptedError {
     /// A block hash is expected to be 32 bytes. This isn't the case.
     InvalidBlockHashLen,
     /// Values in the database are all well-formatted, but are incoherent.
+    #[display(fmt = "Invalid chain information: {}", _0)]
     InvalidChainInformation(chain_information::ValidityError),
     /// The parent of a block in the database couldn't be found in that same database.
     BrokenChain,
@@ -890,11 +894,13 @@ pub enum CorruptedError {
     /// couldn't be found.
     MissingBlockHeader,
     /// The header of a block in the database has failed to decode.
+    #[display(fmt = "Corrupted block header: {}", _0)]
     BlockHeaderCorrupted(header::Error),
     /// Multiple different consensus algorithms are mixed within the database.
     ConsensusAlgorithmMix,
     /// The information about a Babe epoch found in the database has failed to decode.
     InvalidBabeEpochInformation,
+    #[display(fmt = "Internal error: {}", _0)]
     Internal(InternalError),
 }
 

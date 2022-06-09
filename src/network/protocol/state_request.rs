@@ -106,6 +106,7 @@ pub struct StateResponseEntry {
 
 /// Error potentially returned by [`decode_state_response`].
 #[derive(Debug, derive_more::Display)]
+#[display(fmt = "Failed to decode response")]
 pub enum DecodeStateResponseError {
     /// Error while decoding the Protobuf encoding.
     ProtobufDecode,

@@ -310,6 +310,7 @@ pub enum FromBytesError {
     /// The algorithm used in the multihash isn't identity or SHA-256.
     InvalidMultihashAlgorithm,
     /// Multihash uses the identity algorithm, but the data isn't a valid public key.
+    #[display(fmt = "Failed to decode public key protobuf: {}", _0)]
     InvalidPublicKey(FromProtobufEncodingError),
 }
 
@@ -317,8 +318,10 @@ pub enum FromBytesError {
 #[derive(Debug, derive_more::Display)]
 pub enum ParseError {
     /// Error decoding the Base58 encoding.
+    #[display(fmt = "Base58 decoding error: {}", _0)]
     Bs58(Bs58DecodeError),
     /// Decoded bytes aren't a valid [`PeerId`].
+    #[display(fmt = "{}", _0)]
     NotPeerId(FromBytesError),
 }
 

@@ -335,8 +335,11 @@ impl fmt::Debug for NoiseKeyRequired {
 #[derive(Debug, derive_more::Display)]
 pub enum HandshakeError {
     /// Protocol error during a multistream-select negotiation.
+    // TODO: differentiate noise negotiation from yamux negotiation
+    #[display(fmt = "Protocol selection error: {}", _0)]
     MultistreamSelect(multistream_select::Error),
     /// Protocol error during the noise handshake.
+    #[display(fmt = "Noise handshake error: {}", _0)]
     NoiseHandshake(noise::HandshakeError),
     /// No encryption protocol in common with the remote.
     ///
@@ -347,5 +350,6 @@ pub enum HandshakeError {
     /// The remote is behaving correctly but isn't compatible with the local node.
     NoMultiplexingProtocol,
     /// Error in the noise cipher. Data has most likely been corrupted.
+    #[display(fmt = "Noise cipher error: {}", _0)]
     Noise(noise::CipherError),
 }
