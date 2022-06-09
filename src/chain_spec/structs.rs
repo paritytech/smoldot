@@ -68,7 +68,14 @@ pub(super) struct ClientSpec {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ChainSpecParachain {
+    // Note that in Substrate/Cumulus this field is only named `relay_chain` and `relayChain` is
+    // not accepted (as of 2022-06-09). This seems to be an oversight, as there are only two
+    // fields that use snake_case while the rest uses camelCase. For this reason, smoldot
+    // supports both.
+    #[serde(alias = "relayChain")]
     pub(super) relay_chain: String,
+    // Same remark concerning the name as `relay_chain`
+    #[serde(alias = "paraId")]
     pub(super) para_id: u32,
 }
 

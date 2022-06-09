@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- The `relay_chain` and `para_id` fields in chain specifications can now alternatively be named respectively `relayChain` and `paraId`. This increases consistency with the other fields of chain specifications, which are all camelCase.
+
 ### Fixed
 
 - Fix another panic in case of a carefully-crafted LEB128 length. ([#2337](https://github.com/paritytech/smoldot/pull/2337))
