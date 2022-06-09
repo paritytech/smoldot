@@ -103,7 +103,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             .expect("Failed to decode chain specs")
     };
 
-    // This warning message should be removed if the full node becomes mature.
+    // This warning message should be removed if/when the full node becomes mature.
     tracing::warn!(
         "Please note that this full node is experimental. It is not feature complete and is \
         known to panic often. Please report any panic you might encounter to \
