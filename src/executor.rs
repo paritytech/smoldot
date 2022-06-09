@@ -291,54 +291,55 @@ pub struct CoreVersionApi {
 }
 
 fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
-    let result: nom::IResult<_, _> = nom::combinator::all_consuming(nom::combinator::map(
-        nom::sequence::tuple((
-            crate::util::nom_string_decode,
-            crate::util::nom_string_decode,
-            nom::number::complete::le_u32,
-            nom::number::complete::le_u32,
-            nom::number::complete::le_u32,
-            nom::combinator::map(
-                nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-                    nom::combinator::recognize(nom::multi::fold_many_m_n(
-                        num_elems,
-                        num_elems,
-                        core_version_api,
-                        || {},
-                        |(), _| (),
-                    ))
-                }),
-                |inner| CoreVersionApisRefIter { inner },
-            ),
-            nom::branch::alt((
-                nom::combinator::map(nom::number::complete::le_u32, Some),
-                nom::combinator::map(nom::combinator::eof, |_| None),
+    let result: nom::IResult<_, _> =
+        nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
+            nom::sequence::tuple((
+                crate::util::nom_string_decode,
+                crate::util::nom_string_decode,
+                nom::number::complete::le_u32,
+                nom::number::complete::le_u32,
+                nom::number::complete::le_u32,
+                nom::combinator::map(
+                    nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
+                        nom::combinator::recognize(nom::multi::fold_many_m_n(
+                            num_elems,
+                            num_elems,
+                            core_version_api,
+                            || {},
+                            |(), _| (),
+                        ))
+                    }),
+                    |inner| CoreVersionApisRefIter { inner },
+                ),
+                nom::branch::alt((
+                    nom::combinator::map(nom::number::complete::le_u32, Some),
+                    nom::combinator::map(nom::combinator::eof, |_| None),
+                )),
+                nom::branch::alt((
+                    nom::combinator::map(nom::number::complete::u8, Some),
+                    nom::combinator::map(nom::combinator::eof, |_| None),
+                )),
             )),
-            nom::branch::alt((
-                nom::combinator::map(nom::number::complete::u8, Some),
-                nom::combinator::map(nom::combinator::eof, |_| None),
-            )),
-        )),
-        |(
-            spec_name,
-            impl_name,
-            authoring_version,
-            spec_version,
-            impl_version,
-            apis,
-            transaction_version,
-            state_version,
-        )| CoreVersionRef {
-            spec_name,
-            impl_name,
-            authoring_version,
-            spec_version,
-            impl_version,
-            apis,
-            transaction_version,
-            state_version,
-        },
-    ))(scale_encoded);
+            |(
+                spec_name,
+                impl_name,
+                authoring_version,
+                spec_version,
+                impl_version,
+                apis,
+                transaction_version,
+                state_version,
+            )| CoreVersionRef {
+                spec_name,
+                impl_name,
+                authoring_version,
+                spec_version,
+                impl_version,
+                apis,
+                transaction_version,
+                state_version,
+            },
+        )))(scale_encoded);
 
     match result {
         Ok((_, out)) => Ok(out),
