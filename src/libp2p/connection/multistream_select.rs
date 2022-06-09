@@ -538,6 +538,7 @@ pub enum Error {
     /// Writing side of the connection is closed. The handshake can't proceed further.
     WriteClosed,
     /// Error while decoding a frame length, or frame size limit reached.
+    #[display(fmt = "LEB128 frame error: {}", _0)]
     Frame(leb128::FramedError),
     /// Unknown handshake or unknown multistream-select protocol version.
     BadHandshake,

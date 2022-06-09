@@ -27,8 +27,10 @@ import * as fs from 'node:fs';
 const westend = fs.readFileSync('../../westend.json', 'utf8');
 const westmint = fs.readFileSync('../../westend-westmint.json', 'utf8');
 const polkadot = fs.readFileSync('../../polkadot.json', 'utf8');
+const acala = fs.readFileSync('../../polkadot-acala.json', 'utf8');
 const kusama = fs.readFileSync('../../kusama.json', 'utf8');
 const statemine = fs.readFileSync('../../kusama-statemine.json', 'utf8');
+const karura = fs.readFileSync('../../kusama-karura.json', 'utf8');
 const rococo = fs.readFileSync('../../rococo.json', 'utf8');
 const adz = fs.readFileSync('../../rococo-adz.json', 'utf8');
 const canvas = fs.readFileSync('../../rococo-canvas.json', 'utf8');
@@ -79,7 +81,9 @@ server.listen(9944, function () {
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fwestmint');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fkusama');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fstatemine');
+    console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fkarura');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fpolkadot');
+    console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Facala');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Frococo');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fadz');
     console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fcanvas');
@@ -152,6 +156,22 @@ wsServer.on('request', function (request) {
 
             return { relay, para };
         })();
+    } else if (request.resource == '/karura') {
+        chain = (async () => {
+            const relay = await client.addChain({
+                chainSpec: kusama,
+            });
+
+            const para = await client.addChain({
+                chainSpec: karura,
+                jsonRpcCallback: (resp) => {
+                    connection.sendUTF(resp);
+                },
+                potentialRelayChains: [relay]
+            });
+
+            return { relay, para };
+        })();
     } else if (request.resource == '/polkadot') {
         chain = (async () => {
             return {
@@ -162,6 +182,22 @@ wsServer.on('request', function (request) {
                     },
                 })
             };
+        })();
+    } else if (request.resource == '/acala') {
+        chain = (async () => {
+            const relay = await client.addChain({
+                chainSpec: polkadot,
+            });
+
+            const para = await client.addChain({
+                chainSpec: acala,
+                jsonRpcCallback: (resp) => {
+                    connection.sendUTF(resp);
+                },
+                potentialRelayChains: [relay]
+            });
+
+            return { relay, para };
         })();
     } else if (request.resource == '/rococo') {
         chain = (async () => {

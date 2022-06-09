@@ -1009,8 +1009,10 @@ pub enum Event<TRqUd, TNotifUd> {
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
     /// Error in the noise cipher. Data has most likely been corrupted.
+    #[display(fmt = "Noise error: {}", _0)]
     Noise(noise::CipherError),
     /// Error in the Yamux multiplexing protocol.
+    #[display(fmt = "Yamux error: {}", _0)]
     Yamux(yamux::Error),
 }
 

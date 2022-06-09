@@ -1857,6 +1857,7 @@ pub enum HeaderVerifyError {
     /// Block uses a different consensus than the rest of the chain.
     ConsensusMismatch,
     /// The block verification has failed. The block is invalid and should be thrown away.
+    #[display(fmt = "{}", _0)]
     VerificationFailed(verify::header_only::Error),
 }
 
@@ -2099,10 +2100,13 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
 #[derive(Debug, derive_more::Display)]
 pub enum BlockVerificationError {
     /// Error while decoding a header.
+    #[display(fmt = "Failed to decode header: {}", _0)]
     InvalidHeader(header::Error),
     /// Error while verifying a header.
+    #[display(fmt = "{}", _0)]
     HeaderError(blocks_tree::HeaderVerifyError),
     /// Error while verifying a header and body.
+    #[display(fmt = "{}", _0)]
     HeaderBodyError(blocks_tree::BodyVerifyError),
 }
 
