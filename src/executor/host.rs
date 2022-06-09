@@ -2559,7 +2559,7 @@ impl Inner {
 #[derive(Debug, derive_more::From, derive_more::Display, Clone)]
 pub enum NewErr {
     /// Error while initializing the virtual machine.
-    #[display(fmt = "Error while initializing the virtual machine: {}", _0)]
+    #[display(fmt = "{}", _0)]
     VirtualMachine(vm::NewErr),
     /// Error in the format of the runtime code.
     #[display(fmt = "{}", _0)]
@@ -2575,7 +2575,7 @@ pub enum NewErr {
 #[derive(Debug, Clone, derive_more::From, derive_more::Display)]
 pub enum StartErr {
     /// Error while starting the virtual machine.
-    #[display(fmt = "Error while starting the virtual machine: {}", _0)]
+    #[display(fmt = "{}", _0)]
     VirtualMachine(vm::StartErr),
     /// The size of the input data is too large.
     DataSizeOverflow,

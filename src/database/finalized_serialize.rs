@@ -98,5 +98,6 @@ enum CorruptedErrorInner {
     Serde(serde_json::Error),
     #[display(fmt = "{}", _0)]
     Deserialize(defs::DeserializeError),
+    #[display(fmt = "Invalid chain information: {}", _0)]
     InvalidChain(chain_information::ValidityError),
 }

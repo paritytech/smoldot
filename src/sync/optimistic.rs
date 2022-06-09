@@ -1485,10 +1485,13 @@ impl<'a, TRq, TBl> Drop for RequestsDrain<'a, TRq, TBl> {
 #[derive(Debug, derive_more::Display)]
 pub enum ResetCause {
     /// Error while decoding a header.
+    #[display(fmt = "Failed to decode header: {}", _0)]
     InvalidHeader(header::Error),
     /// Error while verifying a header.
+    #[display(fmt = "{}", _0)]
     HeaderError(blocks_tree::HeaderVerifyError),
     /// Error while verifying a header and body.
+    #[display(fmt = "{}", _0)]
     HeaderBodyError(blocks_tree::BodyVerifyError),
     /// Received block isn't a child of the current best block.
     NonCanonical,

@@ -52,6 +52,7 @@ pub enum Error {
     /// Error while decoding the output of the runtime.
     DecodeFailed,
     /// Invalid Babe information found in the runtime.
+    #[display(fmt = "Invalid Babe information returned by the runtime: {}", _0)]
     InvalidBabeInfo(BabeValidityError),
 }
 

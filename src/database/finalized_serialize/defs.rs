@@ -26,6 +26,7 @@ use hashbrown::HashMap;
 /// Error that can happen when deserializing the data.
 #[derive(Debug, derive_more::Display)]
 pub(super) enum DeserializeError {
+    #[display(fmt = "Failed to decode header: {}", _0)]
     Header(header::Error),
     ConsensusAlgorithmsMismatch,
     /// Some Babe-related information is missing.

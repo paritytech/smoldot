@@ -204,6 +204,7 @@ pub enum VerifyError {
     MissingEpochChangeLog,
     /// The header contains an epoch change that would put the Babe configuration in an
     /// non-sensical state.
+    #[display(fmt = "Invalid Babe epoch change found in header: {}", _0)]
     InvalidBabeParametersChange(chain_information::BabeValidityError),
     /// Authority index stored within block is out of range.
     InvalidAuthorityIndex,

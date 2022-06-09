@@ -879,8 +879,8 @@ impl<'a> Drop for RuntimeCallLock<'a> {
 // TODO: clean up these errors
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum RuntimeCallError {
-    /// Runtime of the best block isn't valid.
-    #[display(fmt = "Runtime of the best block isn't valid: {}", _0)]
+    /// Runtime of the block isn't valid.
+    #[display(fmt = "Runtime of the block isn't valid: {}", _0)]
     InvalidRuntime(RuntimeError),
     /// Error while retrieving the storage item from other nodes.
     // TODO: change error type?
@@ -915,10 +915,13 @@ pub enum RuntimeError {
     /// The `:code` key of the storage is empty.
     CodeNotFound,
     /// Error while parsing the `:heappages` storage value.
+    #[display(fmt = "Failed to parse `:heappages` storage value: {}", _0)]
     InvalidHeapPages(executor::InvalidHeapPagesError),
     /// Error while compiling the runtime.
+    #[display(fmt = "{}", _0)]
     Build(executor::host::NewErr),
     /// Error when determining the runtime specification.
+    #[display(fmt = "Error determining runtime version: {}", _0)]
     CoreVersion(executor::CoreVersionError),
 }
 
@@ -1355,7 +1358,9 @@ async fn run_background<TPlat: Platform>(
 
 #[derive(Debug, Clone, derive_more::Display)]
 enum RuntimeDownloadError {
+    #[display(fmt = "{}", _0)]
     StorageQuery(sync_service::StorageQueryError),
+    #[display(fmt = "Couldn't decode header: {}", _0)]
     InvalidHeader(header::Error),
 }
 
