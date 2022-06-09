@@ -1816,6 +1816,7 @@ pub enum HeaderVerifyError {
     /// Block uses a different consensus than the rest of the chain.
     ConsensusMismatch,
     /// The block verification has failed. The block is invalid and should be thrown away.
+    #[display(fmt = "{}", _0)]
     VerificationFailed(verify::header_only::Error),
 }
 

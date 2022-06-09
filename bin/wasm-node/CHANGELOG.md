@@ -2,11 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- The `relay_chain` and `para_id` fields in chain specifications can now alternatively be named respectively `relayChain` and `paraId`. This increases consistency with the other fields of chain specifications, which are all camelCase.
+
 ### Fixed
 
 - Fix another panic in case of a carefully-crafted LEB128 length. ([#2337](https://github.com/paritytech/smoldot/pull/2337))
 - Fix a panic when decoding a block header containing a large number of Aura authorities. ([#2338](https://github.com/paritytech/smoldot/pull/2338))
-- Fix multiple panics when decoding network messages in case where these messages were truncated. ([#2340](https://github.com/paritytech/smoldot/pull/2340))
+- Fix multiple panics when decoding network messages in case where these messages were truncated. ([#2340](https://github.com/paritytech/smoldot/pull/2340), [#2355](https://github.com/paritytech/smoldot/pull/2355))
 
 ## 0.6.17 - 2022-05-31
 

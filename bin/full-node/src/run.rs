@@ -385,14 +385,16 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     // are connected to the JSON-RPC endpoint of the node while they are in reality connected to
     // something else.
     let _json_rpc_service = if let Some(bind_address) = cli_options.json_rpc_address.0 {
-        Some(
-            json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
-                tasks_executor: { &mut move |task| threads_pool.spawn_ok(task) },
-                bind_address,
-            })
-            .await
-            .unwrap(),
-        )
+        let result = json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
+            tasks_executor: { &mut move |task| threads_pool.spawn_ok(task) },
+            bind_address,
+        })
+        .await;
+
+        Some(match result {
+            Ok(service) => service,
+            Err(err) => panic!("failed to initialize JSON-RPC endpoint: {}", err),
+        })
     } else {
         None
     };
