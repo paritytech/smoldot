@@ -207,6 +207,11 @@ pub enum ProtocolRef<'a> {
     Wss,
     // TODO: unclear what the payload is; see https://github.com/multiformats/multiaddr/issues/127
     Memory(u64),
+    // TODO: these protocols are inventions for prototyping, see https://github.com/libp2p/specs/pull/412
+    ExperimentalWebRtc,
+    // TODO: these protocols are inventions for prototyping, see https://github.com/libp2p/specs/pull/412
+    /// Contains the hash of the TLS certificate.
+    ExperimentalCertHash([u8; 32]),
 }
 
 impl<'a> ProtocolRef<'a> {
@@ -274,6 +279,14 @@ impl<'a> ProtocolRef<'a> {
                         .map_err(|_| ParseError::InvalidMemoryPayload)?,
                 ))
             }
+            "experimental-webrtc" => Ok(ProtocolRef::ExperimentalWebRtc),
+            "experimental-certhash" => {
+                let string_hash = iter.next().ok_or(ParseError::UnexpectedEof)?;
+                let parsed = hex::decode(string_hash).map_err(|_| ParseError::InvalidDomainName)?; // TODO: wrong error; proper errors should be added to ParseError when it's no longer experimental
+                let correct_len =
+                    <[u8; 32]>::try_from(&parsed[..]).map_err(|_| ParseError::InvalidDomainName)?; // TODO: wrong error
+                Ok(ProtocolRef::ExperimentalCertHash(correct_len))
+            }
             _ => Err(ParseError::UnrecognizedProtocol),
         }
     }
@@ -296,6 +309,8 @@ impl<'a> ProtocolRef<'a> {
             ProtocolRef::Ws => 477,
             ProtocolRef::Wss => 478,
             ProtocolRef::Memory(_) => 777,
+            ProtocolRef::ExperimentalWebRtc => 991234, // TODO: these numbers are complete invention
+            ProtocolRef::ExperimentalCertHash(_) => 991235, // TODO: these numbers are complete invention
         };
 
         // TODO: optimize by not allocating a Vec
@@ -320,6 +335,7 @@ impl<'a> ProtocolRef<'a> {
             }
             ProtocolRef::Tcp(port) | ProtocolRef::Udp(port) => port.to_be_bytes().to_vec(),
             ProtocolRef::Memory(payload) => payload.to_be_bytes().to_vec(),
+            ProtocolRef::ExperimentalCertHash(hash) => hash.to_vec(),
             _ => Vec::new(),
         };
 
@@ -351,6 +367,10 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
             ProtocolRef::Ws => write!(f, "/ws"),
             ProtocolRef::Wss => write!(f, "/wss"),
             ProtocolRef::Memory(payload) => write!(f, "/memory/{}", payload),
+            ProtocolRef::ExperimentalWebRtc => write!(f, "/experimental-webrtc"),
+            ProtocolRef::ExperimentalCertHash(hash) => {
+                write!(f, "/experimental-certhash/{}", hex::encode(hash))
+            }
         }
     }
 }
@@ -486,6 +506,12 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             478 => Ok((bytes, ProtocolRef::Wss)),
             // TODO: unclear what the /memory payload is, see https://github.com/multiformats/multiaddr/issues/127
             777 => nom::combinator::map(nom::number::complete::be_u64, ProtocolRef::Memory)(bytes),
+            991234 => Ok((bytes, ProtocolRef::ExperimentalWebRtc)), // TODO: these numbers are complete invention
+            991235 => {
+                nom::combinator::map(nom::bytes::complete::take(32_u32), |hash: &'a [u8]| {
+                    ProtocolRef::ExperimentalCertHash(<[u8; 32]>::try_from(hash).unwrap())
+                })(bytes)
+            } // TODO: these numbers are complete invention
             _ => Err(nom::Err::Error(nom::error::make_error(
                 bytes,
                 nom::error::ErrorKind::Tag,
