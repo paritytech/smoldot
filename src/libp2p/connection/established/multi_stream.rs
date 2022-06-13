@@ -108,8 +108,10 @@ where
     pub fn new(config: Config<TNow>) -> MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
         // TODO: check conflicts between protocol names?
 
+        // We expect at maximum one parallel request per protocol, plus one substream per direction
+        // (in and out) per notification substream, plus one ping substream per direction.
         let num_expected_substreams =
-            config.request_protocols.len() + config.notifications_protocols.len() * 2 + 1;
+            config.request_protocols.len() + config.notifications_protocols.len() * 2 + 2;
 
         let mut randomness = rand_chacha::ChaCha20Rng::from_seed(config.randomness_seed);
 
