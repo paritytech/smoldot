@@ -798,6 +798,20 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.rpc_methods(request_id, &state_machine_request_id)
                     .await;
             }
+            methods::MethodCall::state_call {
+                name,
+                parameters,
+                hash,
+            } => {
+                self.state_call(
+                    request_id,
+                    &state_machine_request_id,
+                    &name,
+                    parameters,
+                    hash,
+                )
+                .await;
+            }
             methods::MethodCall::state_getKeysPaged {
                 prefix,
                 count,
@@ -1069,7 +1083,6 @@ impl<TPlat: Platform> Background<TPlat> {
             | methods::MethodCall::grandpa_roundState { .. }
             | methods::MethodCall::offchain_localStorageGet { .. }
             | methods::MethodCall::offchain_localStorageSet { .. }
-            | methods::MethodCall::state_call { .. }
             | methods::MethodCall::state_getKeys { .. }
             | methods::MethodCall::state_getPairs { .. }
             | methods::MethodCall::state_getReadProof { .. }

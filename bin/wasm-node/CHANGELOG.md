@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add support for the `state_call` JSON-RPC function.
 - The `relay_chain` and `para_id` fields in chain specifications can now alternatively be named respectively `relayChain` and `paraId`. This increases consistency with the other fields of chain specifications, which are all camelCase.
 
 ### Fixed
