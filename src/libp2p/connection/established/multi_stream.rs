@@ -72,10 +72,6 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     /// Because of the API of [`substream::Substream`] concerning pings, there is no need to
     /// handle situations where the substream fails to negotiate, as this is handled by making
     /// outgoing pings error. This substream is therefore constant.
-    ///
-    /// It is possible, however, that the remote resets the ping substream. In other words, this
-    /// substream might not be found in [`Inner::yamux`]. When that happens, all outgoing pings
-    /// are immediately considered as failed.
     ping_substream: Option<TSubId>,
     /// When to start the next ping attempt.
     next_ping: TNow,
@@ -163,8 +159,9 @@ where
     /// opened.
     ///
     /// This value doesn't change automatically over time but only after a call to
-    /// [`MultiStream::substream_read_write`], [`MultiStream::inject_coordinator_message`],
-    /// [`MultiStream::add_substream`], or [`MultiStream::reset_substream`].
+    /// [`MultiStream::substream_read_write`], [`MultiStream::add_substream`],
+    /// [`MultiStream::reset_substream`], [`MultiStream::add_request`], or
+    /// [`MultiStream::open_notifications_substream`].
     ///
     /// Note that the user is expected to track the number of substreams that are currently being
     /// opened. For example, if this function returns 2 and there are already 2 substreams
@@ -453,8 +450,8 @@ where
     ///
     /// Must pass the index of the protocol within [`Config::request_protocols`].
     ///
-    /// This method only inserts the request into the connection object. Use
-    /// [`MultiStream::read_write`] in order to actually send out the request.
+    /// This method only inserts the request into the connection object. The request will later
+    /// be sent out through [`MultiStream::substream_read_write`].
     ///
     /// Assuming that the remote is using the same implementation, an [`Event::RequestIn`] will
     /// be generated on its side.
@@ -539,8 +536,8 @@ where
     /// The remote must first accept (or reject) the substream before notifications can be sent
     /// on it.
     ///
-    /// This method only inserts the opening handshake into the connection object. Use
-    /// [`MultiStream::read_write`] in order to actually send out the request.
+    /// This method only inserts the opening handshake into the connection object. The handshake
+    /// will later be sent out through [`MultiStream::substream_read_write`].
     ///
     /// Assuming that the remote is using the same implementation, an
     /// [`Event::NotificationsInOpen`] will be generated on its side.
@@ -726,8 +723,6 @@ where
     }
 
     /// Responds to an incoming request. Must be called in response to a [`Event::RequestIn`].
-    ///
-    /// Passing an `Err` corresponds, on the other side, to a [`RequestError::SubstreamClosed`].
     ///
     /// Returns an error if the [`SubstreamId`] is invalid.
     pub fn respond_in_request(

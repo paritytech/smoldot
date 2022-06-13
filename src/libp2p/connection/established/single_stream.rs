@@ -855,7 +855,8 @@ where
 
     /// Responds to an incoming request. Must be called in response to a [`Event::RequestIn`].
     ///
-    /// Passing an `Err` corresponds, on the other side, to a [`RequestError::SubstreamClosed`].
+    /// Passing an `Err` corresponds, on the other side, to a
+    /// [`substream::RequestError::SubstreamClosed`].
     ///
     /// Returns an error if the [`SubstreamId`] is invalid.
     pub fn respond_in_request(

@@ -72,8 +72,8 @@
 //! not, unresponsive.
 //!
 //! After the handshake is successful, use [`established::ConnectionPrototype::into_connection`]
-//! to obtain an [`established::Established`]. Similar to the handshake, use
-//! [`established::Established::read_write`] to update the state machine.
+//! to obtain an [`established::SingleStream`]. Similar to the handshake, use
+//! [`established::SingleStream::read_write`] to update the state machine.
 //!
 
 pub use noise::{NoiseKey, UnsignedNoiseKey};

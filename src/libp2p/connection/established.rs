@@ -65,7 +65,7 @@ impl SubstreamId {
 }
 
 /// Event that happened on the connection. See [`SingleStream::read_write`] and
-/// [`MultiStream::read_write`].
+/// [`MultiStream::pull_event`].
 #[must_use]
 #[derive(Debug)]
 pub enum Event<TRqUd, TNotifUd> {

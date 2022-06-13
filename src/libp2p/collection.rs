@@ -20,14 +20,16 @@
 //! The [`Network`] struct in this module is a collection of libp2p connections. In the
 //! documentation below, it is also called the *coordinator*.
 //!
-//! When a connection is inserted in the collection with [`Network::insert`], two objects are
-//! returned: an identifier for this new connection assigned by the collection, and a
-//! [`ConnectionTask`].
+//! When a connection is inserted in the collection with [`Network::insert_single_stream`] or
+//! [`Network::insert_multi_stream`], two objects are returned: an identifier for this new
+//! connection assigned by the collection, and a [`SingleStreamConnectionTask`] or
+//! [`MultiStreamConnectionTask`].
 //!
-//! All the [`ConnectionTask`]s created by the [`Network`] communicate with that [`Network`] by
-//! passing messages. Passing the messages has to be done explicitly by the API user. It is the
-//! responsibility of the API user to pull messages from the coordinator (i.e. the [`Network`])
-//! and push them onto the [`ConnectionTask`] and vice-versa.
+//! All the [`SingleStreamConnectionTask`]s/[`MultiStreamConnectionTask`] created by the
+//! [`Network`] communicate with that [`Network`] by passing messages. Passing the messages has
+//! to be done explicitly by the API user. It is the responsibility of the API user to pull
+//! messages from the coordinator (i.e. the [`Network`]) and push them onto the
+//! [`SingleStreamConnectionTask`] or [`MultiStreamConnectionTask`] and vice-versa.
 //!
 //! # Usage
 //!
@@ -814,12 +816,12 @@ where
 
     /// Pulls a message that must be sent to a connection.
     ///
-    /// The message must be passed to [`ConnectionTask::inject_coordinator_message`] in the
-    /// appropriate connection.
+    /// The message must be passed to [`SingleStreamConnectionTask::inject_coordinator_message`]
+    /// or [`MultiStreamConnectionTask::inject_coordinator_message`] in the appropriate connection.
     ///
     /// This function guarantees that the [`ConnectionId`] always refers to a connection that
-    /// is still alive, in the sense that [`ConnectionTask::inject_coordinator_message`] has
-    /// never returned `None`.
+    /// is still alive, in the sense that [`SingleStreamConnectionTask::inject_coordinator_message`]
+    /// or [`MultStreamConnectionTask::inject_coordinator_message`] has never returned `None`.
     pub fn pull_message_to_connection(
         &mut self,
     ) -> Option<(ConnectionId, CoordinatorToConnection<TNow>)> {
