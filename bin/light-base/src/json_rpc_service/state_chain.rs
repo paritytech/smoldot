@@ -23,7 +23,6 @@ use crate::runtime_service;
 
 use futures::{lock::MutexGuard, prelude::*};
 use smoldot::{
-    executor::runtime_host,
     header,
     json_rpc::{self, methods, requests_subscriptions},
     network::protocol,
