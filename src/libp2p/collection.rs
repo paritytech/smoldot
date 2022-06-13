@@ -391,11 +391,11 @@ where
                     ping_timeout: Duration::from_secs(10),         // TODO: hardcoded
                     first_out_ping: now + Duration::from_secs(2),  // TODO: hardcoded
                 }),
-                outbound_substreams_mapping: hashbrown::HashMap::with_capacity_and_hasher(
+                outbound_substreams_map: hashbrown::HashMap::with_capacity_and_hasher(
                     0,
                     Default::default(),
                 ), // TODO: capacity?
-                outbound_substreams_mapping2: hashbrown::HashMap::with_capacity_and_hasher(
+                outbound_substreams_reverse: hashbrown::HashMap::with_capacity_and_hasher(
                     0,
                     Default::default(),
                 ), // TODO: capacity?
@@ -1357,12 +1357,12 @@ enum SingleStreamConnectionTaskInner<TNow> {
 
         /// Because outgoing substream ids are assigned by the coordinator, we maintain a mapping
         /// of the "outer ids" to "inner ids".
-        outbound_substreams_mapping:
+        outbound_substreams_map:
             hashbrown::HashMap<SubstreamId, established::SubstreamId, fnv::FnvBuildHasher>,
 
         /// Reverse mapping.
         // TODO: could be user datas in established?
-        outbound_substreams_mapping2:
+        outbound_substreams_reverse:
             hashbrown::HashMap<established::SubstreamId, SubstreamId, fnv::FnvBuildHasher>,
     },
 
@@ -1460,17 +1460,16 @@ where
                 },
                 SingleStreamConnectionTaskInner::Established {
                     established,
-                    outbound_substreams_mapping,
-                    outbound_substreams_mapping2,
+                    outbound_substreams_map,
+                    outbound_substreams_reverse,
                 },
             ) => {
                 let inner_substream_id =
                     established.add_request(protocol_index, request_data, timeout, substream_id);
-                let _prev_value =
-                    outbound_substreams_mapping.insert(substream_id, inner_substream_id);
+                let _prev_value = outbound_substreams_map.insert(substream_id, inner_substream_id);
                 debug_assert!(_prev_value.is_none());
                 let _prev_value =
-                    outbound_substreams_mapping2.insert(inner_substream_id, substream_id);
+                    outbound_substreams_reverse.insert(inner_substream_id, substream_id);
                 debug_assert!(_prev_value.is_none());
             }
             (
@@ -1482,8 +1481,8 @@ where
                 },
                 SingleStreamConnectionTaskInner::Established {
                     established,
-                    outbound_substreams_mapping,
-                    outbound_substreams_mapping2,
+                    outbound_substreams_map,
+                    outbound_substreams_reverse,
                 },
             ) => {
                 let inner_substream_id = established.open_notifications_substream(
@@ -1494,27 +1493,26 @@ where
                 );
 
                 let _prev_value =
-                    outbound_substreams_mapping.insert(outer_substream_id, inner_substream_id);
+                    outbound_substreams_map.insert(outer_substream_id, inner_substream_id);
                 debug_assert!(_prev_value.is_none());
                 let _prev_value =
-                    outbound_substreams_mapping2.insert(inner_substream_id, outer_substream_id);
+                    outbound_substreams_reverse.insert(inner_substream_id, outer_substream_id);
                 debug_assert!(_prev_value.is_none());
             }
             (
                 CoordinatorToConnectionInner::CloseOutNotifications { substream_id },
                 SingleStreamConnectionTaskInner::Established {
                     established,
-                    outbound_substreams_mapping,
-                    outbound_substreams_mapping2,
+                    outbound_substreams_map,
+                    outbound_substreams_reverse,
                 },
             ) => {
                 // It is possible that the remote has closed the outbound notification substream
                 // while the `CloseOutNotifications` message was being delivered, or that the API
                 // user close the substream before the message about the substream being closed
                 // was delivered to the coordinator.
-                if let Some(inner_substream_id) = outbound_substreams_mapping.remove(&substream_id)
-                {
-                    outbound_substreams_mapping2.remove(&inner_substream_id);
+                if let Some(inner_substream_id) = outbound_substreams_map.remove(&substream_id) {
+                    outbound_substreams_reverse.remove(&inner_substream_id);
                     established.close_notifications_substream(inner_substream_id);
                 }
             }
@@ -1525,7 +1523,7 @@ where
                 },
                 SingleStreamConnectionTaskInner::Established {
                     established,
-                    outbound_substreams_mapping,
+                    outbound_substreams_map,
                     ..
                 },
             ) => {
@@ -1536,7 +1534,7 @@ where
                 // If that happens, we intentionally silently discard the message, causing the
                 // notification to not be sent. This is consistent with the guarantees about
                 // notifications delivered that are documented in the public API.
-                if let Some(inner_substream_id) = outbound_substreams_mapping.get(&substream_id) {
+                if let Some(inner_substream_id) = outbound_substreams_map.get(&substream_id) {
                     established.write_notification_unbounded(*inner_substream_id, notification);
                 }
             }
@@ -1684,8 +1682,8 @@ where
         ) {
             SingleStreamConnectionTaskInner::Established {
                 established,
-                mut outbound_substreams_mapping,
-                mut outbound_substreams_mapping2,
+                mut outbound_substreams_map,
+                mut outbound_substreams_reverse,
             } => match established.read_write(read_write) {
                 Ok((connection, event)) => {
                     if read_write.is_dead() && event.is_none() {
@@ -1720,10 +1718,8 @@ where
                         }
                         Some(established::Event::Response { id, response, .. }) => {
                             let outer_substream_id =
-                                outbound_substreams_mapping2.remove(&id).unwrap();
-                            outbound_substreams_mapping
-                                .remove(&outer_substream_id)
-                                .unwrap();
+                                outbound_substreams_reverse.remove(&id).unwrap();
+                            outbound_substreams_map.remove(&outer_substream_id).unwrap();
                             self.pending_messages.push_back(
                                 ConnectionToCoordinatorInner::Response {
                                     response,
@@ -1760,12 +1756,11 @@ where
                             );
                         }
                         Some(established::Event::NotificationsOutResult { id, result }) => {
-                            let outer_substream_id =
-                                *outbound_substreams_mapping2.get(&id).unwrap();
+                            let outer_substream_id = *outbound_substreams_reverse.get(&id).unwrap();
 
                             if result.is_err() {
-                                outbound_substreams_mapping.remove(&outer_substream_id);
-                                outbound_substreams_mapping2.remove(&id);
+                                outbound_substreams_map.remove(&outer_substream_id);
+                                outbound_substreams_reverse.remove(&id);
                             }
 
                             self.pending_messages.push_back(
@@ -1777,8 +1772,7 @@ where
                             );
                         }
                         Some(established::Event::NotificationsOutCloseDemanded { id }) => {
-                            let outer_substream_id =
-                                *outbound_substreams_mapping2.get(&id).unwrap();
+                            let outer_substream_id = *outbound_substreams_reverse.get(&id).unwrap();
                             self.pending_messages.push_back(
                                 ConnectionToCoordinatorInner::NotificationsOutCloseDemanded {
                                     id: outer_substream_id,
@@ -1787,8 +1781,8 @@ where
                         }
                         Some(established::Event::NotificationsOutReset { id, .. }) => {
                             let outer_substream_id =
-                                outbound_substreams_mapping2.remove(&id).unwrap();
-                            outbound_substreams_mapping.remove(&outer_substream_id);
+                                outbound_substreams_reverse.remove(&id).unwrap();
+                            outbound_substreams_map.remove(&outer_substream_id);
                             self.pending_messages.push_back(
                                 ConnectionToCoordinatorInner::NotificationsOutReset {
                                     id: outer_substream_id,
@@ -1808,8 +1802,8 @@ where
 
                     self.connection = SingleStreamConnectionTaskInner::Established {
                         established: connection,
-                        outbound_substreams_mapping,
-                        outbound_substreams_mapping2,
+                        outbound_substreams_map,
+                        outbound_substreams_reverse,
                     };
                 }
                 Err(_err) => {
@@ -1932,12 +1926,12 @@ where
                                     ping_timeout: Duration::from_secs(10),    // TODO: hardcoded
                                     first_out_ping: read_write.now.clone() + Duration::from_secs(2), // TODO: hardcoded
                                 }),
-                                outbound_substreams_mapping:
+                                outbound_substreams_map:
                                     hashbrown::HashMap::with_capacity_and_hasher(
                                         0,
                                         Default::default(),
                                     ), // TODO: capacity?
-                                outbound_substreams_mapping2:
+                                outbound_substreams_reverse:
                                     hashbrown::HashMap::with_capacity_and_hasher(
                                         0,
                                         Default::default(),
@@ -1994,12 +1988,12 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
 
         /// Because outgoing substream ids are assigned by the coordinator, we maintain a mapping
         /// of the "outer ids" to "inner ids".
-        outbound_substreams_mapping:
+        outbound_substreams_map:
             hashbrown::HashMap<SubstreamId, established::SubstreamId, fnv::FnvBuildHasher>,
 
         /// Reverse mapping.
         // TODO: could be user datas in established?
-        outbound_substreams_mapping2:
+        outbound_substreams_reverse:
             hashbrown::HashMap<established::SubstreamId, SubstreamId, fnv::FnvBuildHasher>,
     },
 
@@ -2069,8 +2063,8 @@ where
         match &mut self.connection {
             MultiStreamConnectionTaskInner::Established {
                 established,
-                outbound_substreams_mapping,
-                outbound_substreams_mapping2,
+                outbound_substreams_map,
+                outbound_substreams_reverse,
             } => {
                 let event = match established.pull_event() {
                     Some(established::Event::InboundError(err)) => {
@@ -2086,10 +2080,8 @@ where
                         request,
                     }),
                     Some(established::Event::Response { id, response, .. }) => {
-                        let outer_substream_id = outbound_substreams_mapping2.remove(&id).unwrap();
-                        outbound_substreams_mapping
-                            .remove(&outer_substream_id)
-                            .unwrap();
+                        let outer_substream_id = outbound_substreams_reverse.remove(&id).unwrap();
+                        outbound_substreams_map.remove(&outer_substream_id).unwrap();
                         Some(ConnectionToCoordinatorInner::Response {
                             response,
                             id: outer_substream_id,
@@ -2114,11 +2106,11 @@ where
                         Some(ConnectionToCoordinatorInner::NotificationsInClose { id, outcome })
                     }
                     Some(established::Event::NotificationsOutResult { id, result }) => {
-                        let outer_substream_id = *outbound_substreams_mapping2.get(&id).unwrap();
+                        let outer_substream_id = *outbound_substreams_reverse.get(&id).unwrap();
 
                         if result.is_err() {
-                            outbound_substreams_mapping.remove(&outer_substream_id);
-                            outbound_substreams_mapping2.remove(&id);
+                            outbound_substreams_map.remove(&outer_substream_id);
+                            outbound_substreams_reverse.remove(&id);
                         }
 
                         Some(ConnectionToCoordinatorInner::NotificationsOutResult {
@@ -2127,7 +2119,7 @@ where
                         })
                     }
                     Some(established::Event::NotificationsOutCloseDemanded { id }) => {
-                        let outer_substream_id = *outbound_substreams_mapping2.get(&id).unwrap();
+                        let outer_substream_id = *outbound_substreams_reverse.get(&id).unwrap();
                         Some(
                             ConnectionToCoordinatorInner::NotificationsOutCloseDemanded {
                                 id: outer_substream_id,
@@ -2135,8 +2127,8 @@ where
                         )
                     }
                     Some(established::Event::NotificationsOutReset { id, .. }) => {
-                        let outer_substream_id = outbound_substreams_mapping2.remove(&id).unwrap();
-                        outbound_substreams_mapping.remove(&outer_substream_id);
+                        let outer_substream_id = outbound_substreams_reverse.remove(&id).unwrap();
+                        outbound_substreams_map.remove(&outer_substream_id);
                         Some(ConnectionToCoordinatorInner::NotificationsOutReset {
                             id: outer_substream_id,
                         })
@@ -2202,17 +2194,16 @@ where
                 },
                 MultiStreamConnectionTaskInner::Established {
                     established,
-                    outbound_substreams_mapping,
-                    outbound_substreams_mapping2,
+                    outbound_substreams_map,
+                    outbound_substreams_reverse,
                 },
             ) => {
                 let inner_substream_id =
                     established.add_request(protocol_index, request_data, timeout, substream_id);
-                let _prev_value =
-                    outbound_substreams_mapping.insert(substream_id, inner_substream_id);
+                let _prev_value = outbound_substreams_map.insert(substream_id, inner_substream_id);
                 debug_assert!(_prev_value.is_none());
                 let _prev_value =
-                    outbound_substreams_mapping2.insert(inner_substream_id, substream_id);
+                    outbound_substreams_reverse.insert(inner_substream_id, substream_id);
                 debug_assert!(_prev_value.is_none());
             }
             (
@@ -2224,8 +2215,8 @@ where
                 },
                 MultiStreamConnectionTaskInner::Established {
                     established,
-                    outbound_substreams_mapping,
-                    outbound_substreams_mapping2,
+                    outbound_substreams_map,
+                    outbound_substreams_reverse,
                 },
             ) => {
                 let inner_substream_id = established.open_notifications_substream(
@@ -2236,27 +2227,26 @@ where
                 );
 
                 let _prev_value =
-                    outbound_substreams_mapping.insert(outer_substream_id, inner_substream_id);
+                    outbound_substreams_map.insert(outer_substream_id, inner_substream_id);
                 debug_assert!(_prev_value.is_none());
                 let _prev_value =
-                    outbound_substreams_mapping2.insert(inner_substream_id, outer_substream_id);
+                    outbound_substreams_reverse.insert(inner_substream_id, outer_substream_id);
                 debug_assert!(_prev_value.is_none());
             }
             (
                 CoordinatorToConnectionInner::CloseOutNotifications { substream_id },
                 MultiStreamConnectionTaskInner::Established {
                     established,
-                    outbound_substreams_mapping,
-                    outbound_substreams_mapping2,
+                    outbound_substreams_map,
+                    outbound_substreams_reverse,
                 },
             ) => {
                 // It is possible that the remote has closed the outbound notification substream
                 // while the `CloseOutNotifications` message was being delivered, or that the API
                 // user close the substream before the message about the substream being closed
                 // was delivered to the coordinator.
-                if let Some(inner_substream_id) = outbound_substreams_mapping.remove(&substream_id)
-                {
-                    outbound_substreams_mapping2.remove(&inner_substream_id);
+                if let Some(inner_substream_id) = outbound_substreams_map.remove(&substream_id) {
+                    outbound_substreams_reverse.remove(&inner_substream_id);
                     established.close_notifications_substream(inner_substream_id);
                 }
             }
@@ -2267,7 +2257,7 @@ where
                 },
                 MultiStreamConnectionTaskInner::Established {
                     established,
-                    outbound_substreams_mapping,
+                    outbound_substreams_map,
                     ..
                 },
             ) => {
@@ -2278,7 +2268,7 @@ where
                 // If that happens, we intentionally silently discard the message, causing the
                 // notification to not be sent. This is consistent with the guarantees about
                 // notifications delivered that are documented in the public API.
-                if let Some(inner_substream_id) = outbound_substreams_mapping.get(&substream_id) {
+                if let Some(inner_substream_id) = outbound_substreams_map.get(&substream_id) {
                     established.write_notification_unbounded(*inner_substream_id, notification);
                 }
             }

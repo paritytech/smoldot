@@ -1424,7 +1424,7 @@ async fn connection_task<TPlat: Platform>(
 /// Asynchronous task managing a specific single-stream connection after it's been open.
 // TODO: a lot of logging disappeared
 async fn single_stream_connection_task<TPlat: Platform>(
-    mut websocket: TPlat::Stream,
+    mut connection: TPlat::Stream,
     shared: Arc<Shared<TPlat>>,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<TPlat::Instant>,
@@ -1461,7 +1461,7 @@ async fn single_stream_connection_task<TPlat: Platform>(
         let now = TPlat::now();
         let mut read_write = ReadWrite {
             now: now.clone(),
-            incoming_buffer: TPlat::read_buffer(&mut websocket),
+            incoming_buffer: TPlat::read_buffer(&mut connection),
             outgoing_buffer: Some((&mut write_buffer, &mut [])), // TODO: this should be None if a previous read_write() produced None
             read_bytes: 0,
             written_bytes: 0,
@@ -1481,9 +1481,9 @@ async fn single_stream_connection_task<TPlat: Platform>(
 
         // Now update the connection.
         if written_bytes != 0 {
-            TPlat::send(&mut websocket, &write_buffer[..written_bytes]);
+            TPlat::send(&mut connection, &write_buffer[..written_bytes]);
         }
-        TPlat::advance_read_cursor(&mut websocket, read_bytes);
+        TPlat::advance_read_cursor(&mut connection, read_bytes);
 
         // Try pull message to send to the coordinator.
 
@@ -1568,7 +1568,7 @@ async fn single_stream_connection_task<TPlat: Platform>(
         // Future that is woken up when new data is ready on the socket.
         let read_buffer_ready = if !(read_buffer_has_data && read_bytes == 0) && !read_buffer_closed
         {
-            future::Either::Left(TPlat::wait_more_data(&mut websocket))
+            future::Either::Left(TPlat::wait_more_data(&mut connection))
         } else {
             future::Either::Right(future::pending())
         };
@@ -1590,7 +1590,7 @@ async fn single_stream_connection_task<TPlat: Platform>(
 /// Asynchronous task managing a specific multi-stream connection after it's been open.
 // TODO: a lot of logging disappeared
 async fn multi_stream_connection_task<TPlat: Platform>(
-    mut websocket: TPlat::Connection,
+    mut connection: TPlat::Connection,
     shared: Arc<Shared<TPlat>>,
     connection_id: service::ConnectionId,
     mut connection_task: service::MultiStreamConnectionTask<TPlat::Instant, usize>,
@@ -1629,7 +1629,7 @@ async fn multi_stream_connection_task<TPlat: Platform>(
             .desired_outbound_substreams()
             .saturating_sub(pending_opening_out_substreams)
         {
-            TPlat::open_out_substream(&mut websocket);
+            TPlat::open_out_substream(&mut connection);
             pending_opening_out_substreams += 1;
         }
 
@@ -1812,7 +1812,7 @@ async fn multi_stream_connection_task<TPlat: Platform>(
         debug_assert!(newly_open_substream.is_none());
         futures::select! {
             _ = message_from_coordinator => {}
-            substream = TPlat::next_substream(&mut websocket).fuse() => {
+            substream = TPlat::next_substream(&mut connection).fuse() => {
                 newly_open_substream = substream;
             }
             _ = poll_after => {}
