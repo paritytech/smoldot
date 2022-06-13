@@ -232,8 +232,8 @@ where
     /// substream.
     ///
     /// This value doesn't change automatically over time but only after a call to
-    /// [`MultiStream::substream_read_write`], [`MultiStream::inject_coordinator_message`],
-    /// [`MultiStream::add_substream`], or [`MultiStream::reset_substream`].
+    /// [`MultiStream::substream_read_write`],  [`MultiStream::add_substream`], or
+    /// [`MultiStream::reset_substream`].
     ///
     /// This mechanism is not a substitute for [`ReadWrite::wake_up_after`]. If calling
     /// [`MultiStream::substream_read_write`] puts something in [`ReadWrite::wake_up_after`], then

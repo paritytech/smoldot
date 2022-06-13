@@ -2038,33 +2038,35 @@ where
     /// Pulls a message to send back to the coordinator.
     ///
     /// This function takes ownership of `self` and optionally yields it back. If the first
-    /// option contains `None`, then no more message will be generated and the [`ConnectionTask`]
-    /// has vanished. This will happen after the connection has been shut down or reset.
-    /// It is possible for `self` to not be yielded back even if the [`ReadWrite`] that was last
-    /// passed to [`ConnectionTask::read_write`] is still fully open, in which case the API user
-    /// should abruptly reset the connection, for example by sending a TCP RST flag. This can
-    /// happen for exemple if the connection seems unresponsive and that an attempt at closing
-    /// the connection in a clean way is futile.
+    /// option contains `None`, then no more message will be generated and the
+    /// [`MultiStreamConnectionTask`] has vanished. This will happen after the connection has been
+    /// shut down or reset.
+    /// It is possible for `self` to not be yielded back even if substreams are still open, in
+    /// which case the API user should abruptly reset the connection, for example by sending a
+    /// TCP RST flag.
     ///
     /// If any message is returned, it is the responsibility of the API user to send it to the
     /// coordinator by calling [`Network::inject_connection_message`].
     /// Do not attempt to buffer the message being returned, as it would work against the
     /// back-pressure strategy used internally. As soon as a message is returned, it should be
     /// delivered. If the coordinator is busy at the moment a message should be delivered, then
-    /// the entire thread of execution dedicated to this [`ConnectionTask`] should be paused until
-    /// the coordinator is ready and the message delivered.
+    /// the entire thread of execution dedicated to this [`MultiStreamConnectionTask`] should be
+    /// paused until the coordinator is ready and the message delivered.
     ///
     /// Messages aren't generated spontaneously. In other words, you don't need to periodically
     /// call this function just in case there's a new message. Messages are always generated after
-    /// either [`ConnectionTask::substrema_read_write`] or [`ConnectionTask::reset`] has been
-    /// called. Multiple messages can happen in a row.
+    /// [`MultiStreamConnectionTask::substream_read_write`],
+    /// [`MultiStreamConnectionTask::add_substream`], or [`MultiStreamConnectionTask::reset`]
+    /// has been called. Multiple messages can happen in a row.
     ///
     /// Because this function frees space in a buffer, calling
-    /// [`ConnectionTask::substream_read_write`] again after it has returned might read/write more
-    /// data and generate an event again. In other words, the API user should call
-    /// [`ConnectionTask::substream_read_write`] and
-    /// [`ConnectionTask::pull_message_to_coordinator`] repeatedly in a loop until no more
-    /// message is generated.
+    /// [`MultiStreamConnectionTask::ready_substreams`] and processing substreams again after it
+    /// has returned might read/write more data and generate an event again. In other words,
+    /// the API user should call
+    ///  [`MultiStreamConnectionTask::ready_substreams`] and
+    /// [`MultiStreamConnectionTask::substream_read_write`], and
+    /// [`MultiStreamConnectionTask::pull_message_to_coordinator`] repeatedly in a loop until no
+    /// more message is generated.
     pub fn pull_message_to_coordinator(
         mut self,
     ) -> (Option<Self>, Option<ConnectionToCoordinator>) {

@@ -253,7 +253,7 @@ where
     ///
     /// This function guarantees that the [`ConnectionId`] always refers to a connection that
     /// is still alive, in the sense that [`SingleStreamConnectionTask::inject_coordinator_message`]
-    /// or [`MultStreamConnectionTask::inject_coordinator_message`] has never returned `None`.
+    /// or [`MultiStreamConnectionTask::inject_coordinator_message`] has never returned `None`.
     pub fn pull_message_to_connection(
         &mut self,
     ) -> Option<(ConnectionId, CoordinatorToConnection<TNow>)> {
