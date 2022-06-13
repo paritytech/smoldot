@@ -147,10 +147,6 @@ impl<'a> MethodError<'a> {
     }
 }
 
-/// Could not parse the body of the message as a valid JSON-RPC message.
-#[derive(Debug, derive_more::Display)]
-pub struct JsonRpcParseError(serde_json::Error);
-
 /// The parameter of a function call is invalid.
 #[derive(Debug, derive_more::Display)]
 pub struct InvalidParameterError(serde_json::Error);

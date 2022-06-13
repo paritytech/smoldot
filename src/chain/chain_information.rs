@@ -587,6 +587,7 @@ pub enum ValidityError {
     /// The finalized block is block number 0, but the GrandPa authorities set id is not 0.
     FinalizedZeroButNonZeroAuthoritiesSetId,
     /// Error in a Babe epoch information.
+    #[display(fmt = "Error in a Babe epoch information: {}", _0)]
     InvalidBabe(BabeValidityError),
 }
 

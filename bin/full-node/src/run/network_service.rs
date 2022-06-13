@@ -667,6 +667,10 @@ pub enum InitError {
     #[display(fmt = "I/O error when creating listener for {}: {}", _0, _1)]
     ListenerIo(Multiaddr, io::Error),
     /// A listening address passed through the configuration isn't valid.
+    #[display(
+        fmt = "A listening address passed through the configuration isn't valid: {}",
+        _0
+    )]
     BadListenMultiaddr(Multiaddr),
 }
 
@@ -676,6 +680,7 @@ pub enum BlocksRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
+    #[display(fmt = "{}", _0)]
     Request(service::BlocksRequestError),
 }
 
@@ -685,6 +690,7 @@ pub enum QueueNotificationError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the queuing.
+    #[display(fmt = "{}", _0)]
     Queue(peers::QueueNotificationError),
 }
 

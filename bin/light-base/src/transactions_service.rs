@@ -256,8 +256,10 @@ pub enum DropReason {
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum ValidateTransactionError {
     /// Error during the network request.
+    #[display(fmt = "{}", _0)]
     Call(runtime_service::RuntimeCallError),
     /// Error during the validation runtime call.
+    #[display(fmt = "{}", _0)]
     Validation(validate::Error),
     /// Tried to access the next key of a storage key. This isn't possible through a call request
     /// at the moment.

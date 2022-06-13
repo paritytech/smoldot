@@ -2301,6 +2301,7 @@ pub enum SlotTy {
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum NotificationsOutErr {
     /// Error in the underlying protocol.
+    #[display(fmt = "{}", _0)]
     Substream(peers::NotificationsOutErr),
     /// Mismatch between the genesis hash of the remote and the local genesis hash.
     #[display(fmt = "Mismatch between the genesis hash of the remote and the local genesis hash")]
@@ -2374,14 +2375,21 @@ impl fmt::Debug for EncodedGrandpaCommitMessage {
 /// Error during [`ChainNetwork::start_kademlia_discovery_round`].
 #[derive(Debug, derive_more::Display)]
 pub enum DiscoveryError {
+    /// Not currently connected to any other node.
     NoPeer,
+    /// Error during the request.
+    #[display(fmt = "{}", _0)]
     FindNode(KademliaFindNodeError),
 }
 
 /// Error during [`ChainNetwork::start_kademlia_find_node`].
 #[derive(Debug, derive_more::Display)]
 pub enum KademliaFindNodeError {
+    /// Error during the request.
+    #[display(fmt = "{}", _0)]
     RequestFailed(peers::RequestError),
+    /// Failed to decode the response.
+    #[display(fmt = "Response decoding error: {}", _0)]
     DecodeError(kademlia::DecodeFindNodeResponseError),
 }
 
@@ -2389,8 +2397,10 @@ pub enum KademliaFindNodeError {
 #[derive(Debug, derive_more::Display)]
 pub enum BlocksRequestError {
     /// Error while waiting for the response from the peer.
+    #[display(fmt = "{}", _0)]
     Request(peers::RequestError),
     /// Error while decoding the response returned by the peer.
+    #[display(fmt = "Response decoding error: {}", _0)]
     Decode(protocol::DecodeBlockResponseError),
     /// Block request doesn't request headers, and as such its validity cannot be verified.
     NotVerifiable,
@@ -2431,14 +2441,18 @@ pub enum BlocksRequestResponseEntryError {
 /// Error returned by [`ChainNetwork::start_storage_proof_request`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum StorageProofRequestError {
+    #[display(fmt = "{}", _0)]
     Request(peers::RequestError),
+    #[display(fmt = "Response decoding error: {}", _0)]
     Decode(protocol::DecodeStorageProofResponseError),
 }
 
 /// Error returned by [`ChainNetwork::start_call_proof_request`].
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum CallProofRequestError {
+    #[display(fmt = "{}", _0)]
     Request(peers::RequestError),
+    #[display(fmt = "Response decoding error: {}", _0)]
     Decode(protocol::DecodeCallProofResponseError),
 }
 
@@ -2456,14 +2470,18 @@ impl CallProofRequestError {
 /// Error returned by [`ChainNetwork::start_grandpa_warp_sync_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum GrandpaWarpSyncRequestError {
+    #[display(fmt = "{}", _0)]
     Request(peers::RequestError),
+    #[display(fmt = "Response decoding error: {}", _0)]
     Decode(protocol::DecodeGrandpaWarpSyncResponseError),
 }
 
 /// Error returned by [`ChainNetwork::start_state_request_unchecked`].
 #[derive(Debug, derive_more::Display)]
 pub enum StateRequestError {
+    #[display(fmt = "{}", _0)]
     Request(peers::RequestError),
+    #[display(fmt = "Response decoding error: {}", _0)]
     Decode(protocol::DecodeStateResponseError),
 }
 

@@ -809,8 +809,13 @@ pub enum HandshakeError {
     /// Writing side of the connection is closed. The handshake can't proceed further.
     WriteClosed,
     /// Error in the decryption state machine.
+    #[display(fmt = "Cipher error: {}", _0)]
     Cipher(CipherError),
     /// Failed to decode the payload as the libp2p-extension-to-noise payload.
+    #[display(
+        fmt = "Failed to decode payload as the libp2p-extension-to-noise payload: {}",
+        _0
+    )]
     PayloadDecode(PayloadDecodeError),
     /// Key passed as part of the payload failed to decode into a libp2p public key.
     InvalidKey,
