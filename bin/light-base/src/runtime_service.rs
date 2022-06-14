@@ -182,12 +182,12 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// Only up to `buffer_size` block notifications are buffered in the channel. If the channel
     /// is full when a new notification is attempted to be pushed, the channel gets closed.
     ///
-    /// A maximum number of finalized or non-canonical pinned blocks must be passed, indicating
-    /// the maximum number of blocks that are finalized or non-canonical that the runtime service
-    /// will pin at the same time for this subscription. If this maximum is reached, the channel
-    /// will get closed. In situations where the subscriber is guaranteed to always properly
-    /// unpin blocks, a value of  `usize::max_value()` can be passed in order to ignore this
-    /// maximum.
+    /// A maximum number of finalized or non-canonical (i.e. not part of the finalized chain)
+    /// pinned blocks must be passed, indicating the maximum number of blocks that are finalized
+    /// or non-canonical that the runtime service will pin at the same time for this subscription.
+    /// If this maximum is reached, the channel will get closed. In situations where the subscriber
+    /// is guaranteed to always properly unpin blocks, a value of  `usize::max_value()` can be
+    /// passed in order to ignore this maximum.
     ///
     /// The channel also gets closed if a gap in the finality happens, such as after a Grandpa
     /// warp syncing.
