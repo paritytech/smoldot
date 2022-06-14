@@ -98,12 +98,23 @@ pub trait Platform: Send + 'static {
         + Send
         + Sync
         + 'static;
+
+    /// A multi-stream connection.
+    ///
+    /// This object is merely a handle. The underlying connection should be dropped only after
+    /// the `Connection` and all its associated substream objects ([`Platform::Stream`]) have
+    /// been dropped.
     type Connection: Send + Sync + 'static;
-    type ConnectFuture: Future<Output = Result<Self::Connection, ConnectError>>
+    type Stream: Send + Sync + 'static;
+    type ConnectFuture: Future<Output = Result<PlatformConnection<Self::Stream, Self::Connection>, ConnectError>>
         + Unpin
         + Send
         + 'static;
-    type ConnectionDataFuture: Future<Output = ()> + Unpin + Send + 'static;
+    type StreamDataFuture: Future<Output = ()> + Unpin + Send + 'static;
+    type NextSubstreamFuture: Future<Output = Option<(Self::Stream, PlatformSubstreamDirection)>>
+        + Unpin
+        + Send
+        + 'static;
 
     /// Returns the time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time)
     /// (i.e. 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
@@ -130,37 +141,74 @@ pub trait Platform: Send + 'static {
     /// returned where [`ConnectError::is_bad_addr`] is `true`.
     fn connect(url: &str) -> Self::ConnectFuture;
 
-    /// Returns a future that becomes ready when either the read buffer of the given connection
+    /// Queues the opening of an additional outbound substream.
+    ///
+    /// The substream, once opened, must be yielded by [`Platform::next_substream`].
+    fn open_out_substream(connection: &mut Self::Connection);
+
+    /// Waits until a new incoming substream arrives on the connection.
+    ///
+    /// This returns both inbound and outbound substreams. Outbound substreams should only be
+    /// yielded once for every call to [`Platform::open_out_substream`].
+    ///
+    /// The future can also return `None` if the connection has been killed by the remote. If
+    /// the future returns `None`, the user of the `Platform` should drop the `Connection` and
+    /// all its associated `Stream`s as soon as possible.
+    fn next_substream(connection: &mut Self::Connection) -> Self::NextSubstreamFuture;
+
+    /// Returns a future that becomes ready when either the read buffer of the given stream
     /// contains data, or the remote has closed their sending side.
     ///
     /// The future is immediately ready if data is already available or the remote has already
     /// closed their sending side.
     ///
-    /// This function can be called multiple times with the same connection, in which case all
+    /// This function can be called multiple times with the same stream, in which case all
     /// the futures must be notified. The user of this function, however, is encouraged to
     /// maintain only one active future.
     ///
-    /// If the future is polled after the connection object has been dropped, the behavior is
+    /// If the future is polled after the stream object has been dropped, the behavior is
     /// not specified. The polling might panic, or return `Ready`, or return `Pending`.
-    fn wait_more_data(connection: &mut Self::Connection) -> Self::ConnectionDataFuture;
+    fn wait_more_data(stream: &mut Self::Stream) -> Self::StreamDataFuture;
 
-    /// Gives access to the content of the read buffer of the given connection.
+    /// Gives access to the content of the read buffer of the given stream.
     ///
-    /// Returns `None` if the remote has closed their sending side.
-    fn read_buffer(connection: &mut Self::Connection) -> Option<&[u8]>;
+    /// Returns `None` if the remote has closed their sending side or if the stream has been
+    /// reset.
+    fn read_buffer(stream: &mut Self::Stream) -> Option<&[u8]>;
 
-    /// Discards the first `bytes` bytes of the read buffer of this connection. This makes it
+    /// Discards the first `bytes` bytes of the read buffer of this stream. This makes it
     /// possible for the remote to send more data.
     ///
     /// # Panic
     ///
     /// Panics if there aren't enough bytes to discard in the buffer.
     ///
-    fn advance_read_cursor(connection: &mut Self::Connection, bytes: usize);
+    fn advance_read_cursor(stream: &mut Self::Stream, bytes: usize);
 
     /// Queues the given bytes to be sent out on the given connection.
     // TODO: back-pressure
-    fn send(connection: &mut Self::Connection, data: &[u8]);
+    // TODO: allow closing sending side
+    fn send(stream: &mut Self::Stream, data: &[u8]);
+}
+
+/// Type of opened connection. See [`Platform::connect`].
+#[derive(Debug)]
+pub enum PlatformConnection<TStream, TConnection> {
+    /// The connection is a single stream on top of which encryption and multiplexing should be
+    /// negotiatied. The division in multiple substreams is handled internally.
+    SingleStream(TStream),
+    /// The connection is made of multiple substreams. The encryption and multiplexing are handled
+    /// externally.
+    MultiStream(TConnection, peer_id::PeerId),
+}
+
+/// Direction in which a substream has been opened. See [`Platform::next_substream`].
+#[derive(Debug)]
+pub enum PlatformSubstreamDirection {
+    /// Substream has been opened by the remote.
+    Inbound,
+    /// Substream has been opened locally in response to [`Platform::open_out_substream`].
+    Outbound,
 }
 
 /// Error potentially returned by [`Platform::connect`].

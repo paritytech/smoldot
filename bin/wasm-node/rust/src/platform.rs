@@ -38,9 +38,18 @@ pub(crate) struct Platform;
 impl smoldot_light_base::Platform for Platform {
     type Delay = Delay;
     type Instant = crate::Instant;
-    type Connection = Pin<Box<Connection>>;
-    type ConnectFuture = future::BoxFuture<'static, Result<Self::Connection, ConnectError>>;
-    type ConnectionDataFuture = future::BoxFuture<'static, ()>;
+    type Connection = core::convert::Infallible;
+    type Stream = Pin<Box<Connection>>;
+    type ConnectFuture = future::BoxFuture<
+        'static,
+        Result<
+            smoldot_light_base::PlatformConnection<Self::Stream, Self::Connection>,
+            ConnectError,
+        >,
+    >;
+    type StreamDataFuture = future::BoxFuture<'static, ()>;
+    type NextSubstreamFuture =
+        future::Pending<Option<(Self::Stream, smoldot_light_base::PlatformSubstreamDirection)>>;
 
     fn now_from_unix_epoch() -> Duration {
         Duration::from_secs_f64(unsafe { bindings::unix_time_ms() } / 1000.0)
@@ -124,7 +133,9 @@ impl smoldot_light_base::Platform for Platform {
             }
 
             if pointer.open {
-                Ok(pointer)
+                Ok(smoldot_light_base::PlatformConnection::SingleStream(
+                    pointer,
+                ))
             } else {
                 debug_assert!(pointer.closed_message.is_some());
                 Err(ConnectError {
@@ -136,7 +147,15 @@ impl smoldot_light_base::Platform for Platform {
         .boxed()
     }
 
-    fn wait_more_data(connection: &mut Self::Connection) -> Self::ConnectionDataFuture {
+    fn next_substream(_connection: &mut Self::Connection) -> Self::NextSubstreamFuture {
+        unreachable!()
+    }
+
+    fn open_out_substream(_connection: &mut Self::Connection) {
+        unreachable!()
+    }
+
+    fn wait_more_data(connection: &mut Self::Stream) -> Self::StreamDataFuture {
         if !connection.messages_queue.is_empty() || connection.closed_message.is_some() {
             return future::ready(()).boxed();
         }
@@ -150,7 +169,7 @@ impl smoldot_light_base::Platform for Platform {
         listener.boxed()
     }
 
-    fn read_buffer(connection: &mut Self::Connection) -> Option<&[u8]> {
+    fn read_buffer(connection: &mut Self::Stream) -> Option<&[u8]> {
         if let Some(buffer) = connection.messages_queue.front() {
             debug_assert!(!buffer.is_empty());
             debug_assert!(connection.messages_queue_first_offset < buffer.len());
@@ -162,7 +181,7 @@ impl smoldot_light_base::Platform for Platform {
         }
     }
 
-    fn advance_read_cursor(connection: &mut Self::Connection, bytes: usize) {
+    fn advance_read_cursor(connection: &mut Self::Stream, bytes: usize) {
         let this = unsafe { Pin::get_unchecked_mut(connection.as_mut()) };
 
         this.messages_queue_first_offset += bytes;
@@ -178,7 +197,7 @@ impl smoldot_light_base::Platform for Platform {
         };
     }
 
-    fn send(connection: &mut Self::Connection, data: &[u8]) {
+    fn send(connection: &mut Self::Stream, data: &[u8]) {
         unsafe {
             let this = Pin::get_unchecked_mut(connection.as_mut());
 
@@ -189,8 +208,9 @@ impl smoldot_light_base::Platform for Platform {
 
             TOTAL_BYTES_SENT.fetch_add(data.len(), Ordering::Relaxed);
 
-            bindings::connection_send(
+            bindings::stream_send(
                 this.id.unwrap(),
+                0,
                 u32::try_from(data.as_ptr() as usize).unwrap(),
                 u32::try_from(data.len()).unwrap(),
             );
@@ -203,11 +223,11 @@ pub(crate) struct Connection {
     /// If `Some`, [`bindings::connection_close`] must be called. Set to a value after
     /// [`bindings::connection_new`] returns success.
     id: Option<u32>,
-    /// True if [`bindings::connection_open`] has been called.
+    /// True if [`bindings::connection_open_single_stream`] has been called.
     open: bool,
     /// `Some` if [`bindings::connection_closed`] has been called.
     closed_message: Option<String>,
-    /// List of messages received through [`bindings::connection_message`]. Must never contain
+    /// List of messages received through [`bindings::stream_message`]. Must never contain
     /// empty messages.
     messages_queue: VecDeque<Box<[u8]>>,
     /// Position of the read cursor within the first element of [`Connection::messages_queue`].
@@ -236,14 +256,33 @@ impl Drop for Connection {
     }
 }
 
-pub(crate) fn connection_open(id: u32) {
-    let connection = unsafe { &mut *(usize::try_from(id).unwrap() as *mut Connection) };
+pub(crate) fn connection_open_single_stream(connection_id: u32) {
+    let connection = unsafe { &mut *(usize::try_from(connection_id).unwrap() as *mut Connection) };
     connection.open = true;
     connection.something_happened.notify(usize::max_value());
 }
 
-pub(crate) fn connection_message(id: u32, ptr: u32, len: u32) {
-    let connection = unsafe { &mut *(usize::try_from(id).unwrap() as *mut Connection) };
+pub(crate) fn connection_open_multi_stream(connection_id: u32, peer_id_ptr: u32, peer_id_len: u32) {
+    let connection = unsafe { &mut *(usize::try_from(connection_id).unwrap() as *mut Connection) };
+    connection.open = true;
+    connection.something_happened.notify(usize::max_value());
+
+    let _peer_id: Box<[u8]> = {
+        let peer_id_ptr = usize::try_from(peer_id_ptr).unwrap();
+        let peer_id_len = usize::try_from(peer_id_len).unwrap();
+        unsafe {
+            Box::from_raw(slice::from_raw_parts_mut(
+                peer_id_ptr as *mut u8,
+                peer_id_len,
+            ))
+        }
+    };
+
+    todo!()
+}
+
+pub(crate) fn stream_message(connection_id: u32, _stream_id: u32, ptr: u32, len: u32) {
+    let connection = unsafe { &mut *(usize::try_from(connection_id).unwrap() as *mut Connection) };
 
     let ptr = usize::try_from(ptr).unwrap();
     let len = usize::try_from(len).unwrap();
@@ -268,8 +307,12 @@ pub(crate) fn connection_message(id: u32, ptr: u32, len: u32) {
     connection.something_happened.notify(usize::max_value());
 }
 
-pub(crate) fn connection_closed(id: u32, ptr: u32, len: u32) {
-    let connection = unsafe { &mut *(usize::try_from(id).unwrap() as *mut Connection) };
+pub(crate) fn connection_stream_opened(_connection_id: u32, _stream_id: u32, _outbound: u32) {
+    todo!()
+}
+
+pub(crate) fn connection_closed(connection_id: u32, ptr: u32, len: u32) {
+    let connection = unsafe { &mut *(usize::try_from(connection_id).unwrap() as *mut Connection) };
 
     connection.closed_message = Some({
         let ptr = usize::try_from(ptr).unwrap();
@@ -280,4 +323,8 @@ pub(crate) fn connection_closed(id: u32, ptr: u32, len: u32) {
     });
 
     connection.something_happened.notify(usize::max_value());
+}
+
+pub(crate) fn stream_closed(_connection_id: u32, _stream_id: u32) {
+    todo!()
 }

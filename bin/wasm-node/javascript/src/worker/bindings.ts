@@ -33,9 +33,12 @@ export interface SmoldotWasmExports extends WebAssembly.Exports {
     json_rpc_send: (textPtr: number, textLen: number, chainId: number) => void,
     database_content: (chainId: number, maxSize: number) => void,
     timer_finished: (timerId: number) => void,
-    connection_open: (id: number) => void,
-    connection_message: (id: number, ptr: number, len: number) => void,
-    connection_closed: (id: number, ptr: number, len: number) => void,
+    connection_open_single_stream: (connectionId: number) => void,
+    connection_open_multi_stream: (connectionId: number, peerIdPtr: number, peerIdLen: number) => void,
+    stream_message: (connectionId: number, streamId: number, ptr: number, len: number) => void,
+    connection_stream_opened: (connectionId: number, streamId: number, outbound: number) => void,
+    connection_closed: (connectionId: number, ptr: number, len: number) => void,
+    stream_closed: (connectionId: number, streamId: number) => void,
 }
 
 export interface SmoldotWasmInstance extends WebAssembly.Instance {
