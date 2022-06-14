@@ -30,7 +30,7 @@ use smoldot::{
 };
 use std::{
     iter,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     str,
     sync::{atomic, Arc},
     time::Duration,
@@ -403,7 +403,7 @@ impl<TPlat: Platform> Background<TPlat> {
             // malicious behaviors. This code is by definition not considered malicious.
             let subscribe_all = self
                 .runtime_service
-                .subscribe_all(32, usize::max_value())
+                .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
                 .await;
 
             // The finalized and already-known blocks aren't reported to the user, but we need
@@ -832,6 +832,49 @@ impl<TPlat: Platform> Background<TPlat> {
 
         self.requests_subscriptions
             .respond(&state_machine_request_id, response)
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_call`].
+    pub(super) async fn state_call(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        function_to_call: &str,
+        call_parameters: methods::HexString,
+        hash: Option<methods::HashHexString>,
+    ) {
+        let block_hash = if let Some(hash) = hash {
+            hash.0
+        } else {
+            header::hash_from_scale_encoded_header(
+                &sub_utils::subscribe_best(&self.runtime_service).await.0,
+            )
+        };
+
+        let result = self
+            .runtime_call(
+                &block_hash,
+                function_to_call,
+                iter::once(call_parameters.0),
+                3,
+                Duration::from_secs(10),
+                NonZeroU32::new(3).unwrap(),
+            )
+            .await;
+
+        let response = match result {
+            Ok(data) => methods::Response::state_call(methods::HexString(data.to_vec()))
+                .to_json_response(request_id),
+            Err(error) => json_rpc::parse::build_error_response(
+                request_id,
+                json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                None,
+            ),
+        };
+
+        self.requests_subscriptions
+            .respond(state_machine_request_id, response)
             .await;
     }
 

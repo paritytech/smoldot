@@ -72,7 +72,7 @@ use smoldot::{
 use std::{
     collections::BTreeMap,
     iter, mem,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
     sync::{Arc, Weak},
     time::Duration,
@@ -182,11 +182,11 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// Only up to `buffer_size` block notifications are buffered in the channel. If the channel
     /// is full when a new notification is attempted to be pushed, the channel gets closed.
     ///
-    /// A maximum number of pinned blocks must be passed, indicating the maximum number of blocks
-    /// that the runtime service will pin at the same time for this subscription. If this maximum
-    /// is reached, the channel will get closed. In situations where the subscriber is guaranteed
-    /// to always properly unpin blocks, a value of `usize::max_value()` can be passed in order
-    /// to ignore this maximum.
+    /// A maximum number of finalized pinned blocks must be passed, indicating the maximum number
+    /// of finalized blocks that the runtime service will pin at the same time for this
+    /// subscription. If this maximum is reached, the channel will get closed. In situations where
+    /// the subscriber is guaranteed to always properly unpin blocks, a value of
+    /// `usize::max_value()` can be passed in order to ignore this maximum.
     ///
     /// The channel also gets closed if a gap in the finality happens, such as after a Grandpa
     /// warp syncing.
@@ -195,7 +195,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     pub async fn subscribe_all(
         &self,
         buffer_size: usize,
-        max_pinned_blocks: usize,
+        max_finalized_pinned_blocks: NonZeroUsize,
     ) -> SubscribeAll<TPlat> {
         // First, lock `guarded` and wait for the tree to be in `FinalizedBlockRuntimeKnown` mode.
         // This can take a long time.
@@ -231,7 +231,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 _ => unreachable!(),
             };
 
-        let (mut tx, new_blocks_channel) = mpsc::channel(buffer_size);
+        let (tx, new_blocks_channel) = mpsc::channel(buffer_size);
         let subscription_id = guarded_lock.next_subscription_id;
         guarded_lock.next_subscription_id += 1;
 
@@ -307,25 +307,8 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             0 | 1
         ));
 
-        // If the requested maximum number of pinned blocks is too low, we pretend that this
-        // maximum number was just enough by insert `0` remaining pinned blocks, but we also close
-        // the subscription immediately to mimic the effects of not having enough pinned blocks
-        // remaining.
-        //
-        // It could also in principle be possible to not insert in `all_blocks_subscriptions` at,
-        // all but this would require cleaning up all the other modifications we've done to
-        // guarded`. By inserting a closed channel, we reuse the same code as the one that purges
-        // closed channels.
-        all_blocks_subscriptions.insert(subscription_id, {
-            if let Some(pinned_remaining) =
-                max_pinned_blocks.checked_sub(1 + non_finalized_blocks_ancestry_order.len())
-            {
-                (tx, pinned_remaining)
-            } else {
-                tx.close_channel();
-                (tx, 0)
-            }
-        });
+        all_blocks_subscriptions
+            .insert(subscription_id, (tx, max_finalized_pinned_blocks.get() - 1));
 
         SubscribeAll {
             finalized_block_scale_encoded_header: finalized_block.scale_encoded_header.clone(),
@@ -370,27 +353,36 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         if let GuardedInner::FinalizedBlockRuntimeKnown {
             all_blocks_subscriptions,
             pinned_blocks,
+            finalized_block,
             ..
         } = &mut guarded_lock.tree
         {
-            if pinned_blocks
-                .remove(&(subscription_id.0, *block_hash))
-                .is_none()
-            {
-                // Cold path.
-                if all_blocks_subscriptions.contains_key(&subscription_id.0) {
-                    panic!("block already unpinned");
-                } else {
-                    return;
-                }
-            };
+            let unpinned_block_height =
+                match pinned_blocks.remove(&(subscription_id.0, *block_hash)) {
+                    Some((_, _, h)) => h,
+                    None => {
+                        // Cold path.
+                        if all_blocks_subscriptions.contains_key(&subscription_id.0) {
+                            panic!("block already unpinned");
+                        } else {
+                            return;
+                        }
+                    }
+                };
 
             guarded_lock.runtimes.retain(|_, rt| rt.strong_count() > 0);
 
-            let (_, pinned_remaining) = all_blocks_subscriptions
-                .get_mut(&subscription_id.0)
-                .unwrap();
-            *pinned_remaining += 1;
+            let block_is_finalized = unpinned_block_height
+                <= header::decode(&finalized_block.scale_encoded_header)
+                    .unwrap()
+                    .number;
+
+            if block_is_finalized {
+                let (_, finalized_pinned_remaining) = all_blocks_subscriptions
+                    .get_mut(&subscription_id.0)
+                    .unwrap();
+                *finalized_pinned_remaining += 1;
+            }
         } else {
             panic!("Invalid subscription")
         }
@@ -1504,8 +1496,17 @@ impl<TPlat: Platform> Background<TPlat> {
                         };
 
                         let mut to_remove = Vec::new();
-                        for (subscription_id, (sender, _)) in all_blocks_subscriptions.iter_mut() {
-                            if sender.try_send(all_blocks_notif.clone()).is_err() {
+                        for (subscription_id, (sender, finalized_pinned_remaining)) in
+                            all_blocks_subscriptions.iter_mut()
+                        {
+                            if *finalized_pinned_remaining == 0 {
+                                to_remove.push(*subscription_id);
+                                continue;
+                            }
+
+                            if sender.try_send(all_blocks_notif.clone()).is_ok() {
+                                *finalized_pinned_remaining -= 1;
+                            } else {
                                 to_remove.push(*subscription_id);
                             }
                         }
@@ -1565,16 +1566,8 @@ impl<TPlat: Platform> Background<TPlat> {
                         });
 
                         let mut to_remove = Vec::new();
-                        for (subscription_id, (sender, pinned_remaining)) in
-                            all_blocks_subscriptions.iter_mut()
-                        {
-                            if *pinned_remaining == 0 {
-                                to_remove.push(*subscription_id);
-                                continue;
-                            }
-
+                        for (subscription_id, (sender, _)) in all_blocks_subscriptions.iter_mut() {
                             if sender.try_send(notif.clone()).is_ok() {
-                                *pinned_remaining -= 1;
                                 pinned_blocks.insert(
                                     (*subscription_id, block_hash),
                                     (block_runtime.clone(), block_state_root_hash, block_number),
