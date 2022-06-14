@@ -33,7 +33,7 @@ use std::{
     cmp,
     collections::HashMap,
     iter,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     str,
     sync::{atomic, Arc},
     time::Duration,
@@ -379,8 +379,10 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         let (mut subscribe_all, runtime_subscribe_all) = if runtime_updates {
-            // TODO: it is possible that the maximum number of pinned blocks is lower than the current number of finalized blocks; the logic of subscribe_all should be slightly changed to avoid this situation
-            let subscribe_all = self.runtime_service.subscribe_all(32, 48).await;
+            let subscribe_all = self
+                .runtime_service
+                .subscribe_all(32, NonZeroUsize::new(32).unwrap())
+                .await;
             let id = subscribe_all.new_blocks.id();
             (either::Left(subscribe_all), Some(id))
         } else {

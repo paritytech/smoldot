@@ -1987,11 +1987,7 @@ where
 
     ///
     ///
-    /// Returns the [`PeerId`] that now has an outbound slot. This information can be used for
-    /// logging purposes. Keep in mind, however, that [`ChainNetwork::next_event`] might unassign
-    /// slots only for them to be immediately assigned again in this function. If you naively
-    /// log the value returned by this function and the value returned by `next_event`, you might
-    /// see the slot assignments and de-assignments in the wrong order.
+    /// Returns the [`PeerId`] that now has an outbound slot.
     // TODO: docs
     // TODO: when to call this?
     pub fn assign_slots(&mut self, chain_index: usize) -> Option<PeerId> {

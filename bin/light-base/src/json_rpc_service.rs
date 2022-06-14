@@ -57,7 +57,7 @@ use smoldot::{
 use std::{
     collections::HashMap,
     iter,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     str,
     sync::{atomic, Arc},
     time::Duration,
@@ -602,7 +602,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     // malicious.
                     let mut subscribe_all = me
                         .runtime_service
-                        .subscribe_all(32, usize::max_value())
+                        .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
                         .await;
 
                     cache.subscription_id = Some(subscribe_all.new_blocks.id());
@@ -797,6 +797,20 @@ impl<TPlat: Platform> Background<TPlat> {
             methods::MethodCall::rpc_methods {} => {
                 self.rpc_methods(request_id, &state_machine_request_id)
                     .await;
+            }
+            methods::MethodCall::state_call {
+                name,
+                parameters,
+                hash,
+            } => {
+                self.state_call(
+                    request_id,
+                    &state_machine_request_id,
+                    &name,
+                    parameters,
+                    hash,
+                )
+                .await;
             }
             methods::MethodCall::state_getKeysPaged {
                 prefix,
@@ -1069,7 +1083,6 @@ impl<TPlat: Platform> Background<TPlat> {
             | methods::MethodCall::grandpa_roundState { .. }
             | methods::MethodCall::offchain_localStorageGet { .. }
             | methods::MethodCall::offchain_localStorageSet { .. }
-            | methods::MethodCall::state_call { .. }
             | methods::MethodCall::state_getKeys { .. }
             | methods::MethodCall::state_getPairs { .. }
             | methods::MethodCall::state_getReadProof { .. }
