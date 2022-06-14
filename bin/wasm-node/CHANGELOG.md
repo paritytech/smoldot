@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.19 - 2022-06-14
+
 ### Fixed
 
 - Fix panic introduced in v0.6.18 in case of a fork in the chain related to tracking the number of blocks kept alive in the node's memory. ([#2386](https://github.com/paritytech/smoldot/pull/2386))
