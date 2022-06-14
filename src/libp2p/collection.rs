@@ -178,11 +178,11 @@ pub struct Network<TConn, TNow> {
     /// List of all requests that have been started locally.
     outgoing_requests: BTreeSet<(ConnectionId, SubstreamId)>,
 
-    /// List in ingoing notification substreams that connections have received. Can be either
+    /// List in incoming notification substreams that connections have received. Can be either
     /// pending (waiting to be accepted/refused) or fully opened.
     ///
     /// The substream ID of the substream is allocated by the connection task, and thus we need
-    /// to keep a mapping of inner <-> substream IDs.
+    /// to keep a mapping of inner `<->` substream IDs.
     ingoing_notification_substreams: hashbrown::HashMap<
         SubstreamId,
         (ConnectionId, SubstreamState, established::SubstreamId),
@@ -357,7 +357,7 @@ where
     /// connection. The event is implied.
     ///
     /// It is no longer possible to start requests, open notifications substreams, or send
-    /// notifications. No new incoming reuqests or notification substreams will be reported. The
+    /// notifications. No new incoming requests or notification substreams will be reported. The
     /// incoming notifications that were sent by the remote before the shutdown started will still
     /// be reported.
     ///
@@ -408,7 +408,7 @@ where
         }
     }
 
-    /// Returns the Noise key originalled passed as [`Config::noise_key`].
+    /// Returns the Noise key originally passed as [`Config::noise_key`].
     pub fn noise_key(&self) -> &NoiseKey {
         &self.noise_key
     }
@@ -1317,7 +1317,7 @@ enum ConnectionInner<TNow> {
         was_api_reset: bool,
     },
 
-    /// Temporary state used to statisfy the borrow checker during state transitions.
+    /// Temporary state used to satisfy the borrow checker during state transitions.
     Poisoned,
 }
 
@@ -1333,7 +1333,7 @@ where
     /// It is possible for `self` to not be yielded back even if the [`ReadWrite`] that was last
     /// passed to [`ConnectionTask::read_write`] is still fully open, in which case the API user
     /// should abruptly reset the connection, for example by sending a TCP RST flag. This can
-    /// happen for exemple if the connection seems unresponsive and that an attempt at closing
+    /// happen for example if the connection seems unresponsive and that an attempt at closing
     /// the connection in a clean way is futile.
     ///
     /// If any message is returned, it is the responsibility of the API user to send it to the
@@ -2040,7 +2040,7 @@ enum CoordinatorToConnectionInner<TNow> {
     /// Since the API doesn't provide any feedback about whether responses have been successfully
     /// received by the remote, the response should simply be ignored in case the substream is
     /// obsolete. In any case, answering an obsolete request is not an API error because the remote
-    /// might have cancelled their request while the message containing the response was waiting
+    /// might have canceled their request while the message containing the response was waiting
     /// in queue.
     AnswerRequest {
         substream_id: established::SubstreamId,
@@ -2113,7 +2113,7 @@ pub enum Event<TConn> {
         request_payload: Vec<u8>,
     },
 
-    /// Request received earlier has been cancelled by the remote.
+    /// Request received earlier has been canceled by the remote.
     ///
     /// The [`SubstreamId`] is now invalid.
     RequestInCancel { substream_id: SubstreamId },
@@ -2169,7 +2169,7 @@ pub enum Event<TConn> {
     ///
     /// This can happen both before or after the notification substream has been accepted. If it
     /// happens before the substream has been accepted, this event should be interpreted as
-    /// cancelling the opening.
+    /// canceling the opening.
     NotificationsInClose {
         /// Substream that has been closed. Guaranteed to match a substream that was earlier
         /// reported with a [`Event::NotificationsInOpen`].
@@ -2188,7 +2188,7 @@ pub enum Event<TConn> {
 
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum RequestError {
-    /// Request has been cancelled because the connection as a whole is being shut down.
+    /// Request has been canceled because the connection as a whole is being shut down.
     ConnectionShutdown,
 
     /// Error happened in the context of the substream.

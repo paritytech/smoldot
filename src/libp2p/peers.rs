@@ -103,7 +103,7 @@ pub struct Peers<TConn, TNow> {
 
     /// For each known peer, the corresponding index within [`Peers::peers`].
     ///
-    /// We split the list of peers in two in order to avoid doing extensive hashmap lookups when
+    /// We split the list of peers in two in order to avoid doing extensive hash map lookups when
     /// it's not necessary.
     peer_indices: hashbrown::HashMap<PeerId, usize, SipHasherBuild>,
 
