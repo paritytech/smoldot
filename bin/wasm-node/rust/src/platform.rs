@@ -223,11 +223,11 @@ pub(crate) struct Connection {
     /// If `Some`, [`bindings::connection_close`] must be called. Set to a value after
     /// [`bindings::connection_new`] returns success.
     id: Option<u32>,
-    /// True if [`bindings::connection_open`] has been called.
+    /// True if [`bindings::connection_open_single_stream`] has been called.
     open: bool,
     /// `Some` if [`bindings::connection_closed`] has been called.
     closed_message: Option<String>,
-    /// List of messages received through [`bindings::connection_message`]. Must never contain
+    /// List of messages received through [`bindings::stream_message`]. Must never contain
     /// empty messages.
     messages_queue: VecDeque<Box<[u8]>>,
     /// Position of the read cursor within the first element of [`Connection::messages_queue`].
