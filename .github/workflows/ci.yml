@@ -27,7 +27,7 @@ jobs:
   test-64bits:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.60
+      image: rust:1.61
     steps:
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
@@ -36,7 +36,7 @@ jobs:
   test-32bits:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.60
+      image: rust:1.61
     steps:
     - run: apt-get update && apt install -y libc6-dev-i386
     - uses: actions/checkout@v3
@@ -47,7 +47,7 @@ jobs:
   wasm-node-check:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.60
+      image: rust:1.61
     steps:
     - run: apt-get update && apt install -y binaryen # For `wasm-opt`
     - uses: actions/checkout@v3
@@ -60,7 +60,7 @@ jobs:
   wasm-node-size-diff:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.60
+      image: rust:1.61
     steps:
     - run: apt-get update && apt install -y cmake # TODO: remove; temporarily needed to build the `prost-build` library in the "before" comparison
     - uses: actions/checkout@v3
@@ -95,7 +95,7 @@ jobs:
   check-features:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.60
+      image: rust:1.61
     steps:
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
@@ -126,7 +126,7 @@ jobs:
   check-rustdoc-links:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.60
+      image: rust:1.61
     steps:
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
