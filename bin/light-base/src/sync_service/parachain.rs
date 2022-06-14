@@ -29,7 +29,13 @@ use smoldot::{
     network::protocol,
     sync::{all_forks::sources, para},
 };
-use std::{collections::HashMap, iter, num::NonZeroU32, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    iter,
+    num::{NonZeroU32, NonZeroUsize},
+    sync::Arc,
+    time::Duration,
+};
 
 /// Starts a sync service background task to synchronize a parachain.
 pub(super) async fn start_parachain<TPlat: Platform>(
@@ -74,8 +80,9 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         // become full before the execution of the sync service resumes.
         // The maximum number of pinned block is ignored, as this maximum is a way to avoid
         // malicious behaviors. This code is by definition not considered malicious.
-        let mut relay_chain_subscribe_all =
-            relay_chain_sync.subscribe_all(32, usize::max_value()).await;
+        let mut relay_chain_subscribe_all = relay_chain_sync
+            .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
+            .await;
         log::debug!(
             target: &log_target,
             "RelayChain => NewSubscription(finalized_hash={})",
