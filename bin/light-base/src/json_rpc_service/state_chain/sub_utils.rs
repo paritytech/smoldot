@@ -25,7 +25,7 @@ use crate::{
 
 use futures::prelude::*;
 use smoldot::{executor, header};
-use std::sync::Arc;
+use std::{num::NonZeroUsize, sync::Arc};
 
 /// Returns the current runtime version, plus an unlimited stream that produces one item every
 /// time the specs of the runtime of the best block are changed.
@@ -43,7 +43,9 @@ pub async fn subscribe_runtime_version<TPlat: Platform>(
     stream::BoxStream<'static, Result<executor::CoreVersion, RuntimeError>>,
 ) {
     let mut master_stream = stream::unfold(runtime_service.clone(), |runtime_service| async move {
-        let subscribe_all = runtime_service.subscribe_all(16, 32).await;
+        let subscribe_all = runtime_service
+            .subscribe_all(16, NonZeroUsize::new(24).unwrap())
+            .await;
 
         // Map of runtimes by hash. Contains all non-finalized blocks runtimes.
         let mut non_finalized_headers = hashbrown::HashMap::<
@@ -202,7 +204,9 @@ pub async fn subscribe_finalized<TPlat: Platform>(
     runtime_service: &Arc<RuntimeService<TPlat>>,
 ) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
     let mut master_stream = stream::unfold(runtime_service.clone(), |runtime_service| async move {
-        let subscribe_all = runtime_service.subscribe_all(16, 48).await;
+        let subscribe_all = runtime_service
+            .subscribe_all(16, NonZeroUsize::new(32).unwrap())
+            .await;
 
         // Map of block headers by hash. Contains all non-finalized blocks headers.
         let mut non_finalized_headers =
@@ -282,7 +286,9 @@ pub async fn subscribe_best<TPlat: Platform>(
     runtime_service: &Arc<RuntimeService<TPlat>>,
 ) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
     let mut master_stream = stream::unfold(runtime_service.clone(), |runtime_service| async move {
-        let subscribe_all = runtime_service.subscribe_all(16, 48).await;
+        let subscribe_all = runtime_service
+            .subscribe_all(16, NonZeroUsize::new(32).unwrap())
+            .await;
 
         // Map of block headers by hash. Contains all non-finalized blocks headers.
         let mut non_finalized_headers =
