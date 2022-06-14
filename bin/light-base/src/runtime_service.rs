@@ -310,8 +310,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             0 | 1
         ));
 
-        all_blocks_subscriptions
-            .insert(subscription_id, (tx, max_pinned_blocks.get() - 1));
+        all_blocks_subscriptions.insert(subscription_id, (tx, max_pinned_blocks.get() - 1));
 
         SubscribeAll {
             finalized_block_scale_encoded_header: finalized_block.scale_encoded_header.clone(),
