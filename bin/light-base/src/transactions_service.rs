@@ -78,7 +78,13 @@ use smoldot::{
     network::protocol,
     transactions::{light_pool, validate},
 };
-use std::{cmp, iter, marker::PhantomData, num::NonZeroU32, sync::Arc, time::Duration};
+use std::{
+    cmp, iter,
+    marker::PhantomData,
+    num::{NonZeroU32, NonZeroUsize},
+    sync::Arc,
+    time::Duration,
+};
 
 /// Configuration for a [`TransactionsService`].
 pub struct Config<TPlat: Platform> {
@@ -326,7 +332,7 @@ async fn background_task<TPlat: Platform>(
         // malicious behaviors. This code is by definition not considered malicious.
         let mut subscribe_all = worker
             .runtime_service
-            .subscribe_all(32, usize::max_value())
+            .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
             .await;
         let initial_finalized_block_hash = header::hash_from_scale_encoded_header(
             &subscribe_all.finalized_block_scale_encoded_header,

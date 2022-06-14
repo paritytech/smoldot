@@ -30,7 +30,7 @@ use smoldot::{
 };
 use std::{
     iter,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     str,
     sync::{atomic, Arc},
     time::Duration,
@@ -403,7 +403,7 @@ impl<TPlat: Platform> Background<TPlat> {
             // malicious behaviors. This code is by definition not considered malicious.
             let subscribe_all = self
                 .runtime_service
-                .subscribe_all(32, usize::max_value())
+                .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
                 .await;
 
             // The finalized and already-known blocks aren't reported to the user, but we need
