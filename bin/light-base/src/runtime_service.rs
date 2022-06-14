@@ -182,11 +182,12 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// Only up to `buffer_size` block notifications are buffered in the channel. If the channel
     /// is full when a new notification is attempted to be pushed, the channel gets closed.
     ///
-    /// A maximum number of finalized pinned blocks must be passed, indicating the maximum number
-    /// of finalized blocks that the runtime service will pin at the same time for this
-    /// subscription. If this maximum is reached, the channel will get closed. In situations where
-    /// the subscriber is guaranteed to always properly unpin blocks, a value of
-    /// `usize::max_value()` can be passed in order to ignore this maximum.
+    /// A maximum number of finalized or non-canonical pinned blocks must be passed, indicating
+    /// the maximum number of blocks that are finalized or non-canonical that the runtime service
+    /// will pin at the same time for this subscription. If this maximum is reached, the channel
+    /// will get closed. In situations where the subscriber is guaranteed to always properly
+    /// unpin blocks, a value of  `usize::max_value()` can be passed in order to ignore this
+    /// maximum.
     ///
     /// The channel also gets closed if a gap in the finality happens, such as after a Grandpa
     /// warp syncing.
@@ -195,7 +196,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     pub async fn subscribe_all(
         &self,
         buffer_size: usize,
-        max_finalized_pinned_blocks: NonZeroUsize,
+        max_pinned_blocks: NonZeroUsize,
     ) -> SubscribeAll<TPlat> {
         // First, lock `guarded` and wait for the tree to be in `FinalizedBlockRuntimeKnown` mode.
         // This can take a long time.
@@ -310,7 +311,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         ));
 
         all_blocks_subscriptions
-            .insert(subscription_id, (tx, max_finalized_pinned_blocks.get() - 1));
+            .insert(subscription_id, (tx, max_pinned_blocks.get() - 1));
 
         SubscribeAll {
             finalized_block_scale_encoded_header: finalized_block.scale_encoded_header.clone(),
@@ -954,7 +955,7 @@ enum GuardedInner<TPlat: Platform> {
 
         /// List of senders that get notified when new blocks arrive.
         /// See [`RuntimeService::subscribe_all`]. Alongside with each sender, the number of pinned
-        /// blocks remaining for this subscription.
+        /// finalized or non-canonical blocks remaining for this subscription.
         ///
         /// Keys are assigned from [`Guarded::next_subscription_id`].
         all_blocks_subscriptions:
