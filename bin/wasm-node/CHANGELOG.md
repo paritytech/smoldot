@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.18 - 2022-06-14
+
 ### Added
 
 - Add support for the `state_call` JSON-RPC function. ([#2374](https://github.com/paritytech/smoldot/pull/2374))
