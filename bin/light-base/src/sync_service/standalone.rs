@@ -990,10 +990,10 @@ impl<TPlat: Platform> Task<TPlat> {
                             "Sync => Discarded"
                         );
                     }
-                    all::BlockAnnounceOutcome::Disjoint {} => {
+                    all::BlockAnnounceOutcome::StoredForLater {} => {
                         log::debug!(
                             target: &self.log_target,
-                            "Sync => Disjoint"
+                            "Sync => StoredForLater"
                         );
                     }
                     all::BlockAnnounceOutcome::TooOld {

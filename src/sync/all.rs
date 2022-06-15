@@ -1051,12 +1051,12 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     },
                     all_forks::BlockAnnounceOutcome::Unknown(source_update) => {
                         source_update.insert_and_update_source(None);
-                        BlockAnnounceOutcome::Disjoint // TODO: arbitrary
+                        BlockAnnounceOutcome::StoredForLater // TODO: arbitrary
                     }
                     all_forks::BlockAnnounceOutcome::AlreadyInChain(source_update)
                     | all_forks::BlockAnnounceOutcome::Known(source_update) => {
                         source_update.update_source_and_block();
-                        BlockAnnounceOutcome::Disjoint // TODO: arbitrary
+                        BlockAnnounceOutcome::StoredForLater // TODO: arbitrary
                     }
                     all_forks::BlockAnnounceOutcome::InvalidHeader(error) => {
                         BlockAnnounceOutcome::InvalidHeader(error)
@@ -1608,8 +1608,9 @@ pub enum BlockAnnounceOutcome {
     AlreadyInChain,
     /// Announced block is known to not be a descendant of the finalized block.
     NotFinalizedChain,
-    /// Header cannot be verified now, and has been stored for later.
-    Disjoint,
+    /// Header cannot be verified now because its parent hasn't been verified yet. The block has
+    /// been stored for later. See [`Config::max_disjoint_headers`].
+    StoredForLater,
     /// Failed to decode announce header.
     InvalidHeader(header::Error),
 
