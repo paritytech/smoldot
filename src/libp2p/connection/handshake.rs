@@ -133,7 +133,7 @@ impl HealthyHandshake {
                     // Delegating read/write to the negotiation.
                     let updated = negotiation
                         .read_write(read_write)
-                        .map_err(HandshakeError::MultistreamSelect)?;
+                        .map_err(HandshakeError::EncryptionMultistreamSelect)?;
 
                     return match updated {
                         multistream_select::Negotiation::InProgress(updated) => {
@@ -209,12 +209,12 @@ impl HealthyHandshake {
                     // through the Noise cipher.
 
                     if read_write.incoming_buffer.is_none() {
-                        return Err(HandshakeError::MultistreamSelect(
+                        return Err(HandshakeError::MultiplexingMultistreamSelect(
                             multistream_select::Error::ReadClosed,
                         ));
                     }
                     if read_write.outgoing_buffer.is_none() {
-                        return Err(HandshakeError::MultistreamSelect(
+                        return Err(HandshakeError::MultiplexingMultistreamSelect(
                             multistream_select::Error::WriteClosed,
                         ));
                     }
@@ -248,7 +248,7 @@ impl HealthyHandshake {
                         };
                         let updated = negotiation
                             .read_write(&mut interm_read_write)
-                            .map_err(HandshakeError::MultistreamSelect)?;
+                            .map_err(HandshakeError::MultiplexingMultistreamSelect)?;
                         (
                             updated,
                             interm_read_write.read_bytes,
@@ -334,10 +334,12 @@ impl fmt::Debug for NoiseKeyRequired {
 /// Error during a connection handshake. The connection should be shut down.
 #[derive(Debug, derive_more::Display)]
 pub enum HandshakeError {
-    /// Protocol error during a multistream-select negotiation.
-    // TODO: differentiate noise negotiation from yamux negotiation
-    #[display(fmt = "Protocol selection error: {}", _0)]
-    MultistreamSelect(multistream_select::Error),
+    /// Protocol error during the multistream-select negotiation of the encryption protocol.
+    #[display(fmt = "Encryption protocol selection error: {}", _0)]
+    EncryptionMultistreamSelect(multistream_select::Error),
+    /// Protocol error during the multistream-select negotiation of the multiplexing protocol.
+    #[display(fmt = "Multiplexing protocol selection error: {}", _0)]
+    MultiplexingMultistreamSelect(multistream_select::Error),
     /// Protocol error during the noise handshake.
     #[display(fmt = "Noise handshake error: {}", _0)]
     NoiseHandshake(noise::HandshakeError),
