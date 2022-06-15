@@ -499,11 +499,21 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 // We expect the network events channel to never shut down.
                 let network_event = network_event.unwrap();
 
-                if let network_service::Event::BlockAnnounce { chain_index: 0, header, .. } = network_event {
-                    match network_known_best {
-                        Some(n) if n >= header.number => {},
-                        _ => network_known_best = Some(header.number),
+                // Update `network_known_best`.
+                match network_event {
+                    network_service::Event::BlockAnnounce { chain_index: 0, header, .. } => {
+                        match network_known_best {
+                            Some(n) if n >= header.number => {},
+                            _ => network_known_best = Some(header.number),
+                        }
                     }
+                    network_service::Event::Connected { chain_index: 0, best_block_number, .. } => {
+                        match network_known_best {
+                            Some(n) if n >= best_block_number => {},
+                            _ => network_known_best = Some(best_block_number),
+                        }
+                    }
+                    _ => {}
                 }
             }
 
