@@ -494,7 +494,7 @@ impl SyncBackground {
                                 all::BlockAnnounceOutcome::AlreadyInChain => {},
                                 all::BlockAnnounceOutcome::NotFinalizedChain => {},
                                 all::BlockAnnounceOutcome::Discarded => {},
-                                all::BlockAnnounceOutcome::Disjoint {} => {},
+                                all::BlockAnnounceOutcome::StoredForLater {} => {},
                                 all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(),
                             }
                         },
@@ -755,7 +755,7 @@ impl SyncBackground {
             true, // Since the new block is a child of the current best block, it always becomes the new best.
         ) {
             all::BlockAnnounceOutcome::HeaderVerify
-            | all::BlockAnnounceOutcome::Disjoint
+            | all::BlockAnnounceOutcome::StoredForLater
             | all::BlockAnnounceOutcome::Discarded => {}
             all::BlockAnnounceOutcome::TooOld { .. }
             | all::BlockAnnounceOutcome::AlreadyInChain
