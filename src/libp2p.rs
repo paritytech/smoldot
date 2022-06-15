@@ -64,8 +64,14 @@
 //! summary, contains:
 //!
 //! - A list of handshaking and established connections, that the API user must manually
-//! synchronize by calling [`peers::ConnectionTask::read_write`]. When inserting a new outgoing
-//! connection, the API user can specify which [`PeerId`] this connection is expected to reach.
+//! synchronize by calling [`collection::SingleStreamConnectionTask::read_write`],
+//! [`collection::SingleStreamConnectionTask::reset`],
+//! [`collection::MultiStreamConnectionTask::substream_read_write`],
+//! [`collection::MultiStreamConnectionTask::reset`],
+//! [`collection::MultiStreamConnectionTask::add_substream`], and/or
+//! [`collection::MultiStreamConnectionTask::desired_outbound_substreams`]. When
+//! inserting a new outgoing connection, the API user can specify which [`PeerId`] this connection
+//! is expected to reach.
 //! - A list of [`̀PeerId`]s that have been marked by the API user as desired. The [`peers::Peers`]
 //! is then able to provide the list of [`PeerId`]s that have been marked as desired but that no
 //! existing connection reaches or tries to reach.
