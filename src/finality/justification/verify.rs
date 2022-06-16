@@ -38,15 +38,22 @@ pub struct Config<'a, I> {
 
 /// Verifies that a justification is valid.
 pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>) -> Result<(), Error> {
+    let num_precommits = config.justification.precommits.iter().count();
+
     // Check that justification contains a number of signatures equal to at least 2/3rd of the
     // number of authorities.
     // Duplicate signatures are checked below.
     // The logic of the check is `actual >= (expected * 2 / 3) + 1`.
-    if config.justification.precommits.iter().count()
-        < (config.authorities_list.clone().count() * 2 / 3) + 1
-    {
+    if num_precommits < (config.authorities_list.clone().count() * 2 / 3) + 1 {
         return Err(Error::NotEnoughSignatures);
     }
+
+    // Used to store the authority public keys that have been seen, in order to check for
+    // duplicates.
+    let mut seen_pub_keys = hashbrown::HashSet::with_capacity_and_hasher(
+        num_precommits,
+        fnv::FnvBuildHasher::default(), // TODO: use SipHasher due to untrusted message
+    );
 
     // Verifying all the signatures together brings better performances than verifying them one
     // by one.
@@ -56,7 +63,7 @@ pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>) ->
     // https://github.com/zcash/zips/blob/master/zip-0215.rst
     let mut batch = ed25519_zebra::batch::Verifier::new();
 
-    for (precommit_num, precommit) in config.justification.precommits.iter().enumerate() {
+    for precommit in config.justification.precommits.iter() {
         if !config
             .authorities_list
             .clone()
@@ -65,13 +72,8 @@ pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>) ->
             return Err(Error::NotAuthority(*precommit.authority_public_key));
         }
 
-        if config
-            .justification
-            .precommits
-            .iter()
-            .skip(precommit_num.saturating_add(1))
-            .any(|pc| pc.authority_public_key == precommit.authority_public_key)
-        {
+        // Make sure that the public key isn't in `seen_pub_keys` yet, and insert it in there.
+        if !seen_pub_keys.insert(precommit.authority_public_key) {
             return Err(Error::DuplicateSignature(*precommit.authority_public_key));
         }
 

@@ -65,6 +65,22 @@ pub fn verify<C: AsRef<[u8]>>(config: Config<C>) -> InProgress<C> {
         return InProgress::Finished(Err(Error::InvalidFormat));
     }
 
+    // Make sure that there is no duplicate authority public key.
+    {
+        let mut unique = hashbrown::HashSet::with_capacity_and_hasher(
+            decoded_commit.message.auth_data.len(),
+            fnv::FnvBuildHasher::default(), // TODO: use SipHasher due to untrusted message
+        );
+        if let Some((_, faulty_pub_key)) = decoded_commit
+            .message
+            .auth_data
+            .iter()
+            .find(|(_, pubkey)| !unique.insert(pubkey))
+        {
+            return InProgress::Finished(Err(Error::DuplicateSignature(**faulty_pub_key)));
+        }
+    }
+
     Verification {
         commit: config.commit,
         next_precommit_index: 0,
@@ -224,18 +240,6 @@ impl<C: AsRef<[u8]>> Verification<C> {
                 let authority_public_key =
                     decoded_commit.message.auth_data[self.next_precommit_index].1;
                 let signature = decoded_commit.message.auth_data[self.next_precommit_index].0;
-
-                if decoded_commit
-                    .message
-                    .auth_data
-                    .iter()
-                    .skip(self.next_precommit_index.saturating_add(1))
-                    .any(|pc| pc.1 == authority_public_key)
-                {
-                    return InProgress::Finished(Err(Error::DuplicateSignature(
-                        *authority_public_key,
-                    )));
-                }
 
                 let mut msg = Vec::with_capacity(1 + 32 + 4 + 8 + 8);
                 msg.push(1u8); // This `1` indicates which kind of message is being signed.
