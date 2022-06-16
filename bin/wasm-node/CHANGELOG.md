@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix errors about verifying justifications. Justifications and Grandpa commits that can't be verified yet are now properly stored in memory in order to be verified later, instead of producing errors.
+- Fix issue where unverified justifications would overwrite one another, meaning that an invalid justification could potentially prevent a valid justification from being taken into account.
+
 ## 0.6.19 - 2022-06-14
 
 ### Fixed

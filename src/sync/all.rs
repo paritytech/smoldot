@@ -1001,9 +1001,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         shared: self.shared,
                     })
                 }
-                all_forks::ProcessOne::JustificationVerify(verify) => {
-                    ProcessOne::VerifyJustification(JustificationVerify {
-                        inner: JustificationVerifyInner::AllForks(verify),
+                all_forks::ProcessOne::FinalityProofVerify(verify) => {
+                    ProcessOne::VerifyFinalityProof(FinalityProofVerify {
+                        inner: FinalityProofVerifyInner::AllForks(verify),
                         shared: self.shared,
                     })
                 }
@@ -1020,8 +1020,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     })
                 }
                 optimistic::ProcessOne::VerifyJustification(inner) => {
-                    ProcessOne::VerifyJustification(JustificationVerify {
-                        inner: JustificationVerifyInner::Optimistic(inner),
+                    ProcessOne::VerifyFinalityProof(FinalityProofVerify {
+                        inner: FinalityProofVerifyInner::Optimistic(inner),
                         shared: self.shared,
                     })
                 }
@@ -1118,14 +1118,22 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     // TODO: return which blocks are removed as finalized
     pub fn grandpa_commit_message(
         &mut self,
+        source_id: SourceId,
         scale_encoded_message: &[u8],
     ) -> Result<(), blocks_tree::CommitVerifyError> {
+        let source_id = self.shared.sources.get(source_id.0).unwrap();
+
         // TODO: clearly indicate if message has been ignored
-        match &mut self.inner {
-            AllSyncInner::AllForks(sync) => sync.grandpa_commit_message(scale_encoded_message),
-            AllSyncInner::Optimistic { .. } => Ok(()),
-            AllSyncInner::GrandpaWarpSync { .. } => Ok(()),
-            AllSyncInner::Poisoned => unreachable!(),
+        match (&mut self.inner, source_id) {
+            (AllSyncInner::AllForks(sync), SourceMapping::AllForks(source_id)) => {
+                sync.grandpa_commit_message(*source_id, scale_encoded_message)
+            }
+            (AllSyncInner::Optimistic { .. }, _) => Ok(()),
+            (AllSyncInner::GrandpaWarpSync { .. }, _) => Ok(()),
+
+            // Invalid internal states.
+            (AllSyncInner::AllForks(_), _) => unreachable!(),
+            (AllSyncInner::Poisoned, _) => unreachable!(),
         }
     }
 
@@ -1669,8 +1677,8 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
     /// Ready to start verifying a header.
     VerifyHeader(HeaderVerify<TRq, TSrc, TBl>),
 
-    /// Ready to start verifying a justification.
-    VerifyJustification(JustificationVerify<TRq, TSrc, TBl>),
+    /// Ready to start verifying a proof of finality.
+    VerifyFinalityProof(FinalityProofVerify<TRq, TSrc, TBl>),
 
     /// Ready to start verifying a header and a body.
     VerifyBodyHeader(HeaderBodyVerify<TRq, TSrc, TBl>),
@@ -1863,14 +1871,14 @@ pub enum HeaderVerifyError {
 }
 
 // TODO: should be used by the optimistic syncing as well
-pub struct JustificationVerify<TRq, TSrc, TBl> {
-    inner: JustificationVerifyInner<TRq, TSrc, TBl>,
+pub struct FinalityProofVerify<TRq, TSrc, TBl> {
+    inner: FinalityProofVerifyInner<TRq, TSrc, TBl>,
     shared: Shared<TRq>,
 }
 
-enum JustificationVerifyInner<TRq, TSrc, TBl> {
+enum FinalityProofVerifyInner<TRq, TSrc, TBl> {
     AllForks(
-        all_forks::JustificationVerify<
+        all_forks::FinalityProofVerify<
             Option<TBl>,
             AllForksRequestExtra<TRq>,
             AllForksSourceExtra<TSrc>,
@@ -1885,51 +1893,63 @@ enum JustificationVerifyInner<TRq, TSrc, TBl> {
     ),
 }
 
-impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
+impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
     /// Perform the verification.
-    pub fn perform(self) -> (AllSync<TRq, TSrc, TBl>, JustificationVerifyOutcome<TBl>) {
+    pub fn perform(self) -> (AllSync<TRq, TSrc, TBl>, FinalityProofVerifyOutcome<TBl>) {
         match self.inner {
-            JustificationVerifyInner::AllForks(verify) => match verify.perform() {
+            FinalityProofVerifyInner::AllForks(verify) => {
+                let (sync, outcome) = match verify.perform() {
+                    (
+                        sync,
+                        all_forks::FinalityProofVerifyOutcome::NewFinalized {
+                            finalized_blocks,
+                            updates_best_block,
+                        },
+                    ) => (
+                        sync,
+                        FinalityProofVerifyOutcome::NewFinalized {
+                            finalized_blocks: finalized_blocks
+                                .into_iter()
+                                .map(|b| Block {
+                                    full: None, // TODO: wrong
+                                    header: b.0,
+                                    justifications: Vec::new(), // TODO: wrong
+                                    user_data: b.1.unwrap(),
+                                })
+                                .collect(),
+                            updates_best_block,
+                        },
+                    ),
+                    (sync, all_forks::FinalityProofVerifyOutcome::AlreadyFinalized) => {
+                        (sync, FinalityProofVerifyOutcome::AlreadyFinalized)
+                    }
+                    (sync, all_forks::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
+                        (sync, FinalityProofVerifyOutcome::GrandpaCommitPending)
+                    }
+                    (sync, all_forks::FinalityProofVerifyOutcome::JustificationError(error)) => {
+                        (sync, FinalityProofVerifyOutcome::JustificationError(error))
+                    }
+                    (sync, all_forks::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
+                        (sync, FinalityProofVerifyOutcome::GrandpaCommitError(error))
+                    }
+                };
+
                 (
-                    sync,
-                    all_forks::JustificationVerifyOutcome::NewFinalized {
-                        finalized_blocks,
-                        updates_best_block,
-                    },
-                ) => (
                     AllSync {
                         inner: AllSyncInner::AllForks(sync),
                         shared: self.shared,
                     },
-                    JustificationVerifyOutcome::NewFinalized {
-                        finalized_blocks: finalized_blocks
-                            .into_iter()
-                            .map(|b| Block {
-                                full: None, // TODO: wrong
-                                header: b.0,
-                                justifications: Vec::new(), // TODO: wrong
-                                user_data: b.1.unwrap(),
-                            })
-                            .collect(),
-                        updates_best_block,
-                    },
-                ),
-                (sync, all_forks::JustificationVerifyOutcome::Error(error)) => (
-                    AllSync {
-                        inner: AllSyncInner::AllForks(sync),
-                        shared: self.shared,
-                    },
-                    JustificationVerifyOutcome::Error(error),
-                ),
-            },
-            JustificationVerifyInner::Optimistic(verify) => match verify.perform() {
+                    outcome,
+                )
+            }
+            FinalityProofVerifyInner::Optimistic(verify) => match verify.perform() {
                 (inner, optimistic::JustificationVerification::Finalized { finalized_blocks }) => (
                     // TODO: transition to all_forks
                     AllSync {
                         inner: AllSyncInner::Optimistic { inner },
                         shared: self.shared,
                     },
-                    JustificationVerifyOutcome::NewFinalized {
+                    FinalityProofVerifyOutcome::NewFinalized {
                         finalized_blocks: finalized_blocks
                             .into_iter()
                             .map(|b| Block {
@@ -1951,17 +1971,17 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
                         inner: AllSyncInner::Optimistic { inner },
                         shared: self.shared,
                     },
-                    JustificationVerifyOutcome::Error(error),
+                    FinalityProofVerifyOutcome::JustificationError(error),
                 ),
             },
         }
     }
 }
 
-/// Information about the outcome of verifying a justification.
+/// Information about the outcome of verifying a finality proof.
 #[derive(Debug)]
-pub enum JustificationVerifyOutcome<TBl> {
-    /// Justification verification successful. The block and all its ancestors is now finalized.
+pub enum FinalityProofVerifyOutcome<TBl> {
+    /// Proof verification successful. The block and all its ancestors is now finalized.
     NewFinalized {
         /// List of finalized blocks, in decreasing block number.
         finalized_blocks: Vec<Block<TBl>>,
@@ -1971,8 +1991,14 @@ pub enum JustificationVerifyOutcome<TBl> {
         /// block.
         updates_best_block: bool,
     },
+    /// Finality proof concerns block that was already finalized.
+    AlreadyFinalized,
+    /// GrandPa commit cannot be verified yet and has been stored for later.
+    GrandpaCommitPending,
     /// Problem while verifying justification.
-    Error(blocks_tree::JustificationVerifyError),
+    JustificationError(blocks_tree::JustificationVerifyError),
+    /// Problem while verifying GrandPa commit.
+    GrandpaCommitError(blocks_tree::CommitVerifyError),
 }
 
 pub struct WarpSyncFragmentVerify<TRq, TSrc, TBl> {

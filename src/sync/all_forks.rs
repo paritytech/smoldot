@@ -87,10 +87,7 @@ use crate::{
     header, verify,
 };
 
-use alloc::{
-    borrow::ToOwned as _,
-    vec::{self, Vec},
-};
+use alloc::{borrow::ToOwned as _, vec::Vec};
 use core::{mem, num::NonZeroU32, ops, time::Duration};
 
 mod disjoint;
@@ -171,13 +168,7 @@ pub struct AllForksSync<TBl, TRq, TSrc> {
 
 /// Extra fields. In a separate structure in order to be moved around.
 struct Inner<TBl, TRq, TSrc> {
-    blocks: pending_blocks::PendingBlocks<PendingBlock<TBl>, TRq, TSrc>,
-
-    /// Justifications waiting to be verified.
-    ///
-    /// These justifications came with a block header that has been successfully verified in the
-    /// past.
-    pending_justifications_verify: vec::IntoIter<([u8; 4], Vec<u8>)>,
+    blocks: pending_blocks::PendingBlocks<PendingBlock<TBl>, TRq, Source<TSrc>>,
 
     /// Same value as [`Config::banned_blocks`].
     banned_blocks: hashbrown::HashSet<[u8; 32], fnv::FnvBuildHasher>,
@@ -186,8 +177,226 @@ struct Inner<TBl, TRq, TSrc> {
 struct PendingBlock<TBl> {
     header: Option<header::Header>,
     // TODO: add body: Option<Vec<Vec<u8>>>, when adding full node support
-    justifications: Vec<([u8; 4], Vec<u8>)>,
     user_data: TBl,
+}
+
+struct Source<TSrc> {
+    /// Each source stores between zero and two finality proofs that haven't been verified yet.
+    ///
+    /// If more than two finality proofs are received from the same source, only the one with the
+    /// lowest target block and the one with the highest target block are kept in memory. This is
+    /// done in order to have a maximum bound to the amount of memory that is allocated per source
+    /// and avoid DoS attack vectors.
+    ///
+    /// The finality proof with the highest target block is the "best" finality proof. However,
+    /// keeping the finality proof with the lowest target block guarantees that, assuming the
+    /// source isn't malicious, we will able to make *some* progress in the finality.
+    unverified_finality_proofs: SourcePendingJustificationProofs,
+
+    /// Similar to [`Source::unverified_finality_proofs`]. Contains proofs that have been checked
+    /// and have been determined to not be verifiable right now.
+    pending_finality_proofs: SourcePendingJustificationProofs,
+
+    /// Opaque data chosen by the API user.
+    user_data: TSrc,
+}
+
+enum SourcePendingJustificationProofs {
+    None,
+    One {
+        target_height: u64,
+        proof: FinalityProofs,
+    },
+    Two {
+        low_target_height: u64,
+        low_proof: FinalityProofs,
+        high_target_height: u64,
+        high_proof: FinalityProofs,
+    },
+}
+
+impl SourcePendingJustificationProofs {
+    fn is_none(&self) -> bool {
+        matches!(self, SourcePendingJustificationProofs::None)
+    }
+
+    fn insert(&mut self, new_target_height: u64, new_proof: FinalityProofs) {
+        // An empty list of justifications is an invalid state.
+        debug_assert!(match &new_proof {
+            FinalityProofs::Justifications(list) if list.is_empty() => false,
+            _ => true,
+        });
+
+        match mem::replace(self, SourcePendingJustificationProofs::None) {
+            SourcePendingJustificationProofs::None => {
+                *self = SourcePendingJustificationProofs::One {
+                    target_height: new_target_height,
+                    proof: new_proof,
+                };
+            }
+            SourcePendingJustificationProofs::One {
+                target_height,
+                proof,
+            } if target_height < new_target_height => {
+                *self = SourcePendingJustificationProofs::Two {
+                    low_target_height: target_height,
+                    low_proof: proof,
+                    high_target_height: new_target_height,
+                    high_proof: new_proof,
+                };
+            }
+            SourcePendingJustificationProofs::One {
+                target_height,
+                proof,
+            } if target_height > new_target_height => {
+                *self = SourcePendingJustificationProofs::Two {
+                    low_target_height: new_target_height,
+                    low_proof: new_proof,
+                    high_target_height: target_height,
+                    high_proof: proof,
+                };
+            }
+            SourcePendingJustificationProofs::One { .. } => {
+                *self = SourcePendingJustificationProofs::One {
+                    target_height: new_target_height,
+                    proof: new_proof,
+                };
+            }
+            SourcePendingJustificationProofs::Two {
+                high_target_height,
+                low_proof,
+                low_target_height,
+                ..
+            } if new_target_height >= high_target_height => {
+                *self = SourcePendingJustificationProofs::Two {
+                    high_proof: new_proof,
+                    high_target_height: new_target_height,
+                    low_proof,
+                    low_target_height,
+                };
+            }
+            SourcePendingJustificationProofs::Two {
+                high_proof,
+                high_target_height,
+                low_target_height,
+                ..
+            } if new_target_height <= low_target_height => {
+                *self = SourcePendingJustificationProofs::Two {
+                    high_proof,
+                    high_target_height,
+                    low_proof: new_proof,
+                    low_target_height: new_target_height,
+                };
+            }
+            val @ SourcePendingJustificationProofs::Two { .. } => {
+                *self = val;
+            }
+        }
+    }
+
+    fn take_one(&mut self) -> Option<FinalityProof> {
+        match mem::replace(self, SourcePendingJustificationProofs::None) {
+            SourcePendingJustificationProofs::None => {
+                *self = SourcePendingJustificationProofs::None;
+                None
+            }
+            SourcePendingJustificationProofs::One {
+                proof: FinalityProofs::GrandpaCommit(commit),
+                ..
+            } => {
+                *self = SourcePendingJustificationProofs::None;
+                Some(FinalityProof::GrandpaCommit(commit))
+            }
+            SourcePendingJustificationProofs::One {
+                proof: FinalityProofs::Justifications(justifications),
+                ..
+            } if justifications.len() == 1 => {
+                *self = SourcePendingJustificationProofs::None;
+                let j = justifications.into_iter().next().unwrap();
+                Some(FinalityProof::Justification(j))
+            }
+            SourcePendingJustificationProofs::One {
+                target_height,
+                proof: FinalityProofs::Justifications(mut justifications),
+            } => {
+                let j = justifications.pop().unwrap();
+                *self = SourcePendingJustificationProofs::One {
+                    target_height,
+                    proof: FinalityProofs::Justifications(justifications),
+                };
+                Some(FinalityProof::Justification(j))
+            }
+            SourcePendingJustificationProofs::Two {
+                high_proof: FinalityProofs::GrandpaCommit(commit),
+                low_proof,
+                low_target_height,
+                ..
+            } => {
+                *self = SourcePendingJustificationProofs::One {
+                    target_height: low_target_height,
+                    proof: low_proof,
+                };
+                Some(FinalityProof::GrandpaCommit(commit))
+            }
+            SourcePendingJustificationProofs::Two {
+                high_proof: FinalityProofs::Justifications(justifications),
+                low_proof,
+                low_target_height,
+                ..
+            } if justifications.len() == 1 => {
+                let j = justifications.into_iter().next().unwrap();
+                *self = SourcePendingJustificationProofs::One {
+                    target_height: low_target_height,
+                    proof: low_proof,
+                };
+                Some(FinalityProof::Justification(j))
+            }
+            SourcePendingJustificationProofs::Two {
+                high_proof: FinalityProofs::Justifications(mut justifications),
+                high_target_height,
+                low_proof,
+                low_target_height,
+            } => {
+                let j = justifications.pop().unwrap();
+                *self = SourcePendingJustificationProofs::Two {
+                    high_proof: FinalityProofs::Justifications(justifications),
+                    high_target_height,
+                    low_proof,
+                    low_target_height,
+                };
+                Some(FinalityProof::Justification(j))
+            }
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        match other {
+            SourcePendingJustificationProofs::None => {}
+            SourcePendingJustificationProofs::One {
+                target_height,
+                proof,
+            } => self.insert(target_height, proof),
+            SourcePendingJustificationProofs::Two {
+                high_proof,
+                high_target_height,
+                low_proof,
+                low_target_height,
+            } => {
+                self.insert(high_target_height, high_proof);
+                self.insert(low_target_height, low_proof);
+            }
+        }
+    }
+}
+
+enum FinalityProofs {
+    GrandpaCommit(Vec<u8>),
+    Justifications(Vec<([u8; 4], Vec<u8>)>),
+}
+
+enum FinalityProof {
+    GrandpaCommit(Vec<u8>),
+    Justification(([u8; 4], Vec<u8>)),
 }
 
 struct Block<TBl> {
@@ -219,7 +428,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     sources_capacity: config.sources_capacity,
                     verify_bodies: config.full,
                 }),
-                pending_justifications_verify: Vec::new().into_iter(),
                 banned_blocks: config.banned_blocks.collect(),
             },
         }
@@ -384,7 +592,8 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         &mut self,
         source_id: SourceId,
     ) -> (TSrc, impl Iterator<Item = (RequestId, RequestParams, TRq)>) {
-        self.inner.blocks.remove_source(source_id)
+        let (user_data, iter) = self.inner.blocks.remove_source(source_id);
+        (user_data.user_data, iter)
     }
 
     /// Returns the list of sources in this state machine.
@@ -497,7 +706,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             .map(move |rq| {
                 (
                     rq.source_id,
-                    &self.inner.blocks[rq.source_id],
+                    &self.inner.blocks[rq.source_id].user_data,
                     rq.request_params,
                 )
             })
@@ -690,28 +899,51 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Update the state machine with a Grandpa commit message received from the network.
     ///
     /// On success, the finalized block has been updated.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `source_id` is invalid.
+    ///
     // TODO: return which blocks are removed as finalized
+    // TODO: this should probably just insert the commit in the state machine and not verify it immediately
     pub fn grandpa_commit_message(
         &mut self,
-        scale_encoded_message: &[u8],
+        source_id: SourceId,
+        scale_encoded_commit: &[u8],
     ) -> Result<(), blocks_tree::CommitVerifyError> {
-        // TODO: must also handle the `NotEnoughBlocks` error separately
-        match self
+        // Grabbing the source is done early on in order to panic if the `source_id` is invalid.
+        let source = &mut self.inner.blocks[source_id];
+
+        let block_number = match self
             .chain
-            .verify_grandpa_commit_message(scale_encoded_message)
+            .verify_grandpa_commit_message(scale_encoded_commit)
         {
             Ok(apply) => {
                 apply.apply();
-                Ok(())
+                return Ok(());
             }
             // In case where the commit message concerns a block older or equal to the finalized
             // block, the operation is silently considered successful.
             Err(blocks_tree::CommitVerifyError::FinalityVerify(
                 blocks_tree::FinalityVerifyError::EqualToFinalized
                 | blocks_tree::FinalityVerifyError::BelowFinalized,
-            )) => Ok(()),
-            Err(err) => Err(err),
-        }
+            )) => return Ok(()),
+            Err(blocks_tree::CommitVerifyError::FinalityVerify(
+                blocks_tree::FinalityVerifyError::UnknownTargetBlock { block_number, .. },
+            )) => block_number,
+            Err(blocks_tree::CommitVerifyError::NotEnoughKnownBlocks) => {
+                todo!() // TODO:
+            }
+            Err(err) => return Err(err),
+        };
+
+        // If we reach here, the commit can't be verified yet. The commit is stored for later.
+        source.pending_finality_proofs.insert(
+            block_number,
+            FinalityProofs::GrandpaCommit(scale_encoded_commit.to_vec()),
+        );
+
+        Ok(())
     }
 
     /// Process the next block in the queue of verification.
@@ -719,10 +951,22 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// This method takes ownership of the [`AllForksSync`] and starts a verification
     /// process. The [`AllForksSync`] is yielded back at the end of this process.
     pub fn process_one(mut self) -> ProcessOne<TBl, TRq, TSrc> {
-        if let Some(justification_to_verify) = self.inner.pending_justifications_verify.next() {
-            return ProcessOne::JustificationVerify(JustificationVerify {
+        // TODO: O(n)
+        let source_id_with_finality_proof = self
+            .inner
+            .blocks
+            .sources()
+            .find(|id| !self.inner.blocks[*id].unverified_finality_proofs.is_none());
+
+        if let Some(source_id_with_finality_proof) = source_id_with_finality_proof {
+            let finality_proof_to_verify = self.inner.blocks[source_id_with_finality_proof]
+                .unverified_finality_proofs
+                .take_one()
+                .unwrap(); // `take()` always returns `Some` because we've checked `is_none()` above
+            return ProcessOne::FinalityProofVerify(FinalityProofVerify {
                 parent: self,
-                justification_to_verify,
+                source_id: source_id_with_finality_proof,
+                finality_proof_to_verify,
             });
         }
 
@@ -802,14 +1046,14 @@ impl<TBl, TRq, TSrc> ops::Index<SourceId> for AllForksSync<TBl, TRq, TSrc> {
 
     #[track_caller]
     fn index(&self, id: SourceId) -> &TSrc {
-        &self.inner.blocks[id]
+        &self.inner.blocks[id].user_data
     }
 }
 
 impl<TBl, TRq, TSrc> ops::IndexMut<SourceId> for AllForksSync<TBl, TRq, TSrc> {
     #[track_caller]
     fn index_mut(&mut self, id: SourceId) -> &mut TSrc {
-        &mut self.inner.blocks[id]
+        &mut self.inner.blocks[id].user_data
     }
 }
 
@@ -1133,10 +1377,18 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
             },
             PendingBlock {
                 header: Some(self.decoded_header.clone()),
-                justifications: self.justifications,
                 user_data,
             },
         );
+
+        if !self.justifications.is_empty() {
+            self.inner.inner.inner.blocks[self.inner.source_id]
+                .unverified_finality_proofs
+                .insert(
+                    self.decoded_header.number,
+                    FinalityProofs::Justifications(self.justifications),
+                );
+        }
 
         if self
             .inner
@@ -1179,10 +1431,6 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
                 .blocks
                 .remove_unverified_block(height, &hash);
         }
-
-        // TODO: what if the pending block already contains a justification and it is not the
-        //       same as here? since justifications aren't immediately verified, it is possible
-        //       for a malicious peer to send us bad justifications
 
         // Update the state machine for the next iteration.
         // Note: this can't be reached if `expected_next_height` is 0, because that should have
@@ -1381,7 +1629,6 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
             },
             PendingBlock {
                 header: Some(self.announced_header_encoded),
-                justifications: Vec::new(),
                 user_data,
             },
         );
@@ -1501,7 +1748,11 @@ impl<'a, TBl, TRq, TSrc> AddSourceOldBlock<'a, TBl, TRq, TSrc> {
     /// retrieved using the `Index` trait implementation of the [`AllForksSync`].
     pub fn add_source(self, source_user_data: TSrc) -> SourceId {
         self.inner.inner.blocks.add_source(
-            source_user_data,
+            Source {
+                user_data: source_user_data,
+                unverified_finality_proofs: SourcePendingJustificationProofs::None,
+                pending_finality_proofs: SourcePendingJustificationProofs::None,
+            },
             self.best_block_number,
             self.best_block_hash,
         )
@@ -1543,7 +1794,11 @@ impl<'a, TBl, TRq, TSrc> AddSourceKnown<'a, TBl, TRq, TSrc> {
     /// retrieved using the `Index` trait implementation of the [`AllForksSync`].
     pub fn add_source(self, source_user_data: TSrc) -> SourceId {
         self.inner.inner.blocks.add_source(
-            source_user_data,
+            Source {
+                user_data: source_user_data,
+                unverified_finality_proofs: SourcePendingJustificationProofs::None,
+                pending_finality_proofs: SourcePendingJustificationProofs::None,
+            },
             self.best_block_number,
             self.best_block_hash,
         )
@@ -1574,7 +1829,11 @@ impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
         best_block_user_data: TBl,
     ) -> SourceId {
         let source_id = self.inner.inner.blocks.add_source(
-            source_user_data,
+            Source {
+                user_data: source_user_data,
+                unverified_finality_proofs: SourcePendingJustificationProofs::None,
+                pending_finality_proofs: SourcePendingJustificationProofs::None,
+            },
             self.best_block_number,
             self.best_block_hash,
         );
@@ -1585,7 +1844,6 @@ impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
             pending_blocks::UnverifiedBlockState::HeightHashKnown,
             PendingBlock {
                 header: None,
-                justifications: Vec::new(),
                 user_data: best_block_user_data,
             },
         );
@@ -1667,17 +1925,17 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
                 };
                 insert.insert(block);
 
-                // Store the justification in `pending_justification_verify`.
-                // A `HeaderVerify` can only exist if `pending_justification_verify` is `None`,
-                // meaning that there's no risk of accidental overwrite.
-                debug_assert!(self
-                    .parent
-                    .inner
-                    .pending_justifications_verify
-                    .as_slice()
-                    .is_empty());
-                self.parent.inner.pending_justifications_verify =
-                    pending_block.justifications.into_iter();
+                // Because a new block is now in the chain, all the previously-unverifiable
+                // finality proofs might have now become verifiable.
+                // TODO: this way of doing it is correct but quite inefficient
+                for source in self.parent.inner.blocks.sources_user_data_iter_mut() {
+                    let pending = mem::replace(
+                        &mut source.pending_finality_proofs,
+                        SourcePendingJustificationProofs::None,
+                    );
+
+                    source.unverified_finality_proofs.merge(pending)
+                }
 
                 Ok(is_new_best)
             }
@@ -1724,43 +1982,106 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
     }
 }
 
-/// Justification verification to be performed.
+/// Finality proof verification to be performed.
 ///
 /// Internally holds the [`AllForksSync`].
-pub struct JustificationVerify<TBl, TRq, TSrc> {
+pub struct FinalityProofVerify<TBl, TRq, TSrc> {
     parent: AllForksSync<TBl, TRq, TSrc>,
-    /// Justification that can be verified and its consensus engine id.
-    justification_to_verify: ([u8; 4], Vec<u8>),
+    /// Source that has sent the finality proof.
+    source_id: SourceId,
+    /// Justification and its consensus engine id, or commit that can be verified.
+    finality_proof_to_verify: FinalityProof,
 }
 
-impl<TBl, TRq, TSrc> JustificationVerify<TBl, TRq, TSrc> {
+impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
     /// Perform the verification.
     pub fn perform(
         mut self,
     ) -> (
         AllForksSync<TBl, TRq, TSrc>,
-        JustificationVerifyOutcome<TBl>,
+        FinalityProofVerifyOutcome<TBl>,
     ) {
-        let outcome = match self.parent.chain.verify_justification(
-            self.justification_to_verify.0,
-            &self.justification_to_verify.1,
-        ) {
-            Ok(success) => {
-                let finalized_blocks_iter = success.apply();
-                let updates_best_block = finalized_blocks_iter.updates_best_block();
-                let finalized_blocks = finalized_blocks_iter
-                    .map(|b| (b.header, b.user_data))
-                    .collect::<Vec<_>>();
-                self.parent
-                    .inner
-                    .blocks
-                    .set_finalized_block_height(finalized_blocks.last().unwrap().0.number);
-                JustificationVerifyOutcome::NewFinalized {
-                    finalized_blocks,
-                    updates_best_block,
+        let outcome = match self.finality_proof_to_verify {
+            FinalityProof::GrandpaCommit(scale_encoded_commit) => {
+                match self
+                    .parent
+                    .chain
+                    .verify_grandpa_commit_message(&scale_encoded_commit)
+                {
+                    Ok(success) => {
+                        // TODO: DRY
+                        let finalized_blocks_iter = success.apply();
+                        let updates_best_block = finalized_blocks_iter.updates_best_block();
+                        let finalized_blocks = finalized_blocks_iter
+                            .map(|b| (b.header, b.user_data))
+                            .collect::<Vec<_>>();
+                        self.parent
+                            .inner
+                            .blocks
+                            .set_finalized_block_height(finalized_blocks.last().unwrap().0.number);
+                        FinalityProofVerifyOutcome::NewFinalized {
+                            finalized_blocks,
+                            updates_best_block,
+                        }
+                    }
+                    // In case where the commit message concerns a block older or equal to the
+                    // finalized block, the operation is silently considered successful.
+                    Err(blocks_tree::CommitVerifyError::FinalityVerify(
+                        blocks_tree::FinalityVerifyError::EqualToFinalized
+                        | blocks_tree::FinalityVerifyError::BelowFinalized,
+                    )) => FinalityProofVerifyOutcome::AlreadyFinalized,
+                    Err(blocks_tree::CommitVerifyError::FinalityVerify(
+                        blocks_tree::FinalityVerifyError::UnknownTargetBlock {
+                            block_number, ..
+                        },
+                    )) => {
+                        self.parent.inner.blocks[self.source_id]
+                            .pending_finality_proofs
+                            .insert(
+                                block_number,
+                                FinalityProofs::GrandpaCommit(scale_encoded_commit),
+                            );
+                        FinalityProofVerifyOutcome::GrandpaCommitPending
+                    }
+                    Err(blocks_tree::CommitVerifyError::NotEnoughKnownBlocks) => {
+                        todo!() // TODO:
+                    }
+                    Err(err) => FinalityProofVerifyOutcome::GrandpaCommitError(err),
                 }
             }
-            Err(err) => JustificationVerifyOutcome::Error(err),
+            FinalityProof::Justification((consensus_engine_id, scale_encoded_justification)) => {
+                match self
+                    .parent
+                    .chain
+                    .verify_justification(consensus_engine_id, &scale_encoded_justification)
+                {
+                    Ok(success) => {
+                        let finalized_blocks_iter = success.apply();
+                        let updates_best_block = finalized_blocks_iter.updates_best_block();
+                        let finalized_blocks = finalized_blocks_iter
+                            .map(|b| (b.header, b.user_data))
+                            .collect::<Vec<_>>();
+                        self.parent
+                            .inner
+                            .blocks
+                            .set_finalized_block_height(finalized_blocks.last().unwrap().0.number);
+                        FinalityProofVerifyOutcome::NewFinalized {
+                            finalized_blocks,
+                            updates_best_block,
+                        }
+                    }
+                    // In case where the commit message concerns a block older or equal to the
+                    // finalized block, the operation is silently considered successful.
+                    Err(blocks_tree::JustificationVerifyError::FinalityVerify(
+                        blocks_tree::FinalityVerifyError::EqualToFinalized
+                        | blocks_tree::FinalityVerifyError::BelowFinalized,
+                    )) => FinalityProofVerifyOutcome::AlreadyFinalized,
+
+                    // Note that, contrary to commits, there's no such thing as a justification
+                    // that can't be verified yet.
+                    Err(err) => FinalityProofVerifyOutcome::JustificationError(err),
+                }
+            }
         };
 
         (self.parent, outcome)
@@ -1788,7 +2109,7 @@ pub enum ProcessOne<TBl, TRq, TSrc> {
     HeaderVerify(HeaderVerify<TBl, TRq, TSrc>),
 
     /// A justification is ready for verification.
-    JustificationVerify(JustificationVerify<TBl, TRq, TSrc>),
+    FinalityProofVerify(FinalityProofVerify<TBl, TRq, TSrc>),
 }
 
 /// Outcome of calling [`HeaderVerify::perform`].
@@ -1820,10 +2141,10 @@ pub enum HeaderVerifyError {
     VerificationFailed(verify::header_only::Error),
 }
 
-/// Information about the outcome of verifying a justification.
+/// Information about the outcome of verifying a finality proof.
 #[derive(Debug)]
-pub enum JustificationVerifyOutcome<TBl> {
-    /// Justification verification successful. The block and all its ancestors is now finalized.
+pub enum FinalityProofVerifyOutcome<TBl> {
+    /// Verification successful. The block and all its ancestors is now finalized.
     NewFinalized {
         /// List of finalized blocks, in decreasing block number.
         // TODO: use `Vec<u8>` instead of `Header`?
@@ -1834,8 +2155,14 @@ pub enum JustificationVerifyOutcome<TBl> {
         /// block.
         updates_best_block: bool,
     },
+    /// Finality proof concerns block that was already finalized.
+    AlreadyFinalized,
+    /// GrandPa commit cannot be verified yet and has been stored for later.
+    GrandpaCommitPending,
     /// Problem while verifying justification.
-    Error(blocks_tree::JustificationVerifyError),
+    JustificationError(blocks_tree::JustificationVerifyError),
+    /// Problem while verifying GrandPa commit.
+    GrandpaCommitError(blocks_tree::CommitVerifyError),
 }
 
 /// State of the processing of blocks.
