@@ -409,16 +409,35 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                 }),
                 finalized_serialize::decode_chain(config.database_content),
             ) {
-                (Ok(Ok(genesis_ci)), _, Ok((database, _))) => {
+                // Use the database if it contains a more recent block than the chain spec checkpoint.
+                (Ok(Ok(genesis_ci)), checkpoint, Ok((database, _)))
+                    if checkpoint
+                        .as_ref()
+                        .map(|r| r.as_ref().ok())
+                        .flatten()
+                        .map_or(true, |cp| {
+                            cp.as_ref().finalized_block_header.number
+                                < database.as_ref().finalized_block_header.number
+                        }) =>
+                {
                     let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
                     (database, genesis_header.into())
                 }
 
+                // Use the database if it contains a more recent block than the chain spec checkpoint.
                 (
                     Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
-                    _,
+                    checkpoint,
                     Ok((database, _)),
-                ) => {
+                ) if checkpoint
+                    .as_ref()
+                    .map(|r| r.as_ref().ok())
+                    .flatten()
+                    .map_or(true, |cp| {
+                        cp.as_ref().finalized_block_header.number
+                            < database.as_ref().finalized_block_header.number
+                    }) =>
+                {
                     let genesis_header = header::Header {
                         parent_hash: [0; 32],
                         number: 0,
