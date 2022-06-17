@@ -409,12 +409,16 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                 }),
                 finalized_serialize::decode_chain(config.database_content),
             ) {
-                (Ok(Ok(genesis_ci)), _, Ok((ci, _))) => {
+                (Ok(Ok(genesis_ci)), _, Ok((database, _))) => {
                     let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
-                    (ci, genesis_header.into())
+                    (database, genesis_header.into())
                 }
 
-                (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), _, Ok((ci, _))) => {
+                (
+                    Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
+                    _,
+                    Ok((database, _)),
+                ) => {
                     let genesis_header = header::Header {
                         parent_hash: [0; 32],
                         number: 0,
@@ -423,7 +427,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         digest: header::DigestRef::empty().into(),
                     };
 
-                    (ci, genesis_header)
+                    (database, genesis_header)
                 }
 
                 (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None, _) => {
@@ -438,7 +442,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
 
                 (
                     Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
-                    Some(Ok(ci)),
+                    Some(Ok(checkpoint)),
                     _,
                 ) => {
                     let genesis_header = header::Header {
@@ -449,7 +453,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         digest: header::DigestRef::empty().into(),
                     };
 
-                    (ci, genesis_header)
+                    (checkpoint, genesis_header)
                 }
 
                 (Err(err), _, _) => {
@@ -473,15 +477,15 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                     }));
                 }
 
-                (Ok(Ok(genesis_ci)), Some(Ok(ci)), _) => {
+                (Ok(Ok(genesis_ci)), Some(Ok(checkpoint)), _) => {
                     let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
-                    (ci, genesis_header.into())
+                    (checkpoint, genesis_header.into())
                 }
 
-                (Ok(Ok(ci)), None, _) => {
+                (Ok(Ok(genesis_ci)), None, _) => {
                     let genesis_header =
-                        header::Header::from(ci.as_ref().finalized_block_header.clone());
-                    (ci, genesis_header)
+                        header::Header::from(genesis_ci.as_ref().finalized_block_header.clone());
+                    (genesis_ci, genesis_header)
                 }
             }
         };
