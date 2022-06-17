@@ -2635,7 +2635,7 @@ pub enum Error {
     ParamDecodeError,
     /// The type of one of the parameters is wrong.
     #[display(
-        fmt = "Type mismatch in parameter #{}: {}, expected = {:?}, actual = {:?}",
+        fmt = "Type mismatch in parameter of index {}: {}, expected = {:?}, actual = {:?}",
         param_num,
         function,
         expected,
@@ -2654,7 +2654,7 @@ pub enum Error {
     /// One parameter is expected to point to a buffer, but the pointer is out
     /// of range of the memory of the Wasm VM.
     #[display(
-        fmt = "Bad pointer for parameter #{} of {}: 0x{:x}, len = 0x{:x}",
+        fmt = "Bad pointer for parameter of index {} of {}: 0x{:x}, len = 0x{:x}",
         param_num,
         function,
         pointer,
@@ -2676,7 +2676,7 @@ pub enum Error {
     /// One parameter is expected to point to a UTF-8 string, but the buffer
     /// isn't valid UTF-8.
     #[display(
-        fmt = "UTF-8 error for parameter #{} of {}: {}",
+        fmt = "UTF-8 error for parameter of index {} of {}: {}",
         param_num,
         function,
         error
