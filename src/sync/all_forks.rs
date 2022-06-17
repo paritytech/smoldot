@@ -928,12 +928,14 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 blocks_tree::FinalityVerifyError::EqualToFinalized
                 | blocks_tree::FinalityVerifyError::BelowFinalized,
             )) => return Ok(()),
-            Err(blocks_tree::CommitVerifyError::FinalityVerify(
-                blocks_tree::FinalityVerifyError::UnknownTargetBlock { block_number, .. },
-            )) => block_number,
-            Err(blocks_tree::CommitVerifyError::NotEnoughKnownBlocks) => {
-                todo!() // TODO:
-            }
+            Err(
+                blocks_tree::CommitVerifyError::FinalityVerify(
+                    blocks_tree::FinalityVerifyError::UnknownTargetBlock { block_number, .. },
+                )
+                | blocks_tree::CommitVerifyError::NotEnoughKnownBlocks {
+                    target_block_number: block_number,
+                },
+            ) => block_number,
             Err(err) => return Err(err),
         };
 
@@ -2030,11 +2032,17 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                         blocks_tree::FinalityVerifyError::EqualToFinalized
                         | blocks_tree::FinalityVerifyError::BelowFinalized,
                     )) => FinalityProofVerifyOutcome::AlreadyFinalized,
-                    Err(blocks_tree::CommitVerifyError::FinalityVerify(
-                        blocks_tree::FinalityVerifyError::UnknownTargetBlock {
-                            block_number, ..
+                    Err(
+                        blocks_tree::CommitVerifyError::FinalityVerify(
+                            blocks_tree::FinalityVerifyError::UnknownTargetBlock {
+                                block_number,
+                                ..
+                            },
+                        )
+                        | blocks_tree::CommitVerifyError::NotEnoughKnownBlocks {
+                            target_block_number: block_number,
                         },
-                    )) => {
+                    ) => {
                         self.parent.inner.blocks[self.source_id]
                             .pending_finality_proofs
                             .insert(
@@ -2042,9 +2050,6 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                                 FinalityProofs::GrandpaCommit(scale_encoded_commit),
                             );
                         FinalityProofVerifyOutcome::GrandpaCommitPending
-                    }
-                    Err(blocks_tree::CommitVerifyError::NotEnoughKnownBlocks) => {
-                        todo!() // TODO:
                     }
                     Err(err) => FinalityProofVerifyOutcome::GrandpaCommitError(err),
                 }

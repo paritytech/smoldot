@@ -372,7 +372,9 @@ impl<T> NonFinalizedTreeInner<T> {
                     });
                 }
                 grandpa::commit::verify::InProgress::FinishedUnknown => {
-                    return Err(CommitVerifyError::NotEnoughKnownBlocks)
+                    return Err(CommitVerifyError::NotEnoughKnownBlocks {
+                        target_block_number: u64::from(decoded_commit.message.target_number),
+                    })
                 }
                 grandpa::commit::verify::InProgress::Finished(Err(error)) => {
                     return Err(CommitVerifyError::VerificationFailed(error))
@@ -639,7 +641,11 @@ pub enum CommitVerifyError {
     ///
     /// This doesn't mean that the commit is bad, but that it can't be verified without adding
     /// more blocks to the tree.
-    NotEnoughKnownBlocks,
+    #[display(fmt = "Not enough blocks are known to verify this commit")]
+    NotEnoughKnownBlocks {
+        /// Block number that the commit targets.
+        target_block_number: u64,
+    },
     /// The commit verification has failed. The commit is invalid and should be thrown away.
     #[display(fmt = "{}", _0)]
     VerificationFailed(grandpa::commit::verify::Error),
