@@ -32,7 +32,7 @@
     "websocket": "^1.0.32"
   },
   "devDependencies": {
-    "@types/node": "^17.0.8",
+    "@types/node": "^18.0.0",
     "@types/pako": "^2.0.0",
     "@types/websocket": "^1.0.4",
     "ava": "^4.0.0",
