@@ -190,7 +190,7 @@ jobs:
       with:
         crate: cargo-spellcheck
         version: 0.11.2
-    - run: cargo spellcheck check
+    - run: cargo spellcheck -m 99
 
   wasm-node-versions-match:
     runs-on: ubuntu-latest
