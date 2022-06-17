@@ -56,7 +56,7 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
 
     /// List of outgoing substreams that aren't opened yet.
     ///
-    /// Everytime an outgoing substream is opened, an item is pulled from this list.
+    /// Every time an outgoing substream is opened, an item is pulled from this list.
     ///
     /// Does not include the ping substream.
     desired_out_substreams: VecDeque<(substream::Substream<TNow, TRqUd, TNotifUd>, u32)>,
@@ -239,7 +239,7 @@ where
     /// [`MultiStream::substream_read_write`] puts something in [`ReadWrite::wake_up_after`], then
     /// the substream should be processed after this time, even if it isn't return by this
     /// method.
-    /// TODO: it should be the case ^ it is currently too complicated from the user's perspective to handle a `wake_up_after` value for each substream
+    /// TODO: it should be the case above it is currently too complicated from the user's perspective to handle a `wake_up_after` value for each substream
     ///
     /// > **Note**: An example situation is: a notification is queued, which leads to a message
     /// >           being sent to a connection task, which, once injected, leads to a notifications

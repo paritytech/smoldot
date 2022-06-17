@@ -216,7 +216,7 @@ extern "C" {
     /// later be called when the substream has been successfully opened.
     ///
     /// This function will only be called for multi-stream connections. The connection must
-    /// currently be in the `Open` state. See the documentaiton of [`connection_new`] for details.
+    /// currently be in the `Open` state. See the documentation of [`connection_new`] for details.
     pub fn connection_stream_open(id: u32);
 
     /// Queues data on the given stream. The data is found in the memory of the WebAssembly

@@ -1,4 +1,4 @@
-151
+153
 ABI
 API
 APIs
@@ -108,6 +108,8 @@ metadata
 multiaddress/S
 multihash
 mutex/SM
+namespace/S
+noncomprehending
 opcode
 orthogonally
 parachain/S

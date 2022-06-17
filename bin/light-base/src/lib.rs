@@ -195,7 +195,7 @@ pub trait Platform: Send + 'static {
 #[derive(Debug)]
 pub enum PlatformConnection<TStream, TConnection> {
     /// The connection is a single stream on top of which encryption and multiplexing should be
-    /// negotiatied. The division in multiple substreams is handled internally.
+    /// negotiated. The division in multiple substreams is handled internally.
     SingleStream(TStream),
     /// The connection is made of multiple substreams. The encryption and multiplexing are handled
     /// externally.

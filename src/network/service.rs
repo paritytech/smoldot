@@ -2122,7 +2122,7 @@ where
 /// User must start connecting to the given multiaddress.
 ///
 /// One of [`ChainNetwork::pending_outcome_ok_single_stream`],
-/// [`ChainNetwork::pending_outcome_ok_multi_stream], or [`ChainNetwork::pending_outcome_err`]
+/// [`ChainNetwork::pending_outcome_ok_multi_stream`], or [`ChainNetwork::pending_outcome_err`]
 /// must later be called in order to inform of the outcome of the connection.
 #[derive(Debug)]
 #[must_use]
