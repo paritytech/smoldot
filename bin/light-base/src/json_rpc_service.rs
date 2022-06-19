@@ -692,7 +692,7 @@ impl<TPlat: Platform> Background<TPlat> {
             Err(methods::ParseError::Method { request_id, error }) => {
                 log::warn!(
                     target: &self.log_target,
-                    "Error in JSON-RPC method call: {}", error
+                    "Error in JSON-RPC method call with id {:?}: {}", request_id, error
                 );
                 self.requests_subscriptions
                     .respond(&state_machine_request_id, error.to_json_error(request_id))
