@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- When a database and a chain specification checkpoint are both provided to `addChain`, the block in the database is used only if it has a higher block number than the block in the chain specification checkpoint. This makes it possible to bypass issues where smoldot is incapable of syncing over a certain block by updating the chain specification, without having to manually clear existing databases. ([#2401](https://github.com/paritytech/smoldot/pull/2401))
+
 ## 0.6.19 - 2022-06-14
 
 ### Fixed
