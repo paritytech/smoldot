@@ -407,11 +407,12 @@ impl<TPlat: Platform> SyncService<TPlat> {
                 .await
                 .map_err(StorageQueryErrorDetail::Network)
                 .and_then(|outcome| {
+                    let decoded = outcome.decode();
                     let mut result = Vec::with_capacity(requested_keys.clone().count());
                     for key in requested_keys.clone() {
                         result.push(
                             proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-                                proof: outcome.iter().map(|nv| &nv[..]),
+                                proof: decoded.iter().map(|nv| &nv[..]),
                                 requested_key: key.as_ref(),
                                 trie_root_hash: &storage_trie_root,
                             })
@@ -481,7 +482,8 @@ impl<TPlat: Platform> SyncService<TPlat> {
 
                 match result {
                     Ok(proof) => {
-                        match prefix_scan.resume(proof.iter().map(|v| &v[..])) {
+                        let decoded_proof = proof.decode();
+                        match prefix_scan.resume(decoded_proof.iter().map(|v| &v[..])) {
                             Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
                                 // Continue next step of the proof.
                                 prefix_scan = scan;
@@ -521,7 +523,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
         total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
-    ) -> Result<Vec<Vec<u8>>, CallProofQueryError> {
+    ) -> Result<network_service::EncodedMerkleProof, CallProofQueryError> {
         let mut outcome_errors =
             Vec::with_capacity(usize::try_from(total_attempts).unwrap_or(usize::max_value()));
 
@@ -544,7 +546,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                 .await;
 
             match result {
-                Ok(value) if !value.is_empty() => return Ok(value),
+                Ok(value) if !value.decode().is_empty() => return Ok(value),
                 // TODO: this check of emptiness is a bit of a hack; it is necessary because Substrate responds to requests about blocks it doesn't know with an empty proof
                 Ok(_) => outcome_errors.push(network_service::CallProofRequestError::Request(
                     service::CallProofRequestError::Request(
