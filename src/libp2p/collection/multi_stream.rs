@@ -139,7 +139,7 @@ where
     /// TCP RST flag.
     ///
     /// If any message is returned, it is the responsibility of the API user to send it to the
-    /// coordinator by calling [`Network::inject_connection_message`].
+    /// coordinator.
     /// Do not attempt to buffer the message being returned, as it would work against the
     /// back-pressure strategy used internally. As soon as a message is returned, it should be
     /// delivered. If the coordinator is busy at the moment a message should be delivered, then
@@ -281,7 +281,7 @@ where
         }
     }
 
-    /// Injects a message that has been pulled using [`Network::pull_message_to_connection`].
+    /// Injects a message that has been pulled from the coordinator.
     ///
     /// Calling this function might generate data to send to the connection. You should call
     /// [`MultiStreamConnectionTask::desired_outbound_substreams`] and

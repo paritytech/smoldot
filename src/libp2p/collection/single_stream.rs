@@ -61,16 +61,16 @@ enum SingleStreamConnectionTaskInner<TNow> {
         /// When the handshake phase times out.
         timeout: TNow,
 
-        /// See [`Config::noise_key`].
+        /// See [`super::Config::noise_key`].
         noise_key: Arc<NoiseKey>,
 
         /// See [`OverlayNetwork`].
         notification_protocols: Arc<[OverlayNetwork]>,
 
-        /// See [`Config::request_response_protocols`].
+        /// See [`super::Config::request_response_protocols`].
         request_response_protocols: Arc<[ConfigRequestResponse]>,
 
-        /// See [`Config::ping_protocol`].
+        /// See [`super::Config::ping_protocol`].
         ping_protocol: Arc<str>,
     },
 
@@ -155,7 +155,7 @@ where
     /// the connection in a clean way is futile.
     ///
     /// If any message is returned, it is the responsibility of the API user to send it to the
-    /// coordinator by calling [`Network::inject_connection_message`].
+    /// coordinator.
     /// Do not attempt to buffer the message being returned, as it would work against the
     /// back-pressure strategy used internally. As soon as a message is returned, it should be
     /// delivered. If the coordinator is busy at the moment a message should be delivered, then
@@ -198,7 +198,7 @@ where
         (self_ret, message)
     }
 
-    /// Injects a message that has been pulled using [`Network::pull_message_to_connection`].
+    /// Injects a message that has been pulled from the coordinator.
     ///
     /// Calling this function might generate data to send to the connection. You should call
     /// [`SingleStreamConnectionTask::read_write`] after this function has returned (unless you
