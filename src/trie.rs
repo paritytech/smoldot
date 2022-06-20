@@ -105,12 +105,12 @@ pub use nibble::{
 
 /// The format of the nodes of trie has two different versions.
 ///
-/// As a summary of the difference between versions, in V1 the value of the item in the trie is
-/// hashed if it is too large. This isn't the case in V0 where the value of the item is always
+/// As a summary of the difference between versions, in `V1` the value of the item in the trie is
+/// hashed if it is too large. This isn't the case in `V0` where the value of the item is always
 /// unhashed.
 ///
-/// An encoded node value can be decoded unambiguously no matter whether it was encoded using V0
-/// or V1.
+/// An encoded node value can be decoded unambiguously no matter whether it was encoded using `V0`
+/// or `V1`.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum TrieEntryVersion {
     V0,

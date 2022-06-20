@@ -63,7 +63,7 @@ pub struct Config<TNow> {
 
     /// Seed for the randomness within the networking state machine.
     ///
-    /// While this seed influences the general behaviour of the networking state machine, it
+    /// While this seed influences the general behavior of the networking state machine, it
     /// notably isn't used when generating the ephemeral key used for the Diffie-Hellman
     /// handshake.
     /// This is a defensive measure against users passing a dummy seed instead of actual entropy.
@@ -412,7 +412,7 @@ where
         self.chains.len()
     }
 
-    /// Returns the Noise key originalled passed as [`Config::noise_key`].
+    /// Returns the Noise key originally passed as [`Config::noise_key`].
     pub fn noise_key(&self) -> &connection::NoiseKey {
         self.inner.noise_key()
     }
@@ -2123,7 +2123,7 @@ where
 /// User must start connecting to the given multiaddress.
 ///
 /// One of [`ChainNetwork::pending_outcome_ok_single_stream`],
-/// [`ChainNetwork::pending_outcome_ok_multi_stream], or [`ChainNetwork::pending_outcome_err`]
+/// [`ChainNetwork::pending_outcome_ok_multi_stream`], or [`ChainNetwork::pending_outcome_err`]
 /// must later be called in order to inform of the outcome of the connection.
 #[derive(Debug)]
 #[must_use]

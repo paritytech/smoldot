@@ -33,10 +33,10 @@ pub enum PublicKey {
 }
 
 impl PublicKey {
-    /// Encode the public key into a protobuf structure for exchange with other nodes.
+    /// Encode the public key into a Protobuf structure for exchange with other nodes.
     ///
     /// As indicated in the libp2p specification, the encoding is done deterministically despite
-    /// the fact that the protobuf format isn't deterministic.
+    /// the fact that the Protobuf format isn't deterministic.
     ///
     /// See https://github.com/libp2p/specs/blob/master/peer-ids/peer-ids.md#keys.
     pub fn to_protobuf_encoding(&self) -> Vec<u8> {
@@ -56,7 +56,7 @@ impl PublicKey {
         }
     }
 
-    /// Decode a public key from a protobuf structure, e.g. read from storage or received from
+    /// Decode a public key from a Protobuf structure, e.g. read from storage or received from
     /// another node.
     pub fn from_protobuf_encoding(bytes: &[u8]) -> Result<PublicKey, FromProtobufEncodingError> {
         struct ErrorWrapper(FromProtobufEncodingError);

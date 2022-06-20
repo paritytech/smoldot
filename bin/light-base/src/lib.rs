@@ -195,7 +195,7 @@ pub trait Platform: Send + 'static {
 #[derive(Debug)]
 pub enum PlatformConnection<TStream, TConnection> {
     /// The connection is a single stream on top of which encryption and multiplexing should be
-    /// negotiatied. The division in multiple substreams is handled internally.
+    /// negotiated. The division in multiple substreams is handled internally.
     SingleStream(TStream),
     /// The connection is made of multiple substreams. The encryption and multiplexing are handled
     /// externally.
@@ -409,12 +409,35 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                 }),
                 finalized_serialize::decode_chain(config.database_content),
             ) {
-                (Ok(Ok(genesis_ci)), _, Ok((ci, _))) => {
+                // Use the database if it contains a more recent block than the chain spec checkpoint.
+                (Ok(Ok(genesis_ci)), checkpoint, Ok((database, _)))
+                    if checkpoint
+                        .as_ref()
+                        .map(|r| r.as_ref().ok())
+                        .flatten()
+                        .map_or(true, |cp| {
+                            cp.as_ref().finalized_block_header.number
+                                < database.as_ref().finalized_block_header.number
+                        }) =>
+                {
                     let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
-                    (ci, genesis_header.into())
+                    (database, genesis_header.into())
                 }
 
-                (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), _, Ok((ci, _))) => {
+                // Use the database if it contains a more recent block than the chain spec checkpoint.
+                (
+                    Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
+                    checkpoint,
+                    Ok((database, _)),
+                ) if checkpoint
+                    .as_ref()
+                    .map(|r| r.as_ref().ok())
+                    .flatten()
+                    .map_or(true, |cp| {
+                        cp.as_ref().finalized_block_header.number
+                            < database.as_ref().finalized_block_header.number
+                    }) =>
+                {
                     let genesis_header = header::Header {
                         parent_hash: [0; 32],
                         number: 0,
@@ -423,7 +446,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         digest: header::DigestRef::empty().into(),
                     };
 
-                    (ci, genesis_header)
+                    (database, genesis_header)
                 }
 
                 (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None, _) => {
@@ -438,7 +461,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
 
                 (
                     Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
-                    Some(Ok(ci)),
+                    Some(Ok(checkpoint)),
                     _,
                 ) => {
                     let genesis_header = header::Header {
@@ -449,7 +472,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         digest: header::DigestRef::empty().into(),
                     };
 
-                    (ci, genesis_header)
+                    (checkpoint, genesis_header)
                 }
 
                 (Err(err), _, _) => {
@@ -473,15 +496,15 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                     }));
                 }
 
-                (Ok(Ok(genesis_ci)), Some(Ok(ci)), _) => {
+                (Ok(Ok(genesis_ci)), Some(Ok(checkpoint)), _) => {
                     let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
-                    (ci, genesis_header.into())
+                    (checkpoint, genesis_header.into())
                 }
 
-                (Ok(Ok(ci)), None, _) => {
+                (Ok(Ok(genesis_ci)), None, _) => {
                     let genesis_header =
-                        header::Header::from(ci.as_ref().finalized_block_header.clone());
-                    (ci, genesis_header)
+                        header::Header::from(genesis_ci.as_ref().finalized_block_header.clone());
+                    (genesis_ci, genesis_header)
                 }
             }
         };

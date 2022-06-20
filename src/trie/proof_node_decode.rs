@@ -192,7 +192,7 @@ impl<'a> Decoded<'a> {
 pub enum StorageValue<'a> {
     /// Storage value of the item is present in the node value.
     Unhashed(&'a [u8]),
-    /// Blake2 hash of the storage value of the item is present in the node value.
+    /// BLAKE2 hash of the storage value of the item is present in the node value.
     Hashed(&'a [u8; 32]),
     /// Item doesn't have any storage value.
     None,

@@ -210,7 +210,7 @@ pub enum ProtocolRef<'a> {
     // TODO: these protocols are inventions for prototyping, see https://github.com/libp2p/specs/pull/412
     ExperimentalWebRtc,
     // TODO: these protocols are inventions for prototyping, see https://github.com/libp2p/specs/pull/412
-    /// Contains the SHA256 hash of the TLS certificate.
+    /// Contains the SHA-256 hash of the TLS certificate.
     ExperimentalCertHash([u8; 32]),
 }
 

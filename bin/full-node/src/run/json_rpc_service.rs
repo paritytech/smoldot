@@ -75,7 +75,7 @@ impl JsonRpcService {
     }
 }
 
-/// Error potentially retuend by [`JsonRpcService::new`].
+/// Error potentially returned by [`JsonRpcService::new`].
 #[derive(Debug, derive_more::Display)]
 pub enum InitError {
     /// Failed to listen on the server address.

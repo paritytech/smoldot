@@ -103,13 +103,13 @@ pub(crate) fn delimited_tag_encode<'a>(
         .chain(iter::once(either::Left(data)))
 }
 
-/// Decodes a protobuf message.
+/// Decodes a Protobuf message.
 ///
 /// Must be passed a list of parsers that will parse a tag and value (such as for example
 /// [`uint32_tag_decode`] or [`string_tag_decode`]) as a tuple, similar to the `alt` or `tuple`
-/// combinators of nom.
+/// combinators of `nom`.
 ///
-/// Contrary to the built-in nom combinators, this combinator follows protobuf-specific rules,
+/// Contrary to the built-in `nom` combinators, this combinator follows protobuf-specific rules,
 /// namely that fields can be in any order and that unknown fields are allowed.
 ///
 /// If you pass as parameter a tuple `(a, b, c)`, the parser will be able to parse
@@ -123,7 +123,7 @@ pub(crate) fn message_decode<'a, O, E, F: MessageDecodeFields<'a, O, E>>(
     move |bytes| fields.decode(bytes)
 }
 
-/// Decodes a protobuf tag. On success, returns the field number and wire type.
+/// Decodes a Protobuf tag. On success, returns the field number and wire type.
 pub(crate) fn tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], (u64, u8), E> {
@@ -135,7 +135,7 @@ pub(crate) fn tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     })(bytes)
 }
 
-/// Decodes a protobuf tag of the given field number, and value where the data type is "uint32".
+/// Decodes a Protobuf tag of the given field number, and value where the data type is `uint32`.
 pub(crate) fn uint32_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     field: u64,
 ) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], u32, E> {
@@ -144,7 +144,7 @@ pub(crate) fn uint32_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     })
 }
 
-/// Decodes a protobuf tag of the given field number, and value where the data type is "bool".
+/// Decodes a Protobuf tag of the given field number, and value where the data type is `bool`.
 pub(crate) fn bool_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     field: u64,
 ) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], bool, E> {
@@ -156,14 +156,14 @@ pub(crate) fn bool_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     })
 }
 
-/// Decodes a protobuf tag of the given field number, and value where the data type is "enum".
+/// Decodes a Protobuf tag of the given field number, and value where the data type is "enum".
 pub(crate) fn enum_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     field: u64,
 ) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], u64, E> {
     varint_zigzag_tag_decode(field)
 }
 
-/// Decodes a protobuf tag of the given field number, and value where the data type is a
+/// Decodes a Protobuf tag of the given field number, and value where the data type is a
 /// sub-message.
 pub(crate) fn message_tag_decode<'a, O, E: nom::error::ParseError<&'a [u8]>>(
     field: u64,
@@ -172,7 +172,7 @@ pub(crate) fn message_tag_decode<'a, O, E: nom::error::ParseError<&'a [u8]>>(
     nom::combinator::map_parser(delimited_tag_decode(field), inner_message_parser)
 }
 
-/// Decodes a protobuf tag of the given field number, and value where the data type is "string".
+/// Decodes a Protobuf tag of the given field number, and value where the data type is "string".
 pub(crate) fn string_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     field: u64,
 ) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], &'a str, E> {
@@ -184,7 +184,7 @@ pub(crate) fn string_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     })
 }
 
-/// Decodes a protobuf tag of the given field number, and value where the data type is "bytes".
+/// Decodes a Protobuf tag of the given field number, and value where the data type is "bytes".
 pub(crate) fn bytes_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     field: u64,
 ) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], &'a [u8], E> {
@@ -193,7 +193,7 @@ pub(crate) fn bytes_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     })
 }
 
-/// Decodes a protobuf tag of the given field number, and value where the wire type is "varint"
+/// Decodes a Protobuf tag of the given field number, and value where the wire type is `varint`
 /// or "zigzag".
 pub(crate) fn varint_zigzag_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     field: u64,
@@ -205,7 +205,7 @@ pub(crate) fn varint_zigzag_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     )
 }
 
-/// Decodes a protobuf tag of the given field number, and value where the wire type is "delimited".
+/// Decodes a Protobuf tag of the given field number, and value where the wire type is "delimited".
 pub(crate) fn delimited_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     field: u64,
 ) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], &'a [u8], E> {
@@ -215,7 +215,7 @@ pub(crate) fn delimited_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     )
 }
 
-/// Decodes a protobuf tag and value and discards them.
+/// Decodes a Protobuf tag and value and discards them.
 pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], (), E> {
