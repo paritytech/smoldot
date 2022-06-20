@@ -932,6 +932,12 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                 blocks_tree::CommitVerifyError::FinalityVerify(
                     blocks_tree::FinalityVerifyError::UnknownTargetBlock { block_number, .. },
                 )
+                | blocks_tree::CommitVerifyError::FinalityVerify(
+                    blocks_tree::FinalityVerifyError::TooFarAhead {
+                        justification_block_number: block_number,
+                        ..
+                    },
+                )
                 | blocks_tree::CommitVerifyError::NotEnoughKnownBlocks {
                     target_block_number: block_number,
                 },
@@ -2036,6 +2042,12 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                         blocks_tree::CommitVerifyError::FinalityVerify(
                             blocks_tree::FinalityVerifyError::UnknownTargetBlock {
                                 block_number,
+                                ..
+                            },
+                        )
+                        | blocks_tree::CommitVerifyError::FinalityVerify(
+                            blocks_tree::FinalityVerifyError::TooFarAhead {
+                                justification_block_number: block_number,
                                 ..
                             },
                         )
