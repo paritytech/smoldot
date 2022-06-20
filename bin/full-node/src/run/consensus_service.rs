@@ -1089,9 +1089,9 @@ impl SyncBackground {
                     }
                 }
 
-                all::ProcessOne::VerifyJustification(verify) => {
+                all::ProcessOne::VerifyFinalityProof(verify) => {
                     let span = tracing::debug_span!(
-                        "justification-verification",
+                        "finality-proof-verification",
                         outcome = tracing::field::Empty,
                         error = tracing::field::Empty,
                     );
@@ -1100,7 +1100,7 @@ impl SyncBackground {
                     match verify.perform() {
                         (
                             sync_out,
-                            all::JustificationVerifyOutcome::NewFinalized {
+                            all::FinalityProofVerifyOutcome::NewFinalized {
                                 finalized_blocks,
                                 updates_best_block,
                             },
@@ -1158,7 +1158,23 @@ impl SyncBackground {
                             database_set_finalized(&self.database, new_finalized_hash).await;
                             continue;
                         }
-                        (sync_out, all::JustificationVerifyOutcome::Error(error)) => {
+                        (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
+                            span.record("outcome", &"pending");
+                            self.sync = sync_out;
+                            continue;
+                        }
+                        (sync_out, all::FinalityProofVerifyOutcome::AlreadyFinalized) => {
+                            span.record("outcome", &"already-finalized");
+                            self.sync = sync_out;
+                            continue;
+                        }
+                        (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
+                            span.record("outcome", &"failure");
+                            span.record("error", &tracing::field::display(error));
+                            self.sync = sync_out;
+                            continue;
+                        }
+                        (sync_out, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
                             span.record("outcome", &"failure");
                             span.record("error", &tracing::field::display(error));
                             self.sync = sync_out;

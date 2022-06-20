@@ -829,6 +829,7 @@ pub enum Event {
     },
     /// Received a GrandPa commit message from the network.
     GrandpaCommitMessage {
+        peer_id: PeerId,
         chain_index: usize,
         message: service::EncodedGrandpaCommitMessage,
     },
@@ -1159,6 +1160,7 @@ async fn update_round<TPlat: Platform>(
                 }
                 service::Event::GrandpaCommitMessage {
                     chain_index,
+                    peer_id,
                     message,
                 } => {
                     log::debug!(
@@ -1169,6 +1171,7 @@ async fn update_round<TPlat: Platform>(
                     );
                     break Event::GrandpaCommitMessage {
                         chain_index,
+                        peer_id,
                         message,
                     };
                 }
