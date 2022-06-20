@@ -1595,6 +1595,7 @@ where
                     if let protocol::GrandpaNotificationRef::Commit(_) = decoded_notif {
                         break Some(Event::GrandpaCommitMessage {
                             chain_index,
+                            peer_id,
                             message: EncodedGrandpaCommitMessage(notification),
                         });
                     }
@@ -2237,6 +2238,8 @@ pub enum Event {
 
     /// Received a GrandPa commit message from the network.
     GrandpaCommitMessage {
+        /// Identity of the sender of the message.
+        peer_id: PeerId,
         /// Index of the chain the commit message relates to.
         chain_index: usize,
         message: EncodedGrandpaCommitMessage,
