@@ -548,10 +548,11 @@ impl<TPlat: Platform> Task<TPlat> {
                     if let Ok(outcome) = storage_request.await {
                         // TODO: lots of copying around
                         // TODO: log what happens
+                        let decoded = outcome.decode();
                         keys.iter()
                             .map(|key| {
                                 proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-                                    proof: outcome.iter().map(|nv| &nv[..]),
+                                    proof: decoded.iter().map(|nv| &nv[..]),
                                     requested_key: key.as_ref(),
                                     trie_root_hash: &state_trie_root,
                                 })
