@@ -328,6 +328,13 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
         self.sources.keys()
     }
 
+    /// Returns the list of all user datas of all sources.
+    pub fn sources_user_data_iter_mut(
+        &'_ mut self,
+    ) -> impl ExactSizeIterator<Item = &'_ mut TSrc> + '_ {
+        self.sources.user_data_iter_mut().map(|s| &mut s.user_data)
+    }
+
     /// Registers a new block that the source is aware of.
     ///
     /// Has no effect if `height` is inferior or equal to the finalized block height.
@@ -755,7 +762,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             .filter(|(height, hash)| {
                 !self
                     .sources
-                    .iter()
+                    .keys()
                     .any(|source_id| self.sources.best_block(source_id) == (*height, hash))
             })
     }

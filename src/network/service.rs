@@ -1318,8 +1318,13 @@ where
                         let response = response
                             .map_err(StorageProofRequestError::Request)
                             .and_then(|payload| {
-                                protocol::decode_storage_proof_response(&payload)
-                                    .map_err(StorageProofRequestError::Decode)
+                                if let Err(err) =
+                                    protocol::decode_storage_or_call_proof_response(&payload)
+                                {
+                                    Err(StorageProofRequestError::Decode(err))
+                                } else {
+                                    Ok(EncodedMerkleProof(payload))
+                                }
                             });
 
                         break Some(Event::StorageProofRequestResult {
@@ -1332,8 +1337,13 @@ where
                             response
                                 .map_err(CallProofRequestError::Request)
                                 .and_then(|payload| {
-                                    protocol::decode_call_proof_response(&payload)
-                                        .map_err(CallProofRequestError::Decode)
+                                    if let Err(err) =
+                                        protocol::decode_storage_or_call_proof_response(&payload)
+                                    {
+                                        Err(CallProofRequestError::Decode(err))
+                                    } else {
+                                        Ok(EncodedMerkleProof(payload))
+                                    }
                                 });
 
                         break Some(Event::CallProofRequestResult {
@@ -1595,6 +1605,7 @@ where
                     if let protocol::GrandpaNotificationRef::Commit(_) = decoded_notif {
                         break Some(Event::GrandpaCommitMessage {
                             chain_index,
+                            peer_id,
                             message: EncodedGrandpaCommitMessage(notification),
                         });
                     }
@@ -2200,12 +2211,12 @@ pub enum Event {
 
     StorageProofRequestResult {
         request_id: OutRequestId,
-        response: Result<Vec<Vec<u8>>, StorageProofRequestError>,
+        response: Result<EncodedMerkleProof, StorageProofRequestError>,
     },
 
     CallProofRequestResult {
         request_id: OutRequestId,
-        response: Result<Vec<Vec<u8>>, CallProofRequestError>,
+        response: Result<EncodedMerkleProof, CallProofRequestError>,
     },
 
     KademliaFindNodeRequestResult {
@@ -2237,6 +2248,8 @@ pub enum Event {
 
     /// Received a GrandPa commit message from the network.
     GrandpaCommitMessage {
+        /// Identity of the sender of the message.
+        peer_id: PeerId,
         /// Index of the chain the commit message relates to.
         chain_index: usize,
         message: EncodedGrandpaCommitMessage,
@@ -2346,6 +2359,23 @@ impl fmt::Debug for EncodedBlockAnnounce {
     }
 }
 
+/// Undecoded but valid Merkle proof.
+#[derive(Clone)]
+pub struct EncodedMerkleProof(Vec<u8>);
+
+impl EncodedMerkleProof {
+    /// Returns the decoded version of the proof.
+    pub fn decode(&self) -> Vec<&[u8]> {
+        protocol::decode_storage_or_call_proof_response(&self.0).unwrap()
+    }
+}
+
+impl fmt::Debug for EncodedMerkleProof {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode(), f)
+    }
+}
+
 /// Undecoded but valid GrandPa commit message.
 #[derive(Clone)]
 pub struct EncodedGrandpaCommitMessage(Vec<u8>);
@@ -2444,7 +2474,7 @@ pub enum StorageProofRequestError {
     #[display(fmt = "{}", _0)]
     Request(peers::RequestError),
     #[display(fmt = "Response decoding error: {}", _0)]
-    Decode(protocol::DecodeStorageProofResponseError),
+    Decode(protocol::DecodeStorageCallProofResponseError),
 }
 
 /// Error returned by [`ChainNetwork::start_call_proof_request`].
@@ -2453,7 +2483,7 @@ pub enum CallProofRequestError {
     #[display(fmt = "{}", _0)]
     Request(peers::RequestError),
     #[display(fmt = "Response decoding error: {}", _0)]
-    Decode(protocol::DecodeCallProofResponseError),
+    Decode(protocol::DecodeStorageCallProofResponseError),
 }
 
 impl CallProofRequestError {

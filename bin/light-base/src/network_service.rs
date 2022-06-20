@@ -57,6 +57,8 @@ use std::{
     sync::Arc,
 };
 
+pub use service::EncodedMerkleProof;
+
 /// Configuration for a [`NetworkService`].
 pub struct Config {
     /// Closure that spawns background tasks.
@@ -169,13 +171,13 @@ struct SharedGuarded<TPlat: Platform> {
 
     storage_proof_requests: HashMap<
         service::OutRequestId,
-        oneshot::Sender<Result<Vec<Vec<u8>>, service::StorageProofRequestError>>,
+        oneshot::Sender<Result<service::EncodedMerkleProof, service::StorageProofRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
     call_proof_requests: HashMap<
         service::OutRequestId,
-        oneshot::Sender<Result<Vec<Vec<u8>>, service::CallProofRequestError>>,
+        oneshot::Sender<Result<service::EncodedMerkleProof, service::CallProofRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
@@ -568,7 +570,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
-    ) -> Result<Vec<Vec<u8>>, StorageProofRequestError> {
+    ) -> Result<service::EncodedMerkleProof, StorageProofRequestError> {
         let rx = {
             let mut guarded = self.shared.guarded.lock().await;
 
@@ -605,13 +607,14 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
         match &result {
             Ok(items) => {
+                let decoded = items.decode();
                 log::debug!(
                     target: "network",
                     "Connection({}) => StorageProofRequest(chain={}, num_elems={}, total_size={})",
                     target,
                     self.shared.log_chain_names[chain_index],
-                    items.len(),
-                    BytesDisplay(items.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
+                    decoded.len(),
+                    BytesDisplay(decoded.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
                 );
             }
             Err(err) => {
@@ -638,7 +641,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::CallProofRequestConfig<'a, impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
-    ) -> Result<Vec<Vec<u8>>, CallProofRequestError> {
+    ) -> Result<EncodedMerkleProof, CallProofRequestError> {
         let rx = {
             let mut guarded = self.shared.guarded.lock().await;
 
@@ -675,13 +678,14 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
         match &result {
             Ok(items) => {
+                let decoded = items.decode();
                 log::debug!(
                     target: "network",
                     "Connection({}) => CallProofRequest({}, num_elems: {}, total_size: {})",
                     target,
                     self.shared.log_chain_names[chain_index],
-                    items.len(),
-                    BytesDisplay(items.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
+                    decoded.len(),
+                    BytesDisplay(decoded.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
                 );
             }
             Err(err) => {
@@ -829,6 +833,7 @@ pub enum Event {
     },
     /// Received a GrandPa commit message from the network.
     GrandpaCommitMessage {
+        peer_id: PeerId,
         chain_index: usize,
         message: service::EncodedGrandpaCommitMessage,
     },
@@ -1159,6 +1164,7 @@ async fn update_round<TPlat: Platform>(
                 }
                 service::Event::GrandpaCommitMessage {
                     chain_index,
+                    peer_id,
                     message,
                 } => {
                     log::debug!(
@@ -1169,6 +1175,7 @@ async fn update_round<TPlat: Platform>(
                     );
                     break Event::GrandpaCommitMessage {
                         chain_index,
+                        peer_id,
                         message,
                     };
                 }

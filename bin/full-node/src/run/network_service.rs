@@ -916,10 +916,11 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                 }
                 service::Event::GrandpaCommitMessage {
                     chain_index,
+                    peer_id,
                     message,
                 } => {
                     tracing::debug!(
-                        %chain_index,
+                        %chain_index, %peer_id,
                         target_hash = %HashDisplay(message.decode().message.target_hash),
                         "grandpa-commit-message"
                     );
