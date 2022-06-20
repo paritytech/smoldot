@@ -1319,6 +1319,7 @@ where
                             .map_err(StorageProofRequestError::Request)
                             .and_then(|payload| {
                                 protocol::decode_storage_proof_response(&payload)
+                                    .map(|list| list.into_iter().map(|i| i.to_vec()).collect())
                                     .map_err(StorageProofRequestError::Decode)
                             });
 

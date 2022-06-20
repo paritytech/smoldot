@@ -49,10 +49,11 @@ pub fn build_storage_proof_request<'a>(
 }
 
 /// Decodes a response to a storage proof request.
-// TODO: should have a more zero-cost API
+///
+/// On success, contains a list of Merkle proof entries.
 pub fn decode_storage_proof_response(
     response_bytes: &[u8],
-) -> Result<Vec<Vec<u8>>, DecodeStorageProofResponseError> {
+) -> Result<Vec<&[u8]>, DecodeStorageProofResponseError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode((protobuf::message_tag_decode(
             2,
@@ -66,16 +67,9 @@ pub fn decode_storage_proof_response(
     };
 
     // The proof itself is a SCALE-encoded `Vec<Vec<u8>>`.
-    // Each inner `Vec<u8>` is a node value in the storage trie.
     let (_, decoded) = nom::combinator::all_consuming(nom::combinator::flat_map(
         crate::util::nom_scale_compact_usize,
-        |num_elems| {
-            nom::multi::many_m_n(
-                num_elems,
-                num_elems,
-                nom::combinator::map(crate::util::nom_bytes_decode, |b| b.to_vec()),
-            )
-        },
+        |num_elems| nom::multi::many_m_n(num_elems, num_elems, crate::util::nom_bytes_decode),
     ))(proof)
     .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
         DecodeStorageProofResponseError::ProofDecodeError
