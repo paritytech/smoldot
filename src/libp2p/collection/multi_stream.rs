@@ -22,7 +22,7 @@ use super::{
     SubstreamId,
 };
 
-use alloc::sync::Arc;
+use alloc::{string::ToString as _, sync::Arc};
 use core::{
     hash::Hash,
     iter,
