@@ -108,7 +108,7 @@ pub enum MethodError<'a> {
     },
     /// One of the parameters of the function call is invalid.
     #[display(
-        fmt = "Parameter #{} is invalid when calling {}: {}",
+        fmt = "Parameter of index {} is invalid when calling {}: {}",
         parameter_index,
         rpc_method,
         error
