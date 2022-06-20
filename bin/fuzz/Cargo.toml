@@ -109,12 +109,6 @@ test = false
 doc = false
 
 [[bin]]
-name = "protocol-call-proof-response-decode"
-path = "fuzz_targets/protocol-call-proof-response-decode.rs"
-test = false
-doc = false
-
-[[bin]]
 name = "protocol-grandpa-warp-sync-response-decode"
 path = "fuzz_targets/protocol-grandpa-warp-sync-response-decode.rs"
 test = false
@@ -139,8 +133,8 @@ test = false
 doc = false
 
 [[bin]]
-name = "protocol-storage-proof-response-decode"
-path = "fuzz_targets/protocol-storage-proof-response-decode.rs"
+name = "protocol-storage-call-proof-response-decode"
+path = "fuzz_targets/protocol-storage-call-proof-response-decode.rs"
 test = false
 doc = false
 

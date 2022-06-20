@@ -54,7 +54,7 @@
 //! large, the subscription is force-killed by the [`RuntimeService`].
 //!
 
-use crate::{sync_service, Platform};
+use crate::{network_service, sync_service, Platform};
 
 use futures::{
     channel::mpsc,
@@ -752,7 +752,7 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
 pub struct RuntimeCallLock<'a> {
     guarded: MutexGuard<'a, Option<executor::host::HostVmPrototype>>,
     block_state_root_hash: [u8; 32],
-    call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
+    call_proof: Result<network_service::EncodedMerkleProof, RuntimeCallError>,
 }
 
 impl<'a> RuntimeCallLock<'a> {
@@ -768,7 +768,7 @@ impl<'a> RuntimeCallLock<'a> {
     // TODO: if proof is invalid, we should give the option to fetch another call proof
     pub fn storage_entry(&self, requested_key: &[u8]) -> Result<Option<&[u8]>, RuntimeCallError> {
         let call_proof = match &self.call_proof {
-            Ok(p) => p,
+            Ok(p) => p.decode(),
             Err(err) => return Err(err.clone()),
         };
 
@@ -798,7 +798,7 @@ impl<'a> RuntimeCallLock<'a> {
         let mut output = Vec::new();
 
         let call_proof = match &self.call_proof {
-            Ok(p) => p,
+            Ok(p) => p.decode(),
             Err(err) => return Err(err.clone()),
         };
 
