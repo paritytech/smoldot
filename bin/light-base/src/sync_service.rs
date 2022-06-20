@@ -523,7 +523,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
         total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
-    ) -> Result<Vec<Vec<u8>>, CallProofQueryError> {
+    ) -> Result<network_service::EncodedMerkleProof, CallProofQueryError> {
         let mut outcome_errors =
             Vec::with_capacity(usize::try_from(total_attempts).unwrap_or(usize::max_value()));
 
@@ -546,7 +546,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                 .await;
 
             match result {
-                Ok(value) if !value.is_empty() => return Ok(value),
+                Ok(value) if !value.decode().is_empty() => return Ok(value),
                 // TODO: this check of emptiness is a bit of a hack; it is necessary because Substrate responds to requests about blocks it doesn't know with an empty proof
                 Ok(_) => outcome_errors.push(network_service::CallProofRequestError::Request(
                     service::CallProofRequestError::Request(

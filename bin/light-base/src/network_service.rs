@@ -57,6 +57,8 @@ use std::{
     sync::Arc,
 };
 
+pub use service::EncodedMerkleProof;
+
 /// Configuration for a [`NetworkService`].
 pub struct Config {
     /// Closure that spawns background tasks.
@@ -175,7 +177,7 @@ struct SharedGuarded<TPlat: Platform> {
 
     call_proof_requests: HashMap<
         service::OutRequestId,
-        oneshot::Sender<Result<Vec<Vec<u8>>, service::CallProofRequestError>>,
+        oneshot::Sender<Result<service::EncodedMerkleProof, service::CallProofRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
@@ -639,7 +641,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::CallProofRequestConfig<'a, impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
-    ) -> Result<Vec<Vec<u8>>, CallProofRequestError> {
+    ) -> Result<EncodedMerkleProof, CallProofRequestError> {
         let rx = {
             let mut guarded = self.shared.guarded.lock().await;
 
@@ -676,13 +678,14 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
         match &result {
             Ok(items) => {
+                let decoded = items.decode();
                 log::debug!(
                     target: "network",
                     "Connection({}) => CallProofRequest({}, num_elems: {}, total_size: {})",
                     target,
                     self.shared.log_chain_names[chain_index],
-                    items.len(),
-                    BytesDisplay(items.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
+                    decoded.len(),
+                    BytesDisplay(decoded.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
                 );
             }
             Err(err) => {

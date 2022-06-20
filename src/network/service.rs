@@ -1337,9 +1337,13 @@ where
                             response
                                 .map_err(CallProofRequestError::Request)
                                 .and_then(|payload| {
-                                    protocol::decode_storage_or_call_proof_response(&payload)
-                                        .map(|l| l.into_iter().map(|e| e.to_vec()).collect())
-                                        .map_err(CallProofRequestError::Decode)
+                                    if let Err(err) =
+                                        protocol::decode_storage_or_call_proof_response(&payload)
+                                    {
+                                        Err(CallProofRequestError::Decode(err))
+                                    } else {
+                                        Ok(EncodedMerkleProof(payload))
+                                    }
                                 });
 
                         break Some(Event::CallProofRequestResult {
@@ -2212,7 +2216,7 @@ pub enum Event {
 
     CallProofRequestResult {
         request_id: OutRequestId,
-        response: Result<Vec<Vec<u8>>, CallProofRequestError>,
+        response: Result<EncodedMerkleProof, CallProofRequestError>,
     },
 
     KademliaFindNodeRequestResult {
