@@ -407,11 +407,12 @@ impl<TPlat: Platform> SyncService<TPlat> {
                 .await
                 .map_err(StorageQueryErrorDetail::Network)
                 .and_then(|outcome| {
+                    let decoded = outcome.decode();
                     let mut result = Vec::with_capacity(requested_keys.clone().count());
                     for key in requested_keys.clone() {
                         result.push(
                             proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-                                proof: outcome.iter().map(|nv| &nv[..]),
+                                proof: decoded.iter().map(|nv| &nv[..]),
                                 requested_key: key.as_ref(),
                                 trie_root_hash: &storage_trie_root,
                             })
@@ -481,7 +482,8 @@ impl<TPlat: Platform> SyncService<TPlat> {
 
                 match result {
                     Ok(proof) => {
-                        match prefix_scan.resume(proof.iter().map(|v| &v[..])) {
+                        let decoded_proof = proof.decode();
+                        match prefix_scan.resume(decoded_proof.iter().map(|v| &v[..])) {
                             Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
                                 // Continue next step of the proof.
                                 prefix_scan = scan;

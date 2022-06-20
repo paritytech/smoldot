@@ -169,7 +169,7 @@ struct SharedGuarded<TPlat: Platform> {
 
     storage_proof_requests: HashMap<
         service::OutRequestId,
-        oneshot::Sender<Result<Vec<Vec<u8>>, service::StorageProofRequestError>>,
+        oneshot::Sender<Result<service::EncodedMerkleProof, service::StorageProofRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
@@ -568,7 +568,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
-    ) -> Result<Vec<Vec<u8>>, StorageProofRequestError> {
+    ) -> Result<service::EncodedMerkleProof, StorageProofRequestError> {
         let rx = {
             let mut guarded = self.shared.guarded.lock().await;
 
@@ -605,13 +605,14 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
         match &result {
             Ok(items) => {
+                let decoded = items.decode();
                 log::debug!(
                     target: "network",
                     "Connection({}) => StorageProofRequest(chain={}, num_elems={}, total_size={})",
                     target,
                     self.shared.log_chain_names[chain_index],
-                    items.len(),
-                    BytesDisplay(items.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
+                    decoded.len(),
+                    BytesDisplay(decoded.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
                 );
             }
             Err(err) => {
