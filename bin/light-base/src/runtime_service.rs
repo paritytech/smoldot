@@ -394,6 +394,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     ///
     /// Panics if the given block isn't currently pinned by the given subscription.
     ///
+    #[track_caller]
     pub async fn pinned_block_runtime_lock<'a>(
         &'a self,
         subscription_id: SubscriptionId,
@@ -406,12 +407,12 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             if let GuardedInner::FinalizedBlockRuntimeKnown { pinned_blocks, .. } =
                 &mut guarded.tree
             {
-                (*pinned_blocks
-                    .get(&(subscription_id.0, *block_hash))
-                    .unwrap())
-                .clone()
+                match pinned_blocks.get(&(subscription_id.0, *block_hash)) {
+                    Some(b) => b.clone(),
+                    None => panic!("block already unpinned"),
+                }
             } else {
-                panic!("Invalid subscription")
+                panic!("invalid subscription")
             }
         };
 
