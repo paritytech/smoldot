@@ -47,16 +47,15 @@
 //! the calls to [`Network::inject_connection_message`].
 //!
 
-use super::connection::{established, handshake, NoiseKey};
+use super::connection::{established, NoiseKey};
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    string::{String, ToString as _},
+    string::String,
     sync::Arc,
     vec::Vec,
 };
 use core::{
     hash::Hash,
-    iter, mem,
     ops::{self, Add, Sub},
     time::Duration,
 };
