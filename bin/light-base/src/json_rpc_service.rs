@@ -1369,7 +1369,7 @@ impl<TPlat: Platform> Background<TPlat> {
             }
         };
 
-        let (runtime_call_lock, virtual_machine) = precall
+        let (mut runtime_call_lock, mut virtual_machine) = precall
             .start(
                 function_to_call,
                 call_parameters.clone(),
@@ -1380,56 +1380,65 @@ impl<TPlat: Platform> Background<TPlat> {
             .await
             .unwrap(); // TODO: don't unwrap
 
-        // Now that we have obtained the virtual machine, we can perform the call.
-        // This is a CPU-only operation that executes the virtual machine.
-        // The virtual machine might access the storage.
-        // TODO: finish doc
-
-        let mut runtime_call = match read_only_runtime_host::run(read_only_runtime_host::Config {
-            virtual_machine,
-            function_to_call,
-            parameter: call_parameters,
-        }) {
-            Ok(vm) => vm,
-            Err((err, prototype)) => {
-                runtime_call_lock.unlock(prototype);
-                return Err(RuntimeCallError::StartError(err));
-            }
-        };
-
         loop {
-            match runtime_call {
-                read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
-                    let output = success.virtual_machine.value().as_ref().to_vec();
-                    runtime_call_lock.unlock(success.virtual_machine.into_prototype());
-                    break Ok(output);
-                }
-                read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
-                    runtime_call_lock.unlock(error.prototype);
-                    break Err(RuntimeCallError::ReadOnlyRuntime(error.detail));
-                }
-                read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
-                    let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
-                        Ok(v) => v,
-                        Err(err) => {
-                            runtime_call_lock.unlock(
+            // Now that we have obtained the virtual machine, we can perform the call.
+            // This is a CPU-only operation that executes the virtual machine.
+            // The virtual machine might access the storage.
+            // TODO: finish doc
+
+            let mut runtime_call =
+                match read_only_runtime_host::run(read_only_runtime_host::Config {
+                    virtual_machine,
+                    function_to_call,
+                    parameter: call_parameters.clone(),
+                }) {
+                    Ok(vm) => vm,
+                    Err((err, prototype)) => {
+                        runtime_call_lock.unlock_finish(prototype);
+                        return Err(RuntimeCallError::StartError(err));
+                    }
+                };
+
+            loop {
+                match runtime_call {
+                    read_only_runtime_host::RuntimeHostVm::Finished(Ok(success)) => {
+                        let output = success.virtual_machine.value().as_ref().to_vec();
+                        runtime_call_lock.unlock_finish(success.virtual_machine.into_prototype());
+                        return Ok(output);
+                    }
+                    read_only_runtime_host::RuntimeHostVm::Finished(Err(error)) => {
+                        runtime_call_lock.unlock_finish(error.prototype);
+                        return Err(RuntimeCallError::ReadOnlyRuntime(error.detail));
+                    }
+                    read_only_runtime_host::RuntimeHostVm::StorageGet(get) => {
+                        if let Ok(storage_value) =
+                            runtime_call_lock.storage_entry(&get.key_as_vec())
+                        {
+                            runtime_call = get.inject_value(storage_value.map(iter::once));
+                            continue;
+                        }
+
+                        let (new_lock, new_vm) = runtime_call_lock
+                            .unlock_retry(
                                 read_only_runtime_host::RuntimeHostVm::StorageGet(get)
                                     .into_prototype(),
-                            );
-                            break Err(RuntimeCallError::Call(err));
-                        }
-                    };
-                    runtime_call = get.inject_value(storage_value.map(iter::once));
-                }
-                read_only_runtime_host::RuntimeHostVm::NextKey(nk) => {
-                    // TODO:
-                    runtime_call_lock.unlock(
-                        read_only_runtime_host::RuntimeHostVm::NextKey(nk).into_prototype(),
-                    );
-                    break Err(RuntimeCallError::NextKeyForbidden);
-                }
-                read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
-                    runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
+                            )
+                            .await
+                            .unwrap(); // TODO: don't unwrap
+                        runtime_call_lock = new_lock;
+                        virtual_machine = new_vm;
+                        break;
+                    }
+                    read_only_runtime_host::RuntimeHostVm::NextKey(nk) => {
+                        // TODO:
+                        runtime_call_lock.unlock_finish(
+                            read_only_runtime_host::RuntimeHostVm::NextKey(nk).into_prototype(),
+                        );
+                        return Err(RuntimeCallError::NextKeyForbidden);
+                    }
+                    read_only_runtime_host::RuntimeHostVm::StorageRoot(storage_root) => {
+                        runtime_call = storage_root.resume(runtime_call_lock.block_storage_root());
+                    }
                 }
             }
         }
