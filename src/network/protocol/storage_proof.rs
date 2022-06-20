@@ -48,12 +48,56 @@ pub fn build_storage_proof_request<'a>(
     )
 }
 
-/// Decodes a response to a storage proof request.
+/// Description of a call proof request that can be sent to a peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallProofRequestConfig<'a, I> {
+    /// Hash of the block to request the storage of.
+    pub block_hash: [u8; 32],
+    /// Name of the runtime function to call.
+    pub method: &'a str,
+    /// Iterator to buffers of bytes to be concatenated then passed as input to the call. The
+    /// semantics of these bytes depend on which method is being called.
+    pub parameter_vectored: I,
+}
+
+// See https://github.com/paritytech/substrate/blob/c8653447fc8ef8d95a92fe164c96dffb37919e85/client/network/light/src/schema/light.v1.proto
+// for protocol definition.
+
+/// Builds the bytes corresponding to a call proof request.
+pub fn build_call_proof_request<'a>(
+    config: CallProofRequestConfig<'a, impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a>,
+) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
+    // TODO: don't allocate here
+    let parameter = config
+        .parameter_vectored
+        .fold(Vec::with_capacity(512), |mut a, b| {
+            a.extend_from_slice(b.as_ref());
+            a
+        });
+
+    protobuf::message_tag_encode(
+        1,
+        protobuf::bytes_tag_encode(2, config.block_hash)
+            .map(either::Left)
+            .chain(
+                protobuf::string_tag_encode(3, config.method)
+                    .map(either::Left)
+                    .map(either::Right),
+            )
+            .chain(
+                protobuf::bytes_tag_encode(4, parameter)
+                    .map(either::Right)
+                    .map(either::Right),
+            ),
+    )
+}
+
+/// Decodes a response to a storage proof request or a call proof request.
 ///
 /// On success, contains a list of Merkle proof entries.
-pub fn decode_storage_proof_response(
+pub fn decode_storage_or_call_proof_response(
     response_bytes: &[u8],
-) -> Result<Vec<&[u8]>, DecodeStorageProofResponseError> {
+) -> Result<Vec<&[u8]>, DecodeStorageCallProofResponseError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode((protobuf::message_tag_decode(
             2,
@@ -63,7 +107,7 @@ pub fn decode_storage_proof_response(
 
     let proof: &[u8] = match nom::Finish::finish(parser(response_bytes)) {
         Ok((_, ((((b,),),),))) => b,
-        Err(_) => return Err(DecodeStorageProofResponseError::ProtobufDecode),
+        Err(_) => return Err(DecodeStorageCallProofResponseError::ProtobufDecode),
     };
 
     // The proof itself is a SCALE-encoded `Vec<Vec<u8>>`.
@@ -72,15 +116,15 @@ pub fn decode_storage_proof_response(
         |num_elems| nom::multi::many_m_n(num_elems, num_elems, crate::util::nom_bytes_decode),
     ))(proof)
     .map_err(|_: nom::Err<nom::error::Error<&[u8]>>| {
-        DecodeStorageProofResponseError::ProofDecodeError
+        DecodeStorageCallProofResponseError::ProofDecodeError
     })?;
 
     Ok(decoded)
 }
 
-/// Error potentially returned by [`decode_storage_proof_response`].
+/// Error potentially returned by [`decode_storage_or_call_proof_response`].
 #[derive(Debug, derive_more::Display, Clone)]
-pub enum DecodeStorageProofResponseError {
+pub enum DecodeStorageCallProofResponseError {
     /// Error while decoding the Protobuf encoding.
     ProtobufDecode,
     /// Response isn't a response to a storage proof request.

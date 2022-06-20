@@ -1318,7 +1318,8 @@ where
                         let response = response
                             .map_err(StorageProofRequestError::Request)
                             .and_then(|payload| {
-                                if let Err(err) = protocol::decode_storage_proof_response(&payload)
+                                if let Err(err) =
+                                    protocol::decode_storage_or_call_proof_response(&payload)
                                 {
                                     Err(StorageProofRequestError::Decode(err))
                                 } else {
@@ -1336,7 +1337,8 @@ where
                             response
                                 .map_err(CallProofRequestError::Request)
                                 .and_then(|payload| {
-                                    protocol::decode_call_proof_response(&payload)
+                                    protocol::decode_storage_or_call_proof_response(&payload)
+                                        .map(|l| l.into_iter().map(|e| e.to_vec()).collect())
                                         .map_err(CallProofRequestError::Decode)
                                 });
 
@@ -2360,7 +2362,7 @@ pub struct EncodedMerkleProof(Vec<u8>);
 impl EncodedMerkleProof {
     /// Returns the decoded version of the proof.
     pub fn decode(&self) -> Vec<&[u8]> {
-        protocol::decode_storage_proof_response(&self.0).unwrap()
+        protocol::decode_storage_or_call_proof_response(&self.0).unwrap()
     }
 }
 
@@ -2468,7 +2470,7 @@ pub enum StorageProofRequestError {
     #[display(fmt = "{}", _0)]
     Request(peers::RequestError),
     #[display(fmt = "Response decoding error: {}", _0)]
-    Decode(protocol::DecodeStorageProofResponseError),
+    Decode(protocol::DecodeStorageCallProofResponseError),
 }
 
 /// Error returned by [`ChainNetwork::start_call_proof_request`].
@@ -2477,7 +2479,7 @@ pub enum CallProofRequestError {
     #[display(fmt = "{}", _0)]
     Request(peers::RequestError),
     #[display(fmt = "Response decoding error: {}", _0)]
-    Decode(protocol::DecodeCallProofResponseError),
+    Decode(protocol::DecodeStorageCallProofResponseError),
 }
 
 impl CallProofRequestError {
