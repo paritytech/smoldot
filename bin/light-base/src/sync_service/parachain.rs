@@ -211,7 +211,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         // Must unpin the pruned blocks if they haven't already been unpinned and
                         // if there is no operation in progress. In case where there is a parahead
                         // fetch operation in progress for this block, the operation uses the pin
-                        // and block will be unpinned when the operation is finished.
+                        // and the block will be unpinned when the operation is finished.
                         for (block_index, _, pruned_block_parahead) in pruned_blocks {
                             if pruned_block_parahead.is_none()
                                 && async_tree.block_async_op_in_progress(block_index).is_none()
