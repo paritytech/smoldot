@@ -706,7 +706,7 @@ pub struct TransactionWatchEventBlock {
 }
 
 /// Unstable event.
-/// See https://github.com/paritytech/smoldot/issues/2245.
+/// See <https://github.com/paritytech/smoldot/issues/2245>.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event")]
 pub enum NetworkEvent<'a> {
