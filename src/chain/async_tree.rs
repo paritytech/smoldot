@@ -324,6 +324,23 @@ where
         }
     }
 
+    /// If an asynchronous operation is in progress and targets the given block, returns the
+    /// identifier of this asynchronous operation.
+    ///
+    /// Returns `None` if the asynchronous operation of this block is either already finished or
+    /// not started yet.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`NodeIndex`] is invalid.
+    ///
+    pub fn block_async_op_in_progress(&self, node_index: NodeIndex) -> Option<AsyncOpId> {
+        match &self.non_finalized_blocks.get(node_index).unwrap().async_op {
+            AsyncOpState::InProgress { async_op_id, .. } => Some(*async_op_id),
+            _ => None,
+        }
+    }
+
     /// Returns the parent of the given node. Returns `None` if the node doesn't have any parent,
     /// meaning that its parent is the finalized node.
     ///

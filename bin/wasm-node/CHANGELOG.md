@@ -10,6 +10,7 @@
 
 - Fix errors about verifying justifications. Justifications and Grandpa commits that can't be verified yet are now properly stored in memory in order to be verified later, instead of producing errors. ([#2400](https://github.com/paritytech/smoldot/pull/2400))
 - Fix issue where unverified justifications would overwrite one another, meaning that an invalid justification could potentially prevent a valid justification from being taken into account. ([#2400](https://github.com/paritytech/smoldot/pull/2400))
+- Fix panic when a relay chain block is pruned at the same time as we are trying to determine the parachain block corresponding to it.
 
 ## 0.6.19 - 2022-06-14
 
