@@ -455,6 +455,11 @@ define_methods! {
 
     transaction_unstable_submitAndWatch(transaction: HexString) -> Cow<'a, str>,
     transaction_unstable_unwatch(subscription: Cow<'a, str>) -> (),
+
+    // This function is a custom addition in smoldot. As of the writing of this comment, there is
+    // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
+    network_unstable_subscribeEvents() -> Cow<'a, str>,
+    network_unstable_unsubscribeEvents(subscription: Cow<'a, str>) -> (),
 }
 
 define_methods! {
@@ -472,6 +477,10 @@ define_methods! {
     chainHead_unstable_followEvent(subscription: Cow<'a, str>, result: FollowEvent<'a>) -> (),
     chainHead_unstable_storageEvent(subscription: Cow<'a, str>, result: ChainHeadStorageEvent) -> (),
     transaction_unstable_watchEvent(subscription: Cow<'a, str>, result: TransactionWatchEvent<'a>) -> (),
+
+    // This function is a custom addition in smoldot. As of the writing of this comment, there is
+    // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
+    network_unstable_event(subscription: Cow<'a, str>, result: NetworkEvent<'a>) -> (),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -694,6 +703,94 @@ pub enum TransactionWatchEvent<'a> {
 pub struct TransactionWatchEventBlock {
     pub hash: HashHexString,
     pub index: NumberAsString,
+}
+
+/// Unstable event.
+/// See https://github.com/paritytech/smoldot/issues/2245.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event")]
+pub enum NetworkEvent<'a> {
+    #[serde(rename = "startConnect")]
+    StartConnect {
+        when: u64,
+        #[serde(rename = "connectionId")]
+        connection_id: u32,
+        multiaddr: Cow<'a, str>,
+    },
+    #[serde(rename = "connected")]
+    Connected {
+        when: u64,
+        #[serde(rename = "connectionId")]
+        connection_id: u32,
+    },
+    #[serde(rename = "handshakeFinished")]
+    HandshakeFinished {
+        when: u64,
+        #[serde(rename = "connectionId")]
+        connection_id: u32,
+        #[serde(rename = "peerId")]
+        peer_id: Cow<'a, str>,
+    },
+    #[serde(rename = "stop")]
+    Stop {
+        when: u64,
+        #[serde(rename = "connectionId")]
+        connection_id: u32,
+        reason: Cow<'a, str>,
+    },
+    #[serde(rename = "out-slot-assign")]
+    OutSlotAssign {
+        when: u64,
+        #[serde(rename = "peerId")]
+        peer_id: Cow<'a, str>,
+    },
+    #[serde(rename = "out-slot-unassign")]
+    OutSlotUnassign {
+        when: u64,
+        #[serde(rename = "peerId")]
+        peer_id: Cow<'a, str>,
+    },
+    #[serde(rename = "in-slot-assign")]
+    InSlotAssign {
+        when: u64,
+        #[serde(rename = "peerId")]
+        peer_id: Cow<'a, str>,
+    },
+    #[serde(rename = "in-slot-unassign")]
+    InSlotUnassign {
+        when: u64,
+        #[serde(rename = "peerId")]
+        peer_id: Cow<'a, str>,
+    },
+    #[serde(rename = "in-slot-to-out-slot")]
+    InSlotToOutSlot {
+        when: u64,
+        #[serde(rename = "peerId")]
+        peer_id: Cow<'a, str>,
+    },
+    #[serde(rename = "substream-out-open")]
+    SubstreamOutOpen {
+        when: u64,
+        #[serde(rename = "connectionId")]
+        connection_id: u32,
+        #[serde(rename = "substreamId")]
+        substream_id: u32,
+        #[serde(rename = "protocolName")]
+        protocol_name: Cow<'a, str>,
+    },
+    #[serde(rename = "substream-out-accept")]
+    SubstreamOutAccept {
+        when: u64,
+        #[serde(rename = "substreamId")]
+        substream_id: u32,
+    },
+    #[serde(rename = "substream-out-stop")]
+    SubstreamOutStop {
+        when: u64,
+        #[serde(rename = "substreamId")]
+        substream_id: u32,
+        reason: Cow<'a, str>,
+    },
 }
 
 #[derive(Debug, Clone)]
