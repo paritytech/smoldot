@@ -96,11 +96,17 @@ pub fn build_call_proof_request<'a>(
 ///
 /// On success, contains a list of Merkle proof entries.
 pub fn decode_storage_or_call_proof_response(
+    ty: StorageOrCallProof,
     response_bytes: &[u8],
 ) -> Result<Vec<&[u8]>, DecodeStorageCallProofResponseError> {
+    let field_num = match ty {
+        StorageOrCallProof::CallProof => 1,
+        StorageOrCallProof::StorageProof => 2,
+    };
+
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
         nom::combinator::complete(protobuf::message_decode((protobuf::message_tag_decode(
-            2,
+            field_num,
             protobuf::message_decode((protobuf::bytes_tag_decode(2),)),
         ),))),
     );
@@ -131,4 +137,12 @@ pub enum DecodeStorageCallProofResponseError {
     BadResponseTy,
     /// Failed to decode response as a storage proof.
     ProofDecodeError,
+}
+
+/// Passed as parameter to [`decode_storage_or_call_proof_response`] to indicate what kind of
+/// request the response corresponds to.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum StorageOrCallProof {
+    StorageProof,
+    CallProof,
 }
