@@ -338,6 +338,7 @@ where
             (
                 CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
+                | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
                 | CoordinatorToConnectionInner::CloseOutNotifications { .. }
@@ -348,6 +349,7 @@ where
             (
                 CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
+                | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
                 | CoordinatorToConnectionInner::CloseOutNotifications { .. }
@@ -369,7 +371,13 @@ where
                     was_api_reset: *was_reset,
                 };
             }
-            _ => todo!(), // TODO:
+            (
+                CoordinatorToConnectionInner::StartShutdown,
+                SingleStreamConnectionTaskInner::ShutdownWaitingAck { .. }
+                | SingleStreamConnectionTaskInner::ShutdownAcked { .. },
+            ) => unreachable!(),
+            (CoordinatorToConnectionInner::ShutdownFinishedAck, _) => unreachable!(),
+            (_, SingleStreamConnectionTaskInner::Poisoned) => unreachable!(),
         }
     }
 
