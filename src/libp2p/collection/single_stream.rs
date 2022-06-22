@@ -338,6 +338,7 @@ where
             (
                 CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
+                | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
                 | CoordinatorToConnectionInner::CloseOutNotifications { .. }
@@ -348,11 +349,18 @@ where
             (
                 CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
+                | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
                 | CoordinatorToConnectionInner::CloseOutNotifications { .. }
                 | CoordinatorToConnectionInner::QueueNotification { .. },
                 SingleStreamConnectionTaskInner::ShutdownWaitingAck { .. },
+            )
+            | (
+                CoordinatorToConnectionInner::StartShutdown,
+                SingleStreamConnectionTaskInner::ShutdownWaitingAck {
+                    was_api_reset: true,
+                },
             ) => {
                 // There might still be some messages coming from the coordinator after the
                 // connection task has sent a message indicating that it has shut down. This is
@@ -369,7 +377,13 @@ where
                     was_api_reset: *was_reset,
                 };
             }
-            _ => todo!(), // TODO:
+            (
+                CoordinatorToConnectionInner::StartShutdown,
+                SingleStreamConnectionTaskInner::ShutdownWaitingAck { .. }
+                | SingleStreamConnectionTaskInner::ShutdownAcked { .. },
+            ) => unreachable!(),
+            (CoordinatorToConnectionInner::ShutdownFinishedAck, _) => unreachable!(),
+            (_, SingleStreamConnectionTaskInner::Poisoned) => unreachable!(),
         }
     }
 
