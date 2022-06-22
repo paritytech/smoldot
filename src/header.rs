@@ -636,7 +636,8 @@ impl<'a> DigestRef<'a> {
                 DigestItem::BabeSeal(_) => return Err(Error::SealIsntLastItem),
                 DigestItem::Beefy { .. }
                 | DigestItem::PolkadotParachain { .. }
-                | DigestItem::Frontier { .. } => {}
+                | DigestItem::Frontier { .. }
+                | DigestItem::Other(..) => {}
             }
         }
 
@@ -728,7 +729,8 @@ impl<'a> DigestRef<'a> {
                 DigestItemRef::BabeSeal(_) => return Err(Error::SealIsntLastItem),
                 DigestItemRef::Beefy { .. }
                 | DigestItemRef::PolkadotParachain { .. }
-                | DigestItemRef::Frontier { .. } => {}
+                | DigestItemRef::Frontier { .. }
+                | DigestItemRef::Other { .. } => {}
             }
         }
 
@@ -978,6 +980,9 @@ pub enum DigestItemRef<'a> {
         opaque: &'a [u8],
     },
 
+    /// Some other thing. Unsupported and experimental.
+    Other(&'a [u8]),
+
     /// Runtime of the chain has been updated in this block. This can include the runtime code or
     /// the heap pages.
     RuntimeEnvironmentUpdated,
@@ -1118,6 +1123,12 @@ impl<'a> DigestItemRef<'a> {
                 ret.extend_from_slice(opaque);
                 iter::once(ret)
             }
+            DigestItemRef::Other(raw) => {
+                let mut ret = vec![0];
+                ret.extend_from_slice(util::encode_scale_compact_usize(raw.len()).as_ref());
+                ret.extend_from_slice(raw);
+                iter::once(ret)
+            }
             DigestItemRef::RuntimeEnvironmentUpdated => iter::once(vec![8]),
         }
     }
@@ -1138,6 +1149,7 @@ impl<'a> From<&'a DigestItem> for DigestItemRef<'a> {
                 DigestItemRef::PolkadotParachain { opaque: &*opaque }
             }
             DigestItem::Frontier { opaque } => DigestItemRef::Frontier { opaque: &*opaque },
+            DigestItem::Other(v) => DigestItemRef::Other(&*v),
             DigestItem::RuntimeEnvironmentUpdated => DigestItemRef::RuntimeEnvironmentUpdated,
         }
     }
@@ -1179,6 +1191,9 @@ pub enum DigestItem {
     /// Runtime of the chain has been updated in this block. This can include the runtime code or
     /// the heap pages.
     RuntimeEnvironmentUpdated,
+
+    /// Some other thing. Unsupported and experimental.
+    Other(Vec<u8>),
 }
 
 impl<'a> From<DigestItemRef<'a>> for DigestItem {
@@ -1208,6 +1223,7 @@ impl<'a> From<DigestItemRef<'a>> for DigestItem {
             DigestItemRef::Frontier { opaque } => DigestItem::Frontier {
                 opaque: opaque.to_vec(),
             },
+            DigestItemRef::Other(v) => DigestItem::Other(v.to_vec()),
             DigestItemRef::RuntimeEnvironmentUpdated => DigestItem::RuntimeEnvironmentUpdated,
         }
     }
@@ -1243,6 +1259,22 @@ fn decode_item(mut slice: &[u8]) -> Result<(DigestItemRef, &[u8]), Error> {
             Ok((item, slice))
         }
         8 => Ok((DigestItemRef::RuntimeEnvironmentUpdated, slice)),
+        0 => {
+            let (mut slice, len) =
+                crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(slice)
+                    .map_err(|_| Error::DigestItemLenDecodeError)?;
+
+            if slice.len() < len {
+                return Err(Error::TooShort);
+            }
+
+            let content = &slice[..len];
+            slice = &slice[len..];
+
+            let item = DigestItemRef::Other(content);
+
+            Ok((item, slice))
+        }
         ty => Err(Error::UnknownDigestLogType(ty)),
     }
 }
