@@ -355,6 +355,12 @@ where
                 | CoordinatorToConnectionInner::CloseOutNotifications { .. }
                 | CoordinatorToConnectionInner::QueueNotification { .. },
                 SingleStreamConnectionTaskInner::ShutdownWaitingAck { .. },
+            )
+            | (
+                CoordinatorToConnectionInner::StartShutdown,
+                SingleStreamConnectionTaskInner::ShutdownWaitingAck {
+                    was_api_reset: true,
+                },
             ) => {
                 // There might still be some messages coming from the coordinator after the
                 // connection task has sent a message indicating that it has shut down. This is
