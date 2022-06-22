@@ -340,12 +340,9 @@ impl<'a> ProtocolRef<'a> {
         };
 
         // Combine `code` and `extra`.
-        [
-            either::Left(crate::util::leb128::encode_usize(code).map(|b| either::Left([b]))),
-            either::Right(iter::once(either::Right(extra))),
-        ]
-        .into_iter()
-        .flat_map(|b| b)
+        crate::util::leb128::encode_usize(code)
+            .map(|b| either::Left([b]))
+            .chain(iter::once(either::Right(extra)))
     }
 }
 
