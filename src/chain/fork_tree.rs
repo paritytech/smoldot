@@ -104,6 +104,7 @@ impl<T> ForkTree<T> {
     /// Removes all elements in the tree, leaving it empty.
     pub fn clear(&mut self) {
         self.nodes.clear();
+        self.first_root = None;
     }
 
     /// Shrink the capacity of the tree as much as possible.
