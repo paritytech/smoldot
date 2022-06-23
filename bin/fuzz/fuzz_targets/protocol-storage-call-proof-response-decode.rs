@@ -18,5 +18,9 @@
 #![no_main]
 
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {
-    let _ = smoldot::network::protocol::decode_storage_or_call_proof_response(data);
+    // Note that the type of response has no influence on the code of the implementation.
+    let _ = smoldot::network::protocol::decode_storage_or_call_proof_response(
+        smoldot::network::protocol::StorageOrCallProof::CallProof,
+        data,
+    );
 });
