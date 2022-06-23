@@ -235,21 +235,20 @@ pub struct Network<TConn, TNow> {
     ping_protocol: Arc<str>,
 }
 
-// TODO: consider refactoring this struct to use an enum
 struct Connection<TConn> {
-    state: ConnecState,
+    state: InnerConnectionState,
 
     user_data: TConn,
 }
 
-enum ConnecState {
+enum InnerConnectionState {
     /// The connection is still in its handshaking state.
     Handshaking,
     /// The connection is fully established.
     Established,
     /// The connection is in the process of shutting down.
     ShuttingDown {
-        /// `true` if the state before the shutdown was [`ConnecState::Established`].
+        /// `true` if the state before the shutdown was [`InnerConnectionState::Established`].
         was_established: bool,
 
         /// `true` if [`Network::start_shutdown`] has been called on this connection.
@@ -353,7 +352,7 @@ where
         let _previous_value = self.connections.insert(
             connection_id,
             Connection {
-                state: ConnecState::Handshaking,
+                state: InnerConnectionState::Handshaking,
                 user_data,
             },
         );
@@ -385,7 +384,7 @@ where
         let _previous_value = self.connections.insert(
             connection_id,
             Connection {
-                state: ConnecState::Handshaking,
+                state: InnerConnectionState::Handshaking,
                 user_data,
             },
         );
@@ -419,12 +418,12 @@ where
         let connection = self.connections.get_mut(&connection_id).unwrap();
 
         let is_established = match connection.state {
-            ConnecState::Handshaking => false,
-            ConnecState::Established => true,
-            ConnecState::ShuttingDown { .. } => panic!(), // Forbidden.
+            InnerConnectionState::Handshaking => false,
+            InnerConnectionState::Established => true,
+            InnerConnectionState::ShuttingDown { .. } => panic!(), // Forbidden.
         };
 
-        connection.state = ConnecState::ShuttingDown {
+        connection.state = InnerConnectionState::ShuttingDown {
             was_established: is_established,
             api_initiated: true,
         };
@@ -453,15 +452,15 @@ where
     pub fn connection_state(&self, connection_id: ConnectionId) -> ConnectionState {
         let connection = self.connections.get(&connection_id).unwrap();
         match connection.state {
-            ConnecState::Handshaking => ConnectionState {
+            InnerConnectionState::Handshaking => ConnectionState {
                 established: false,
                 shutting_down: false,
             },
-            ConnecState::Established => ConnectionState {
+            InnerConnectionState::Established => ConnectionState {
                 established: true,
                 shutting_down: false,
             },
-            ConnecState::ShuttingDown {
+            InnerConnectionState::ShuttingDown {
                 was_established, ..
             } => ConnectionState {
                 established: was_established,
@@ -537,7 +536,7 @@ where
         timeout: TNow,
     ) -> SubstreamId {
         let connection = self.connections.get(&target).unwrap();
-        assert!(matches!(connection.state, ConnecState::Established));
+        assert!(matches!(connection.state, InnerConnectionState::Established));
 
         assert!(self
             .request_response_protocols
@@ -588,7 +587,7 @@ where
         handshake: impl Into<Vec<u8>>,
     ) -> SubstreamId {
         let connection = self.connections.get(&connection_id).unwrap();
-        assert!(matches!(connection.state, ConnecState::Established));
+        assert!(matches!(connection.state, InnerConnectionState::Established));
 
         assert!(self
             .notification_protocols
@@ -969,23 +968,23 @@ where
             break Some(match message {
                 ConnectionToCoordinatorInner::StartShutdown => {
                     let report_event = match &mut connection.state {
-                        ConnecState::ShuttingDown {
+                        InnerConnectionState::ShuttingDown {
                             api_initiated: true,
                             ..
                         } => false,
-                        ConnecState::ShuttingDown {
+                        InnerConnectionState::ShuttingDown {
                             api_initiated: false,
                             ..
                         } => unreachable!(),
-                        st @ ConnecState::Handshaking => {
-                            *st = ConnecState::ShuttingDown {
+                        st @ InnerConnectionState::Handshaking => {
+                            *st = InnerConnectionState::ShuttingDown {
                                 api_initiated: false,
                                 was_established: false,
                             };
                             true
                         }
-                        st @ ConnecState::Established => {
-                            *st = ConnecState::ShuttingDown {
+                        st @ InnerConnectionState::Established => {
+                            *st = InnerConnectionState::ShuttingDown {
                                 api_initiated: false,
                                 was_established: true,
                             };
@@ -1007,7 +1006,7 @@ where
                 }
                 ConnectionToCoordinatorInner::ShutdownFinished => {
                     let was_established = match &connection.state {
-                        ConnecState::ShuttingDown {
+                        InnerConnectionState::ShuttingDown {
                             was_established, ..
                         } => *was_established,
                         _ => unreachable!(),
@@ -1054,7 +1053,7 @@ where
                     );
 
                     match &mut connection.state {
-                        ConnecState::ShuttingDown {
+                        InnerConnectionState::ShuttingDown {
                             was_established,
                             api_initiated,
                         } => {
@@ -1062,8 +1061,8 @@ where
                             debug_assert!(*api_initiated);
                             continue;
                         }
-                        st @ ConnecState::Handshaking => *st = ConnecState::Established,
-                        ConnecState::Established => unreachable!(),
+                        st @ InnerConnectionState::Handshaking => *st = InnerConnectionState::Established,
+                        InnerConnectionState::Established => unreachable!(),
                     }
 
                     Event::HandshakeFinished {
@@ -1072,7 +1071,7 @@ where
                     }
                 }
                 ConnectionToCoordinatorInner::InboundError(error) => {
-                    if let ConnecState::ShuttingDown { api_initiated, .. } = connection.state {
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } = connection.state {
                         debug_assert!(api_initiated);
                         continue;
                     }
@@ -1087,7 +1086,7 @@ where
                     protocol_index,
                     request,
                 } => {
-                    if let ConnecState::ShuttingDown { api_initiated, .. } = connection.state {
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } = connection.state {
                         debug_assert!(api_initiated);
                         continue;
                     }
@@ -1112,7 +1111,7 @@ where
                     response,
                     ..
                 } => {
-                    if let ConnecState::ShuttingDown { api_initiated, .. } = connection.state {
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } = connection.state {
                         debug_assert!(api_initiated);
                         continue;
                     }
@@ -1132,7 +1131,7 @@ where
                     protocol_index: overlay_network_index,
                     handshake,
                 } => {
-                    if let ConnecState::ShuttingDown { api_initiated, .. } = connection.state {
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } = connection.state {
                         debug_assert!(api_initiated);
                         continue;
                     }
@@ -1158,7 +1157,7 @@ where
                     id: inner_substream_id,
                     ..
                 } => {
-                    if let ConnecState::ShuttingDown { api_initiated, .. } = connection.state {
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } = connection.state {
                         debug_assert!(api_initiated);
                         continue;
                     }
@@ -1181,7 +1180,7 @@ where
                     id: inner_substream_id,
                     notification,
                 } => {
-                    if let ConnecState::ShuttingDown { api_initiated, .. } = connection.state {
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } = connection.state {
                         debug_assert!(api_initiated);
                         continue;
                     }
@@ -1201,7 +1200,7 @@ where
                     outcome,
                     ..
                 } => {
-                    if let ConnecState::ShuttingDown { api_initiated, .. } = connection.state {
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } = connection.state {
                         debug_assert!(api_initiated);
                         continue;
                     }
@@ -1222,7 +1221,7 @@ where
                     id: substream_id,
                     result,
                 } => {
-                    if let ConnecState::ShuttingDown { api_initiated, .. } = connection.state {
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } = connection.state {
                         debug_assert!(api_initiated);
                         continue;
                     }
@@ -1259,7 +1258,7 @@ where
                     id: substream_id,
                     ..
                 } => {
-                    if let ConnecState::ShuttingDown { api_initiated, .. } = connection.state {
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } = connection.state {
                         debug_assert!(api_initiated);
                         continue;
                     }
@@ -1276,7 +1275,7 @@ where
                     Event::NotificationsOutCloseDemanded { substream_id }
                 }
                 ConnectionToCoordinatorInner::NotificationsOutReset { id: substream_id } => {
-                    if let ConnecState::ShuttingDown { api_initiated, .. } = connection.state {
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } = connection.state {
                         debug_assert!(api_initiated);
                         continue;
                     }
@@ -1299,7 +1298,7 @@ where
                     Event::NotificationsOutReset { substream_id }
                 }
                 ConnectionToCoordinatorInner::PingOutSuccess => {
-                    if let ConnecState::ShuttingDown { api_initiated, .. } = connection.state {
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } = connection.state {
                         debug_assert!(api_initiated);
                         continue;
                     }
@@ -1307,7 +1306,7 @@ where
                     Event::PingOutSuccess { id: connection_id }
                 }
                 ConnectionToCoordinatorInner::PingOutFailed => {
-                    if let ConnecState::ShuttingDown { api_initiated, .. } = connection.state {
+                    if let InnerConnectionState::ShuttingDown { api_initiated, .. } = connection.state {
                         debug_assert!(api_initiated);
                         continue;
                     }
