@@ -31,9 +31,9 @@ export default function () {
     // modules in the worker code. It is thus also the role of this bundler to tweak or remove
     // the value of this `type` property to indicate to the browser that modules aren't in use.
     //
-    // It is unclear whether bundlers actually do this. Whether bundlers actually do this or not,
-    // it is nonetheless more correct to indicate `type: "module"` and doing so doesn't have any
-    // drawback.
+    // WebPack in particular does this, but it is unclear whether *all* bundlers do it.
+    // Whether bundlers actually do this or not, it is nonetheless more correct to indicate
+    // `type: "module"` and doing so doesn't have any drawback.
     const worker = new Worker(new URL('./worker.js', import.meta.url), { name: "smoldot", type: "module" });
     return worker;
 }
