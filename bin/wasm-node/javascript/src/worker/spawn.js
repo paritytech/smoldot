@@ -23,6 +23,10 @@ export default function () {
     // Because this line is precisely recognized by bundlers, we extract it to a separate
     // JavaScript file.
     // See also the README.md for more context.
-    const worker = new Worker(new URL('./worker.js', import.meta.url));
+
+    // Note that at the time of writing of this comment, NodeJS doesn't support the
+    // `type: "module"` option, as modules "just work". But we put it anyway because Deno throws
+    // an exception if this option isn't present.
+    const worker = new Worker(new URL('./worker.js', import.meta.url), { type: "module" });
     return worker;
 }

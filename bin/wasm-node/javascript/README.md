@@ -77,7 +77,7 @@ The code in this package uses a web worker (in browsers) or a worker thread (on 
 line of JavaScript that creates the worker is of the following form:
 
 ``` js
-new Worker(new URL('./worker.js', import.meta.url));
+new Worker(new URL('./worker.js', import.meta.url), { type: "module" });
 ```
 
 This format is compatible [with Webpack 5](https://webpack.js.org/guides/web-workers/), meaning
