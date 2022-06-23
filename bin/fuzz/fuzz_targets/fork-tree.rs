@@ -125,8 +125,8 @@ impl<'a> arbitrary::Arbitrary<'a> for OperationsList {
                 return Ok(ControlFlow::Continue(()));
             }
 
-            // 9/10th of the time, insert a new node in the tree.
-            if u.ratio(9, 10)? {
+            // 9/10th of the time, or if the tree is empty, insert a new node in the tree.
+            if tree_root.children.borrow().is_empty() || u.ratio(9, 10)? {
                 let index = u.choose_index(all_nodes.len())?;
 
                 operations.push(Operation::Insert {
@@ -145,6 +145,7 @@ impl<'a> arbitrary::Arbitrary<'a> for OperationsList {
             }
 
             // The remaining half of the time, we prune ancestors. Otherwise, we prune uncles.
+            // Note that this path is never reached if the tree is empty.
             if u.ratio(1, 2)? {
                 let index = u.choose_index(all_nodes.len() - 1)? + 1; // Avoid the tree root
                 operations.push(Operation::PruneAncestors(
