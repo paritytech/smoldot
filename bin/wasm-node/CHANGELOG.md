@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.20 - 2022-06-23
+
 ### Changed
 
 - `new Worker` is now called with the `{ type: "module" }` option. Despite not being supported by NodeJS or Firefox, indicating this option is technically more correct and is necessary in order for smoldot to run with Deno. ([#2426](https://github.com/paritytech/smoldot/pull/2426))
