@@ -418,6 +418,7 @@ where
             (
                 CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
+                | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
                 | CoordinatorToConnectionInner::CloseOutNotifications { .. }
@@ -427,11 +428,19 @@ where
             (
                 CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
+                | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
                 | CoordinatorToConnectionInner::CloseOutNotifications { .. }
                 | CoordinatorToConnectionInner::QueueNotification { .. },
                 MultiStreamConnectionTaskInner::ShutdownWaitingAck { .. },
+            )
+            | (
+                CoordinatorToConnectionInner::StartShutdown,
+                MultiStreamConnectionTaskInner::ShutdownWaitingAck {
+                    was_api_reset: true,
+                    ..
+                },
             ) => {
                 // There might still be some messages coming from the coordinator after the
                 // connection task has sent a message indicating that it has shut down. This is
@@ -451,7 +460,12 @@ where
                     was_api_reset: *was_reset,
                 };
             }
-            _ => todo!(), // TODO:
+            (
+                CoordinatorToConnectionInner::StartShutdown,
+                MultiStreamConnectionTaskInner::ShutdownWaitingAck { .. }
+                | MultiStreamConnectionTaskInner::ShutdownAcked { .. },
+            ) => unreachable!(),
+            (CoordinatorToConnectionInner::ShutdownFinishedAck, _) => unreachable!(),
         }
     }
 

@@ -1318,12 +1318,16 @@ where
                         let response = response
                             .map_err(StorageProofRequestError::Request)
                             .and_then(|payload| {
-                                if let Err(err) =
-                                    protocol::decode_storage_or_call_proof_response(&payload)
-                                {
+                                if let Err(err) = protocol::decode_storage_or_call_proof_response(
+                                    protocol::StorageOrCallProof::StorageProof,
+                                    &payload,
+                                ) {
                                     Err(StorageProofRequestError::Decode(err))
                                 } else {
-                                    Ok(EncodedMerkleProof(payload))
+                                    Ok(EncodedMerkleProof(
+                                        payload,
+                                        protocol::StorageOrCallProof::StorageProof,
+                                    ))
                                 }
                             });
 
@@ -1338,11 +1342,17 @@ where
                                 .map_err(CallProofRequestError::Request)
                                 .and_then(|payload| {
                                     if let Err(err) =
-                                        protocol::decode_storage_or_call_proof_response(&payload)
+                                        protocol::decode_storage_or_call_proof_response(
+                                            protocol::StorageOrCallProof::CallProof,
+                                            &payload,
+                                        )
                                     {
                                         Err(CallProofRequestError::Decode(err))
                                     } else {
-                                        Ok(EncodedMerkleProof(payload))
+                                        Ok(EncodedMerkleProof(
+                                            payload,
+                                            protocol::StorageOrCallProof::CallProof,
+                                        ))
                                     }
                                 });
 
@@ -2361,12 +2371,12 @@ impl fmt::Debug for EncodedBlockAnnounce {
 
 /// Undecoded but valid Merkle proof.
 #[derive(Clone)]
-pub struct EncodedMerkleProof(Vec<u8>);
+pub struct EncodedMerkleProof(Vec<u8>, protocol::StorageOrCallProof);
 
 impl EncodedMerkleProof {
     /// Returns the decoded version of the proof.
     pub fn decode(&self) -> Vec<&[u8]> {
-        protocol::decode_storage_or_call_proof_response(&self.0).unwrap()
+        protocol::decode_storage_or_call_proof_response(self.1, &self.0).unwrap()
     }
 }
 

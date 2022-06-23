@@ -339,9 +339,10 @@ impl<'a> ProtocolRef<'a> {
             _ => Vec::new(),
         };
 
-        let mut out = crate::util::leb128::encode_usize(code).collect::<Vec<_>>();
-        out.extend(extra);
-        iter::once(out.into_iter())
+        // Combine `code` and `extra`.
+        crate::util::leb128::encode_usize(code)
+            .map(|b| either::Left([b]))
+            .chain(iter::once(either::Right(extra)))
     }
 }
 
