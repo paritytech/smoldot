@@ -265,15 +265,18 @@ impl smoldot_light_base::Platform for Platform {
     }
 
     fn read_buffer(StreamWrapper(stream_id, read_buffer): &mut Self::Stream) -> Option<&[u8]> {
-        // TODO: should check whether stream is closed
+        let mut lock = STATE.try_lock().unwrap();
+        let stream = lock.streams.get_mut(stream_id).unwrap();
+
+        if stream.closed {
+            return None;
+        }
 
         if read_buffer.buffer_first_offset < read_buffer.buffer.len() {
             return Some(&read_buffer.buffer[read_buffer.buffer_first_offset..]);
         }
 
         // Move the next buffer from `STATE` into `read_buffer`.
-        let mut lock = STATE.try_lock().unwrap();
-        let stream = lock.streams.get_mut(stream_id).unwrap();
         if let Some(msg) = stream.messages_queue.pop_front() {
             read_buffer.buffer = msg;
             read_buffer.buffer_first_offset = 0;
@@ -620,7 +623,7 @@ pub(crate) fn connection_closed(connection_id: u32, ptr: u32, len: u32) {
 
     let connection_handles_alive = match &connection.inner {
         ConnectionInner::NotOpen => 0,
-        ConnectionInner::SingleStream => 0, // TODO: correct?!
+        ConnectionInner::SingleStream => 1, // TODO: I believe that this is correct but a bit confusing; might be helpful to refactor with an enum or something
         ConnectionInner::MultiStream {
             connection_handles_alive,
             ..
