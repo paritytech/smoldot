@@ -980,7 +980,7 @@ pub enum DigestItemRef<'a> {
         opaque: &'a [u8],
     },
 
-    /// Some other thing. Unsupported and experimental.
+    /// Some other thing. Always ignored.
     Other(&'a [u8]),
 
     /// Runtime of the chain has been updated in this block. This can include the runtime code or
