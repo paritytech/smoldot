@@ -41,8 +41,8 @@ pub(crate) struct Platform;
 impl smoldot_light_base::Platform for Platform {
     type Delay = Delay;
     type Instant = crate::Instant;
-    type Connection = u32; // Entry in the ̀`CONNECTIONS` map.
-    type Stream = ((u32, u32), ReadBuffer); // Entry in the ̀`STREAMS` map and a read buffer.
+    type Connection = ConnectionWrapper; // Entry in the ̀`CONNECTIONS` map.
+    type Stream = StreamWrapper; // Entry in the ̀`STREAMS` map and a read buffer.
     type ConnectFuture = future::BoxFuture<
         'static,
         Result<
@@ -146,18 +146,26 @@ impl smoldot_light_base::Platform for Platform {
                         buffer_first_offset: 0,
                     };
 
-                    Ok(smoldot_light_base::PlatformConnection::SingleStream((
-                        (connection_id, 0),
-                        read_buffer,
-                    )))
+                    Ok(smoldot_light_base::PlatformConnection::SingleStream(
+                        StreamWrapper((connection_id, 0), read_buffer),
+                    ))
                 }
-                ConnectionInner::MultiStream { peer_id, .. } => {
+                ConnectionInner::MultiStream {
+                    peer_id,
+                    connection_handles_alive,
+                    ..
+                } => {
+                    *connection_handles_alive += 1;
                     Ok(smoldot_light_base::PlatformConnection::MultiStream(
-                        connection_id,
+                        ConnectionWrapper(connection_id),
                         peer_id.clone(),
                     ))
                 }
-                ConnectionInner::Closed(message) => {
+                ConnectionInner::Closed {
+                    message,
+                    connection_handles_alive,
+                } => {
+                    debug_assert_eq!(*connection_handles_alive, 0);
                     let message = mem::take(message);
                     lock.connections.remove(&connection_id).unwrap();
                     Err(ConnectError {
@@ -170,7 +178,9 @@ impl smoldot_light_base::Platform for Platform {
         .boxed()
     }
 
-    fn next_substream(connection_id: &mut Self::Connection) -> Self::NextSubstreamFuture {
+    fn next_substream(
+        ConnectionWrapper(connection_id): &mut Self::Connection,
+    ) -> Self::NextSubstreamFuture {
         let connection_id = *connection_id;
 
         async move {
@@ -180,14 +190,16 @@ impl smoldot_light_base::Platform for Platform {
                     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
                     match &mut connection.inner {
-                        ConnectionInner::Closed(_) => return None,
+                        ConnectionInner::Closed { .. } => return None,
                         ConnectionInner::MultiStream {
                             opened_substreams_to_pick_up,
+                            connection_handles_alive,
                             ..
                         } => {
                             if let Some((substream, direction)) =
                                 opened_substreams_to_pick_up.pop_front()
                             {
+                                *connection_handles_alive += 1;
                                 break (substream, direction);
                             }
                         }
@@ -203,7 +215,7 @@ impl smoldot_light_base::Platform for Platform {
             };
 
             Some((
-                (
+                StreamWrapper(
                     (connection_id, stream_id),
                     ReadBuffer {
                         buffer: Vec::<u8>::new().into(),
@@ -216,7 +228,7 @@ impl smoldot_light_base::Platform for Platform {
         .boxed()
     }
 
-    fn open_out_substream(connection_id: &mut Self::Connection) {
+    fn open_out_substream(ConnectionWrapper(connection_id): &mut Self::Connection) {
         debug_assert!(matches!(
             STATE
                 .try_lock()
@@ -231,7 +243,9 @@ impl smoldot_light_base::Platform for Platform {
         unsafe { bindings::connection_stream_open(*connection_id) }
     }
 
-    fn wait_more_data((stream_id, read_buffer): &mut Self::Stream) -> Self::StreamDataFuture {
+    fn wait_more_data(
+        StreamWrapper(stream_id, read_buffer): &mut Self::Stream,
+    ) -> Self::StreamDataFuture {
         if read_buffer.buffer_first_offset < read_buffer.buffer.len() {
             return async move {}.boxed();
         }
@@ -250,7 +264,7 @@ impl smoldot_light_base::Platform for Platform {
         something_happened.boxed()
     }
 
-    fn read_buffer((stream_id, read_buffer): &mut Self::Stream) -> Option<&[u8]> {
+    fn read_buffer(StreamWrapper(stream_id, read_buffer): &mut Self::Stream) -> Option<&[u8]> {
         // TODO: should check whether stream is closed
 
         if read_buffer.buffer_first_offset < read_buffer.buffer.len() {
@@ -269,7 +283,10 @@ impl smoldot_light_base::Platform for Platform {
         }
     }
 
-    fn advance_read_cursor((stream_id, read_buffer): &mut Self::Stream, mut bytes: usize) {
+    fn advance_read_cursor(
+        StreamWrapper(stream_id, read_buffer): &mut Self::Stream,
+        mut bytes: usize,
+    ) {
         loop {
             // Advance `read_buffer`.
             {
@@ -299,7 +316,7 @@ impl smoldot_light_base::Platform for Platform {
         }
     }
 
-    fn send(((connection_id, stream_id), _): &mut Self::Stream, data: &[u8]) {
+    fn send(StreamWrapper((connection_id, stream_id), _): &mut Self::Stream, data: &[u8]) {
         let mut lock = STATE.try_lock().unwrap();
         let stream = lock.streams.get_mut(&(*connection_id, *stream_id)).unwrap();
 
@@ -320,6 +337,93 @@ impl smoldot_light_base::Platform for Platform {
     }
 }
 
+pub(crate) struct StreamWrapper((u32, u32), ReadBuffer);
+
+impl Drop for StreamWrapper {
+    fn drop(&mut self) {
+        let mut lock = STATE.try_lock().unwrap();
+
+        let connection = lock.connections.get_mut(&self.0 .0).unwrap();
+        let remove_connection = match &mut connection.inner {
+            ConnectionInner::NotOpen => unreachable!(),
+            ConnectionInner::SingleStream => {
+                unsafe {
+                    bindings::connection_close(self.0 .0);
+                }
+
+                debug_assert_eq!(self.0 .1, 0);
+                true
+            }
+            ConnectionInner::MultiStream {
+                connection_handles_alive,
+                ..
+            } => {
+                unsafe { bindings::connection_stream_close(self.0 .0, self.0 .1) }
+                *connection_handles_alive -= 1;
+                let remove_connection = *connection_handles_alive == 0;
+                if remove_connection {
+                    unsafe {
+                        bindings::connection_close(self.0 .0);
+                    }
+                }
+                remove_connection
+            }
+            ConnectionInner::Closed {
+                connection_handles_alive,
+                ..
+            } => {
+                *connection_handles_alive -= 1;
+                let remove_connection = *connection_handles_alive == 0;
+                if remove_connection {
+                    unsafe {
+                        bindings::connection_close(self.0 .0);
+                    }
+                }
+                remove_connection
+            }
+        };
+
+        lock.streams.remove(&(self.0 .0, self.0 .1)).unwrap();
+
+        if remove_connection {
+            lock.connections.remove(&self.0 .0).unwrap();
+        }
+    }
+}
+
+pub(crate) struct ConnectionWrapper(u32);
+
+impl Drop for ConnectionWrapper {
+    fn drop(&mut self) {
+        let mut lock = STATE.try_lock().unwrap();
+
+        let connection = lock.connections.get_mut(&self.0).unwrap();
+        let remove_connection = match &mut connection.inner {
+            ConnectionInner::NotOpen | ConnectionInner::SingleStream => unreachable!(),
+            ConnectionInner::MultiStream {
+                connection_handles_alive,
+                ..
+            }
+            | ConnectionInner::Closed {
+                connection_handles_alive,
+                ..
+            } => {
+                *connection_handles_alive -= 1;
+                *connection_handles_alive == 0
+            }
+        };
+
+        if remove_connection {
+            lock.connections.remove(&self.0).unwrap();
+            if remove_connection {
+                unsafe {
+                    bindings::connection_close(self.0);
+                }
+            }
+        }
+    }
+}
+
 lazy_static::lazy_static! {
     static ref STATE: Mutex<NetworkState> = Mutex::new(NetworkState {
         next_connection_id: 0,
@@ -328,6 +432,11 @@ lazy_static::lazy_static! {
     });
 }
 
+/// All the connections and streams that are alive.
+///
+/// Single-stream connections have one entry in `connections` and one entry in `streams` (with
+/// a `stream_id` always equal to 0).
+/// Multi-stream connections have one entry in `connections` and zero or more entries in `streams`.
 struct NetworkState {
     next_connection_id: u32,
     connections: hashbrown::HashMap<u32, Connection, fnv::FnvBuildHasher>,
@@ -350,9 +459,18 @@ enum ConnectionInner {
         /// List of substreams that the host (i.e. JS side) has reported have been opened, but
         /// that haven't been reported through [`Platform::next_substream`] yet.
         opened_substreams_to_pick_up: VecDeque<(u32, PlatformSubstreamDirection)>,
+        /// Number of objects (connections and streams) in the [`Platform`] API that reference
+        /// this connection. If it switches from 1 to 0, the connection must be removed.
+        connection_handles_alive: u32,
     },
     /// [`bindings::connection_closed`] has been called
-    Closed(String),
+    Closed {
+        /// Message given by the bindings to justify the closure.
+        message: String,
+        /// Number of objects (connections and streams) in the [`Platform`] API that reference
+        /// this connection. If it switches from 1 to 0, the connection must be removed.
+        connection_handles_alive: u32,
+    },
 }
 
 struct Stream {
@@ -366,7 +484,7 @@ struct Stream {
     something_happened: event_listener::Event,
 }
 
-pub(crate) struct ReadBuffer {
+struct ReadBuffer {
     /// Buffer containing incoming data.
     buffer: Box<[u8]>,
 
@@ -416,6 +534,7 @@ pub(crate) fn connection_open_multi_stream(connection_id: u32, peer_id_ptr: u32,
     connection.inner = ConnectionInner::MultiStream {
         peer_id,
         opened_substreams_to_pick_up: VecDeque::with_capacity(8),
+        connection_handles_alive: 0,
     };
     connection.something_happened.notify(usize::max_value());
 }
@@ -425,12 +544,12 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: 
 
     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
-    // The docs of this function mentions that `stream_id` can be any value. However, internally
-    // we always use `0` for single stream connections.
+    // For single stream connections, the docs of this function mentions that `stream_id` can be
+    // any value. However, internally we always use `0`.
     let actual_stream_id = match connection.inner {
         ConnectionInner::MultiStream { .. } => stream_id,
         ConnectionInner::SingleStream => 0,
-        ConnectionInner::Closed(_) | ConnectionInner::NotOpen => unreachable!(),
+        ConnectionInner::Closed { .. } | ConnectionInner::NotOpen => unreachable!(),
     };
 
     let stream = lock
@@ -499,17 +618,29 @@ pub(crate) fn connection_closed(connection_id: u32, ptr: u32, len: u32) {
     let mut lock = STATE.try_lock().unwrap();
     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
-    connection.inner = ConnectionInner::Closed({
-        let ptr = usize::try_from(ptr).unwrap();
-        let len = usize::try_from(len).unwrap();
-        let message: Box<[u8]> =
-            unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) };
-        str::from_utf8(&message).unwrap().to_owned()
-    });
+    let connection_handles_alive = match &connection.inner {
+        ConnectionInner::NotOpen => 0,
+        ConnectionInner::SingleStream => 0, // TODO: correct?!
+        ConnectionInner::MultiStream {
+            connection_handles_alive,
+            ..
+        } => *connection_handles_alive,
+        ConnectionInner::Closed { .. } => unreachable!(),
+    };
+
+    connection.inner = ConnectionInner::Closed {
+        connection_handles_alive,
+        message: {
+            let ptr = usize::try_from(ptr).unwrap();
+            let len = usize::try_from(len).unwrap();
+            let message: Box<[u8]> =
+                unsafe { Box::from_raw(slice::from_raw_parts_mut(ptr as *mut u8, len)) };
+            str::from_utf8(&message).unwrap().to_owned()
+        },
+    };
 
     connection.something_happened.notify(usize::max_value());
 
-    // TODO: should we simply remove the streams or something?
     for ((_, _), stream) in lock
         .streams
         .range_mut((connection_id, u32::min_value())..=(connection_id, u32::max_value()))
@@ -520,6 +651,8 @@ pub(crate) fn connection_closed(connection_id: u32, ptr: u32, len: u32) {
 }
 
 pub(crate) fn stream_closed(connection_id: u32, stream_id: u32) {
+    // Note that, as documented, it is illegal to call this function on single-stream substreams.
+    // We can thus assume that the `stream_id` is valid.
     let mut lock = STATE.try_lock().unwrap();
     let stream = lock.streams.get_mut(&(connection_id, stream_id)).unwrap();
     stream.closed = true;

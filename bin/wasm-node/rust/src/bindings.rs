@@ -217,7 +217,14 @@ extern "C" {
     ///
     /// This function will only be called for multi-stream connections. The connection must
     /// currently be in the `Open` state. See the documentation of [`connection_new`] for details.
-    pub fn connection_stream_open(id: u32);
+    pub fn connection_stream_open(connection_id: u32);
+
+    /// Closes an existing substream of a multi-stream connection. The substream must currently
+    /// be in the `Open` state.
+    ///
+    /// This function will only be called for multi-stream connections. The connection must
+    /// currently be in the `Open` state. See the documentation of [`connection_new`] for details.
+    pub fn connection_stream_close(connection_id: u32, stream_id: u32);
 
     /// Queues data on the given stream. The data is found in the memory of the WebAssembly
     /// virtual machine, at the given pointer. The data must be sent as a binary frame.
