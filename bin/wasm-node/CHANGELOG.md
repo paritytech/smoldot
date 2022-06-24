@@ -2,8 +2,11 @@
 
 ## Unreleased
 
+## 0.6.20 - 2022-06-23
+
 ### Changed
 
+- `new Worker` is now called with the `{ type: "module" }` option. Despite not being supported by NodeJS or Firefox, indicating this option is technically more correct and is necessary in order for smoldot to run with Deno. ([#2426](https://github.com/paritytech/smoldot/pull/2426))
 - When a database and a chain specification checkpoint are both provided to `addChain`, the block in the database is used only if it has a higher block number than the block in the chain specification checkpoint. This makes it possible to bypass issues where smoldot is incapable of syncing over a certain block by updating the chain specification, without having to manually clear existing databases. ([#2401](https://github.com/paritytech/smoldot/pull/2401))
 
 ### Fixed
