@@ -580,7 +580,9 @@ where
                 }
                 Err(err) => {
                     self.pending_messages
-                        .push_back(ConnectionToCoordinatorInner::StartShutdown(Some(ShutdownCause::ProtocolError(err))));
+                        .push_back(ConnectionToCoordinatorInner::StartShutdown(Some(
+                            ShutdownCause::ProtocolError(err),
+                        )));
                     self.pending_messages
                         .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
                     self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
