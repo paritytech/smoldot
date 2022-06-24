@@ -251,11 +251,11 @@ where
                 )
             }
             MultiStreamConnectionTaskInner::ShutdownWaitingAck {
-                start_shutdown_message_to_send: start_shutdown_message_sent,
+                start_shutdown_message_to_send,
                 shutdown_finish_message_sent,
                 ..
             } => {
-                if let Some(reason) = start_shutdown_message_sent.take() {
+                if let Some(reason) = start_shutdown_message_to_send.take() {
                     debug_assert!(!*shutdown_finish_message_sent);
                     (
                         Some(self),
@@ -264,7 +264,7 @@ where
                         }),
                     )
                 } else if !*shutdown_finish_message_sent {
-                    debug_assert!(start_shutdown_message_sent.is_none());
+                    debug_assert!(start_shutdown_message_to_send.is_none());
                     *shutdown_finish_message_sent = true;
                     (
                         Some(self),
