@@ -19,7 +19,7 @@ use super::{
     super::{connection::established, read_write::ReadWrite},
     ConfigRequestResponse, ConnectionToCoordinator, ConnectionToCoordinatorInner,
     CoordinatorToConnection, CoordinatorToConnectionInner, NotificationsOutErr, OverlayNetwork,
-    SubstreamId,
+    ShutdownCause, SubstreamId,
 };
 
 use alloc::{string::ToString as _, sync::Arc};
@@ -58,9 +58,9 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
         /// of the behavior but is used to make sure that the API is used correctly.
         was_api_reset: bool,
 
-        /// `true` if the [`ConnectionToCoordinatorInner::StartShutdown`] message has already
-        /// been sent to the coordinator.
-        start_shutdown_message_sent: bool,
+        /// `None` if the [`ConnectionToCoordinatorInner::StartShutdown`] message has already
+        /// been sent to the coordinator. `Some` if the message hasn't been sent yet.
+        start_shutdown_message_to_send: Option<Option<ShutdownCause>>,
 
         /// `true` if the [`ConnectionToCoordinatorInner::ShutdownFinished`] message has already
         /// been sent to the coordinator.
@@ -251,21 +251,20 @@ where
                 )
             }
             MultiStreamConnectionTaskInner::ShutdownWaitingAck {
-                start_shutdown_message_sent,
+                start_shutdown_message_to_send: start_shutdown_message_sent,
                 shutdown_finish_message_sent,
                 ..
             } => {
-                if !*start_shutdown_message_sent {
+                if let Some(reason) = start_shutdown_message_sent.take() {
                     debug_assert!(!*shutdown_finish_message_sent);
-                    *start_shutdown_message_sent = true;
                     (
                         Some(self),
                         Some(ConnectionToCoordinator {
-                            inner: ConnectionToCoordinatorInner::StartShutdown,
+                            inner: ConnectionToCoordinatorInner::StartShutdown(reason),
                         }),
                     )
                 } else if !*shutdown_finish_message_sent {
-                    debug_assert!(*start_shutdown_message_sent);
+                    debug_assert!(start_shutdown_message_sent.is_none());
                     *shutdown_finish_message_sent = true;
                     (
                         Some(self),
@@ -410,7 +409,7 @@ where
             ) => {
                 // TODO: implement proper shutdown
                 self.connection = MultiStreamConnectionTaskInner::ShutdownWaitingAck {
-                    start_shutdown_message_sent: false,
+                    start_shutdown_message_to_send: Some(None),
                     shutdown_finish_message_sent: false,
                     was_api_reset: false,
                 };
@@ -450,12 +449,14 @@ where
             (
                 CoordinatorToConnectionInner::ShutdownFinishedAck,
                 MultiStreamConnectionTaskInner::ShutdownWaitingAck {
-                    start_shutdown_message_sent,
+                    start_shutdown_message_to_send: start_shutdown_message_sent,
                     shutdown_finish_message_sent,
                     was_api_reset: was_reset,
                 },
             ) => {
-                debug_assert!(*start_shutdown_message_sent && *shutdown_finish_message_sent);
+                debug_assert!(
+                    start_shutdown_message_sent.is_none() && *shutdown_finish_message_sent
+                );
                 self.connection = MultiStreamConnectionTaskInner::ShutdownAcked {
                     was_api_reset: *was_reset,
                 };
@@ -568,7 +569,7 @@ where
         self.connection = MultiStreamConnectionTaskInner::ShutdownWaitingAck {
             was_api_reset: true,
             shutdown_finish_message_sent: false,
-            start_shutdown_message_sent: false,
+            start_shutdown_message_to_send: Some(Some(ShutdownCause::RemoteReset)),
         };
     }
 
