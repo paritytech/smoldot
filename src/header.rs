@@ -1192,7 +1192,7 @@ pub enum DigestItem {
     /// the heap pages.
     RuntimeEnvironmentUpdated,
 
-    /// Some other thing. Unsupported and experimental.
+    /// Some other thing. Always ignored.
     Other(Vec<u8>),
 }
 
