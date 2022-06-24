@@ -154,7 +154,7 @@ impl smoldot_light_base::Platform for Platform {
                 ConnectionInner::MultiStream { peer_id, .. } => {
                     Ok(smoldot_light_base::PlatformConnection::MultiStream(
                         connection_id,
-                        todo!(), // TODO: peer_id.clone(),
+                        peer_id.clone(),
                     ))
                 }
                 ConnectionInner::Closed(message) => {
@@ -346,7 +346,7 @@ enum ConnectionInner {
     SingleStream,
     MultiStream {
         /// Peer id we're connected to.
-        peer_id: Box<[u8]>,
+        peer_id: smoldot_light_base::PeerId,
         /// List of substreams that the host (i.e. JS side) has reported have been opened, but
         /// that haven't been reported through [`Platform::next_substream`] yet.
         opened_substreams_to_pick_up: VecDeque<(u32, PlatformSubstreamDirection)>,
@@ -398,15 +398,16 @@ pub(crate) fn connection_open_single_stream(connection_id: u32) {
 }
 
 pub(crate) fn connection_open_multi_stream(connection_id: u32, peer_id_ptr: u32, peer_id_len: u32) {
-    let peer_id: Box<[u8]> = {
+    let peer_id = {
         let peer_id_ptr = usize::try_from(peer_id_ptr).unwrap();
         let peer_id_len = usize::try_from(peer_id_len).unwrap();
-        unsafe {
+        let bytes: Box<[u8]> = unsafe {
             Box::from_raw(slice::from_raw_parts_mut(
                 peer_id_ptr as *mut u8,
                 peer_id_len,
             ))
-        }
+        };
+        smoldot_light_base::PeerId::from_bytes(bytes.into()).unwrap()
     };
 
     let mut lock = STATE.try_lock().unwrap();
