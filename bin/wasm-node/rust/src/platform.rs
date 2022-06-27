@@ -600,7 +600,7 @@ pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbo
         );
 
         if _prev_value.is_some() {
-            panic!() // StreamId has been reused.
+            panic!("same stream_id used multiple times in connection_stream_opened")
         }
 
         opened_substreams_to_pick_up.push_back((
