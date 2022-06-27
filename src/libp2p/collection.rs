@@ -1090,6 +1090,7 @@ where
                     }
                 }
                 ConnectionToCoordinatorInner::InboundError(error) => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
                     if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
                         connection.state
                     {
@@ -1107,6 +1108,7 @@ where
                     protocol_index,
                     request,
                 } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
                     if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
                         connection.state
                     {
@@ -1134,6 +1136,7 @@ where
                     response,
                     ..
                 } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
                     if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
                         connection.state
                     {
@@ -1156,6 +1159,7 @@ where
                     protocol_index: overlay_network_index,
                     handshake,
                 } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
                     if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
                         connection.state
                     {
@@ -1184,6 +1188,7 @@ where
                     id: inner_substream_id,
                     ..
                 } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
                     if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
                         connection.state
                     {
@@ -1209,6 +1214,7 @@ where
                     id: inner_substream_id,
                     notification,
                 } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
                     if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
                         connection.state
                     {
@@ -1231,6 +1237,7 @@ where
                     outcome,
                     ..
                 } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
                     if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
                         connection.state
                     {
@@ -1254,6 +1261,7 @@ where
                     id: substream_id,
                     result,
                 } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
                     if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
                         connection.state
                     {
@@ -1293,6 +1301,7 @@ where
                     id: substream_id,
                     ..
                 } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
                     if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
                         connection.state
                     {
@@ -1315,6 +1324,7 @@ where
                     Event::NotificationsOutCloseDemanded { substream_id }
                 }
                 ConnectionToCoordinatorInner::NotificationsOutReset { id: substream_id } => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
                     if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
                         connection.state
                     {
@@ -1342,6 +1352,7 @@ where
                     Event::NotificationsOutReset { substream_id }
                 }
                 ConnectionToCoordinatorInner::PingOutSuccess => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
                     if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
                         connection.state
                     {
@@ -1352,6 +1363,7 @@ where
                     Event::PingOutSuccess { id: connection_id }
                 }
                 ConnectionToCoordinatorInner::PingOutFailed => {
+                    // Ignore events if a shutdown has been initiated by the coordinator.
                     if let InnerConnectionState::ShuttingDown { api_initiated, .. } =
                         connection.state
                     {
