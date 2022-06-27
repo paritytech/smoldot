@@ -125,27 +125,30 @@ pub struct NotificationProtocolConfig {
 pub struct ConnectionId(u64);
 
 impl ConnectionId {
+    /// Returns the value that compares inferior or equal to any possible [`ConnectionId`̀].
     pub fn min_value() -> Self {
         ConnectionId(u64::min_value())
     }
 
+    /// Returns the value that compares superior or equal to any possible [`ConnectionId`̀].
     pub fn max_value() -> Self {
         ConnectionId(u64::max_value())
     }
 }
 
-/// Identifier of a request created by [`Network::start_request`].
+/// Identifier of a request, or an inbound substream, or an outbound substream.
 //
 // Identifiers are never reused.
-// TODO: update doc ^
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SubstreamId(u64);
 
 impl SubstreamId {
+    /// Returns the value that compares inferior or equal to any possible [`SubstreamId`̀].
     pub fn min_value() -> Self {
         SubstreamId(u64::min_value())
     }
 
+    /// Returns the value that compares superior or equal to any possible [`SubstreamId`̀].
     pub fn max_value() -> Self {
         SubstreamId(u64::max_value())
     }
@@ -1438,6 +1441,7 @@ pub struct ConnectionState {
     pub shutting_down: bool,
 }
 
+/// Message from a connection task destined to the coordinator.
 pub struct ConnectionToCoordinator {
     inner: ConnectionToCoordinatorInner,
 }
@@ -1513,6 +1517,7 @@ enum ConnectionToCoordinatorInner {
     ShutdownFinished,
 }
 
+/// Message from the coordinator destined to a connection task.
 pub struct CoordinatorToConnection<TNow> {
     inner: CoordinatorToConnectionInner<TNow>,
 }
@@ -1597,11 +1602,15 @@ pub enum Event<TConn> {
     /// notifications on this connection, and no new incoming requests or notification substreams
     /// will be reported as events.
     ///
-    /// Keep in mind that this event can happen for connections that haven't finished their
+    /// Further events will close all existing substreams (requests and notifications) one by one.
+    /// Once all substreams have been closed, a [`Event::Shutdown`] is reported.
+    ///
+    /// Keep in mind that this event can also happen for connections that haven't finished their
     /// handshake.
     ///
     /// This event is **not** generated when [`Network::start_shutdown`] is called.
     StartShutdown {
+        /// Identifier of the connection that is starting its shutdown.
         id: ConnectionId,
         /// Reason why the connection is starting its shutdown. Because this event is not generated
         /// when the shutdown is initiated locally, the reason is always cause by the remote.
@@ -1612,8 +1621,11 @@ pub enum Event<TConn> {
     ///
     /// This [`ConnectionId`] is no longer valid, and using it will result in panics.
     Shutdown {
+        /// Identifier of the connection that has finished its shutdown.
         id: ConnectionId,
+        /// `true` if the connection was in its established phase before the shutdown.
         was_established: bool,
+        /// User data that was stored in the state machine for this connection.
         user_data: TConn,
     },
 
@@ -1622,6 +1634,7 @@ pub enum Event<TConn> {
     /// > **Note**: This event exists only for diagnostic purposes. No action is expected in
     /// >           return.
     InboundError {
+        /// Identifier of the connection that has received the substream.
         id: ConnectionId,
         /// Error that happened.
         error: InboundError,
@@ -1632,17 +1645,24 @@ pub enum Event<TConn> {
     /// *All* requests always lead to an outcome, even if the connection has been closed while the
     /// request was in progress.
     Response {
+        /// Substream that was returned by [`Network::start_request`].
         substream_id: SubstreamId,
+        /// If the request is successful, contains the response sent back by the remote. Otherwise,
+        /// contains the reason why the request isn't successful.
         response: Result<Vec<u8>, RequestError>,
     },
 
     /// Received a request from a request-response protocol.
     RequestIn {
+        /// Identifier of the connection that has received the request.
         id: ConnectionId,
         /// Substream on which the request has been received. Must be passed back when providing
         /// the response.
         substream_id: SubstreamId,
+        /// Index of the negotiated protocol within [`Config::request_response_protocols`].
         protocol_index: usize,
+        /// Payload that has been sent by the remote. Its interpretation is beyond the scope of
+        /// this module.
         request_payload: Vec<u8>,
     },
 
@@ -1683,11 +1703,15 @@ pub enum Event<TConn> {
     /// The substream needs to be accepted or refused using [`Network::accept_in_notifications`]
     /// or [`Network::reject_in_notifications`].
     NotificationsInOpen {
+        /// Identifier of the connection that has received the notification substream request.
         id: ConnectionId,
         /// Newly-generated identifier for the substream on which the request has been received.
         /// Must be passed back when accepting or refusing the substream.
         substream_id: SubstreamId,
+        /// Index of the negotiated protocol within [`Config::notification_protocols`].
         notifications_protocol_index: usize,
+        /// Handshake that has been sent by the remote. Its interpretation is beyond the scope of
+        /// this module.
         remote_handshake: Vec<u8>,
     },
 
@@ -1711,7 +1735,7 @@ pub enum Event<TConn> {
         /// reported with a [`Event::NotificationsInOpen`].
         substream_id: SubstreamId,
         /// Reason why the substream has been closed.
-        outcome: Result<(), NotificationsInClosedErr>, // TODO: other err for connection shutdown
+        outcome: Result<(), NotificationsInClosedErr>,
     },
 
     /// An outgoing ping has succeeded. This event is generated automatically over time for each
