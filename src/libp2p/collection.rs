@@ -540,6 +540,7 @@ where
     /// Panics if the [`ConnectionId`] is invalid or is a connection that hasn't finished its
     /// handshake or is shutting down.
     ///
+    #[track_caller]
     pub fn start_request(
         &mut self,
         target: ConnectionId,
@@ -547,7 +548,10 @@ where
         request_data: impl Into<Vec<u8>>,
         timeout: TNow,
     ) -> SubstreamId {
-        let connection = self.connections.get(&target).unwrap();
+        let connection = match self.connections.get(&target) {
+            Some(c) => c,
+            None => panic!(),
+        };
         assert!(matches!(
             connection.state,
             InnerConnectionState::Established
@@ -594,6 +598,7 @@ where
     /// Panics if the [`ConnectionId`] is invalid or is a connection that hasn't finished its
     /// handshake or is shutting down.
     ///
+    #[track_caller]
     pub fn open_out_notifications(
         &mut self,
         connection_id: ConnectionId,
@@ -601,7 +606,10 @@ where
         now: TNow,
         handshake: impl Into<Vec<u8>>,
     ) -> SubstreamId {
-        let connection = self.connections.get(&connection_id).unwrap();
+        let connection = match self.connections.get(&connection_id) {
+            Some(c) => c,
+            None => panic!(),
+        };
         assert!(matches!(
             connection.state,
             InnerConnectionState::Established
@@ -653,12 +661,14 @@ where
     ///
     /// Panics if [`SubstreamId`] doesn't correspond to an outbound notifications substream.
     ///
+    #[track_caller]
     pub fn close_out_notifications(&mut self, substream_id: SubstreamId) {
         // Both `Pending` and `Open` states are accepted.
-        let (connection_id, _state) = self
-            .outgoing_notification_substreams
-            .remove(&substream_id)
-            .unwrap();
+        let (connection_id, _state) =
+            match self.outgoing_notification_substreams.remove(&substream_id) {
+                Some(s) => s,
+                None => panic!(),
+            };
         let _was_in = self
             .outgoing_notification_substreams_by_connection
             .remove(&(connection_id, substream_id));
@@ -702,15 +712,17 @@ where
     ///
     /// Panics if [`SubstreamId`] is not a fully open outbound notifications substream.
     ///
+    #[track_caller]
     pub fn queue_notification(
         &mut self,
         substream_id: SubstreamId,
         notification: impl Into<Vec<u8>>,
     ) -> Result<(), QueueNotificationError> {
-        let (connection_id, state) = self
-            .outgoing_notification_substreams
-            .get(&substream_id)
-            .unwrap();
+        let (connection_id, state) = match self.outgoing_notification_substreams.get(&substream_id)
+        {
+            Some(s) => s,
+            None => panic!(),
+        };
         assert!(matches!(state, SubstreamState::Open));
 
         //  TODO: add some back-pressure system and return a `QueueNotificationError` if full
@@ -739,11 +751,13 @@ where
     ///
     /// Panics if the [`SubstreamId`] doesn't correspond to an inbound notifications substream.
     ///
+    #[track_caller]
     pub fn accept_in_notifications(&mut self, substream_id: SubstreamId, handshake: Vec<u8>) {
-        let (connection_id, state, inner_substream_id) = self
-            .ingoing_notification_substreams
-            .get_mut(&substream_id)
-            .unwrap();
+        let (connection_id, state, inner_substream_id) =
+            match self.ingoing_notification_substreams.get_mut(&substream_id) {
+                Some(s) => s,
+                None => panic!(),
+            };
         assert!(matches!(state, SubstreamState::Pending));
 
         self.messages_to_connections.push_back((
@@ -772,6 +786,7 @@ where
     ///
     /// Panics if the [`SubstreamId`] doesn't correspond to an inbound notifications substream.
     ///
+    #[track_caller]
     pub fn reject_in_notifications(&mut self, substream_id: SubstreamId) {
         if let Some((connection_id, SubstreamState::Pending, inner_substream_id)) =
             self.ingoing_notification_substreams.remove(&substream_id)
@@ -809,9 +824,14 @@ where
     ///
     /// Panics if the [`SubstreamId`] doesn't correspond to an active incoming request.
     ///
+    #[track_caller]
     pub fn respond_in_request(&mut self, substream_id: SubstreamId, response: Result<Vec<u8>, ()>) {
-        let (connection_id, inner_substream_id) =
-            self.ingoing_requests.remove(&substream_id).unwrap();
+        let (connection_id, inner_substream_id) = match self.ingoing_requests.remove(&substream_id)
+        {
+            Some(s) => s,
+            None => panic!(),
+        };
+
         self.ingoing_requests_by_connection
             .remove(&(connection_id, substream_id));
 
