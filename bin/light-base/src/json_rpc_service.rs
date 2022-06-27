@@ -812,17 +812,9 @@ impl<TPlat: Platform> Background<TPlat> {
                 )
                 .await;
             }
-            methods::MethodCall::state_getKeys {
-                prefix,
-                hash,
-            } => {
-                self.state_get_keys(
-                    request_id,
-                    &state_machine_request_id,
-                    prefix,
-                    hash,
-                )
-                .await;
+            methods::MethodCall::state_getKeys { prefix, hash } => {
+                self.state_get_keys(request_id, &state_machine_request_id, prefix, hash)
+                    .await;
             }
             methods::MethodCall::state_getKeysPaged {
                 prefix,
