@@ -1300,13 +1300,16 @@ where
                         continue;
                     }
 
-                    // The substream might already have been destroyed if the user closed the
-                    // substream while this message was pending in the queue.
-                    if !self
-                        .outgoing_notification_substreams
-                        .contains_key(&substream_id)
-                    {
-                        continue;
+                    match self.outgoing_notification_substreams.get(&substream_id) {
+                        Some((_connection_id, _substream_state)) => {
+                            debug_assert_eq!(*_connection_id, connection_id);
+                            debug_assert!(matches!(_substream_state, SubstreamState::Open));
+                        }
+                        None => {
+                            // The substream might already have been destroyed if the user closed
+                            // the substream while this message was pending in the queue.
+                            continue;
+                        }
                     }
 
                     Event::NotificationsOutCloseDemanded { substream_id }
@@ -1319,14 +1322,16 @@ where
                         continue;
                     }
 
-                    // The substream might already have been destroyed if the user closed the
-                    // substream while this message was pending in the queue.
-                    if self
-                        .outgoing_notification_substreams
-                        .remove(&substream_id)
-                        .is_none()
-                    {
-                        continue;
+                    match self.outgoing_notification_substreams.remove(&substream_id) {
+                        Some((_connection_id, _substream_state)) => {
+                            debug_assert_eq!(_connection_id, connection_id);
+                            debug_assert!(matches!(_substream_state, SubstreamState::Open));
+                        }
+                        None => {
+                            // The substream might already have been destroyed if the user closed
+                            // the substream while this message was pending in the queue.
+                            continue;
+                        }
                     }
 
                     let _was_removed = self
