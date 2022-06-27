@@ -1612,13 +1612,16 @@ pub enum Event<TConn> {
     /// Remote has closed an outgoing notifications substream, meaning that it demands the closing
     /// of the substream. Use [`Network::close_out_notifications`] as soon as possible, which is
     /// typically after all outbound notifications that need to be queued have been queued.
+    ///
+    /// This event is only generated for notification substreams that are fully open.
     NotificationsOutCloseDemanded { substream_id: SubstreamId },
 
     /// A previously open outbound substream has been closed, by the remote or as a consequence of
     /// the connection shutting down.
     ///
+    /// This event is only generated for notification substreams that are fully open.
+    ///
     /// The substream no longer exists and the [`SubstreamId`] becomes invalid.
-    // TODO: ambiguity with failed NotificationsOutResult
     NotificationsOutReset { substream_id: SubstreamId },
 
     /// The remote would like to open a notifications substream.
