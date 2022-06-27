@@ -789,6 +789,30 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         self.shared.wake_up_main_background_task.notify(1);
     }
 
+    /// Returns a list of nodes (their [`PeerId`] and multiaddresses) that we know are part of
+    /// the network.
+    ///
+    /// Nodes that are discovered might disappear over time. In other words, there is no guarantee
+    /// that a node that has been added through [`ChainNetwork::discover`] will later be returned
+    /// by [`ChainNetwork::discovered_nodes`].
+    pub async fn discovered_nodes(
+        &self,
+        chain_index: usize,
+    ) -> impl Iterator<Item = (PeerId, impl Iterator<Item = Multiaddr>)> {
+        let guarded = self.shared.guarded.lock().await;
+        guarded
+            .network
+            .discovered_nodes(chain_index)
+            .map(|(peer_id, addresses)| {
+                (
+                    peer_id.clone(),
+                    addresses.map(|a| a.clone()).collect::<Vec<_>>().into_iter(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
     /// with.
     pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
