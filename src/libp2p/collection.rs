@@ -292,9 +292,11 @@ where
             .map(|config| OverlayNetwork { config })
             .collect::<Arc<[_]>>();
 
+        // The initial capacities given to the containers below are more or less arbitrary, the
+        // objective being to avoid rellocating the containers.
         Network {
-            messages_to_connections: VecDeque::new(), // TODO: capacity?
-            pending_incoming_messages: VecDeque::new(), // TODO: capacity?
+            messages_to_connections: VecDeque::with_capacity(config.capacity * 2),
+            pending_incoming_messages: VecDeque::with_capacity(config.capacity * 2),
             next_substream_id: SubstreamId(0),
             handshake_timeout: config.handshake_timeout,
             next_connection_id: ConnectionId(0),
@@ -304,17 +306,20 @@ where
             ),
             shutting_down_connection: None,
             outgoing_requests: BTreeSet::new(),
-            ingoing_requests: hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()), // TODO: capacity?
+            ingoing_requests: hashbrown::HashMap::with_capacity_and_hasher(
+                config.request_response_protocols.len() * config.capacity,
+                Default::default(),
+            ),
             ingoing_requests_by_connection: BTreeSet::new(),
             outgoing_notification_substreams: hashbrown::HashMap::with_capacity_and_hasher(
-                0,
+                notification_protocols.len() * config.capacity,
                 Default::default(),
-            ), // TODO: capacity?
+            ),
             outgoing_notification_substreams_by_connection: BTreeSet::new(),
             ingoing_notification_substreams: hashbrown::HashMap::with_capacity_and_hasher(
-                0,
+                notification_protocols.len() * config.capacity,
                 Default::default(),
-            ), // TODO: capacity?
+            ),
             ingoing_notification_substreams_by_connection: BTreeMap::new(),
             randomness_seeds: ChaCha20Rng::from_seed(config.randomness_seed),
             noise_key: Arc::new(config.noise_key),
