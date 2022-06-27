@@ -415,13 +415,24 @@ where
     /// Panics if the connection is already shutting down, either because
     /// [`Network::start_shutdown`] was called or a [`Event::StartShutdown`] event was yielded.
     ///
+    #[track_caller]
     pub fn start_shutdown(&mut self, connection_id: ConnectionId) {
-        let connection = self.connections.get_mut(&connection_id).unwrap();
+        let connection = match self.connections.get_mut(&connection_id) {
+            Some(c) => c,
+            None => panic!(),
+        };
 
         let is_established = match connection.state {
             InnerConnectionState::Handshaking => false,
             InnerConnectionState::Established => true,
-            InnerConnectionState::ShuttingDown { .. } => panic!(), // Forbidden.
+            InnerConnectionState::ShuttingDown {
+                api_initiated: true,
+                ..
+            } => panic!("start_shutdown called twice on same connection"), // Forbidden.
+            InnerConnectionState::ShuttingDown {
+                api_initiated: false,
+                ..
+            } => panic!("start_shutdown called after StartShutdown event"), // Forbidden.
         };
 
         connection.state = InnerConnectionState::ShuttingDown {
