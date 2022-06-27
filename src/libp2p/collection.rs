@@ -1017,6 +1017,7 @@ where
                         }
                     };
 
+                    // Control flow can't reach here if `shutting_down_connection` is ̀`Some`.
                     debug_assert!(self.shutting_down_connection.is_none());
                     self.shutting_down_connection = Some(connection_id);
 
