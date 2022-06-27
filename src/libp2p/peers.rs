@@ -406,7 +406,8 @@ where
                     });
                 }
 
-                collection::Event::StartShutdown { id } => {
+                collection::Event::StartShutdown { id, .. } => {
+                    // TODO: report the shutdown reason in the API; should be done after https://github.com/paritytech/smoldot/issues/2370
                     // TODO: this is O(n)
                     for (_, item) in &mut self.desired_out_notifications {
                         if let Some((_, connection_id, _)) = item.as_ref() {
