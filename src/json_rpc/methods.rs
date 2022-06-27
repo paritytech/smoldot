@@ -366,7 +366,7 @@ define_methods! {
     /// Returns a list of all JSON-RPC methods that are available.
     rpc_methods() -> RpcMethods,
     state_call(name: Cow<'a, str>, parameters: HexString, hash: Option<HashHexString>) -> HexString [state_callAt],
-    state_getKeys() -> (), // TODO:
+    state_getKeys(prefix: HexString, hash: Option<HashHexString>) -> Vec<HexString>,
     state_getKeysPaged(prefix: Option<HexString>, count: u32, start_key: Option<HexString>, hash: Option<HashHexString>) -> Vec<HexString> [state_getKeysPagedAt],
     state_getMetadata(hash: Option<HashHexString>) -> HexString,
     state_getPairs() -> (), // TODO:

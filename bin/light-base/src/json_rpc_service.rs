@@ -812,6 +812,18 @@ impl<TPlat: Platform> Background<TPlat> {
                 )
                 .await;
             }
+            methods::MethodCall::state_getKeys {
+                prefix,
+                hash,
+            } => {
+                self.state_get_keys(
+                    request_id,
+                    &state_machine_request_id,
+                    prefix,
+                    hash,
+                )
+                .await;
+            }
             methods::MethodCall::state_getKeysPaged {
                 prefix,
                 count,
@@ -1083,7 +1095,6 @@ impl<TPlat: Platform> Background<TPlat> {
             | methods::MethodCall::grandpa_roundState { .. }
             | methods::MethodCall::offchain_localStorageGet { .. }
             | methods::MethodCall::offchain_localStorageSet { .. }
-            | methods::MethodCall::state_getKeys { .. }
             | methods::MethodCall::state_getPairs { .. }
             | methods::MethodCall::state_getReadProof { .. }
             | methods::MethodCall::state_getStorageHash { .. }
