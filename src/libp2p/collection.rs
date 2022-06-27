@@ -47,7 +47,7 @@
 //! the calls to [`Network::inject_connection_message`].
 //!
 
-use super::connection::{established, NoiseKey};
+use super::connection::{established, handshake, NoiseKey};
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     string::String,
@@ -65,6 +65,7 @@ use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 pub use super::peer_id::PeerId;
 pub use super::read_write::ReadWrite;
 pub use established::{ConfigRequestResponse, ConfigRequestResponseIn, InboundError};
+pub use handshake::HandshakeError;
 
 pub use multi_stream::MultiStreamConnectionTask;
 pub use single_stream::SingleStreamConnectionTask;
@@ -972,7 +973,14 @@ where
             let connection = &mut self.connections.get_mut(&connection_id).unwrap();
 
             break Some(match message {
-                ConnectionToCoordinatorInner::StartShutdown => {
+                ConnectionToCoordinatorInner::StartShutdown(reason) => {
+                    // The `ConnectionToCoordinator` message contains a shutdown reason if
+                    // and only if it sends `StartShutdown` as a response to a shutdown
+                    // initiated by the remote. If the shutdown was initiated locally
+                    // (`api_initiated` is `true`), then it can contain `None`, but it can also
+                    // contain `Some` in case the shutdown was initiated by the remote at the same
+                    // time as it was initiated locally.
+
                     let report_event = match &mut connection.state {
                         InnerConnectionState::ShuttingDown {
                             api_initiated: true,
@@ -1007,7 +1015,10 @@ where
                         // confirmation.
                         continue;
                     } else {
-                        Event::StartShutdown { id: connection_id }
+                        Event::StartShutdown {
+                            id: connection_id,
+                            reason: reason.unwrap(), // See comment above.
+                        }
                     }
                 }
                 ConnectionToCoordinatorInner::ShutdownFinished => {
@@ -1434,10 +1445,11 @@ enum ConnectionToCoordinatorInner {
     /// See the corresponding event in [`established::Event`].
     PingOutFailed,
 
-    /// Sent either in response to [`ConnectionToCoordinatorInner::StartShutdown`] or if the
-    /// remote has initiated the shutdown. After this, no more [`ConnectionToCoordinatorInner`]
-    /// will be sent anymore except for [`ConnectionToCoordinatorInner::ShutdownFinished`].
-    StartShutdown,
+    /// Sent either in response to [`ConnectionToCoordinatorInner::StartShutdown`] (in which case
+    /// the content is `None`) or if the remote has initiated the shutdown (in which case the
+    /// content is `Some`). After this, no more [`ConnectionToCoordinatorInner`] will be sent
+    /// anymore except for [`ConnectionToCoordinatorInner::ShutdownFinished`].
+    StartShutdown(Option<ShutdownCause>),
 
     /// Shutdown has now finished. Always sent after
     /// [`ConnectionToCoordinatorInner::StartShutdown`]. No message is sent by the connection
@@ -1535,13 +1547,16 @@ pub enum Event<TConn> {
     /// handshake.
     ///
     /// This event is **not** generated when [`Network::start_shutdown`] is called.
-    // TODO: add reason for shutdown?
-    StartShutdown { id: ConnectionId },
+    StartShutdown {
+        id: ConnectionId,
+        /// Reason why the connection is starting its shutdown. Because this event is not generated
+        /// when the shutdown is initiated locally, the reason is always cause by the remote.
+        reason: ShutdownCause,
+    },
 
     /// A transport-level connection (e.g. a TCP socket) has been shut down.
     ///
     /// This [`ConnectionId`] is no longer valid, and using it will result in panics.
-    // TODO: add reason for shutdown?
     Shutdown {
         id: ConnectionId,
         was_established: bool,
@@ -1648,6 +1663,21 @@ pub enum Event<TConn> {
     /// An outgoing ping has failed. This event is generated automatically over time for each
     /// connection in the collection.
     PingOutFailed { id: ConnectionId },
+}
+
+/// Reason why a connection is shutting down. See [`Event::StartShutdown`].
+#[derive(Debug, derive_more::Display)]
+pub enum ShutdownCause {
+    /// Shutdown was demanded by the remote and performed cleanly.
+    CleanShutdown,
+    /// Remote has abruptly reset the connection.
+    RemoteReset,
+    /// Error in the connection protocol of a fully established connection.
+    ProtocolError(established::Error),
+    /// Error in the protocol of the handshake.
+    HandshakeError(HandshakeError),
+    /// Handshake phase took too long.
+    HandshakeTimeout,
 }
 
 #[derive(Debug, derive_more::Display, Clone)]
