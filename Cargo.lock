@@ -2313,7 +2313,9 @@ name = "smoldot-light-wasm"
 version = "0.6.20"
 dependencies = [
  "event-listener",
+ "fnv",
  "futures",
+ "hashbrown 0.12.1",
  "lazy_static",
  "log",
  "pin-project",

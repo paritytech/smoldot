@@ -46,6 +46,7 @@ mod transactions_service;
 mod util;
 
 pub use json_rpc_service::HandleRpcError;
+pub use peer_id::PeerId;
 
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
@@ -199,7 +200,7 @@ pub enum PlatformConnection<TStream, TConnection> {
     SingleStream(TStream),
     /// The connection is made of multiple substreams. The encryption and multiplexing are handled
     /// externally.
-    MultiStream(TConnection, peer_id::PeerId),
+    MultiStream(TConnection, PeerId),
 }
 
 /// Direction in which a substream has been opened. See [`Platform::next_substream`].
