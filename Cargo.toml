@@ -98,7 +98,7 @@ parity-scale-codec = { version = "3.1.5", features = ["derive"], default-feature
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # `std` feature
-wasmtime = { version = "0.36.0", default-features = false, features = ["async", "cranelift"], optional = true }
+wasmtime = { version = "0.38.0", default-features = false, features = ["async", "cranelift"], optional = true }
 
 [dev-dependencies]
 async-std = "1.12.0"
