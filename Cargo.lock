@@ -2303,6 +2303,7 @@ dependencies = [
  "log",
  "lru",
  "rand",
+ "serde",
  "serde_json",
  "slab",
  "smoldot",

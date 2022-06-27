@@ -29,6 +29,7 @@ use smoldot::{
     libp2p::{connection, multiaddr, peer_id},
 };
 use std::{
+    cmp,
     collections::{hash_map::Entry, HashMap},
     num::NonZeroU32,
     ops,
@@ -398,7 +399,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
         // known as a checkpoint) is present in the chain spec, it is possible to start syncing at
         // the finalized block it describes.
         // TODO: clean up that block
-        let (chain_information, genesis_block_header) = {
+        let (chain_information, genesis_block_header, checkpoint_nodes) = {
             match (
                 chain_spec
                     .as_chain_information()
@@ -408,10 +409,10 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         s.as_chain_information(),
                     )
                 }),
-                finalized_serialize::decode_chain(config.database_content),
+                decode_database(config.database_content),
             ) {
                 // Use the database if it contains a more recent block than the chain spec checkpoint.
-                (Ok(Ok(genesis_ci)), checkpoint, Ok((database, _)))
+                (Ok(Ok(genesis_ci)), checkpoint, Ok((database, checkpoint_nodes)))
                     if checkpoint
                         .as_ref()
                         .map(|r| r.as_ref().ok())
@@ -422,14 +423,14 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         }) =>
                 {
                     let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
-                    (database, genesis_header.into())
+                    (database, genesis_header.into(), checkpoint_nodes)
                 }
 
                 // Use the database if it contains a more recent block than the chain spec checkpoint.
                 (
                     Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
                     checkpoint,
-                    Ok((database, _)),
+                    Ok((database, checkpoint_nodes)),
                 ) if checkpoint
                     .as_ref()
                     .map(|r| r.as_ref().ok())
@@ -447,7 +448,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         digest: header::DigestRef::empty().into(),
                     };
 
-                    (database, genesis_header)
+                    (database, genesis_header, checkpoint_nodes)
                 }
 
                 (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None, _) => {
@@ -473,7 +474,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         digest: header::DigestRef::empty().into(),
                     };
 
-                    (checkpoint, genesis_header)
+                    (checkpoint, genesis_header, Default::default())
                 }
 
                 (Err(err), _, _) => {
@@ -499,13 +500,13 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
 
                 (Ok(Ok(genesis_ci)), Some(Ok(checkpoint)), _) => {
                     let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
-                    (checkpoint, genesis_header.into())
+                    (checkpoint, genesis_header.into(), Default::default())
                 }
 
                 (Ok(Ok(genesis_ci)), None, _) => {
                     let genesis_header =
                         header::Header::from(genesis_ci.as_ref().finalized_block_header.clone());
-                    (genesis_ci, genesis_header)
+                    (genesis_ci, genesis_header, Default::default())
                 }
             }
         };
@@ -818,11 +819,12 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
         let new_chain_id = ChainId(public_api_chains_entry.key());
 
         // Multiple chains can share the same network service, but each specify different
-        // bootstrap nodes. In order to resolve this, each chain adds their own bootnodes to
-        // the network service after it has been initialized. This is done by adding a short-lived
-        // task that waits for the chain initialization to finish then adds the nodes.
+        // bootstrap nodes and database nodes. In order to resolve this, each chain adds their own
+        // bootnodes and database nodes to the network service after it has been initialized. This
+        // is done by adding a short-lived task that waits for the chain initialization to finish
+        // then adds the nodes.
         self.new_task_tx
-            .unbounded_send(("network-service-add-bootnodes".to_owned(), {
+            .unbounded_send(("network-service-add-initial-topology".to_owned(), {
                 // Clone `running_chain_init`.
                 let mut running_chain_init = match services_init {
                     future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
@@ -834,6 +836,10 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                     // Wait for the chain to finish initializing to proceed.
                     (&mut running_chain_init).await;
                     let running_chain = Pin::new(&mut running_chain_init).take_output().unwrap();
+                    running_chain
+                        .network_service
+                        .discover(&TPlat::now(), 0, checkpoint_nodes, false)
+                        .await;
                     running_chain
                         .network_service
                         .discover(&TPlat::now(), 0, bootstrap_nodes, true)
@@ -1054,28 +1060,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
             // Wait for the chain to finish initializing before we can obtain the database.
             (&mut services).await;
             let services = Pin::new(&mut services).take_output().unwrap();
-
-            // Finally getting the database.
-            // If the database can't be obtained, we just return a dummy value that will intentionally
-            // fail to decode if passed back.
-            let database_content = services
-                .sync_service
-                .serialize_chain_information()
-                .await
-                .map(|ci| finalized_serialize::encode_chain(&ci))
-                .unwrap_or_else(|| "<unknown>".into());
-
-            // Cap the database length to the requested max length.
-            if database_content.len() > max_size {
-                let dummy_message = "<too-large>";
-                if dummy_message.len() >= max_size {
-                    String::new()
-                } else {
-                    dummy_message.to_owned()
-                }
-            } else {
-                database_content
-            }
+            encode_database(&services, max_size).await
         }
     }
 }
@@ -1235,4 +1220,113 @@ async fn start_services<TPlat: Platform>(
         sync_service,
         transactions_service,
     }
+}
+
+async fn encode_database<TPlat: Platform>(
+    services: &ChainServices<TPlat>,
+    max_size: usize,
+) -> String {
+    // Craft the structure containing all the data that we would like to include.
+    let mut database_draft = SerdeDatabase {
+        chain: match services.sync_service.serialize_chain_information().await {
+            Some(ci) => {
+                let encoded = finalized_serialize::encode_chain(&ci);
+                serde_json::from_str(&encoded).unwrap()
+            }
+            None => {
+                // If the database can't be obtained, we just return a dummy value that will
+                // intentionally fail to decode if passed back.
+                let dummy_message = "<unknown>";
+                return if dummy_message.len() > max_size {
+                    String::new()
+                } else {
+                    dummy_message.to_owned()
+                };
+            }
+        },
+        nodes: services
+            .network_service
+            .discovered_nodes(0)
+            .await
+            .map(|(peer_id, addrs)| {
+                (
+                    peer_id.to_base58(),
+                    addrs.map(|a| a.to_string()).collect::<Vec<_>>(),
+                )
+            })
+            .collect(),
+    };
+
+    // Cap the database length to the maximum size.
+    loop {
+        let serialized = serde_json::to_string(&database_draft).unwrap();
+        if serialized.len() <= max_size {
+            // Success!
+            return serialized;
+        }
+
+        if database_draft.nodes.is_empty() {
+            // Can't shrink the database anymore. Return the string `"<too-large>"` which will
+            // fail to decode but will indicate what is wrong.
+            let dummy_message = "<too-large>";
+            return if dummy_message.len() >= max_size {
+                String::new()
+            } else {
+                dummy_message.to_owned()
+            };
+        }
+
+        // Try to reduce the size of the database.
+
+        // Remove half of the nodes.
+        // Which nodes are removed doesn't really matter.
+        let mut nodes_to_remove = cmp::max(1, database_draft.nodes.len() / 2);
+        database_draft.nodes.retain(|_, _| {
+            if nodes_to_remove >= 1 {
+                nodes_to_remove -= 1;
+                false
+            } else {
+                true
+            }
+        });
+    }
+}
+
+fn decode_database(
+    encoded: &str,
+) -> Result<
+    (
+        chain::chain_information::ValidChainInformation,
+        Vec<(PeerId, Vec<multiaddr::Multiaddr>)>,
+    ),
+    (),
+> {
+    let decoded: SerdeDatabase = serde_json::from_str(encoded).map_err(|_| ())?;
+
+    let (chain, _) =
+        finalized_serialize::decode_chain(&serde_json::to_string(&decoded.chain).unwrap())
+            .map_err(|_| ())?;
+
+    // Nodes that fail to decode are simply ignored. This is especially important for
+    // multiaddresses, as the definition of a valid or invalid multiaddress might change across
+    // versions.
+    let nodes = decoded
+        .nodes
+        .iter()
+        .filter_map(|(peer_id, addrs)| {
+            let addrs = addrs
+                .iter()
+                .filter_map(|a| Some(a.parse::<multiaddr::Multiaddr>().ok()?))
+                .collect();
+            Some((peer_id.parse::<PeerId>().ok()?, addrs))
+        })
+        .collect::<Vec<_>>();
+
+    Ok((chain, nodes))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SerdeDatabase {
+    chain: Box<serde_json::value::RawValue>,
+    nodes: hashbrown::HashMap<String, Vec<String>, fnv::FnvBuildHasher>,
 }
