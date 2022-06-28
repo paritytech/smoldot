@@ -608,7 +608,7 @@ async fn parahead<TPlat: Platform>(
     }
 }
 
-/// Error that can happen when fetching the parahead corresponding to a relay chain block.
+/// Error that can happen when fetching the parachain head corresponding to a relay chain block.
 #[derive(Debug, derive_more::Display)]
 enum ParaheadError {
     /// Error while performing call request over the network.
