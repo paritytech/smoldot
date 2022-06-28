@@ -615,7 +615,10 @@ enum ParaheadError {
     #[display(fmt = "Error while performing call request over the network: {}", _0)]
     Call(runtime_service::RuntimeCallError),
     /// Error while starting virtual machine to verify call proof.
-    #[display(fmt = "Error while starting virtual machine to verify call proof: {}", _0)]
+    #[display(
+        fmt = "Error while starting virtual machine to verify call proof: {}",
+        _0
+    )]
     StartError(host::StartErr),
     /// Error during the execution of the virtual machine to verify call proof.
     #[display(fmt = "Error during the call proof verification: {}", _0)]
