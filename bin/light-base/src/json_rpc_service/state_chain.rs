@@ -24,6 +24,7 @@ use crate::runtime_service;
 use futures::{lock::MutexGuard, prelude::*};
 use smoldot::{
     header,
+    informant::HashDisplay,
     json_rpc::{self, methods, requests_subscriptions},
     network::protocol,
     remove_metadata_length_prefix,
@@ -636,27 +637,34 @@ impl<TPlat: Platform> Background<TPlat> {
             let me = self.clone();
             async move {
                 loop {
-                    match blocks_list.next().await {
-                        Some(block) => {
-                            let header =
-                                methods::Header::from_scale_encoded_header(&block).unwrap();
-                            me.requests_subscriptions
-                                .set_queued_notification(
-                                    &state_machine_subscription,
-                                    0,
-                                    methods::ServerToClient::chain_newHead {
-                                        subscription: (&subscription_id).into(),
-                                        result: header,
-                                    }
-                                    .to_json_call_object_parameters(None),
-                                )
-                                .await;
+                    // Stream returned by `subscribe_best` is always unlimited.
+                    let header = blocks_list.next().await.unwrap();
+
+                    let header = match methods::Header::from_scale_encoded_header(&header) {
+                        Ok(h) => h,
+                        Err(error) => {
+                            log::warn!(
+                                target: &me.log_target,
+                                "`chain_subscribeNewHeads` subscription has skipped block due to \
+                                undecodable header. Hash: {}. Error: {}",
+                                HashDisplay(&header::hash_from_scale_encoded_header(&header)),
+                                error,
+                            );
+                            continue;
                         }
-                        None => {
-                            // TODO: ?!
-                            return;
-                        }
-                    }
+                    };
+
+                    me.requests_subscriptions
+                        .set_queued_notification(
+                            &state_machine_subscription,
+                            0,
+                            methods::ServerToClient::chain_newHead {
+                                subscription: (&subscription_id).into(),
+                                result: header,
+                            }
+                            .to_json_call_object_parameters(None),
+                        )
+                        .await;
                 }
             }
         };
