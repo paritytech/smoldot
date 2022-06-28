@@ -212,7 +212,6 @@ pub struct WarpSyncFragment {
     /// Header of a block in the chain.
     pub scale_encoded_header: Vec<u8>,
 
-    /// Justification that proves the finality of
-    /// [`GrandpaWarpSyncResponseFragment::scale_encoded_header`].
+    /// Justification that proves the finality of [`WarpSyncFragment::scale_encoded_header`].
     pub scale_encoded_justification: Vec<u8>,
 }
