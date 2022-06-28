@@ -46,6 +46,8 @@ use core::{
     time::Duration,
 };
 
+pub use warp_sync::WarpSyncFragment;
+
 /// Configuration for the [`AllSync`].
 // TODO: review these fields
 #[derive(Debug)]
@@ -1271,19 +1273,40 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         }
     }
 
-    /// Inject a response to a previously-emitted GrandPa warp sync request.
+    /// Inject a successful response to a previously-emitted GrandPa warp sync request.
     ///
     /// # Panic
     ///
     /// Panics if the [`RequestId`] doesn't correspond to any request, or corresponds to a request
     /// of a different type.
     ///
-    pub fn grandpa_warp_sync_response(
+    pub fn grandpa_warp_sync_response_ok<'a>(
         &mut self,
         request_id: RequestId,
-        // TODO: don't use crate::network::protocol
-        // TODO: Result instead of Option?
-        response: Option<crate::network::protocol::GrandpaWarpSyncResponse>,
+        fragments: Vec<WarpSyncFragment>,
+        is_finished: bool,
+    ) -> (TRq, ResponseOutcome) {
+        self.grandpa_warp_sync_response_inner(request_id, Some((fragments, is_finished)))
+    }
+
+    /// Inject a failure to a previously-emitted GrandPa warp sync request.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] doesn't correspond to any request, or corresponds to a request
+    /// of a different type.
+    ///
+    pub fn grandpa_warp_sync_response_err(
+        &mut self,
+        request_id: RequestId,
+    ) -> (TRq, ResponseOutcome) {
+        self.grandpa_warp_sync_response_inner(request_id, None)
+    }
+
+    fn grandpa_warp_sync_response_inner(
+        &mut self,
+        request_id: RequestId,
+        response: Option<(Vec<WarpSyncFragment>, bool)>,
     ) -> (TRq, ResponseOutcome) {
         debug_assert!(self.shared.requests.contains(request_id.0));
         let request = self.shared.requests.remove(request_id.0);
@@ -1296,7 +1319,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             AllSyncInner::GrandpaWarpSync {
                 inner: warp_sync::InProgressWarpSync::WarpSyncRequest(grandpa),
             } => {
-                let updated_grandpa = grandpa.handle_response(response);
+                let updated_grandpa = if let Some((fragments, is_finished)) = response {
+                    grandpa.handle_response_ok(fragments, is_finished)
+                } else {
+                    grandpa.handle_response_err()
+                };
                 self.inner = AllSyncInner::GrandpaWarpSync {
                     inner: updated_grandpa,
                 };
@@ -1624,6 +1651,17 @@ pub enum BlockAnnounceOutcome {
 
     /// Header cannot be verified now and has been silently discarded.
     Discarded,
+}
+
+/// Response to a GrandPa warp sync request.
+#[derive(Debug)]
+pub struct GrandpaWarpSyncResponseFragment<'a> {
+    /// Header of a block in the chain.
+    pub scale_encoded_header: &'a [u8],
+
+    /// Justification that proves the finality of
+    /// [`GrandpaWarpSyncResponseFragment::scale_encoded_header`].
+    pub scale_encoded_justification: &'a [u8],
 }
 
 /// See [`AllSync::best_block_storage`].
