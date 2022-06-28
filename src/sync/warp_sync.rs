@@ -67,13 +67,12 @@ use crate::{
     },
     finality::grandpa::warp_sync,
     header::{self, Header, HeaderRef},
-    network::protocol::GrandpaWarpSyncResponse,
 };
 
 use alloc::vec::Vec;
 use core::ops;
 
-pub use warp_sync::Error as FragmentError;
+pub use warp_sync::{Error as FragmentError, WarpSyncFragment};
 
 /// Problem encountered during a call to [`warp_sync()`].
 #[derive(Debug, derive_more::Display)]
@@ -851,47 +850,48 @@ impl<TSrc> GrandpaWarpSyncRequest<TSrc> {
         }
     }
 
-    /// Submit a GrandPa warp sync response if the request succeeded or `None` if it did not.
-    pub fn handle_response(
+    /// Submit a GrandPa warp sync successful response.
+    pub fn handle_response_ok(
         mut self,
-        response: Option<GrandpaWarpSyncResponse>,
+        fragments: Vec<WarpSyncFragment>,
+        final_set_of_fragments: bool,
     ) -> InProgressWarpSync<TSrc> {
         debug_assert!(self.sources.contains(self.source_id.0));
-
         self.sources[self.source_id.0].already_tried = true;
 
-        match response {
-            Some(response) => {
-                let final_set_of_fragments = response.is_finished;
-
-                let verifier = match &self.previous_verifier_values {
-                    Some((_, chain_information_finality)) => warp_sync::Verifier::new(
-                        chain_information_finality.into(),
-                        response.fragments,
-                        final_set_of_fragments,
-                    ),
-                    None => warp_sync::Verifier::new(
-                        self.state.start_chain_information.as_ref().finality,
-                        response.fragments,
-                        final_set_of_fragments,
-                    ),
-                };
-
-                InProgressWarpSync::Verifier(Verifier {
-                    final_set_of_fragments,
-                    verifier,
-                    state: self.state,
-                    sources: self.sources,
-                    warp_sync_source_id: self.source_id,
-                    previous_verifier_values: self.previous_verifier_values,
-                })
-            }
-            None => InProgressWarpSync::warp_sync_request_from_next_source(
-                self.sources,
-                self.state,
-                self.previous_verifier_values,
+        let verifier = match &self.previous_verifier_values {
+            Some((_, chain_information_finality)) => warp_sync::Verifier::new(
+                chain_information_finality.into(),
+                fragments,
+                final_set_of_fragments,
             ),
-        }
+            None => warp_sync::Verifier::new(
+                self.state.start_chain_information.as_ref().finality,
+                fragments,
+                final_set_of_fragments,
+            ),
+        };
+
+        InProgressWarpSync::Verifier(Verifier {
+            final_set_of_fragments,
+            verifier,
+            state: self.state,
+            sources: self.sources,
+            warp_sync_source_id: self.source_id,
+            previous_verifier_values: self.previous_verifier_values,
+        })
+    }
+
+    /// Submit a GrandPa warp sync request failure.
+    pub fn handle_response_err(mut self) -> InProgressWarpSync<TSrc> {
+        debug_assert!(self.sources.contains(self.source_id.0));
+        self.sources[self.source_id.0].already_tried = true;
+
+        InProgressWarpSync::warp_sync_request_from_next_source(
+            self.sources,
+            self.state,
+            self.previous_verifier_values,
+        )
     }
 }
 
