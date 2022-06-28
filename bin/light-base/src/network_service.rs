@@ -793,8 +793,8 @@ impl<TPlat: Platform> NetworkService<TPlat> {
     /// the network.
     ///
     /// Nodes that are discovered might disappear over time. In other words, there is no guarantee
-    /// that a node that has been added through [`ChainNetwork::discover`] will later be returned
-    /// by [`ChainNetwork::discovered_nodes`].
+    /// that a node that has been added through [`NetworkService::discover`] will later be
+    /// returned by [`NetworkService::discovered_nodes`].
     pub async fn discovered_nodes(
         &self,
         chain_index: usize,
