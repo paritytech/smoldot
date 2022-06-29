@@ -296,7 +296,7 @@ where
             .collect::<Arc<[_]>>();
 
         // The initial capacities given to the containers below are more or less arbitrary, the
-        // objective being to avoid rellocating the containers.
+        // objective being to avoid relocating the containers.
         Network {
             messages_to_connections: VecDeque::with_capacity(config.capacity * 2),
             pending_incoming_messages: VecDeque::with_capacity(config.capacity * 2),
