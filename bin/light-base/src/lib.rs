@@ -1234,8 +1234,8 @@ async fn encode_database<TPlat: Platform>(
                 serde_json::from_str(&encoded).unwrap()
             }
             None => {
-                // If the database can't be obtained, we just return a dummy value that will
-                // intentionally fail to decode if passed back.
+                // If the chain information can't be obtained, we just return a dummy value that
+                // will intentionally fail to decode if passed back.
                 let dummy_message = "<unknown>";
                 return if dummy_message.len() > max_size {
                     String::new()
