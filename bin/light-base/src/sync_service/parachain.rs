@@ -367,10 +367,10 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         },
                         Err(error) => {
                             // Several chains initially didn't support parachains, and have later
-                            // been upgraded to support them. Additionally, the parachain might
-                            // not have had a core on the relay chain until recently. For these
-                            // reasons, we only print an error if the relay chain is near the head
-                            // of the chain.
+                            // been upgraded to support them. Similarly, the parachain might not
+                            // have had a core on the relay chain until recently. For these
+                            // reasons, errors when the relay chain is not near head of the chain
+                            // are most likely normal and do not warrant logging an error.
                             if relay_chain_sync.is_near_head_of_chain_heuristic().await
                                 && !error.is_network_problem()
                             {
