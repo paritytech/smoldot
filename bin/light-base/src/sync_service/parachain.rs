@@ -67,10 +67,6 @@ pub(super) async fn start_parachain<TPlat: Platform>(
     // Maps `PeerId`s to their indices within `sync_sources`.
     let mut sync_sources_map = HashMap::new();
 
-    // `true` after a parachain block has been fetched from the parachain.
-    // TODO: handled in a hacky way; unclear how to handle properly
-    let mut is_near_head_of_chain;
-
     // This function contains two loops within each other. If the relay chain syncing service has
     // a gap in its blocks, or if the node is overloaded and can't process blocks in time, then
     // we break out of the inner loop in order to reset everything.
@@ -90,8 +86,6 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                 &relay_chain_subscribe_all.finalized_block_scale_encoded_header
             ))
         );
-
-        is_near_head_of_chain = relay_chain_sync.is_near_head_of_chain_heuristic().await;
 
         // Tree of relay chain blocks. Blocks are inserted when received from the relay chain
         // sync service. Once inside, their corresponding parahead is fetched. Once the parahead
@@ -322,8 +316,6 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         None => break, // Jumps to the outer loop to recreate the channel.
                     };
 
-                    is_near_head_of_chain = relay_chain_sync.is_near_head_of_chain_heuristic().await;
-
                     // Update the local tree of blocks to match the update sent by the relay chain
                     // syncing service.
                     match relay_chain_notif {
@@ -374,10 +366,14 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             }
                         },
                         Err(error) => {
-                            // Only a debug line is printed if not near the head of the chain,
-                            // to handle chains that have been upgraded later on to support
-                            // parachains later.
-                            if is_near_head_of_chain && !error.is_network_problem() { // TODO: is is_near_head_of_chain the correct flag?
+                            // Several chains initially didn't support parachains, and have later
+                            // been upgraded to support them. Similarly, the parachain might not
+                            // have had a core on the relay chain until recently. For these
+                            // reasons, errors when the relay chain is not near head of the chain
+                            // are most likely normal and do not warrant logging an error.
+                            if relay_chain_sync.is_near_head_of_chain_heuristic().await
+                                && !error.is_network_problem()
+                            {
                                 log::error!(
                                     target: &log_target,
                                     "Failed to fetch the parachain head from relay chain blocks {}: {}",
@@ -409,7 +405,13 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
                     match foreground_message {
                         ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
-                            let _ = send_back.send(is_near_head_of_chain);
+                            // Since there is a mapping between relay chain blocks and parachain
+                            // blocks, whether a parachain is at the head of the chain is the
+                            // same thing as whether its relay chain is at the head of the chain.
+                            // Note that there is no ordering guarantee of any kind w.r.t.
+                            // block subscriptions notifications.
+                            let val = relay_chain_sync.is_near_head_of_chain_heuristic().await;
+                            let _ = send_back.send(val);
                         },
                         ToBackground::SubscribeAll { send_back, buffer_size, .. } => {
                             let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
