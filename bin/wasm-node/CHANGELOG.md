@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.21 - 2022-06-30
+
 ### Added
 
 - Block headers with a digest item of type `Other` no longer fail to parse. ([#2425](https://github.com/paritytech/smoldot/pull/2425))
