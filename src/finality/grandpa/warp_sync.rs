@@ -24,7 +24,6 @@ use crate::finality::justification::verify::{
 };
 use crate::header::{self, DigestItemRef, GrandpaAuthority, GrandpaConsensusLogRef};
 use crate::informant::HashDisplay;
-use crate::network::protocol::GrandpaWarpSyncResponseFragment;
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -83,14 +82,14 @@ pub struct Verifier {
     index: usize,
     authorities_set_id: u64,
     authorities_list: Vec<GrandpaAuthority>,
-    fragments: Vec<GrandpaWarpSyncResponseFragment>,
+    fragments: Vec<WarpSyncFragment>,
     is_proof_complete: bool,
 }
 
 impl Verifier {
     pub fn new(
         start_chain_information_finality: ChainInformationFinalityRef,
-        warp_sync_response_fragments: Vec<GrandpaWarpSyncResponseFragment>,
+        warp_sync_response_fragments: Vec<WarpSyncFragment>,
         is_proof_complete: bool,
     ) -> Self {
         let (wrong_chain_algorithm, authorities_list, authorities_set_id) =
@@ -205,4 +204,14 @@ pub enum Next {
         scale_encoded_header: Vec<u8>,
         chain_information_finality: ChainInformationFinality,
     },
+}
+
+/// Fragment to be verified.
+#[derive(Debug)]
+pub struct WarpSyncFragment {
+    /// Header of a block in the chain.
+    pub scale_encoded_header: Vec<u8>,
+
+    /// Justification that proves the finality of [`WarpSyncFragment::scale_encoded_header`].
+    pub scale_encoded_justification: Vec<u8>,
 }

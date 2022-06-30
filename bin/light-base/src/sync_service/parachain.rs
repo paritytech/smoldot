@@ -608,14 +608,29 @@ async fn parahead<TPlat: Platform>(
     }
 }
 
-// TODO: document and properly derive Display
+/// Error that can happen when fetching the parachain head corresponding to a relay chain block.
 #[derive(Debug, derive_more::Display)]
 enum ParaheadError {
+    /// Error while performing call request over the network.
+    #[display(fmt = "Error while performing call request over the network: {}", _0)]
     Call(runtime_service::RuntimeCallError),
+    /// Error while starting virtual machine to verify call proof.
+    #[display(
+        fmt = "Error while starting virtual machine to verify call proof: {}",
+        _0
+    )]
     StartError(host::StartErr),
+    /// Error during the execution of the virtual machine to verify call proof.
+    #[display(fmt = "Error during the call proof verification: {}", _0)]
     ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
+    /// Parachain doesn't have a core in the relay chain.
     NoCore,
+    /// Error while decoding the output of the call.
+    ///
+    /// This indicates some kind of incompatibility between smoldot and the relay chain.
+    #[display(fmt = "Error while decoding the output of the call: {}", _0)]
     InvalidRuntimeOutput(para::Error),
+    /// Fetching following keys is not supported by call proofs.
     NextKeyForbidden,
 }
 
