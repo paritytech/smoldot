@@ -823,6 +823,23 @@ where
         }
     }
 
+    /// Returns a list of nodes (their [`PeerId`] and multiaddresses) that we know are part of
+    /// the network.
+    ///
+    /// Nodes that are discovered might disappear over time. In other words, there is no guarantee
+    /// that a node that has been added through [`ChainNetwork::discover`] will later be returned
+    /// by [`ChainNetwork::discovered_nodes`].
+    pub fn discovered_nodes(
+        &'_ self,
+        chain_index: usize,
+    ) -> impl Iterator<Item = (&'_ PeerId, impl Iterator<Item = &'_ multiaddr::Multiaddr>)> + '_
+    {
+        let kbuckets = &self.chains[chain_index].kbuckets;
+        kbuckets
+            .iter_ordered()
+            .map(|(peer_id, addresses)| (peer_id, addresses.iter()))
+    }
+
     /// After calling [`ChainNetwork::next_start_connect`], notifies the [`ChainNetwork`] of the
     /// success of the dialing attempt.
     ///
@@ -1956,7 +1973,7 @@ where
                 let potential = self
                     .chains
                     .iter_mut()
-                    .flat_map(|chain| chain.kbuckets.iter_mut())
+                    .flat_map(|chain| chain.kbuckets.iter_mut_ordered())
                     .find(|(p, _)| **p == *entry.key())
                     .and_then(|(_, addrs)| addrs.addr_to_pending());
                 match potential {
@@ -2015,7 +2032,7 @@ where
         let chain = &mut self.chains[chain_index];
 
         let list = {
-            let mut list = chain.kbuckets.iter().collect::<Vec<_>>();
+            let mut list = chain.kbuckets.iter_ordered().collect::<Vec<_>>();
             list.shuffle(&mut self.randomness);
             list
         };

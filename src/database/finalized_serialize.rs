@@ -37,7 +37,7 @@ use hashbrown::HashMap;
 
 mod defs;
 
-/// Serializes the given chain information as a string.
+/// Serializes the given chain information as a JSON string.
 ///
 /// This is a shortcut for [`encode_chain_storage`] with no `finalized_storage`.
 pub fn encode_chain<'a>(

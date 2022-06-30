@@ -2303,6 +2303,7 @@ dependencies = [
  "log",
  "lru",
  "rand",
+ "serde",
  "serde_json",
  "slab",
  "smoldot",
@@ -2310,7 +2311,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-light-wasm"
-version = "0.6.20"
+version = "0.6.21"
 dependencies = [
  "event-listener",
  "fnv",
