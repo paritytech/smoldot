@@ -905,6 +905,75 @@ impl<TPlat: Platform> Background<TPlat> {
             .await;
     }
 
+    /// Handles a call to [`methods::MethodCall::state_getKeys`].
+    pub(super) async fn state_get_keys(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        prefix: methods::HexString,
+        hash: Option<methods::HashHexString>,
+    ) {
+        // `hash` equal to `None` means "best block".
+        let hash = match hash {
+            Some(h) => h.0,
+            None => header::hash_from_scale_encoded_header(
+                &sub_utils::subscribe_best(&self.runtime_service).await.0,
+            ),
+        };
+
+        // Obtain the state trie root and height of the requested block.
+        // This is necessary to perform network storage queries.
+        let (state_root, block_number) = match self.state_trie_root_hash(&hash).await {
+            Ok(v) => v,
+            Err(()) => {
+                self.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                &"Failed to fetch block information",
+                            ),
+                            None,
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let outcome = self
+            .sync_service
+            .clone()
+            .storage_prefix_keys_query(
+                block_number,
+                &hash,
+                &prefix.0,
+                &state_root,
+                3,
+                Duration::from_secs(12),
+                NonZeroU32::new(1).unwrap(),
+            )
+            .await;
+
+        let response = match outcome {
+            Ok(keys) => {
+                let out = keys.into_iter().map(methods::HexString).collect::<Vec<_>>();
+                methods::Response::state_getKeys(out).to_json_response(request_id)
+            }
+            Err(error) => json_rpc::parse::build_error_response(
+                request_id,
+                json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                None,
+            ),
+        };
+
+        self.requests_subscriptions
+            .respond(&state_machine_request_id, response)
+            .await;
+    }
+
     /// Handles a call to [`methods::MethodCall::state_getKeysPaged`].
     pub(super) async fn state_get_keys_paged(
         self: &Arc<Self>,
