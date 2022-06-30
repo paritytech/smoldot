@@ -160,7 +160,7 @@ where
     pub fn closest_entries(&self, target: &K) -> impl Iterator<Item = (&K, &V)> {
         // TODO: this is extremely unoptimized
         let target_hashed = Key::new(target.as_ref());
-        let mut list = self.iter().collect::<Vec<_>>();
+        let mut list = self.iter_ordered().collect::<Vec<_>>();
         list.sort_by_key(|(key, _)| {
             let key_hashed = Key::new(key.as_ref());
             distance_log2(&key_hashed, &target_hashed).map_or(0, |d| u16::from(d) + 1)
@@ -171,14 +171,20 @@ where
 
 impl<K, V, TNow, const ENTRIES_PER_BUCKET: usize> KBuckets<K, V, TNow, ENTRIES_PER_BUCKET> {
     /// Iterates over all the peers in the k-buckets.
-    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+    ///
+    /// The buckets are iterated one by one from closest to furthest away, and within each bucket
+    /// elements are ordered by descending time since connectivity.
+    pub fn iter_ordered(&self) -> impl Iterator<Item = (&K, &V)> {
         self.buckets
             .iter()
             .flat_map(|b| b.entries.iter().map(|(k, v)| (k, v)))
     }
 
     /// Iterates over all the peers in the k-buckets.
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+    ///
+    /// The buckets are iterated one by one from closest to furthest away, and within each bucket
+    /// elements are ordered by descending time since connectivity.
+    pub fn iter_mut_ordered(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
         self.buckets
             .iter_mut()
             .flat_map(|b| b.entries.iter_mut().map(|(k, v)| (&*k, v)))
@@ -192,7 +198,7 @@ where
     V: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_list().entries(self.iter()).finish()
+        f.debug_list().entries(self.iter_ordered()).finish()
     }
 }
 
