@@ -23,17 +23,34 @@ import * as http from 'node:http';
 import * as process from 'node:process';
 import * as fs from 'node:fs';
 
-// Adjust these chain specs for the chain you want to connect to.
-const westend = fs.readFileSync('../../westend.json', 'utf8');
-const westmint = fs.readFileSync('../../westend-westmint.json', 'utf8');
-const polkadot = fs.readFileSync('../../polkadot.json', 'utf8');
-const acala = fs.readFileSync('../../polkadot-acala.json', 'utf8');
-const kusama = fs.readFileSync('../../kusama.json', 'utf8');
-const statemine = fs.readFileSync('../../kusama-statemine.json', 'utf8');
-const karura = fs.readFileSync('../../kusama-karura.json', 'utf8');
-const rococo = fs.readFileSync('../../rococo.json', 'utf8');
-const adz = fs.readFileSync('../../rococo-adz.json', 'utf8');
-const canvas = fs.readFileSync('../../rococo-canvas.json', 'utf8');
+// List of files containing chains available to the user.
+// The first item has a specific role in that we always connect to it at initialization.
+const chainSpecsFiles = [
+    '../../westend.json',
+    '../../westend-westmint.json',
+    '../../polkadot.json',
+    '../../polkadot-acala.json',
+    '../../kusama.json',
+    '../../kusama-statemine.json',
+    '../../kusama-karura.json',
+    '../../rococo.json',
+    '../../rococo-adz.json',
+    '../../rococo-canvas.json',
+];
+
+// Load all the files in a single map.
+const chainSpecsById = {};
+let firstChainSpecId = null;
+for (const file of chainSpecsFiles) {
+    const content = fs.readFileSync(file, 'utf8');
+    const decoded = JSON.parse(content);
+    if (!firstChainSpecId)
+        firstChainSpecId = decoded.id;
+    chainSpecsById[decoded.id] = {
+        chainSpec: content,
+        relayChain: decoded.relay_chain,
+    };
+}
 
 const client = smoldot.start({
     maxLogLevel: 3,  // Can be increased for more verbosity
@@ -42,7 +59,7 @@ const client = smoldot.start({
     forbidNonLocalWs: false,
     forbidWss: false,
     cpuRateLimit: 0.5,
-    logCallback: (level, target, message) => {
+    logCallback: (_level, target, message) => {
         // As incredible as it seems, there is currently no better way to print the current time
         // formatted in a certain way.
         const now = new Date();
@@ -57,36 +74,28 @@ const client = smoldot.start({
     }
 });
 
-// Pre-load smoldot with the relay chain spec.
-// We call `addChain` again with the same chain spec again every time a new WebSocket connection
-// is established, but smoldot will de-duplicate them and only connect to the chain once.
-// By calling it now, we let smoldot start syncing that chain in the background even before a
-// WebSocket connection has been established.
+// Note that We call `addChain` again with the same chain spec again every time a new WebSocket
+// connection is established, but smoldot will de-duplicate them and only connect to the chain
+// once. By calling it now, we let smoldot start syncing that chain in the background even before
+// a WebSocket connection has been established.
 client
-    .addChain({ chainSpec: westend })
+    .addChain({ chainSpec: chainSpecsById[firstChainSpecId].chainSpec })
     .catch((error) => {
         console.error("Error while adding chain: " + error);
         process.exit(1);
     });
 
 // Start the WebSocket server listening on port 9944.
-let server = http.createServer(function (request, response) {
+let server = http.createServer(function (_request, response) {
     response.writeHead(404);
     response.end();
 });
 server.listen(9944, function () {
     console.log('JSON-RPC server now listening on port 9944');
     console.log('Please visit one of:');
-    console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fwestend');
-    console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fwestmint');
-    console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fkusama');
-    console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fstatemine');
-    console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fkarura');
-    console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fpolkadot');
-    console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Facala');
-    console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Frococo');
-    console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fadz');
-    console.log('- https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2Fcanvas');
+    for (const chainId in chainSpecsById) {
+        console.log('- ' + chainId + ': https://polkadot.js.org/apps/?rpc=ws%3A%2F%2F127.0.0.1%3A9944%2F' + chainId);
+    }
     console.log('');
 });
 let wsServer = new websocket.server({
@@ -97,164 +106,47 @@ let wsServer = new websocket.server({
 wsServer.on('request', function (request) {
     // Received a new incoming WebSocket connection.
 
-    // Depending on the URL, we add either Westend or Westend+Westmint to smoldot.
-    // `chain` will contain a `Promise` that yields either `{ relay }` or `{ relay, para }`, where
-    // `relay` and `para` are of type `SmoldotChain`.
-    let chain;
-    if (request.resource == '/westend') {
-        chain = (async () => {
-            return {
-                relay: await client.addChain({
-                    chainSpec: westend,
-                    jsonRpcCallback: (resp) => {
-                        connection.sendUTF(resp);
-                    },
-                })
-            };
-        })();
+    // Note that we don't care too much about sanitizing input as this is just a demo.
+    const chainCfg = chainSpecsById[request.resource.substring(1)];
 
-    } else if (request.resource == '/westmint') {
-        chain = (async () => {
-            const relay = await client.addChain({
-                chainSpec: westend,
-            });
-
-            const para = await client.addChain({
-                chainSpec: westmint,
-                jsonRpcCallback: (resp) => {
-                    connection.sendUTF(resp);
-                },
-                potentialRelayChains: [relay]
-            });
-
-            return { relay, para };
-        })();
-    } else if (request.resource == '/kusama') {
-        chain = (async () => {
-            return {
-                relay: await client.addChain({
-                    chainSpec: kusama,
-                    jsonRpcCallback: (resp) => {
-                        connection.sendUTF(resp);
-                    },
-                })
-            };
-        })();
-    } else if (request.resource == '/statemine') {
-        chain = (async () => {
-            const relay = await client.addChain({
-                chainSpec: kusama,
-            });
-
-            const para = await client.addChain({
-                chainSpec: statemine,
-                jsonRpcCallback: (resp) => {
-                    connection.sendUTF(resp);
-                },
-                potentialRelayChains: [relay]
-            });
-
-            return { relay, para };
-        })();
-    } else if (request.resource == '/karura') {
-        chain = (async () => {
-            const relay = await client.addChain({
-                chainSpec: kusama,
-            });
-
-            const para = await client.addChain({
-                chainSpec: karura,
-                jsonRpcCallback: (resp) => {
-                    connection.sendUTF(resp);
-                },
-                potentialRelayChains: [relay]
-            });
-
-            return { relay, para };
-        })();
-    } else if (request.resource == '/polkadot') {
-        chain = (async () => {
-            return {
-                relay: await client.addChain({
-                    chainSpec: polkadot,
-                    jsonRpcCallback: (resp) => {
-                        connection.sendUTF(resp);
-                    },
-                })
-            };
-        })();
-    } else if (request.resource == '/acala') {
-        chain = (async () => {
-            const relay = await client.addChain({
-                chainSpec: polkadot,
-            });
-
-            const para = await client.addChain({
-                chainSpec: acala,
-                jsonRpcCallback: (resp) => {
-                    connection.sendUTF(resp);
-                },
-                potentialRelayChains: [relay]
-            });
-
-            return { relay, para };
-        })();
-    } else if (request.resource == '/rococo') {
-        chain = (async () => {
-            return {
-                relay: await client.addChain({
-                    chainSpec: rococo,
-                    jsonRpcCallback: (resp) => {
-                        connection.sendUTF(resp);
-                    },
-                })
-            };
-        })();
-    } else if (request.resource == '/adz') {
-        chain = (async () => {
-            const relay = await client.addChain({
-                chainSpec: rococo,
-            });
-
-            const para = await client.addChain({
-                chainSpec: adz,
-                jsonRpcCallback: (resp) => {
-                    connection.sendUTF(resp);
-                },
-                potentialRelayChains: [relay]
-            });
-
-            return { relay, para };
-        })();
-    } else if (request.resource == '/canvas') {
-        chain = (async () => {
-            const relay = await client.addChain({
-                chainSpec: rococo,
-            });
-
-            const para = await client.addChain({
-                chainSpec: canvas,
-                jsonRpcCallback: (resp) => {
-                    connection.sendUTF(resp);
-                },
-                potentialRelayChains: [relay]
-            });
-
-            return { relay, para };
-        })();
-    } else {
+    if (!chainCfg) {
         request.reject(404);
         return;
     }
 
+    // Start loading the chain.
+    let chain = (async () => {
+        if (chainCfg.relayChain) {
+            const relay = await client.addChain({
+                chainSpec: chainSpecsById[chainCfg.relayChain].chainSpec,
+            });
+
+            const para = await client.addChain({
+                chainSpec: chainCfg.chainSpec,
+                jsonRpcCallback: (resp) => {
+                    connection.sendUTF(resp);
+                },
+                potentialRelayChains: [relay]
+            });
+
+            return { relay, para };
+        } else {
+            return {
+                relay: await client.addChain({
+                    chainSpec: chainCfg.chainSpec,
+                    jsonRpcCallback: (resp) => {
+                        connection.sendUTF(resp);
+                    },
+                })
+            };
+        }
+    })().catch((error) => {
+        console.error("(demo) Error while adding chain: " + error);
+        connection.close(400);
+    });
+
     const connection = request.accept(request.requestedProtocols[0], request.origin);
     console.log('(demo) New JSON-RPC client connected: ' + request.remoteAddress + '.');
-
-    chain
-        .catch((error) => {
-            console.error("(demo) Error while adding chain: " + error);
-            connection.close(400);
-        });
 
     // Receiving a message from the connection. This is a JSON-RPC request.
     connection.on('message', function (message) {
