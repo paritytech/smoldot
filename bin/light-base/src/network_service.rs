@@ -444,7 +444,10 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
         if !log::log_enabled!(log::Level::Debug) {
             match &result {
-                Ok(_) | Err(service::BlocksRequestError::Request(_)) => {}
+                Ok(_)
+                | Err(service::BlocksRequestError::EmptyResponse)
+                | Err(service::BlocksRequestError::NotVerifiable) => {}
+                Err(service::BlocksRequestError::Request(err)) if !err.is_protocol_error() => {}
                 Err(err) => {
                     log::warn!(
                         target: "network",

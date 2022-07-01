@@ -1771,6 +1771,17 @@ pub enum RequestError {
     Substream(established::RequestError),
 }
 
+impl RequestError {
+    /// Returns `true` if the error is caused by a faulty behavior by the remote. Returns `false`
+    /// if the error can happen in normal situations.
+    pub fn is_protocol_error(&self) -> bool {
+        match self {
+            RequestError::ConnectionShutdown => false,
+            RequestError::Substream(err) => err.is_protocol_error(),
+        }
+    }
+}
+
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum NotificationsOutErr {
     /// Opening has been interrupted because the connection as a whole is being shut down.
