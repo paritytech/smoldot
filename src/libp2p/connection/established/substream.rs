@@ -1585,6 +1585,21 @@ pub enum RequestError {
     ResponseLebError(leb128::FramedError),
 }
 
+impl RequestError {
+    /// Returns `true` if the error is caused by a faulty behavior by the remote. Returns `false`
+    /// if the error can happen in normal situations.
+    pub fn is_protocol_error(&self) -> bool {
+        match self {
+            RequestError::Timeout => false, // Remote is likely overloaded.
+            RequestError::ProtocolNotAvailable => true,
+            RequestError::SubstreamClosed => false,
+            RequestError::SubstreamReset => true,
+            RequestError::NegotiationError(_) => true,
+            RequestError::ResponseLebError(_) => true,
+        }
+    }
+}
+
 /// Error potentially returned by [`Substream::respond_in_request`].
 #[derive(Debug, derive_more::Display)]
 pub enum RespondInRequestError {
