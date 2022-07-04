@@ -770,6 +770,45 @@ where
         )
     }
 
+    /// Updates the state machine to take into account that the best block of the input has been
+    /// modified.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `new_best_block` isn't a valid node.
+    /// Panics if `new_best_block` isn't equal or a descendant of the input finalized block.
+    ///
+    pub fn input_set_best_block(&mut self, new_best_block: NodeIndex) {
+        // Make sure that `new_best_block` is a descendant of the current input finalized block,
+        // otherwise the state of the tree will be corrupted.
+        // This is checked with an `assert!` rather than a `debug_assert!`, as this constraint
+        // is part of the public API of this method.
+        assert!(self.input_finalized_index.map_or(true, |fin_idx| self
+            .non_finalized_blocks
+            .is_ancestor(fin_idx, new_best_block)));
+
+        // If necessary, update the weight of the block.
+        // TODO: this will panic if the new best block is equal to the output finalized block?
+        match &mut self
+            .non_finalized_blocks
+            .get_mut(new_best_block)
+            .unwrap()
+            .input_best_block_weight
+        {
+            w if *w == self.input_best_block_next_weight - 1 => {}
+            w => {
+                *w = self.input_best_block_next_weight;
+                self.input_best_block_next_weight += 1;
+            }
+        }
+
+        // Minor sanity checks.
+        debug_assert!(self
+            .non_finalized_blocks
+            .iter_unordered()
+            .all(|(_, b)| b.input_best_block_weight < self.input_best_block_next_weight));
+    }
+
     /// Updates the state machine to take into account that the input of blocks has finalized the
     /// given block.
     ///
@@ -1018,6 +1057,58 @@ where
             }));
         }
 
+        // Try to advance the output best block.
+        {
+            let mut best_block_updated = false;
+
+            // Try to advance the output best block to the `Finished` block with the highest
+            // weight.
+            // Weight of the current output best block.
+            let mut current_runtime_service_best_block_weight = match self.best_block_index {
+                None => self.finalized_block_weight,
+                Some(idx) => {
+                    self.non_finalized_blocks
+                        .get(idx)
+                        .unwrap()
+                        .input_best_block_weight
+                }
+            };
+
+            for (node_index, block) in self.non_finalized_blocks.iter_unordered() {
+                // Check uniqueness of weights.
+                debug_assert!(
+                    block.input_best_block_weight != current_runtime_service_best_block_weight
+                        || block.input_best_block_weight == 0
+                        || self.best_block_index == Some(node_index)
+                );
+
+                if block.input_best_block_weight <= current_runtime_service_best_block_weight {
+                    continue;
+                }
+
+                if !matches!(
+                    block.async_op,
+                    AsyncOpState::Finished { reported: true, .. }
+                ) {
+                    continue;
+                }
+
+                // Input best can be updated to the block being iterated.
+                current_runtime_service_best_block_weight = block.input_best_block_weight;
+                self.best_block_index = Some(node_index);
+                best_block_updated = true;
+
+                // Continue looping, as there might be another block with an even
+                // higher weight.
+            }
+
+            if best_block_updated {
+                return Some(OutputUpdate::BestBlockChanged {
+                    best_block_index: self.best_block_index,
+                });
+            }
+        }
+
         // Nothing to do.
         None
     }
@@ -1083,6 +1174,13 @@ pub enum OutputUpdate<'a, TBl, TAsync> {
 
     /// A new block has been added to the list of output unfinalized blocks.
     Block(OutputUpdateBlock<'a, TBl, TAsync>),
+
+    /// The output best block has been modified.
+    BestBlockChanged {
+        /// Index of the best block after the finalization. `None` if the best block is the
+        /// output finalized block.
+        best_block_index: Option<NodeIndex>,
+    },
 }
 
 /// See [`OutputUpdate`].

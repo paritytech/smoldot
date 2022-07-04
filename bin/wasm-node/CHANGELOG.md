@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Changes in the current best block of a parachain are now taken into account if the new best block had already been reported in the past. ([#2457](https://github.com/paritytech/smoldot/pull/2457))
+
 ## 0.6.21 - 2022-06-30
 
 ### Added

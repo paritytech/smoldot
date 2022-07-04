@@ -47,8 +47,9 @@ pub async fn subscribe_runtime_version<TPlat: Platform>(
             .subscribe_all(16, NonZeroUsize::new(24).unwrap())
             .await;
 
-        // Map of runtimes by hash. Contains all non-finalized blocks runtimes.
-        let mut non_finalized_headers = hashbrown::HashMap::<
+        // Map of runtimes by hash. Contains all non-finalized blocks, plus the current finalized
+        // block.
+        let mut headers = hashbrown::HashMap::<
             [u8; 32],
             Arc<Result<executor::CoreVersion, RuntimeError>>,
             fnv::FnvBuildHasher,
@@ -62,7 +63,7 @@ pub async fn subscribe_runtime_version<TPlat: Platform>(
             .unpin_block(&current_finalized_hash)
             .await;
 
-        non_finalized_headers.insert(
+        headers.insert(
             current_finalized_hash,
             Arc::new(subscribe_all.finalized_block_runtime),
         );
@@ -73,13 +74,13 @@ pub async fn subscribe_runtime_version<TPlat: Platform>(
             subscribe_all.new_blocks.unpin_block(&hash).await;
 
             if let Some(new_runtime) = block.new_runtime {
-                non_finalized_headers.insert(hash, Arc::new(new_runtime));
+                headers.insert(hash, Arc::new(new_runtime));
             } else {
-                let parent_runtime = non_finalized_headers
+                let parent_runtime = headers
                     .get(&block.parent_hash)
                     .unwrap()
                     .clone();
-                non_finalized_headers.insert(hash, parent_runtime);
+                headers.insert(hash, parent_runtime);
             }
 
             if block.is_new_best {
@@ -88,19 +89,19 @@ pub async fn subscribe_runtime_version<TPlat: Platform>(
             }
         }
         let current_best = current_best.unwrap_or(current_finalized_hash);
-        let current_best_runtime = (**non_finalized_headers.get(&current_best).unwrap()).clone();
+        let current_best_runtime = (**headers.get(&current_best).unwrap()).clone();
 
         // Turns `subscribe_all.new_blocks` into a stream of headers.
         let substream = stream::unfold(
             (
                 subscribe_all.new_blocks,
-                non_finalized_headers,
+                headers,
                 current_finalized_hash,
                 current_best,
             ),
             |(
                 mut new_blocks,
-                mut non_finalized_headers,
+                mut headers,
                 mut current_finalized_hash,
                 mut current_best,
             )| async move {
@@ -112,19 +113,19 @@ pub async fn subscribe_runtime_version<TPlat: Platform>(
                             new_blocks.unpin_block(&hash).await;
 
                             if let Some(new_runtime) = block.new_runtime {
-                                non_finalized_headers.insert(hash, Arc::new(new_runtime));
+                                headers.insert(hash, Arc::new(new_runtime));
                             } else {
-                                let parent_runtime = non_finalized_headers
+                                let parent_runtime = headers
                                     .get(&block.parent_hash)
                                     .unwrap()
                                     .clone();
-                                non_finalized_headers.insert(hash, parent_runtime);
+                                headers.insert(hash, parent_runtime);
                             }
 
                             if block.is_new_best {
                                 let current_best_runtime =
-                                    non_finalized_headers.get(&current_best).unwrap();
-                                let new_best_runtime = non_finalized_headers.get(&hash).unwrap();
+                                    headers.get(&current_best).unwrap();
+                                let new_best_runtime = headers.get(&hash).unwrap();
                                 current_best = hash;
 
                                 if !Arc::ptr_eq(&current_best_runtime, new_best_runtime) {
@@ -133,7 +134,7 @@ pub async fn subscribe_runtime_version<TPlat: Platform>(
                                         runtime,
                                         (
                                             new_blocks,
-                                            non_finalized_headers,
+                                            headers,
                                             current_finalized_hash,
                                             current_best,
                                         ),
@@ -147,17 +148,17 @@ pub async fn subscribe_runtime_version<TPlat: Platform>(
                             best_block_hash,
                         } => {
                             let current_best_runtime =
-                                non_finalized_headers.get(&current_best).unwrap().clone();
+                                headers.get(&current_best).unwrap().clone();
                             let new_best_runtime =
-                                non_finalized_headers.get(&best_block_hash).unwrap().clone();
+                                headers.get(&best_block_hash).unwrap().clone();
 
                             // Clean up the headers we won't need anymore.
                             for pruned_block in pruned_blocks {
-                                let _was_in = non_finalized_headers.remove(&pruned_block);
+                                let _was_in = headers.remove(&pruned_block);
                                 debug_assert!(_was_in.is_some());
                             }
 
-                            let _ = non_finalized_headers
+                            let _ = headers
                                 .remove(&current_finalized_hash)
                                 .unwrap();
                             current_finalized_hash = hash;
@@ -169,7 +170,28 @@ pub async fn subscribe_runtime_version<TPlat: Platform>(
                                     runtime,
                                     (
                                         new_blocks,
-                                        non_finalized_headers,
+                                        headers,
+                                        current_finalized_hash,
+                                        current_best,
+                                    ),
+                                ));
+                            }
+                        }
+                        Notification::BestBlockChanged { hash } => {
+                            let current_best_runtime =
+                                headers.get(&current_best).unwrap().clone();
+                            let new_best_runtime =
+                                headers.get(&hash).unwrap().clone();
+
+                            current_best = hash;
+
+                            if !Arc::ptr_eq(&current_best_runtime, &new_best_runtime) {
+                                let runtime = (*new_best_runtime).clone();
+                                break Some((
+                                    runtime,
+                                    (
+                                        new_blocks,
+                                        headers,
                                         current_finalized_hash,
                                         current_best,
                                     ),
@@ -254,6 +276,7 @@ pub async fn subscribe_finalized<TPlat: Platform>(
                             let header = non_finalized_headers.remove(&hash).unwrap();
                             break Some((header, (new_blocks, non_finalized_headers)));
                         }
+                        Notification::BestBlockChanged { .. } => {}
                     }
                 }
             },
@@ -290,8 +313,9 @@ pub async fn subscribe_best<TPlat: Platform>(
             .subscribe_all(16, NonZeroUsize::new(32).unwrap())
             .await;
 
-        // Map of block headers by hash. Contains all non-finalized blocks headers.
-        let mut non_finalized_headers =
+        // Map of block headers by hash. Contains all non-finalized blocks headers, plus the
+        // current finalized block header.
+        let mut headers =
             hashbrown::HashMap::<[u8; 32], Vec<u8>, fnv::FnvBuildHasher>::with_capacity_and_hasher(
                 16,
                 Default::default(),
@@ -306,7 +330,7 @@ pub async fn subscribe_best<TPlat: Platform>(
             .unpin_block(&current_finalized_hash)
             .await;
 
-        non_finalized_headers.insert(
+        headers.insert(
             current_finalized_hash,
             subscribe_all.finalized_block_scale_encoded_header,
         );
@@ -315,7 +339,7 @@ pub async fn subscribe_best<TPlat: Platform>(
         for block in subscribe_all.non_finalized_blocks_ancestry_order {
             let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
             subscribe_all.new_blocks.unpin_block(&hash).await;
-            non_finalized_headers.insert(hash, block.scale_encoded_header);
+            headers.insert(hash, block.scale_encoded_header);
 
             if block.is_new_best {
                 debug_assert!(current_best.is_none());
@@ -323,19 +347,19 @@ pub async fn subscribe_best<TPlat: Platform>(
             }
         }
         let current_best = current_best.unwrap_or(current_finalized_hash);
-        let current_best_header = non_finalized_headers.get(&current_best).unwrap().clone();
+        let current_best_header = headers.get(&current_best).unwrap().clone();
 
         // Turns `subscribe_all.new_blocks` into a stream of headers.
         let substream = stream::unfold(
             (
                 subscribe_all.new_blocks,
-                non_finalized_headers,
+                headers,
                 current_finalized_hash,
                 current_best,
             ),
             |(
                 mut new_blocks,
-                mut non_finalized_headers,
+                mut headers,
                 mut current_finalized_hash,
                 mut current_best,
             )| async move {
@@ -345,17 +369,17 @@ pub async fn subscribe_best<TPlat: Platform>(
                             let hash =
                                 header::hash_from_scale_encoded_header(&block.scale_encoded_header);
                             new_blocks.unpin_block(&hash).await;
-                            non_finalized_headers.insert(hash, block.scale_encoded_header);
+                            headers.insert(hash, block.scale_encoded_header);
 
                             if block.is_new_best {
                                 current_best = hash;
                                 let header =
-                                    non_finalized_headers.get(&current_best).unwrap().clone();
+                                    headers.get(&current_best).unwrap().clone();
                                 break Some((
                                     header,
                                     (
                                         new_blocks,
-                                        non_finalized_headers,
+                                        headers,
                                         current_finalized_hash,
                                         current_best,
                                     ),
@@ -369,11 +393,11 @@ pub async fn subscribe_best<TPlat: Platform>(
                         } => {
                             // Clean up the headers we won't need anymore.
                             for pruned_block in pruned_blocks {
-                                let _was_in = non_finalized_headers.remove(&pruned_block);
+                                let _was_in = headers.remove(&pruned_block);
                                 debug_assert!(_was_in.is_some());
                             }
 
-                            let _ = non_finalized_headers
+                            let _ = headers
                                 .remove(&current_finalized_hash)
                                 .unwrap();
                             current_finalized_hash = hash;
@@ -381,12 +405,28 @@ pub async fn subscribe_best<TPlat: Platform>(
                             if best_block_hash != current_best {
                                 current_best = best_block_hash;
                                 let header =
-                                    non_finalized_headers.get(&current_best).unwrap().clone();
+                                    headers.get(&current_best).unwrap().clone();
                                 break Some((
                                     header,
                                     (
                                         new_blocks,
-                                        non_finalized_headers,
+                                        headers,
+                                        current_finalized_hash,
+                                        current_best,
+                                    ),
+                                ));
+                            }
+                        }
+                        Notification::BestBlockChanged { hash } => {
+                            if hash != current_best {
+                                current_best = hash;
+                                let header =
+                                    headers.get(&current_best).unwrap().clone();
+                                break Some((
+                                    header,
+                                    (
+                                        new_blocks,
+                                        headers,
                                         current_finalized_hash,
                                         current_best,
                                     ),

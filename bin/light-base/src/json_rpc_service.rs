@@ -652,7 +652,8 @@ impl<TPlat: Platform> Background<TPlat> {
                                     .recent_pinned_blocks
                                     .put(hash, block.scale_encoded_header);
                             }
-                            Some(runtime_service::Notification::Finalized { .. }) => {}
+                            Some(runtime_service::Notification::Finalized { .. })
+                            | Some(runtime_service::Notification::BestBlockChanged { .. }) => {}
                             None => break,
                         }
                     }

@@ -468,7 +468,8 @@ impl<TPlat: Platform> Background<TPlat> {
                                 )
                                 .await;
                         }
-                        Some(runtime_service::Notification::Finalized { .. }) => {}
+                        Some(runtime_service::Notification::BestBlockChanged { .. })
+                        | Some(runtime_service::Notification::Finalized { .. }) => {}
                         None => {
                             // TODO: must recreate the channel
                             return;
