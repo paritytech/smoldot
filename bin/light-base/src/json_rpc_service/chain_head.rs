@@ -670,6 +670,26 @@ impl<TPlat: Platform> Background<TPlat> {
                                 break;
                             }
                         }
+                        either::Left(Some(runtime_service::Notification::BestBlockChanged {
+                            hash,
+                        }))
+                        | either::Right(Some(sync_service::Notification::BestBlockChanged {
+                            hash,
+                        })) => {
+                            let _ = me
+                                .requests_subscriptions
+                                .try_push_notification(
+                                    &state_machine_subscription,
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                        subscription: (&subscription_id).into(),
+                                        result: methods::FollowEvent::BestBlockChanged {
+                                            best_block_hash: methods::HashHexString(hash),
+                                        },
+                                    }
+                                    .to_json_call_object_parameters(None),
+                                )
+                                .await;
+                        }
                         either::Left(Some(runtime_service::Notification::Block(block))) => {
                             let hash =
                                 header::hash_from_scale_encoded_header(&block.scale_encoded_header);

@@ -629,6 +629,9 @@ async fn background_task<TPlat: Platform>(
                                 // download of that block, but it is not worth the effort.
                             }
                         },
+                        Some(runtime_service::Notification::BestBlockChanged { hash }) => {
+                            worker.set_best_block(&log_target, &hash);
+                        },
                         None => continue 'channels_rebuild
                     }
                 },

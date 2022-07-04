@@ -728,6 +728,15 @@ pub enum Notification {
 
     /// A new block has been added to the list of unfinalized blocks.
     Block(BlockNotification),
+
+    /// The best block has changed to a different one.
+    BestBlockChanged {
+        /// Hash of the new best block.
+        ///
+        /// This can be either the hash of the latest finalized block or the hash of a
+        /// non-finalized block.
+        hash: [u8; 32],
+    },
 }
 
 /// Notification about a new block.
