@@ -1134,6 +1134,7 @@ pub struct PruneBodyFinalized<TTx, TBl> {
 }
 
 /// See [`PruneBodyFinalized`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovedTransaction<TTx> {
     /// Id of this transaction in the state machine.
     pub id: TransactionId,
