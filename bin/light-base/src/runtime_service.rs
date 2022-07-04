@@ -399,6 +399,10 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         subscription_id: SubscriptionId,
         block_hash: &[u8; 32],
     ) -> RuntimeLock<'a, TPlat> {
+        // Note: copying the hash ahead of time fixes some weird intermittent borrow checker
+        // issue.
+        let block_hash = *block_hash;
+
         let mut guarded = self.guarded.lock().await;
         let guarded = &mut *guarded;
 
@@ -406,10 +410,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             if let GuardedInner::FinalizedBlockRuntimeKnown { pinned_blocks, .. } =
                 &mut guarded.tree
             {
-                (*pinned_blocks
-                    .get(&(subscription_id.0, *block_hash))
-                    .unwrap())
-                .clone()
+                (*pinned_blocks.get(&(subscription_id.0, block_hash)).unwrap()).clone()
             } else {
                 panic!("Invalid subscription")
             }
@@ -417,7 +418,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
         RuntimeLock {
             service: self,
-            hash: *block_hash,
+            hash: block_hash,
             runtime,
             block_number,
             block_state_root_hash,
