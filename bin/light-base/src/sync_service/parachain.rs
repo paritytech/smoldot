@@ -410,8 +410,6 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
                             let node_idx = async_tree.input_iter_unordered().find(|b| *b.user_data == hash).unwrap().id;
                             async_tree.input_set_best_block(node_idx);
-
-                            // TODO: check if this updates the best parablock?
                         }
                     };
                 },
