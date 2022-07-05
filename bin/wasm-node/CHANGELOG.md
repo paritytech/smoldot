@@ -5,6 +5,7 @@
 ### Fixed
 
 - Changes in the current best block of a parachain are now taken into account if the new best block had already been reported in the past. ([#2457](https://github.com/paritytech/smoldot/pull/2457))
+- Fix active `chain_subscribeAllHeads` subscriptions silently freezing when the number of non-finalized blocks get passed a certain threshold.
 
 ## 0.6.21 - 2022-06-30
 
