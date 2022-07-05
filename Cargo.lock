@@ -2556,9 +2556,9 @@ dependencies = [
 
 [[package]]
 name = "terminal_size"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a11cc4bc2114fdff27d63eaa12d38a71b590efd8aa8976656096aec8d7758d92"
+checksum = "8440c860cf79def6164e4a0a983bcc2305d82419177a0e0c71930d049e3ac5a1"
 dependencies = [
  "rustix 0.35.7",
  "windows-sys 0.36.1",
