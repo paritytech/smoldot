@@ -787,7 +787,14 @@ impl<TPlat: Platform> Task<TPlat> {
                             self.network_up_to_date_best = false;
                         }
                         self.network_up_to_date_finalized = false;
-                        self.known_finalized_runtime = None; // TODO: only do if there was no RuntimeUpdated log item
+                        // Invalidate the cache of the runtime of the finalized blocks if any
+                        // of the finalized blocks indicates that a runtime update happened.
+                        if finalized_blocks
+                            .iter()
+                            .any(|b| b.header.digest.has_runtime_environment_updated())
+                        {
+                            self.known_finalized_runtime = None;
+                        }
                         self.dispatch_all_subscribers(Notification::Finalized {
                             hash: self.sync.finalized_block_header().hash(),
                             best_block_hash: self.sync.best_block_hash(),
