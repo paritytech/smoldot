@@ -1162,13 +1162,21 @@ async fn update_round<TPlat: Platform>(
                             // No error is printed if the error is about the fact that we have
                             // 0 peers, as this tends to happen quite frequently at initialization
                             // and there is nothing that can be done against this error anyway.
-                            if !matches!(error, service::DiscoveryError::NoPeer) {
-                                log::warn!(
-                                    target: "connections",
-                                    "Problem during discovery on {}: {}",
-                                    &shared.log_chain_names[chain_index],
-                                    error
-                                );
+                            // No error is printed either if the request fails due to a benign
+                            // networking error such as an unresponsive peer.
+                            match error {
+                                service::DiscoveryError::NoPeer => {}
+                                service::DiscoveryError::FindNode(
+                                    service::KademliaFindNodeError::RequestFailed(err),
+                                ) if !err.is_protocol_error() => {}
+                                _ => {
+                                    log::warn!(
+                                        target: "connections",
+                                        "Problem during discovery on {}: {}",
+                                        &shared.log_chain_names[chain_index],
+                                        error
+                                    );
+                                }
                             }
                         }
                     }
