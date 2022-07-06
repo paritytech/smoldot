@@ -228,13 +228,25 @@ where
         value: V,
         now: &TNow,
         state: PeerState,
-    ) -> Result<OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>, ()> {
+    ) -> Result<OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>, OrInsertError> {
         match self {
-            Entry::LocalKey => Err(()),
-            Entry::Vacant(v) => v.insert(value, now, state),
+            Entry::LocalKey => Err(OrInsertError::LocalKey),
+            Entry::Vacant(v) => match v.insert(value, now, state) {
+                Ok((entry, _)) => Ok(entry),
+                Err(InsertError::Full) => Err(OrInsertError::Full),
+            },
             Entry::Occupied(e) => Ok(e),
         }
     }
+}
+
+/// Error that can happen in [`Entry::or_insert`].
+#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display)]
+pub enum OrInsertError {
+    /// K-bucket is full.
+    Full,
+    /// Can't insert the local key into the k-buckets.
+    LocalKey,
 }
 
 pub struct VacantEntry<'a, K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
@@ -250,18 +262,30 @@ where
     TNow: Clone + Add<Duration, Output = TNow> + Ord,
 {
     /// Inserts the entry in the vacant slot. Returns an error if the k-buckets are full.
+    ///
+    /// On success, optionally returns the entry that had to be removed in order to make space
+    /// for the newly-inserted element. This removed entry was always in a disconnected state.
     pub fn insert(
         self,
         value: V,
         now: &TNow,
         state: PeerState,
-    ) -> Result<OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>, ()> {
+    ) -> Result<
+        (
+            OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>,
+            Option<(K, V)>,
+        ),
+        InsertError,
+    > {
         let bucket = &mut self.inner.buckets[usize::from(self.distance)];
 
-        match state {
+        let previous_entry = match state {
             PeerState::Connected if bucket.num_connected_entries < ENTRIES_PER_BUCKET => {
+                let mut previous_entry = None;
+
                 if bucket.entries.is_full() {
-                    let _ = bucket.entries.pop(); // TODO: return element?
+                    previous_entry = bucket.entries.pop();
+                    debug_assert!(previous_entry.is_some());
                     bucket.pending_entry = Some(now.clone() + self.inner.pending_timeout);
                 }
 
@@ -273,25 +297,28 @@ where
                 if bucket.num_connected_entries == ENTRIES_PER_BUCKET {
                     bucket.pending_entry = None;
                 }
+
+                previous_entry
             }
             PeerState::Connected => {
                 debug_assert!(bucket.entries.is_full());
                 debug_assert_eq!(bucket.num_connected_entries, ENTRIES_PER_BUCKET);
                 debug_assert!(bucket.pending_entry.is_none());
-                return Err(());
+                return Err(InsertError::Full);
             }
             PeerState::Disconnected if bucket.entries.is_full() => {
                 if bucket.num_connected_entries == ENTRIES_PER_BUCKET {
-                    return Err(());
+                    return Err(InsertError::Full);
                 }
 
                 if *bucket.pending_entry.as_ref().unwrap() > *now {
-                    return Err(());
+                    return Err(InsertError::Full);
                 }
 
-                let _ = bucket.entries.pop(); // TODO: return element?
+                let previous_entry = bucket.entries.pop();
                 bucket.entries.push((self.key.clone(), value));
                 bucket.pending_entry = Some(now.clone() + self.inner.pending_timeout);
+                previous_entry
             }
             PeerState::Disconnected => {
                 debug_assert!(!bucket.entries.is_full());
@@ -301,15 +328,27 @@ where
                 if bucket.entries.is_full() {
                     bucket.pending_entry = Some(now.clone() + self.inner.pending_timeout);
                 }
+
+                None
             }
         };
 
-        Ok(OccupiedEntry {
-            inner: self.inner,
-            key: self.key,
-            distance: self.distance,
-        })
+        Ok((
+            OccupiedEntry {
+                inner: self.inner,
+                key: self.key,
+                distance: self.distance,
+            },
+            previous_entry,
+        ))
     }
+}
+
+/// Error that can happen in [`VacantEntry::insert`].
+#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display)]
+pub enum InsertError {
+    /// K-bucket is full.
+    Full,
 }
 
 pub struct OccupiedEntry<'a, K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
