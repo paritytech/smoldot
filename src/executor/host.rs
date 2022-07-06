@@ -1338,9 +1338,9 @@ impl ReadyToRun {
                 // `ext_crypto_ed25519_batch_verify`, `ext_crypto_sr25519_batch_verify`, or
                 // `ext_crypto_ecdsa_batch_verify`, then retrieve the result using
                 // `ext_crypto_finish_batch_verify`. However, none of the three
-                // `<algo>_batch_verify` functions is supported at the moment.
+                // `<algo>_batch_verify` functions is supported by smoldot at the moment.
                 // Thus, if the runtime calls `ext_crypto_finish_batch_verify`, then it
-                // necessarily means that a batch is empty, and thus we always return success.
+                // necessarily means that the batch is empty, and thus we always return success.
                 // At the moment, batch signatures verification isn't enabled on any production
                 // chain.
                 // Once support for any of the `<algo>_batch_verify` function is added, this
