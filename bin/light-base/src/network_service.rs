@@ -1153,12 +1153,23 @@ async fn update_round<TPlat: Platform>(
                             guarded.network.discover(&TPlat::now(), chain_index, nodes);
                         }
                         Err(error) => {
-                            log::warn!(
+                            log::debug!(
                                 target: "connections",
-                                "Problem during discovery on {}: {}",
-                                &shared.log_chain_names[chain_index],
+                                "Discovery => {:?}",
                                 error
                             );
+
+                            // No error is printed if the error is about the fact that we have
+                            // 0 peers, as this tends to happen quite frequently at initialization
+                            // and there is nothing that can be done against this error anyway.
+                            if !matches!(error, service::DiscoveryError::NoPeer) {
+                                log::warn!(
+                                    target: "connections",
+                                    "Problem during discovery on {}: {}",
+                                    &shared.log_chain_names[chain_index],
+                                    error
+                                );
+                            }
                         }
                     }
                 }

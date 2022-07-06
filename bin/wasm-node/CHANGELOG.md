@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## Changed
+
+- No warning is generated anymore if the discovery process doesn't work due to having 0 peers.
+
 ### Fixed
 
 - Changes in the current best block of a parachain are now taken into account if the new best block had already been reported in the past. ([#2457](https://github.com/paritytech/smoldot/pull/2457))
