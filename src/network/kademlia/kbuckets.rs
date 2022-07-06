@@ -231,7 +231,7 @@ where
     ) -> Result<OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>, ()> {
         match self {
             Entry::LocalKey => Err(()),
-            Entry::Vacant(v) => v.insert(value, now, state),
+            Entry::Vacant(v) => Ok(v.insert(value, now, state)?.0),
             Entry::Occupied(e) => Ok(e),
         }
     }
@@ -250,18 +250,30 @@ where
     TNow: Clone + Add<Duration, Output = TNow> + Ord,
 {
     /// Inserts the entry in the vacant slot. Returns an error if the k-buckets are full.
+    ///
+    /// On success, optionally returns the entry that had to be removed in order to make space
+    /// for the newly-inserted element. This removed entry was always in a disconnected state.
     pub fn insert(
         self,
         value: V,
         now: &TNow,
         state: PeerState,
-    ) -> Result<OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>, ()> {
+    ) -> Result<
+        (
+            OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>,
+            Option<(K, V)>,
+        ),
+        (),
+    > {
         let bucket = &mut self.inner.buckets[usize::from(self.distance)];
 
-        match state {
+        let previous_entry = match state {
             PeerState::Connected if bucket.num_connected_entries < ENTRIES_PER_BUCKET => {
+                let mut previous_entry = None;
+
                 if bucket.entries.is_full() {
-                    let _ = bucket.entries.pop(); // TODO: return element?
+                    previous_entry = bucket.entries.pop();
+                    debug_assert!(previous_entry.is_some());
                     bucket.pending_entry = Some(now.clone() + self.inner.pending_timeout);
                 }
 
@@ -273,6 +285,8 @@ where
                 if bucket.num_connected_entries == ENTRIES_PER_BUCKET {
                     bucket.pending_entry = None;
                 }
+
+                previous_entry
             }
             PeerState::Connected => {
                 debug_assert!(bucket.entries.is_full());
@@ -289,9 +303,10 @@ where
                     return Err(());
                 }
 
-                let _ = bucket.entries.pop(); // TODO: return element?
+                let previous_entry = bucket.entries.pop();
                 bucket.entries.push((self.key.clone(), value));
                 bucket.pending_entry = Some(now.clone() + self.inner.pending_timeout);
+                previous_entry
             }
             PeerState::Disconnected => {
                 debug_assert!(!bucket.entries.is_full());
@@ -301,14 +316,19 @@ where
                 if bucket.entries.is_full() {
                     bucket.pending_entry = Some(now.clone() + self.inner.pending_timeout);
                 }
+
+                None
             }
         };
 
-        Ok(OccupiedEntry {
-            inner: self.inner,
-            key: self.key,
-            distance: self.distance,
-        })
+        Ok((
+            OccupiedEntry {
+                inner: self.inner,
+                key: self.key,
+                distance: self.distance,
+            },
+            previous_entry,
+        ))
     }
 }
 
