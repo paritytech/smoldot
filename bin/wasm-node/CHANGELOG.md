@@ -4,7 +4,7 @@
 
 ## Changed
 
-- No warning is generated anymore if the discovery process doesn't work due to having 0 peers.
+- No warning is generated anymore if the discovery process doesn't work due to having 0 peers. ([#2476](https://github.com/paritytech/smoldot/pull/2476))
 
 ### Fixed
 
