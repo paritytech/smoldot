@@ -228,13 +228,25 @@ where
         value: V,
         now: &TNow,
         state: PeerState,
-    ) -> Result<OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>, ()> {
+    ) -> Result<OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>, OrInsertError> {
         match self {
-            Entry::LocalKey => Err(()),
-            Entry::Vacant(v) => Ok(v.insert(value, now, state)?.0),
+            Entry::LocalKey => Err(OrInsertError::LocalKey),
+            Entry::Vacant(v) => match v.insert(value, now, state) {
+                Ok((entry, _)) => Ok(entry),
+                Err(InsertError::Full) => Err(OrInsertError::Full),
+            },
             Entry::Occupied(e) => Ok(e),
         }
     }
+}
+
+/// Error that can happen in [`Entry::or_insert`].
+#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display)]
+pub enum OrInsertError {
+    /// K-bucket is full.
+    Full,
+    /// Can't insert the local key into the k-buckets.
+    LocalKey,
 }
 
 pub struct VacantEntry<'a, K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
@@ -263,7 +275,7 @@ where
             OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>,
             Option<(K, V)>,
         ),
-        (),
+        InsertError,
     > {
         let bucket = &mut self.inner.buckets[usize::from(self.distance)];
 
@@ -292,15 +304,15 @@ where
                 debug_assert!(bucket.entries.is_full());
                 debug_assert_eq!(bucket.num_connected_entries, ENTRIES_PER_BUCKET);
                 debug_assert!(bucket.pending_entry.is_none());
-                return Err(());
+                return Err(InsertError::Full);
             }
             PeerState::Disconnected if bucket.entries.is_full() => {
                 if bucket.num_connected_entries == ENTRIES_PER_BUCKET {
-                    return Err(());
+                    return Err(InsertError::Full);
                 }
 
                 if *bucket.pending_entry.as_ref().unwrap() > *now {
-                    return Err(());
+                    return Err(InsertError::Full);
                 }
 
                 let previous_entry = bucket.entries.pop();
@@ -330,6 +342,13 @@ where
             previous_entry,
         ))
     }
+}
+
+/// Error that can happen in [`VacantEntry::insert`].
+#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display)]
+pub enum InsertError {
+    /// K-bucket is full.
+    Full,
 }
 
 pub struct OccupiedEntry<'a, K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
