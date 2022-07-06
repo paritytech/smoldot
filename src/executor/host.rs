@@ -1333,9 +1333,19 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_crypto_finish_batch_verify_version_1 => {
+                // This function is a dummy implementation. After `ext_crypto_start_batch_verify`
+                // has been called, the runtime is supposed to call
+                // `ext_crypto_ed25519_batch_verify`, `ext_crypto_sr25519_batch_verify`, or
+                // `ext_crypto_ecdsa_batch_verify`, then retrieve the result using
+                // `ext_crypto_finish_batch_verify`. However, none of the three
+                // `<algo>_batch_verify` functions is supported at the moment.
+                // Thus, if the runtime calls `ext_crypto_finish_batch_verify`, then it
+                // necessarily means that a batch is empty, and thus we always return success.
+                // At the moment, batch signatures verification isn't enabled on any production
+                // chain.
+                // Once support for any of the `<algo>_batch_verify` function is added, this
+                // implementation should of course change.
                 HostVm::ReadyToRun(ReadyToRun {
-                    // TODO: wrong! this is a dummy implementation meaning that all
-                    // signature verifications are always successful
                     resume_value: Some(vm::WasmValue::I32(1)),
                     inner: self.inner,
                 })
