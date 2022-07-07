@@ -387,7 +387,7 @@ impl DatabaseEmpty {
         }
 
         match &chain_information.consensus {
-            chain_information::ChainInformationConsensusRef::AllAuthorized => {}
+            chain_information::ChainInformationConsensusRef::Unknown => {}
             chain_information::ChainInformationConsensusRef::Aura {
                 finalized_authorities_list,
                 slot_duration,

@@ -177,7 +177,6 @@ impl<T> NonFinalizedTreeInner<T> {
         // information is found either in the parent block, or in the finalized block.
         let consensus = if let Some(parent_tree_index) = parent_tree_index {
             match &self.blocks.get(parent_tree_index).unwrap().consensus {
-                BlockConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
                 BlockConsensus::Aura { authorities_list } => VerifyConsensusSpecific::Aura {
                     authorities_list: authorities_list.clone(),
                 },
@@ -191,7 +190,7 @@ impl<T> NonFinalizedTreeInner<T> {
             }
         } else {
             match &self.finalized_consensus {
-                FinalizedConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
+                FinalizedConsensus::Unknown => VerifyConsensusSpecific::Unknown,
                 FinalizedConsensus::Aura {
                     authorities_list, ..
                 } => VerifyConsensusSpecific::Aura {
@@ -255,8 +254,11 @@ impl<T> NonFinalizedTreeInner<T> {
                         slots_per_epoch: *slots_per_epoch,
                         now_from_unix_epoch,
                     },
-                    (FinalizedConsensus::AllAuthorized, VerifyConsensusSpecific::AllAuthorized) => {
-                        verify::header_only::ConfigConsensus::AllAuthorized
+                    (FinalizedConsensus::Unknown, VerifyConsensusSpecific::Unknown) => {
+                        return VerifyOut::HeaderErr(
+                            context.chain,
+                            HeaderVerifyError::UnknownConsensusEngine,
+                        )
                     }
                     _ => {
                         return VerifyOut::HeaderErr(
@@ -301,9 +303,6 @@ impl<T> VerifyContext<T> {
         success_consensus: verify::header_only::Success,
     ) -> (bool, BlockConsensus) {
         let success_consensus = match success_consensus {
-            verify::header_only::Success::AllAuthorized => {
-                verify::header_body::SuccessConsensus::AllAuthorized
-            }
             verify::header_only::Success::Aura { authorities_change } => {
                 verify::header_body::SuccessConsensus::Aura { authorities_change }
             }
@@ -341,12 +340,6 @@ impl<T> VerifyContext<T> {
             self.parent_tree_index
                 .map(|idx| self.chain.blocks.get(idx).unwrap().consensus.clone()),
         ) {
-            (
-                verify::header_body::SuccessConsensus::AllAuthorized,
-                VerifyConsensusSpecific::AllAuthorized,
-                FinalizedConsensus::AllAuthorized,
-                _,
-            ) => BlockConsensus::AllAuthorized,
             (
                 verify::header_body::SuccessConsensus::Aura { authorities_change },
                 VerifyConsensusSpecific::Aura {
@@ -568,7 +561,7 @@ pub enum BodyVerifyStep1<T> {
 
 #[derive(Debug)]
 enum VerifyConsensusSpecific {
-    AllAuthorized,
+    Unknown,
     Aura {
         authorities_list: Arc<Vec<header::AuraAuthority>>,
     },
@@ -665,8 +658,14 @@ impl<T> BodyVerifyRuntimeRequired<T> {
             &self.context.chain.finalized_consensus,
             &self.context.consensus,
         ) {
-            (FinalizedConsensus::AllAuthorized, VerifyConsensusSpecific::AllAuthorized) => {
-                verify::header_body::ConfigConsensus::AllAuthorized
+            (FinalizedConsensus::Unknown, VerifyConsensusSpecific::Unknown) => {
+                return BodyVerifyStep2::Error {
+                    chain: NonFinalizedTree {
+                        inner: Some(self.context.chain),
+                    },
+                    error: BodyVerifyError::UnknownConsensusEngine,
+                    parent_runtime,
+                }
             }
             (
                 FinalizedConsensus::Aura { slot_duration, .. },
@@ -780,6 +779,8 @@ pub enum BodyVerifyError {
     /// Error during the consensus-related check.
     #[display(fmt = "{}", _0)]
     Consensus(verify::header_body::Error),
+    /// Block can't be verified as it uses an unknown consensus engine.
+    UnknownConsensusEngine,
     /// Block uses a different consensus than the rest of the chain.
     ConsensusMismatch,
 }
@@ -1086,6 +1087,8 @@ pub enum HeaderVerifyError {
     /// Error while decoding the header.
     #[display(fmt = "Error while decoding the header: {}", _0)]
     InvalidHeader(header::Error),
+    /// Block can't be verified as it uses an unknown consensus engine.
+    UnknownConsensusEngine,
     /// Block uses a different consensus than the rest of the chain.
     ConsensusMismatch,
     /// The parent of the block isn't known.

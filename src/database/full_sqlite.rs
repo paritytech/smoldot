@@ -275,7 +275,7 @@ impl SqliteFullDatabase {
                     slot_duration,
                 }
             }
-            (None, None, None) => chain_information::ChainInformationConsensus::AllAuthorized,
+            (None, None, None) => chain_information::ChainInformationConsensus::Unknown,
             _ => {
                 return Err(FinalizedAccessError::Access(AccessError::Corrupted(
                     CorruptedError::ConsensusAlgorithmMix,

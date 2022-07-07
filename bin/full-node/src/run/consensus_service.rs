@@ -364,9 +364,9 @@ impl SyncBackground {
                         chain_information::ChainInformationConsensusRef::Babe { .. } => {
                             Some(keystore::KeyNamespace::Babe)
                         }
-                        chain_information::ChainInformationConsensusRef::AllAuthorized => {
-                            // In `AllAuthorized` mode, all keys are accepted and there is no
-                            // filter on the namespace.
+                        chain_information::ChainInformationConsensusRef::Unknown => {
+                            // In `Unknown` mode, all keys are accepted and there is no
+                            // filter on the namespace, as we can't author blocks anyway.
                             // TODO: is that correct?
                             None
                         }

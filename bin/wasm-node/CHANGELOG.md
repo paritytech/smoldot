@@ -4,7 +4,8 @@
 
 ## Changed
 
-- Block headers with an unknown consensus engine now parse successfully. This adds support for parachains using consensus engines that smoldot doesn't support. As smoldot cannot verify the validity of blocks with an unknown consensus engine, standalone/relay chains using headers with an unknown consensus engine remain unsupported.
+- Block headers with an unknown consensus engine now parse successfully. This adds support for parachains using consensus engines that smoldot doesn't recognized. As smoldot cannot verify the validity of blocks with an unrecognized consensus engine, standalone/relay chains using headers with an unrecognized consensus engine remain unsupported.
+- Standalone/relay chains that use neither Aura nor Babe are no longer supported. Parachains that don't use Aura continue to work.
 - No warning is generated anymore if the discovery process doesn't work due to having 0 peers, or failed due to a benign networking issue. ([#2476](https://github.com/paritytech/smoldot/pull/2476))
 
 ### Fixed

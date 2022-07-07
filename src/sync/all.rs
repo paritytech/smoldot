@@ -1864,6 +1864,9 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                                 all_forks::HeaderVerifyError::VerificationFailed(error) => {
                                     HeaderVerifyError::VerificationFailed(error)
                                 }
+                                all_forks::HeaderVerifyError::UnknownConsensusEngine => {
+                                    HeaderVerifyError::UnknownConsensusEngine
+                                }
                                 all_forks::HeaderVerifyError::ConsensusMismatch => {
                                     HeaderVerifyError::ConsensusMismatch
                                 }
@@ -1901,6 +1904,8 @@ pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
 /// Error that can happen when verifying a block header.
 #[derive(Debug, derive_more::Display)]
 pub enum HeaderVerifyError {
+    /// Block can't be verified as it uses an unknown consensus engine.
+    UnknownConsensusEngine,
     /// Block uses a different consensus than the rest of the chain.
     ConsensusMismatch,
     /// The block verification has failed. The block is invalid and should be thrown away.

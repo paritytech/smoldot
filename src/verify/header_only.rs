@@ -42,15 +42,6 @@ pub struct Config<'a> {
 
 /// Extra items of [`Config`] that are dependant on the consensus engine of the chain.
 pub enum ConfigConsensus<'a> {
-    /// Any node on the chain is allowed to produce blocks.
-    ///
-    /// No seal must be present in the header.
-    ///
-    /// > **Note**: Be warned that this variant makes it possible for a huge number of blocks to
-    /// >           be produced. If this variant is used, the user is encouraged to limit, through
-    /// >           other means, the number of blocks being accepted.
-    AllAuthorized,
-
     /// Chain is using the Aura consensus engine.
     Aura {
         /// Aura authorities that must validate the block.
@@ -88,9 +79,6 @@ pub enum ConfigConsensus<'a> {
 
 /// Block successfully verified.
 pub enum Success {
-    /// [`ConfigConsensus::AllAuthorized`] was passed to [`Config`].
-    AllAuthorized,
-
     /// Chain is using the Aura consensus engine.
     Aura {
         /// True if the list of authorities is modified by this block.
@@ -158,16 +146,6 @@ pub fn verify(config: Config) -> Result<Success, Error> {
     // TODO: verify that there's no grandpa header items if the chain doesn't use grandpa
 
     match config.consensus {
-        ConfigConsensus::AllAuthorized => {
-            // `has_any_aura()` and `has_any_babe()` also make sure that no seal is present.
-            if config.block_header.digest.has_any_aura()
-                || config.block_header.digest.has_any_babe()
-            {
-                return Err(Error::MultipleConsensusEngines);
-            }
-
-            Ok(Success::AllAuthorized)
-        }
         ConfigConsensus::Aura {
             current_authorities,
             slot_duration,

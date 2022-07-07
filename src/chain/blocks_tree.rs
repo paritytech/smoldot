@@ -127,8 +127,8 @@ impl<T> NonFinalizedTree<T> {
                     },
                 },
                 finalized_consensus: match chain_information.consensus {
-                    chain_information::ChainInformationConsensus::AllAuthorized => {
-                        FinalizedConsensus::AllAuthorized
+                    chain_information::ChainInformationConsensus::Unknown => {
+                        FinalizedConsensus::Unknown
                     }
                     chain_information::ChainInformationConsensus::Aura {
                         finalized_authorities_list,
@@ -220,8 +220,8 @@ impl<T> NonFinalizedTree<T> {
         let attempt = chain_information::ChainInformationRef {
             finalized_block_header: (&inner.finalized_block_header).into(),
             consensus: match &inner.finalized_consensus {
-                FinalizedConsensus::AllAuthorized => {
-                    chain_information::ChainInformationConsensusRef::AllAuthorized
+                FinalizedConsensus::Unknown => {
+                    chain_information::ChainInformationConsensusRef::Unknown
                 }
                 FinalizedConsensus::Aura {
                     authorities_list,
@@ -303,8 +303,8 @@ impl<T> NonFinalizedTree<T> {
                 .current_best
                 .map(|idx| &inner.blocks.get(idx).unwrap().consensus),
         ) {
-            (FinalizedConsensus::AllAuthorized, _) => {
-                chain_information::ChainInformationConsensusRef::AllAuthorized
+            (FinalizedConsensus::Unknown, _) => {
+                chain_information::ChainInformationConsensusRef::Unknown
             }
             (
                 FinalizedConsensus::Aura {
@@ -446,7 +446,7 @@ struct NonFinalizedTreeInner<T> {
 /// State of the consensus of the finalized block.
 #[derive(Clone)]
 enum FinalizedConsensus {
-    AllAuthorized,
+    Unknown,
     Aura {
         /// List of authorities that must sign the child of the finalized block.
         authorities_list: Arc<Vec<header::AuraAuthority>>,
@@ -498,7 +498,6 @@ struct Block<T> {
 /// Changes to the consensus made by a block.
 #[derive(Clone)]
 enum BlockConsensus {
-    AllAuthorized,
     Aura {
         /// If `Some`, list of authorities that must verify the child of this block.
         /// This can be a clone of the value of the parent, a clone of
