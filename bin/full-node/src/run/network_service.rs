@@ -213,6 +213,7 @@ impl NetworkService {
                 in_slots: 25,
                 out_slots: 25,
                 protocol_id: chain.protocol_id.clone(),
+                block_number_bytes: 4, // TODO: correct value, maybe load from chain spec?
                 best_hash: chain.best_block.1,
                 best_number: chain.best_block.0,
                 genesis_hash: chain.genesis_block_hash,

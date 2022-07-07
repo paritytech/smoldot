@@ -105,6 +105,9 @@ pub struct ChainConfig {
     /// >           "chain spec").
     pub protocol_id: String,
 
+    /// Number of bytes of the block number in the networking protocol.
+    pub block_number_bytes: usize,
+
     /// If `Some`, the chain uses the GrandPa networking protocol.
     pub grandpa_protocol_config: Option<GrandpaState>,
 
@@ -1193,17 +1196,19 @@ where
                         notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     // Check validity of the handshake.
-                    let remote_handshake =
-                        match protocol::decode_block_announces_handshake(&remote_handshake) {
-                            Ok(hs) => hs,
-                            Err(err) => {
-                                // TODO: must close the substream and unassigned the slot
-                                break Some(Event::ProtocolError {
-                                    error: ProtocolError::BadBlockAnnouncesHandshake(err),
-                                    peer_id,
-                                });
-                            }
-                        };
+                    let remote_handshake = match protocol::decode_block_announces_handshake(
+                        self.chains[chain_index].chain_config.block_number_bytes,
+                        &remote_handshake,
+                    ) {
+                        Ok(hs) => hs,
+                        Err(err) => {
+                            // TODO: must close the substream and unassigned the slot
+                            break Some(Event::ProtocolError {
+                                error: ProtocolError::BadBlockAnnouncesHandshake(err),
+                                peer_id,
+                            });
+                        }
+                    };
 
                     // The desirability of the transactions and grandpa substreams is always equal
                     // to whether the block announces substream is open.
@@ -1656,7 +1661,10 @@ where
                         notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     // Immediately reject the substream if the handshake fails to parse.
-                    if let Err(err) = protocol::decode_block_announces_handshake(&handshake) {
+                    if let Err(err) = protocol::decode_block_announces_handshake(
+                        self.chains[chain_index].chain_config.block_number_bytes,
+                        &handshake,
+                    ) {
                         self.inner
                             .in_notification_refuse(desired_in_notification_id);
 
@@ -1692,6 +1700,7 @@ where
                                 genesis_hash: &chain_config.genesis_hash,
                                 role: chain_config.role,
                             },
+                            chain_config.block_number_bytes,
                         )
                         .fold(Vec::new(), |mut a, b| {
                             a.extend_from_slice(b.as_ref());
@@ -1814,12 +1823,15 @@ where
 
             let handshake = if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0
             {
-                protocol::encode_block_announces_handshake(protocol::BlockAnnouncesHandshakeRef {
-                    best_hash: &chain_config.best_hash,
-                    best_number: chain_config.best_number,
-                    genesis_hash: &chain_config.genesis_hash,
-                    role: chain_config.role,
-                })
+                protocol::encode_block_announces_handshake(
+                    protocol::BlockAnnouncesHandshakeRef {
+                        best_hash: &chain_config.best_hash,
+                        best_number: chain_config.best_number,
+                        genesis_hash: &chain_config.genesis_hash,
+                        role: chain_config.role,
+                    },
+                    chain_config.block_number_bytes,
+                )
                 .fold(Vec::new(), |mut a, b| {
                     a.extend_from_slice(b.as_ref());
                     a
@@ -2354,12 +2366,16 @@ pub enum NotificationsOutErr {
 }
 
 /// Undecoded but valid block announce handshake.
-pub struct EncodedBlockAnnounceHandshake(Vec<u8>);
+pub struct EncodedBlockAnnounceHandshake {
+    handshake: Vec<u8>,
+    block_number_bytes: usize,
+}
 
 impl EncodedBlockAnnounceHandshake {
     /// Returns the decoded version of the handshake.
     pub fn decode(&self) -> protocol::BlockAnnouncesHandshakeRef {
-        protocol::decode_block_announces_handshake(&self.0).unwrap()
+        protocol::decode_block_announces_handshake(self.block_number_bytes, &self.handshake)
+            .unwrap()
     }
 }
 
