@@ -17,7 +17,8 @@
 
 use crate::header;
 
-use core::iter;
+use alloc::vec;
+use core::{cmp, iter};
 use nom::Finish as _;
 
 /// Decoded handshake sent or received when opening a block announces notifications substream.
@@ -132,13 +133,12 @@ pub struct DecodeBlockAnnounceError(nom::error::ErrorKind);
 /// concatenation of the buffers.
 pub fn encode_block_announces_handshake(
     handshake: BlockAnnouncesHandshakeRef<'_>,
+    block_number_bytes: usize,
 ) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
-    let mut header = [0; 5];
+    let mut header = vec![0; 1 + block_number_bytes];
     header[0] = handshake.role.scale_encoding()[0];
-
-    // TODO: the message actually contains a u32, and doesn't use compact encoding; as such, any block height superior to 2^32 cannot be encoded
-    assert!(handshake.best_number < u64::from(u32::max_value()));
-    header[1..].copy_from_slice(&handshake.best_number.to_le_bytes()[..4]);
+    // TODO: what to do if the best number doesn't fit in the given size? right now we just wrap around
+    header[1..].copy_from_slice(&handshake.best_number.to_le_bytes()[..block_number_bytes]);
 
     iter::once(either::Left(header))
         .chain(iter::once(either::Right(handshake.best_hash)))
@@ -147,6 +147,7 @@ pub fn encode_block_announces_handshake(
 
 /// Decodes a SCALE-encoded block announces handshake.
 pub fn decode_block_announces_handshake(
+    expected_block_number_bytes: usize,
     handshake: &[u8],
 ) -> Result<BlockAnnouncesHandshakeRef, BlockAnnouncesHandshakeDecodeError> {
     let result: Result<_, nom::error::Error<_>> =
@@ -157,13 +158,27 @@ pub fn decode_block_announces_handshake(
                     nom::combinator::map(nom::bytes::complete::tag(&[0b10]), |_| Role::Light),
                     nom::combinator::map(nom::bytes::complete::tag(&[0b100]), |_| Role::Authority),
                 )),
-                nom::number::complete::le_u32,
+                nom::combinator::map_res(
+                    nom::bytes::complete::take(expected_block_number_bytes),
+                    move |slice: &[u8]| {
+                        // `slice` contains the little endian block number. We extend the block
+                        // number to 64bits if it is smaller, or return an error if it is larger
+                        // than 64bits and doesn't fit in a u64.
+                        let mut slice_out = [0; 8];
+                        let clamp = cmp::min(8, expected_block_number_bytes);
+                        if slice.iter().skip(clamp).any(|b| *b != 0) {
+                            return Err(nom::error::ErrorKind::TooLarge);
+                        }
+                        slice_out[..clamp].copy_from_slice(&slice[..clamp]);
+                        Ok(u64::from_le_bytes(slice_out))
+                    },
+                ),
                 nom::bytes::complete::take(32u32),
                 nom::bytes::complete::take(32u32),
             )),
             |(role, best_number, best_hash, genesis_hash)| BlockAnnouncesHandshakeRef {
                 role,
-                best_number: u64::from(best_number),
+                best_number,
                 best_hash: TryFrom::try_from(best_hash).unwrap(),
                 genesis_hash: TryFrom::try_from(genesis_hash).unwrap(),
             },
