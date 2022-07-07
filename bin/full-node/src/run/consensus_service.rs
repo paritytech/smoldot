@@ -170,6 +170,7 @@ impl ConsensusService {
         (config.tasks_executor)({
             let mut sync = all::AllSync::new(all::Config {
                 chain_information: finalized_chain_information,
+                allow_unknown_consensus_engines: false,
                 sources_capacity: 32,
                 blocks_capacity: {
                     // This is the maximum number of blocks between two consecutive justifications.

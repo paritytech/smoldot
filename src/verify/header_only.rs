@@ -38,6 +38,14 @@ pub struct Config<'a> {
 
     /// Configuration items related to the consensus engine.
     pub consensus: ConfigConsensus<'a>,
+
+    /// If `false`, digest items with an unknown consensus engine lead to an error.
+    ///
+    /// Passing `true` can lead to blocks being considered as valid when they shouldn't. However,
+    /// even if `true` is passed, a recognized consensus engine must always be present.
+    /// Consequently, both `true` and `false` guarantee that the number of authorable blocks over
+    /// the network is bounded.
+    pub allow_unknown_consensus_engines: bool,
 }
 
 /// Extra items of [`Config`] that are dependant on the consensus engine of the chain.
@@ -148,19 +156,21 @@ pub fn verify(config: Config) -> Result<Success, Error> {
         return Err(Error::NonSequentialBlockNumber);
     }
 
-    // Verification intentionally fails if there is any unrecognized digest log item.
-    if let Some(engine) = config
-        .block_header
-        .digest
-        .logs()
-        .find_map(|item| match item {
-            header::DigestItemRef::UnknownConsensus { engine, .. }
-            | header::DigestItemRef::UnknownSeal { engine, .. }
-            | header::DigestItemRef::UnknownPreRuntime { engine, .. } => Some(engine),
-            _ => None,
-        })
-    {
-        return Err(Error::UnknownConsensusEngine { engine });
+    // Fail verification if there is any digest log item with an unrecognized consensus engine.
+    if !config.allow_unknown_consensus_engines {
+        if let Some(engine) = config
+            .block_header
+            .digest
+            .logs()
+            .find_map(|item| match item {
+                header::DigestItemRef::UnknownConsensus { engine, .. }
+                | header::DigestItemRef::UnknownSeal { engine, .. }
+                | header::DigestItemRef::UnknownPreRuntime { engine, .. } => Some(engine),
+                _ => None,
+            })
+        {
+            return Err(Error::UnknownConsensusEngine { engine });
+        }
     }
 
     // TODO: need to verify that there's no grandpa scheduled change header if there's already an active grandpa scheduled change

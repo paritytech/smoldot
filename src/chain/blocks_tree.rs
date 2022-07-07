@@ -85,6 +85,15 @@ pub struct Config {
 
     /// Pre-allocated size of the chain, in number of non-finalized blocks.
     pub blocks_capacity: usize,
+
+    /// If `false`, blocks containing digest items with an unknown consensus engine will fail to
+    /// verify.
+    ///
+    /// Passing `true` can lead to blocks being considered as valid when they shouldn't. However,
+    /// even if `true` is passed, a recognized consensus engine must always be present.
+    /// Consequently, both `true` and `false` guarantee that the number of authorable blocks over
+    /// the network is bounded.
+    pub allow_unknown_consensus_engines: bool,
 }
 
 /// Holds state about the current state of the chain for the purpose of verifying headers.
@@ -153,6 +162,7 @@ impl<T> NonFinalizedTree<T> {
                     Default::default(),
                 ),
                 current_best: None,
+                allow_unknown_consensus_engines: config.allow_unknown_consensus_engines,
             })),
         }
     }
@@ -441,6 +451,9 @@ struct NonFinalizedTreeInner<T> {
     /// Index within [`NonFinalizedTreeInner::blocks`] of the current best block. `None` if and
     /// only if the fork tree is empty.
     current_best: Option<fork_tree::NodeIndex>,
+
+    /// See [`Config::allow_unknown_consensus_engines`].
+    allow_unknown_consensus_engines: bool,
 }
 
 /// State of the consensus of the finalized block.

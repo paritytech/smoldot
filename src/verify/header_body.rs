@@ -41,6 +41,14 @@ pub struct Config<'a, TBody> {
     /// Configuration items related to the consensus engine.
     pub consensus: ConfigConsensus<'a>,
 
+    /// If `false`, digest items with an unknown consensus engine lead to an error.
+    ///
+    /// Passing `true` can lead to blocks being considered as valid when they shouldn't. However,
+    /// even if `true` is passed, a recognized consensus engine must always be present.
+    /// Consequently, both `true` and `false` guarantee that the number of authorable blocks over
+    /// the network is bounded.
+    pub allow_unknown_consensus_engines: bool,
+
     /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
     /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
     pub now_from_unix_epoch: Duration,
@@ -198,22 +206,24 @@ pub enum Error {
 pub fn verify(
     config: Config<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
 ) -> Verify {
-    // Verification intentionally fails if there is any unrecognized digest log item.
-    if let Some(engine) = config
-        .block_header
-        .digest
-        .logs()
-        .find_map(|item| match item {
-            header::DigestItemRef::UnknownConsensus { engine, .. }
-            | header::DigestItemRef::UnknownSeal { engine, .. }
-            | header::DigestItemRef::UnknownPreRuntime { engine, .. } => Some(engine),
-            _ => None,
-        })
-    {
-        return Verify::Finished(Err((
-            Error::UnknownConsensusEngine { engine },
-            config.parent_runtime,
-        )));
+    // Fail verification if there is any digest log item with an unrecognized consensus engine.
+    if !config.allow_unknown_consensus_engines {
+        if let Some(engine) = config
+            .block_header
+            .digest
+            .logs()
+            .find_map(|item| match item {
+                header::DigestItemRef::UnknownConsensus { engine, .. }
+                | header::DigestItemRef::UnknownSeal { engine, .. }
+                | header::DigestItemRef::UnknownPreRuntime { engine, .. } => Some(engine),
+                _ => None,
+            })
+        {
+            return Verify::Finished(Err((
+                Error::UnknownConsensusEngine { engine },
+                config.parent_runtime,
+            )));
+        }
     }
 
     // Start the consensus engine verification process.

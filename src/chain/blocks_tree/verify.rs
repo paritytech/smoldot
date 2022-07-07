@@ -267,6 +267,7 @@ impl<T> NonFinalizedTreeInner<T> {
                         )
                     }
                 },
+                allow_unknown_consensus_engines: context.chain.allow_unknown_consensus_engines,
                 block_header: (&context.header).into(), // TODO: inefficiency ; in case of header only verify we do an extra allocation to build the context above
                 parent_block_header: parent_block_header.into(),
             })
@@ -701,6 +702,7 @@ impl<T> BodyVerifyRuntimeRequired<T> {
         let process = verify::header_body::verify(verify::header_body::Config {
             parent_runtime,
             consensus: config_consensus,
+            allow_unknown_consensus_engines: self.context.chain.allow_unknown_consensus_engines,
             now_from_unix_epoch: self.now_from_unix_epoch,
             block_header: (&self.context.header).into(),
             parent_block_header: parent_block_header.into(),
