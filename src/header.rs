@@ -990,8 +990,8 @@ pub enum DigestItemRef<'a> {
 
     /// Some other thing. Always ignored.
     ///
-    /// Contrary to [`DigestItemRef::UnknownEngine`], this item is intentionally meant to always
-    /// be ignored.
+    /// Contrary to [`DigestItemRef::UnknownConsensus`], [`DigestItemRef::UnknownPreRuntime`], or
+    /// [`DigestItemRef::UnknownSeal`], this item is intentionally meant to always be ignored.
     Other(&'a [u8]),
 
     /// Runtime of the chain has been updated in this block. This can include the runtime code or
