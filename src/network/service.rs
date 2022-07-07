@@ -566,7 +566,11 @@ where
         timeout: Duration,
         checked: bool,
     ) -> OutRequestId {
-        let request_data = protocol::build_block_request(&config).fold(Vec::new(), |mut a, b| {
+        let request_data = protocol::build_block_request(
+            self.chains[chain_index].chain_config.block_number_bytes,
+            &config,
+        )
+        .fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
             a
         });
@@ -1149,7 +1153,10 @@ where
                 } if ((protocol_index - 1) % REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN) == 0 => {
                     let chain_index = (protocol_index - 1) / REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN;
 
-                    match protocol::decode_block_request(&request_payload) {
+                    match protocol::decode_block_request(
+                        self.chains[chain_index].chain_config.block_number_bytes,
+                        &request_payload,
+                    ) {
                         Ok(config) => {
                             let _prev_value = self
                                 .in_requests_types
