@@ -109,6 +109,12 @@ pub enum Error {
     NonSequentialBlockNumber,
     /// Hash of the parent block doesn't match the hash in the header to verify.
     BadParentHash,
+    /// Block header contains an unrecognized consensus engine.
+    #[display(
+        fmt = "Block header contains an unrecognized consensus engine: {:?}",
+        engine
+    )]
+    UnknownConsensusEngine { engine: [u8; 4] },
     /// Block header contains items relevant to multiple consensus engines at the same time.
     MultipleConsensusEngines,
     /// Failed to verify the authenticity of the block with the AURA algorithm.
@@ -140,6 +146,21 @@ pub fn verify(config: Config) -> Result<Success, Error> {
         .map_or(true, |v| v != config.block_header.number)
     {
         return Err(Error::NonSequentialBlockNumber);
+    }
+
+    // Verification intentionally fails if there is any unrecognized digest log item.
+    if let Some(engine) = config
+        .block_header
+        .digest
+        .logs()
+        .find_map(|item| match item {
+            header::DigestItemRef::UnknownConsensus { engine, .. }
+            | header::DigestItemRef::UnknownSeal { engine, .. }
+            | header::DigestItemRef::UnknownPreRuntime { engine, .. } => Some(engine),
+            _ => None,
+        })
+    {
+        return Err(Error::UnknownConsensusEngine { engine });
     }
 
     // TODO: need to verify that there's no grandpa scheduled change header if there's already an active grandpa scheduled change

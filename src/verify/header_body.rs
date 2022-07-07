@@ -169,6 +169,12 @@ pub enum Error {
     NonEmptyOutput,
     /// Block header contains items relevant to multiple consensus engines at the same time.
     MultipleConsensusEngines,
+    /// Block header contains an unrecognized consensus engine.
+    #[display(
+        fmt = "Block header contains an unrecognized consensus engine: {:?}",
+        engine
+    )]
+    UnknownConsensusEngine { engine: [u8; 4] },
     /// Failed to verify the authenticity of the block with the AURA algorithm.
     #[display(fmt = "{}", _0)]
     AuraVerification(aura::VerifyError),
@@ -192,6 +198,24 @@ pub enum Error {
 pub fn verify(
     config: Config<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
 ) -> Verify {
+    // Verification intentionally fails if there is any unrecognized digest log item.
+    if let Some(engine) = config
+        .block_header
+        .digest
+        .logs()
+        .find_map(|item| match item {
+            header::DigestItemRef::UnknownConsensus { engine, .. }
+            | header::DigestItemRef::UnknownSeal { engine, .. }
+            | header::DigestItemRef::UnknownPreRuntime { engine, .. } => Some(engine),
+            _ => None,
+        })
+    {
+        return Verify::Finished(Err((
+            Error::UnknownConsensusEngine { engine },
+            config.parent_runtime,
+        )));
+    }
+
     // Start the consensus engine verification process.
     let consensus_success = match &config.consensus {
         ConfigConsensus::Aura {
