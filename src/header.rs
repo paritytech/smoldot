@@ -210,9 +210,6 @@ pub enum Error {
     /// Found a Babe configuration change digest without an epoch change digest.
     UnexpectedBabeConfigDescriptor,
     GrandpaConsensusLogDecodeError,
-    /// Unknown consensus engine specified in a digest log.
-    #[display(fmt = "Unknown consensus engine specified in a digest log: {:?}", _0)]
-    UnknownConsensusEngine([u8; 4]),
     /// Proof-of-work consensus algorithm is intentionally not supported for ideological reasons.
     PowIdeologicallyNotSupported,
 }
@@ -634,9 +631,13 @@ impl<'a> DigestRef<'a> {
                     has_runtime_environment_updated = true;
                 }
                 DigestItem::BabeSeal(_) => return Err(Error::SealIsntLastItem),
-                DigestItem::Beefy { .. }
-                | DigestItem::PolkadotParachain { .. }
-                | DigestItem::Frontier { .. }
+                DigestItem::UnknownSeal { .. } if item_num == slice.len() - 1 => {
+                    debug_assert!(aura_seal_index.is_none());
+                    debug_assert!(babe_seal_index.is_none());
+                }
+                DigestItem::UnknownSeal { .. } => return Err(Error::SealIsntLastItem),
+                DigestItem::UnknownConsensus { .. }
+                | DigestItem::UnknownPreRuntime { .. }
                 | DigestItem::Other(..) => {}
             }
         }
@@ -727,9 +728,13 @@ impl<'a> DigestRef<'a> {
                     has_runtime_environment_updated = true;
                 }
                 DigestItemRef::BabeSeal(_) => return Err(Error::SealIsntLastItem),
-                DigestItemRef::Beefy { .. }
-                | DigestItemRef::PolkadotParachain { .. }
-                | DigestItemRef::Frontier { .. }
+                DigestItemRef::UnknownSeal { .. } if item_num == digest_logs_len - 1 => {
+                    debug_assert!(aura_seal_index.is_none());
+                    debug_assert!(babe_seal_index.is_none());
+                }
+                DigestItemRef::UnknownSeal { .. } => return Err(Error::SealIsntLastItem),
+                DigestItemRef::UnknownConsensus { .. }
+                | DigestItemRef::UnknownPreRuntime { .. }
                 | DigestItemRef::Other { .. } => {}
             }
         }
@@ -961,26 +966,32 @@ pub enum DigestItemRef<'a> {
 
     GrandpaConsensus(GrandpaConsensusLogRef<'a>),
 
-    /// Item related to the BEEFY algorithm (Mountain Merkle Ranges). Allows proving that a block
-    /// is a child of another.
-    Beefy {
-        /// Smoldot doesn't interpret the content of the log item at the moment.
+    /// Consensus item with an engine that hasn't been recognized.
+    UnknownConsensus {
+        /// Name of the consensus engine.
+        engine: [u8; 4],
+        /// Smoldot doesn't interpret the content of the log item.
         opaque: &'a [u8],
     },
-
-    /// Item related to parachains consensus. Contains information about a parachain.
-    PolkadotParachain {
-        /// Smoldot doesn't interpret the content of the log item at the moment.
+    /// Pre-runtime item with a consensus engine that hasn't been recognized.
+    UnknownPreRuntime {
+        /// Name of the consensus engine.
+        engine: [u8; 4],
+        /// Smoldot doesn't interpret the content of the log item.
         opaque: &'a [u8],
     },
-
-    /// Item related to the Frontier consensus engine.
-    Frontier {
-        /// Smoldot doesn't interpret the content of the log item at the moment.
+    /// Seal using a consensus engine that hasn't been recognized.
+    UnknownSeal {
+        /// Name of the consensus engine.
+        engine: [u8; 4],
+        /// Smoldot doesn't interpret the content of the log item.
         opaque: &'a [u8],
     },
 
     /// Some other thing. Always ignored.
+    ///
+    /// Contrary to [`DigestItemRef::UnknownEngine`], this item is intentionally meant to always
+    /// be ignored.
     Other(&'a [u8]),
 
     /// Runtime of the chain has been updated in this block. This can include the runtime code or
@@ -1102,23 +1113,23 @@ impl<'a> DigestItemRef<'a> {
                 ret.extend_from_slice(seal);
                 iter::once(ret)
             }
-            DigestItemRef::Beefy { opaque } => {
+            DigestItemRef::UnknownConsensus { engine, opaque } => {
                 let mut ret = vec![4];
-                ret.extend_from_slice(b"BEEF");
+                ret.extend_from_slice(&engine);
                 ret.extend_from_slice(util::encode_scale_compact_usize(opaque.len()).as_ref());
                 ret.extend_from_slice(opaque);
                 iter::once(ret)
             }
-            DigestItemRef::PolkadotParachain { opaque } => {
-                let mut ret = vec![4];
-                ret.extend_from_slice(b"POL1");
+            DigestItemRef::UnknownSeal { engine, opaque } => {
+                let mut ret = vec![5];
+                ret.extend_from_slice(&engine);
                 ret.extend_from_slice(util::encode_scale_compact_usize(opaque.len()).as_ref());
                 ret.extend_from_slice(opaque);
                 iter::once(ret)
             }
-            DigestItemRef::Frontier { opaque } => {
-                let mut ret = vec![4];
-                ret.extend_from_slice(b"fron");
+            DigestItemRef::UnknownPreRuntime { engine, opaque } => {
+                let mut ret = vec![6];
+                ret.extend_from_slice(&engine);
                 ret.extend_from_slice(util::encode_scale_compact_usize(opaque.len()).as_ref());
                 ret.extend_from_slice(opaque);
                 iter::once(ret)
@@ -1144,11 +1155,18 @@ impl<'a> From<&'a DigestItem> for DigestItemRef<'a> {
             DigestItem::BabeConsensus(v) => DigestItemRef::BabeConsensus(v.into()),
             DigestItem::BabeSeal(v) => DigestItemRef::BabeSeal(v),
             DigestItem::GrandpaConsensus(v) => DigestItemRef::GrandpaConsensus(v.into()),
-            DigestItem::Beefy { opaque } => DigestItemRef::Beefy { opaque: &*opaque },
-            DigestItem::PolkadotParachain { opaque } => {
-                DigestItemRef::PolkadotParachain { opaque: &*opaque }
-            }
-            DigestItem::Frontier { opaque } => DigestItemRef::Frontier { opaque: &*opaque },
+            DigestItem::UnknownConsensus { engine, opaque } => DigestItemRef::UnknownConsensus {
+                engine: *engine,
+                opaque: &*opaque,
+            },
+            DigestItem::UnknownSeal { engine, opaque } => DigestItemRef::UnknownSeal {
+                engine: *engine,
+                opaque: &*opaque,
+            },
+            DigestItem::UnknownPreRuntime { engine, opaque } => DigestItemRef::UnknownPreRuntime {
+                engine: *engine,
+                opaque: &*opaque,
+            },
             DigestItem::Other(v) => DigestItemRef::Other(&*v),
             DigestItem::RuntimeEnvironmentUpdated => DigestItemRef::RuntimeEnvironmentUpdated,
         }
@@ -1170,21 +1188,25 @@ pub enum DigestItem {
 
     GrandpaConsensus(GrandpaConsensusLog),
 
-    /// See [`DigestItemRef::Beefy`].
-    Beefy {
-        /// Smoldot doesn't interpret the content of the log item at the moment.
+    /// See [`DigestItemRef::UnknownConsensus`].
+    UnknownConsensus {
+        /// Name of the consensus engine.
+        engine: [u8; 4],
+        /// Smoldot doesn't interpret the content of the log item.
         opaque: Vec<u8>,
     },
-
-    /// See [`DigestItemRef::PolkadotParachain`].
-    PolkadotParachain {
-        /// Smoldot doesn't interpret the content of the log item at the moment.
+    /// See [`DigestItemRef::UnknownPreRuntime`].
+    UnknownPreRuntime {
+        /// Name of the consensus engine.
+        engine: [u8; 4],
+        /// Smoldot doesn't interpret the content of the log item.
         opaque: Vec<u8>,
     },
-
-    /// See [`DigestItemRef::Frontier`].
-    Frontier {
-        /// Smoldot doesn't interpret the content of the log item at the moment.
+    /// See [`DigestItemRef::UnknownSeal`].
+    UnknownSeal {
+        /// Name of the consensus engine.
+        engine: [u8; 4],
+        /// Smoldot doesn't interpret the content of the log item.
         opaque: Vec<u8>,
     },
 
@@ -1214,14 +1236,17 @@ impl<'a> From<DigestItemRef<'a>> for DigestItem {
                 DigestItem::BabeSeal(seal)
             }
             DigestItemRef::GrandpaConsensus(v) => DigestItem::GrandpaConsensus(v.into()),
-            DigestItemRef::Beefy { opaque } => DigestItem::Beefy {
+            DigestItemRef::UnknownConsensus { engine, opaque } => DigestItem::UnknownConsensus {
                 opaque: opaque.to_vec(),
+                engine,
             },
-            DigestItemRef::PolkadotParachain { opaque } => DigestItem::PolkadotParachain {
+            DigestItemRef::UnknownSeal { engine, opaque } => DigestItem::UnknownSeal {
                 opaque: opaque.to_vec(),
+                engine,
             },
-            DigestItemRef::Frontier { opaque } => DigestItem::Frontier {
+            DigestItemRef::UnknownPreRuntime { engine, opaque } => DigestItem::UnknownPreRuntime {
                 opaque: opaque.to_vec(),
+                engine,
             },
             DigestItemRef::Other(v) => DigestItem::Other(v.to_vec()),
             DigestItemRef::RuntimeEnvironmentUpdated => DigestItem::RuntimeEnvironmentUpdated,
@@ -1293,10 +1318,10 @@ fn decode_item_from_parts<'a>(
         (4, b"FRNK") => {
             DigestItemRef::GrandpaConsensus(GrandpaConsensusLogRef::from_slice(content)?)
         }
-        (4, b"BEEF") => DigestItemRef::Beefy { opaque: content },
-        (4, b"POL1") => DigestItemRef::PolkadotParachain { opaque: content },
-        (4, b"fron") => DigestItemRef::Frontier { opaque: content },
-        (4, e) => return Err(Error::UnknownConsensusEngine(*e)),
+        (4, engine) => DigestItemRef::UnknownConsensus {
+            engine: *engine,
+            opaque: content,
+        },
         // 5 = Seal
         (5, b"aura") => DigestItemRef::AuraSeal({
             TryFrom::try_from(content).map_err(|_| Error::BadAuraSealLength)?
@@ -1304,11 +1329,17 @@ fn decode_item_from_parts<'a>(
         (5, b"BABE") => DigestItemRef::BabeSeal({
             TryFrom::try_from(content).map_err(|_| Error::BadBabeSealLength)?
         }),
-        (5, e) => return Err(Error::UnknownConsensusEngine(*e)),
+        (5, engine) => DigestItemRef::UnknownSeal {
+            engine: *engine,
+            opaque: content,
+        },
         // 6 = PreRuntime
         (6, b"aura") => DigestItemRef::AuraPreDigest(AuraPreDigest::from_slice(content)?),
         (6, b"BABE") => DigestItemRef::BabePreDigest(BabePreDigestRef::from_slice(content)?),
-        (6, e) => return Err(Error::UnknownConsensusEngine(*e)),
+        (6, engine) => DigestItemRef::UnknownPreRuntime {
+            engine: *engine,
+            opaque: content,
+        },
         _ => unreachable!(),
     })
 }
