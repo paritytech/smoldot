@@ -114,9 +114,15 @@ wsServer.on('request', function (request) {
         return;
     }
 
+    const connection = request.accept(request.requestedProtocols[0], request.origin);
+    console.log('(demo) New JSON-RPC client connected: ' + request.remoteAddress + '.');
+
     // Start loading the chain.
     let chain = (async () => {
         if (chainCfg.relayChain) {
+            if (!chainSpecsById[chainCfg.relayChain])
+                throw new Error("Couldn't find relay chain: " + chainCfg.relayChain);
+
             const relay = await client.addChain({
                 chainSpec: chainSpecsById[chainCfg.relayChain].chainSpec,
             });
@@ -142,11 +148,8 @@ wsServer.on('request', function (request) {
         }
     })().catch((error) => {
         console.error("(demo) Error while adding chain: " + error);
-        connection.close(400);
+        connection.close(1011); // Internal server error
     });
-
-    const connection = request.accept(request.requestedProtocols[0], request.origin);
-    console.log('(demo) New JSON-RPC client connected: ' + request.remoteAddress + '.');
 
     // Receiving a message from the connection. This is a JSON-RPC request.
     connection.on('message', function (message) {
@@ -163,7 +166,7 @@ wsServer.on('request', function (request) {
                     process.exit(1);
                 });
         } else {
-            connection.close(400);
+            connection.close(1002); // Protocol error
         }
     });
 
