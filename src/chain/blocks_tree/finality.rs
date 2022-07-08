@@ -116,12 +116,11 @@ impl<T> NonFinalizedTree<T> {
     pub fn verify_grandpa_commit_message(
         &mut self,
         scale_encoded_commit: &[u8],
-        block_number_bytes: usize,
     ) -> Result<FinalityApply<T>, CommitVerifyError> {
         self.inner
             .as_mut()
             .unwrap()
-            .verify_grandpa_commit_message(scale_encoded_commit, block_number_bytes)
+            .verify_grandpa_commit_message(scale_encoded_commit)
     }
 
     /// Sets the latest known finalized block. Trying to verify a block that isn't a descendant of
@@ -339,7 +338,6 @@ impl<T> NonFinalizedTreeInner<T> {
     fn verify_grandpa_commit_message(
         &mut self,
         verify_grandpa_commit_message: &[u8],
-        block_number_bytes: usize,
     ) -> Result<FinalityApply<T>, CommitVerifyError> {
         // The code below would panic if the chain doesn't use Grandpa.
         if !matches!(self.finality, Finality::Grandpa { .. }) {
@@ -348,7 +346,7 @@ impl<T> NonFinalizedTreeInner<T> {
 
         let decoded_commit = grandpa::commit::decode::decode_grandpa_commit(
             verify_grandpa_commit_message,
-            block_number_bytes,
+            self.block_number_bytes,
         )
         .map_err(|_| CommitVerifyError::InvalidCommit)?;
 
@@ -362,7 +360,7 @@ impl<T> NonFinalizedTreeInner<T> {
 
         let mut verification = grandpa::commit::verify::verify(grandpa::commit::verify::Config {
             commit: verify_grandpa_commit_message,
-            block_number_bytes,
+            block_number_bytes: self.block_number_bytes,
             expected_authorities_set_id,
             num_authorities: u32::try_from(authorities_list.clone().count()).unwrap(),
         });

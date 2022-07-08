@@ -55,6 +55,10 @@ pub struct Config {
     /// Information about the latest finalized block and its ancestors.
     pub chain_information: chain_information::ValidChainInformation,
 
+    /// Number of bytes used when encoding/decoding the block number. Influences how various data
+    /// structures should be parsed.
+    pub block_number_bytes: usize,
+
     /// Pre-allocated capacity for the number of block sources.
     pub sources_capacity: usize,
 
@@ -124,6 +128,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 AllSyncInner::Optimistic {
                     inner: optimistic::OptimisticSync::new(optimistic::Config {
                         chain_information: config.chain_information,
+                        block_number_bytes: config.block_number_bytes,
                         sources_capacity: config.sources_capacity,
                         blocks_capacity: config.blocks_capacity,
                         download_ahead_blocks: config.download_ahead_blocks,
@@ -144,6 +149,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         AllSyncInner::Optimistic {
                             inner: optimistic::OptimisticSync::new(optimistic::Config {
                                 chain_information,
+                                block_number_bytes: config.block_number_bytes,
                                 sources_capacity: config.sources_capacity,
                                 blocks_capacity: config.blocks_capacity,
                                 download_ahead_blocks: config.download_ahead_blocks,
@@ -161,6 +167,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 blocks_capacity: config.blocks_capacity,
                 max_disjoint_headers: config.max_disjoint_headers,
                 max_requests_per_block: config.max_requests_per_block,
+                block_number_bytes: config.block_number_bytes,
             },
         }
     }
@@ -1128,8 +1135,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         // TODO: clearly indicate if message has been ignored
         match (&mut self.inner, source_id) {
             (AllSyncInner::AllForks(sync), SourceMapping::AllForks(source_id)) => {
-                sync.grandpa_commit_message(*source_id, scale_encoded_message, 4)
-                // TODO: not 4
+                sync.grandpa_commit_message(*source_id, scale_encoded_message)
             }
             (AllSyncInner::Optimistic { .. }, _) => Ok(()),
             (AllSyncInner::GrandpaWarpSync { .. }, _) => Ok(()),
@@ -2389,6 +2395,8 @@ struct Shared<TRq> {
     max_disjoint_headers: usize,
     /// Value passed through [`Config::max_requests_per_block`].
     max_requests_per_block: NonZeroU32,
+    /// Value passed through [`Config::block_number_bytes`].
+    block_number_bytes: usize,
 }
 
 impl<TRq> Shared<TRq> {
@@ -2405,6 +2413,7 @@ impl<TRq> Shared<TRq> {
     ) {
         let mut all_forks = all_forks::AllForksSync::new(all_forks::Config {
             chain_information: grandpa.chain_information,
+            block_number_bytes: self.block_number_bytes,
             sources_capacity: self.sources_capacity,
             blocks_capacity: self.blocks_capacity,
             max_disjoint_headers: self.max_disjoint_headers,

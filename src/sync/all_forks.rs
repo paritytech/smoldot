@@ -103,6 +103,10 @@ pub struct Config<TBannedBlocksIter> {
     /// Information about the latest finalized block and its ancestors.
     pub chain_information: chain_information::ValidChainInformation,
 
+    /// Number of bytes used when encoding/decoding the block number. Influences how various data
+    /// structures should be parsed.
+    pub block_number_bytes: usize,
+
     /// Pre-allocated capacity for the number of block sources.
     pub sources_capacity: usize,
 
@@ -415,6 +419,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
         let chain = blocks_tree::NonFinalizedTree::new(blocks_tree::Config {
             chain_information: config.chain_information,
+            block_number_bytes: config.block_number_bytes,
             blocks_capacity: config.blocks_capacity,
         });
 
@@ -910,14 +915,13 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         &mut self,
         source_id: SourceId,
         scale_encoded_commit: &[u8],
-        block_number_bytes: usize,
     ) -> Result<(), blocks_tree::CommitVerifyError> {
         // Grabbing the source is done early on in order to panic if the `source_id` is invalid.
         let source = &mut self.inner.blocks[source_id];
 
         let block_number = match self
             .chain
-            .verify_grandpa_commit_message(scale_encoded_commit, block_number_bytes)
+            .verify_grandpa_commit_message(scale_encoded_commit)
         {
             Ok(apply) => {
                 apply.apply();
@@ -2015,7 +2019,7 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                 match self
                     .parent
                     .chain
-                    .verify_grandpa_commit_message(&scale_encoded_commit, 4) // TODO: no
+                    .verify_grandpa_commit_message(&scale_encoded_commit)
                 {
                     Ok(success) => {
                         // TODO: DRY

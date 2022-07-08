@@ -170,6 +170,7 @@ impl ConsensusService {
         (config.tasks_executor)({
             let mut sync = all::AllSync::new(all::Config {
                 chain_information: finalized_chain_information,
+                block_number_bytes: 4, // TODO: pass a proper value; for example load through chain spec
                 sources_capacity: 32,
                 blocks_capacity: {
                     // This is the maximum number of blocks between two consecutive justifications.
