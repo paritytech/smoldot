@@ -47,6 +47,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
     let mut task = Task {
         sync: all::AllSync::new(all::Config {
             chain_information,
+            allow_unknown_consensus_engines: true,
             sources_capacity: 32,
             blocks_capacity: {
                 // This is the maximum number of blocks between two consecutive justifications.
