@@ -47,6 +47,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
     let mut task = Task {
         sync: all::AllSync::new(all::Config {
             chain_information,
+            block_number_bytes: 4, // TODO: pass a proper value; for example load through chain spec
             allow_unknown_consensus_engines: true,
             sources_capacity: 32,
             blocks_capacity: {
@@ -172,8 +173,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                 };
 
             if let Some(set_id) = grandpa_set_id {
-                let commit_finalized_height =
-                    u32::try_from(task.sync.finalized_block_header().number).unwrap(); // TODO: unwrap :-/
+                let commit_finalized_height = task.sync.finalized_block_header().number;
                 task.network_service
                     .set_local_grandpa_state(
                         network_chain_index,

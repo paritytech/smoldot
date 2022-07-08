@@ -55,6 +55,10 @@ pub struct Config {
     /// Information about the latest finalized block and its ancestors.
     pub chain_information: chain_information::ValidChainInformation,
 
+    /// Number of bytes used when encoding/decoding the block number. Influences how various data
+    /// structures should be parsed.
+    pub block_number_bytes: usize,
+
     /// If `false`, blocks containing digest items with an unknown consensus engine will fail to
     /// verify.
     ///
@@ -133,6 +137,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 AllSyncInner::Optimistic {
                     inner: optimistic::OptimisticSync::new(optimistic::Config {
                         chain_information: config.chain_information,
+                        block_number_bytes: config.block_number_bytes,
                         sources_capacity: config.sources_capacity,
                         blocks_capacity: config.blocks_capacity,
                         download_ahead_blocks: config.download_ahead_blocks,
@@ -153,6 +158,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         AllSyncInner::Optimistic {
                             inner: optimistic::OptimisticSync::new(optimistic::Config {
                                 chain_information,
+                                block_number_bytes: config.block_number_bytes,
                                 sources_capacity: config.sources_capacity,
                                 blocks_capacity: config.blocks_capacity,
                                 download_ahead_blocks: config.download_ahead_blocks,
@@ -170,6 +176,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 blocks_capacity: config.blocks_capacity,
                 max_disjoint_headers: config.max_disjoint_headers,
                 max_requests_per_block: config.max_requests_per_block,
+                block_number_bytes: config.block_number_bytes,
                 allow_unknown_consensus_engines: config.allow_unknown_consensus_engines,
             },
         }
@@ -2403,6 +2410,8 @@ struct Shared<TRq> {
     max_disjoint_headers: usize,
     /// Value passed through [`Config::max_requests_per_block`].
     max_requests_per_block: NonZeroU32,
+    /// Value passed through [`Config::block_number_bytes`].
+    block_number_bytes: usize,
     /// Value passed through [`Config::allow_unknown_consensus_engines`].
     allow_unknown_consensus_engines: bool,
 }
@@ -2421,6 +2430,7 @@ impl<TRq> Shared<TRq> {
     ) {
         let mut all_forks = all_forks::AllForksSync::new(all_forks::Config {
             chain_information: grandpa.chain_information,
+            block_number_bytes: self.block_number_bytes,
             sources_capacity: self.sources_capacity,
             blocks_capacity: self.blocks_capacity,
             max_disjoint_headers: self.max_disjoint_headers,

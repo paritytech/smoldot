@@ -135,7 +135,7 @@ pub struct GrandpaState {
     /// of [`GrandpaState::commit_finalized_height`].
     pub set_id: u64,
     /// Height of the highest block considered final by the node.
-    pub commit_finalized_height: u32,
+    pub commit_finalized_height: u64,
 }
 
 /// Identifier of a pending connection requested by the network through a [`StartConnect`].
@@ -504,7 +504,7 @@ where
             set_id: grandpa_state.set_id,
             commit_finalized_height: grandpa_state.commit_finalized_height,
         })
-        .scale_encoding()
+        .scale_encoding(self.chains[chain_index].chain_config.block_number_bytes)
         .fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
             a
@@ -1442,7 +1442,7 @@ where
                             set_id: grandpa_config.set_id,
                             commit_finalized_height: grandpa_config.commit_finalized_height,
                         })
-                        .scale_encoding()
+                        .scale_encoding(self.chains[chain_index].chain_config.block_number_bytes)
                         .fold(Vec::new(), |mut a, b| {
                             a.extend_from_slice(b.as_ref());
                             a
@@ -1622,6 +1622,8 @@ where
                 } if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 2 => {
                     let chain_index =
                         notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
+                    let block_number_bytes =
+                        self.chains[chain_index].chain_config.block_number_bytes;
 
                     // Don't report events about nodes we don't have an outbound substream with.
                     // TODO: cloning of peer_id :(
@@ -1629,7 +1631,10 @@ where
                         continue;
                     }
 
-                    let decoded_notif = match protocol::decode_grandpa_notification(&notification) {
+                    let decoded_notif = match protocol::decode_grandpa_notification(
+                        &notification,
+                        block_number_bytes,
+                    ) {
                         Ok(n) => n,
                         Err(err) => {
                             break Some(Event::ProtocolError {
@@ -1645,7 +1650,10 @@ where
                         break Some(Event::GrandpaCommitMessage {
                             chain_index,
                             peer_id,
-                            message: EncodedGrandpaCommitMessage(notification),
+                            message: EncodedGrandpaCommitMessage {
+                                message: notification,
+                                block_number_bytes,
+                            },
                         });
                     }
                 }
@@ -2428,18 +2436,21 @@ impl fmt::Debug for EncodedMerkleProof {
 
 /// Undecoded but valid GrandPa commit message.
 #[derive(Clone)]
-pub struct EncodedGrandpaCommitMessage(Vec<u8>);
+pub struct EncodedGrandpaCommitMessage {
+    message: Vec<u8>,
+    block_number_bytes: usize,
+}
 
 impl EncodedGrandpaCommitMessage {
     /// Returns the encoded bytes of the commit message.
     pub fn as_encoded(&self) -> &[u8] {
         // Skip the first byte because `self.0` is a `GrandpaNotificationRef`.
-        &self.0[1..]
+        &self.message[1..]
     }
 
     /// Returns the decoded version of the commit message.
     pub fn decode(&self) -> protocol::CommitMessageRef {
-        match protocol::decode_grandpa_notification(&self.0) {
+        match protocol::decode_grandpa_notification(&self.message, self.block_number_bytes) {
             Ok(protocol::GrandpaNotificationRef::Commit(msg)) => msg,
             _ => unreachable!(),
         }

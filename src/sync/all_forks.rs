@@ -103,6 +103,10 @@ pub struct Config<TBannedBlocksIter> {
     /// Information about the latest finalized block and its ancestors.
     pub chain_information: chain_information::ValidChainInformation,
 
+    /// Number of bytes used when encoding/decoding the block number. Influences how various data
+    /// structures should be parsed.
+    pub block_number_bytes: usize,
+
     /// If `false`, blocks containing digest items with an unknown consensus engine will fail to
     /// verify.
     ///
@@ -424,6 +428,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
         let chain = blocks_tree::NonFinalizedTree::new(blocks_tree::Config {
             chain_information: config.chain_information,
+            block_number_bytes: config.block_number_bytes,
             blocks_capacity: config.blocks_capacity,
             allow_unknown_consensus_engines: config.allow_unknown_consensus_engines,
         });

@@ -74,6 +74,10 @@ pub struct Config {
     /// Information about the latest finalized block and its ancestors.
     pub chain_information: chain_information::ValidChainInformation,
 
+    /// Number of bytes used when encoding/decoding the block number. Influences how various data
+    /// structures should be parsed.
+    pub block_number_bytes: usize,
+
     /// Pre-allocated capacity for the number of block sources.
     pub sources_capacity: usize,
 
@@ -271,6 +275,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     pub fn new(config: Config) -> Self {
         let blocks_tree_config = blocks_tree::Config {
             chain_information: config.chain_information,
+            block_number_bytes: config.block_number_bytes,
             blocks_capacity: config.blocks_capacity,
             // Considering that we rely on justifications to sync, there is no drawback in
             // accepting blocks with unrecognized consensus engines. While this could lead to

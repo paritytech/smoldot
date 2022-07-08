@@ -83,6 +83,10 @@ pub struct Config {
     /// Information about the latest finalized block and its ancestors.
     pub chain_information: chain_information::ValidChainInformation,
 
+    /// Number of bytes used when encoding/decoding the block number. Influences how various data
+    /// structures should be parsed.
+    pub block_number_bytes: usize,
+
     /// Pre-allocated size of the chain, in number of non-finalized blocks.
     pub blocks_capacity: usize,
 
@@ -162,6 +166,7 @@ impl<T> NonFinalizedTree<T> {
                     Default::default(),
                 ),
                 current_best: None,
+                block_number_bytes: config.block_number_bytes,
                 allow_unknown_consensus_engines: config.allow_unknown_consensus_engines,
             })),
         }
@@ -451,7 +456,8 @@ struct NonFinalizedTreeInner<T> {
     /// Index within [`NonFinalizedTreeInner::blocks`] of the current best block. `None` if and
     /// only if the fork tree is empty.
     current_best: Option<fork_tree::NodeIndex>,
-
+    /// See [`Config::block_number_bytes`].
+    block_number_bytes: usize,
     /// See [`Config::allow_unknown_consensus_engines`].
     allow_unknown_consensus_engines: bool,
 }
