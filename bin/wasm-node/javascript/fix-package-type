@@ -1,0 +1,25 @@
+#!/bin/bash
+#   Adds package.json files to cjs/mjs subtrees with the respective type needed for
+#   the target environment.
+#
+
+cat >dist/cjs/package.json <<!EOF
+{
+    "type": "commonjs"
+}
+!EOF
+
+cat >dist/mjs/package.json <<!EOF
+{
+    "type": "module"
+}
+!EOF
+
+# This is a workaround for supporting Worker in both ESM and CJS with typescript build and without
+# falling into solutions like webpack, babel etc.
+# It is a simple `sed` script that replaces
+#   the `Worker(new URL('./worker.js', import.meta.url), { type: "module" })`
+#   with `Worker(__dirname.concat('/worker.js'))` 
+# which allows the worker to work for Common JS.
+sed -i -e s/new\ URL\(\'\./__dirname\.concat\(\'/g "dist/cjs/worker/spawn.js" 
+sed -i -e s/,\ import\.meta\.url\),\ {\ type:\ \"module\"\ }/\)/g "dist/cjs/worker/spawn.js" 

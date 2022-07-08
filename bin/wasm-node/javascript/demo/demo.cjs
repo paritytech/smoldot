@@ -17,11 +17,11 @@
 
 // This file launches a WebSocket server that exposes JSON-RPC functions.
 
-import * as smoldot from '../dist/index.js';
-import { default as websocket } from 'websocket';
-import * as http from 'node:http';
-import * as process from 'node:process';
-import * as fs from 'node:fs';
+const smoldot = require('../dist/cjs/index.js');
+const websocket = require('websocket');
+const http  = require('node:http');
+const process = require('node:process');
+const fs = require('node:fs');
 
 // List of files containing chains available to the user.
 // The first item has a specific role in that we always connect to it at initialization.
