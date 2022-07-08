@@ -1048,12 +1048,12 @@ where
                     .remove(&(blake2_hash(&tx.scale_encoded), *tx_id));
                 debug_assert!(_removed);
 
-                included_transactions.push((
-                    *tx_id,
-                    *index_in_block,
-                    tx.scale_encoded,
-                    tx.user_data,
-                ));
+                included_transactions.push(RemovedTransaction {
+                    id: *tx_id,
+                    index_in_block: *index_in_block,
+                    scale_encoding: tx.scale_encoded,
+                    user_data: tx.user_data,
+                });
             }
 
             // Purge the state from any validation information about that block.
@@ -1130,8 +1130,23 @@ pub struct PruneBodyFinalized<TTx, TBl> {
     /// List of transactions that were included in this block, alongside with their index within
     /// that block, SCALE encoding, and user data. These transactions have been removed from the
     /// pool.
-    // TODO: use proper struct
-    pub included_transactions: Vec<(TransactionId, usize, Vec<u8>, TTx)>,
+    pub included_transactions: Vec<RemovedTransaction<TTx>>,
+}
+
+/// See [`PruneBodyFinalized`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedTransaction<TTx> {
+    /// Id of this transaction in the state machine.
+    pub id: TransactionId,
+
+    /// Index of the transaction within the finalized block.
+    pub index_in_block: usize,
+
+    /// SCALE-encoded transaction.
+    pub scale_encoding: Vec<u8>,
+
+    /// Opaque user data that was insert alongside with the transaction.
+    pub user_data: TTx,
 }
 
 /// See [`LightPool::set_best_block`].

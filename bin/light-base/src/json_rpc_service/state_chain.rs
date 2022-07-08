@@ -24,6 +24,7 @@ use crate::runtime_service;
 use futures::{lock::MutexGuard, prelude::*};
 use smoldot::{
     header,
+    informant::HashDisplay,
     json_rpc::{self, methods, requests_subscriptions},
     network::protocol,
     remove_metadata_length_prefix,
@@ -396,68 +397,90 @@ impl<TPlat: Platform> Background<TPlat> {
             )
             .await;
 
-        let mut new_blocks = {
-            // The buffer size should be large enough so that, if the CPU is busy, it doesn't
-            // become full before the execution of the runtime service resumes.
-            // The maximum number of pinned block is ignored, as this maximum is a way to avoid
-            // malicious behaviors. This code is by definition not considered malicious.
-            let subscribe_all = self
-                .runtime_service
-                .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
-                .await;
-
-            // The finalized and already-known blocks aren't reported to the user, but we need
-            // unpin them on to the runtime service.
-            subscribe_all
-                .new_blocks
-                .unpin_block(&header::hash_from_scale_encoded_header(
-                    &subscribe_all.finalized_block_scale_encoded_header,
-                ))
-                .await;
-            for block in subscribe_all.non_finalized_blocks_ancestry_order {
-                subscribe_all
-                    .new_blocks
-                    .unpin_block(&header::hash_from_scale_encoded_header(
-                        &block.scale_encoded_header,
-                    ))
-                    .await;
-            }
-
-            subscribe_all.new_blocks
-        };
-
         // Spawn a separate task for the subscription.
         let task = {
             let me = self.clone();
             async move {
                 loop {
-                    match new_blocks.next().await {
-                        Some(runtime_service::Notification::Block(block)) => {
-                            new_blocks
+                    let mut new_blocks = {
+                        // The buffer size should be large enough so that, if the CPU is busy, it
+                        // doesn't become full before the execution of the runtime service resumes.
+                        // The maximum number of pinned block is ignored, as this maximum is a way
+                        // to avoid malicious behaviors. This code is by definition not considered
+                        // malicious.
+                        let subscribe_all = me
+                            .runtime_service
+                            .subscribe_all(64, NonZeroUsize::new(usize::max_value()).unwrap())
+                            .await;
+
+                        // The existing finalized and already-known blocks aren't reported to the
+                        // user, but we need to unpin them on to the runtime service.
+                        subscribe_all
+                            .new_blocks
+                            .unpin_block(&header::hash_from_scale_encoded_header(
+                                &subscribe_all.finalized_block_scale_encoded_header,
+                            ))
+                            .await;
+                        for block in subscribe_all.non_finalized_blocks_ancestry_order {
+                            subscribe_all
+                                .new_blocks
                                 .unpin_block(&header::hash_from_scale_encoded_header(
                                     &block.scale_encoded_header,
                                 ))
                                 .await;
-
-                            let _ = me
-                                .requests_subscriptions
-                                .try_push_notification(
-                                    &state_machine_subscription,
-                                    methods::ServerToClient::chain_newHead {
-                                        subscription: (&subscription_id).into(),
-                                        result: methods::Header::from_scale_encoded_header(
-                                            &block.scale_encoded_header,
-                                        )
-                                        .unwrap(),
-                                    }
-                                    .to_json_call_object_parameters(None),
-                                )
-                                .await;
                         }
-                        Some(runtime_service::Notification::Finalized { .. }) => {}
-                        None => {
-                            // TODO: ?!
-                            return;
+
+                        subscribe_all.new_blocks
+                    };
+
+                    loop {
+                        match new_blocks.next().await {
+                            Some(runtime_service::Notification::Block(block)) => {
+                                new_blocks
+                                    .unpin_block(&header::hash_from_scale_encoded_header(
+                                        &block.scale_encoded_header,
+                                    ))
+                                    .await;
+
+                                let header = match methods::Header::from_scale_encoded_header(
+                                    &block.scale_encoded_header,
+                                ) {
+                                    Ok(h) => h,
+                                    Err(error) => {
+                                        log::warn!(
+                                            target: &me.log_target,
+                                            "`chain_subscribeAllHeads` subscription has skipped \
+                                            block due to undecodable header. Hash: {}. Error: {}",
+                                            HashDisplay(&header::hash_from_scale_encoded_header(&block.scale_encoded_header)),
+                                            error,
+                                        );
+                                        continue;
+                                    }
+                                };
+
+                                // This function call will fail if the queue of notifications to
+                                // the user has too many elements in it. This JSON-RPC function
+                                // unfortunately doesn't provide any mechanism to deal with this
+                                // situation, and we handle it by simply not sending the
+                                // notification.
+                                let _ = me
+                                    .requests_subscriptions
+                                    .try_push_notification(
+                                        &state_machine_subscription,
+                                        methods::ServerToClient::chain_newHead {
+                                            subscription: (&subscription_id).into(),
+                                            result: header,
+                                        }
+                                        .to_json_call_object_parameters(None),
+                                    )
+                                    .await;
+                            }
+                            Some(runtime_service::Notification::BestBlockChanged { .. })
+                            | Some(runtime_service::Notification::Finalized { .. }) => {}
+                            None => {
+                                // Break from the inner loop in order to recreate the channel.
+                                break;
+                            }
                         }
                     }
                 }
@@ -537,28 +560,34 @@ impl<TPlat: Platform> Background<TPlat> {
             let me = self.clone();
             async move {
                 loop {
-                    match blocks_list.next().await {
-                        Some(block) => {
-                            let header =
-                                methods::Header::from_scale_encoded_header(&block).unwrap();
+                    // Stream returned by `subscribe_finalized` is always unlimited.
+                    let header = blocks_list.next().await.unwrap();
 
-                            me.requests_subscriptions
-                                .set_queued_notification(
-                                    &state_machine_subscription,
-                                    0,
-                                    methods::ServerToClient::chain_finalizedHead {
-                                        subscription: (&subscription_id).into(),
-                                        result: header,
-                                    }
-                                    .to_json_call_object_parameters(None),
-                                )
-                                .await;
+                    let header = match methods::Header::from_scale_encoded_header(&header) {
+                        Ok(h) => h,
+                        Err(error) => {
+                            log::warn!(
+                                target: &me.log_target,
+                                "`chain_subscribeFinalizedHeads` subscription has skipped block \
+                                due to undecodable header. Hash: {}. Error: {}",
+                                HashDisplay(&header::hash_from_scale_encoded_header(&header)),
+                                error,
+                            );
+                            continue;
                         }
-                        None => {
-                            // TODO: ?!
-                            return;
-                        }
-                    }
+                    };
+
+                    me.requests_subscriptions
+                        .set_queued_notification(
+                            &state_machine_subscription,
+                            0,
+                            methods::ServerToClient::chain_finalizedHead {
+                                subscription: (&subscription_id).into(),
+                                result: header,
+                            }
+                            .to_json_call_object_parameters(None),
+                        )
+                        .await;
                 }
             }
         };
@@ -636,27 +665,34 @@ impl<TPlat: Platform> Background<TPlat> {
             let me = self.clone();
             async move {
                 loop {
-                    match blocks_list.next().await {
-                        Some(block) => {
-                            let header =
-                                methods::Header::from_scale_encoded_header(&block).unwrap();
-                            me.requests_subscriptions
-                                .set_queued_notification(
-                                    &state_machine_subscription,
-                                    0,
-                                    methods::ServerToClient::chain_newHead {
-                                        subscription: (&subscription_id).into(),
-                                        result: header,
-                                    }
-                                    .to_json_call_object_parameters(None),
-                                )
-                                .await;
+                    // Stream returned by `subscribe_best` is always unlimited.
+                    let header = blocks_list.next().await.unwrap();
+
+                    let header = match methods::Header::from_scale_encoded_header(&header) {
+                        Ok(h) => h,
+                        Err(error) => {
+                            log::warn!(
+                                target: &me.log_target,
+                                "`chain_subscribeNewHeads` subscription has skipped block due to \
+                                undecodable header. Hash: {}. Error: {}",
+                                HashDisplay(&header::hash_from_scale_encoded_header(&header)),
+                                error,
+                            );
+                            continue;
                         }
-                        None => {
-                            // TODO: ?!
-                            return;
-                        }
-                    }
+                    };
+
+                    me.requests_subscriptions
+                        .set_queued_notification(
+                            &state_machine_subscription,
+                            0,
+                            methods::ServerToClient::chain_newHead {
+                                subscription: (&subscription_id).into(),
+                                result: header,
+                            }
+                            .to_json_call_object_parameters(None),
+                        )
+                        .await;
                 }
             }
         };
@@ -875,6 +911,75 @@ impl<TPlat: Platform> Background<TPlat> {
 
         self.requests_subscriptions
             .respond(state_machine_request_id, response)
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::state_getKeys`].
+    pub(super) async fn state_get_keys(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        prefix: methods::HexString,
+        hash: Option<methods::HashHexString>,
+    ) {
+        // `hash` equal to `None` means "best block".
+        let hash = match hash {
+            Some(h) => h.0,
+            None => header::hash_from_scale_encoded_header(
+                &sub_utils::subscribe_best(&self.runtime_service).await.0,
+            ),
+        };
+
+        // Obtain the state trie root and height of the requested block.
+        // This is necessary to perform network storage queries.
+        let (state_root, block_number) = match self.state_trie_root_hash(&hash).await {
+            Ok(v) => v,
+            Err(()) => {
+                self.requests_subscriptions
+                    .respond(
+                        &state_machine_request_id,
+                        json_rpc::parse::build_error_response(
+                            request_id,
+                            json_rpc::parse::ErrorResponse::ServerError(
+                                -32000,
+                                &"Failed to fetch block information",
+                            ),
+                            None,
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let outcome = self
+            .sync_service
+            .clone()
+            .storage_prefix_keys_query(
+                block_number,
+                &hash,
+                &prefix.0,
+                &state_root,
+                3,
+                Duration::from_secs(12),
+                NonZeroU32::new(1).unwrap(),
+            )
+            .await;
+
+        let response = match outcome {
+            Ok(keys) => {
+                let out = keys.into_iter().map(methods::HexString).collect::<Vec<_>>();
+                methods::Response::state_getKeys(out).to_json_response(request_id)
+            }
+            Err(error) => json_rpc::parse::build_error_response(
+                request_id,
+                json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                None,
+            ),
+        };
+
+        self.requests_subscriptions
+            .respond(&state_machine_request_id, response)
             .await;
     }
 

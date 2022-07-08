@@ -24,7 +24,7 @@ use super::{
         read_write::ReadWrite,
     },
     ConnectionToCoordinator, ConnectionToCoordinatorInner, CoordinatorToConnection,
-    CoordinatorToConnectionInner, NotificationsOutErr, OverlayNetwork, SubstreamId,
+    CoordinatorToConnectionInner, NotificationsOutErr, OverlayNetwork, ShutdownCause, SubstreamId,
 };
 
 use alloc::{collections::VecDeque, string::ToString as _, sync::Arc};
@@ -328,7 +328,7 @@ where
             ) => {
                 // TODO: implement proper shutdown
                 self.pending_messages
-                    .push_back(ConnectionToCoordinatorInner::StartShutdown);
+                    .push_back(ConnectionToCoordinatorInner::StartShutdown(None));
                 self.pending_messages
                     .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
                 self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
@@ -338,6 +338,7 @@ where
             (
                 CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
+                | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
                 | CoordinatorToConnectionInner::CloseOutNotifications { .. }
@@ -348,11 +349,18 @@ where
             (
                 CoordinatorToConnectionInner::AcceptInNotifications { .. }
                 | CoordinatorToConnectionInner::RejectInNotifications { .. }
+                | CoordinatorToConnectionInner::StartRequest { .. }
                 | CoordinatorToConnectionInner::AnswerRequest { .. }
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
                 | CoordinatorToConnectionInner::CloseOutNotifications { .. }
                 | CoordinatorToConnectionInner::QueueNotification { .. },
                 SingleStreamConnectionTaskInner::ShutdownWaitingAck { .. },
+            )
+            | (
+                CoordinatorToConnectionInner::StartShutdown,
+                SingleStreamConnectionTaskInner::ShutdownWaitingAck {
+                    was_api_reset: true,
+                },
             ) => {
                 // There might still be some messages coming from the coordinator after the
                 // connection task has sent a message indicating that it has shut down. This is
@@ -369,7 +377,13 @@ where
                     was_api_reset: *was_reset,
                 };
             }
-            _ => todo!(), // TODO:
+            (
+                CoordinatorToConnectionInner::StartShutdown,
+                SingleStreamConnectionTaskInner::ShutdownWaitingAck { .. }
+                | SingleStreamConnectionTaskInner::ShutdownAcked { .. },
+            ) => unreachable!(),
+            (CoordinatorToConnectionInner::ShutdownFinishedAck, _) => unreachable!(),
+            (_, SingleStreamConnectionTaskInner::Poisoned) => unreachable!(),
         }
     }
 
@@ -402,7 +416,9 @@ where
         }
 
         self.pending_messages
-            .push_back(ConnectionToCoordinatorInner::StartShutdown);
+            .push_back(ConnectionToCoordinatorInner::StartShutdown(Some(
+                ShutdownCause::RemoteReset,
+            )));
         self.pending_messages
             .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
         self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
@@ -441,9 +457,11 @@ where
             } => match established.read_write(read_write) {
                 Ok((connection, event)) => {
                     if read_write.is_dead() && event.is_none() {
-                        // TODO: provide error
-                        self.pending_messages
-                            .push_back(ConnectionToCoordinatorInner::StartShutdown);
+                        self.pending_messages.push_back(
+                            ConnectionToCoordinatorInner::StartShutdown(Some(
+                                ShutdownCause::CleanShutdown,
+                            )),
+                        );
                         self.pending_messages
                             .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
                         self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
@@ -560,10 +578,11 @@ where
                         outbound_substreams_reverse,
                     };
                 }
-                Err(_err) => {
-                    // TODO: provide error
+                Err(err) => {
                     self.pending_messages
-                        .push_back(ConnectionToCoordinatorInner::StartShutdown);
+                        .push_back(ConnectionToCoordinatorInner::StartShutdown(Some(
+                            ShutdownCause::ProtocolError(err),
+                        )));
                     self.pending_messages
                         .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
                     self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
@@ -593,9 +612,10 @@ where
                 // guarantees that no horrendously slow connections can accidentally make their
                 // way through.
                 if timeout < read_write.now {
-                    // TODO: provide error: ConnectionError::Handshake(HandshakeError::Timeout)
                     self.pending_messages
-                        .push_back(ConnectionToCoordinatorInner::StartShutdown);
+                        .push_back(ConnectionToCoordinatorInner::StartShutdown(Some(
+                            ShutdownCause::HandshakeTimeout,
+                        )));
                     self.pending_messages
                         .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
                     self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
@@ -614,10 +634,12 @@ where
 
                     let result = match handshake.read_write(read_write) {
                         Ok(rw) => rw,
-                        Err(_err) => {
-                            // TODO: provide error: ConnectionError::Handshake(HandshakeError::Protocol(err))
-                            self.pending_messages
-                                .push_back(ConnectionToCoordinatorInner::StartShutdown);
+                        Err(err) => {
+                            self.pending_messages.push_back(
+                                ConnectionToCoordinatorInner::StartShutdown(Some(
+                                    ShutdownCause::HandshakeError(err),
+                                )),
+                            );
                             self.pending_messages
                                 .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
                             self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {

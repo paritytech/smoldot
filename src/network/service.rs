@@ -105,6 +105,9 @@ pub struct ChainConfig {
     /// >           "chain spec").
     pub protocol_id: String,
 
+    /// Number of bytes of the block number in the networking protocol.
+    pub block_number_bytes: usize,
+
     /// If `Some`, the chain uses the GrandPa networking protocol.
     pub grandpa_protocol_config: Option<GrandpaState>,
 
@@ -563,7 +566,11 @@ where
         timeout: Duration,
         checked: bool,
     ) -> OutRequestId {
-        let request_data = protocol::build_block_request(&config).fold(Vec::new(), |mut a, b| {
+        let request_data = protocol::build_block_request(
+            self.chains[chain_index].chain_config.block_number_bytes,
+            &config,
+        )
+        .fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
             a
         });
@@ -821,6 +828,23 @@ where
                 debug_assert!(!kbuckets_addrs.get_mut().is_empty());
             }
         }
+    }
+
+    /// Returns a list of nodes (their [`PeerId`] and multiaddresses) that we know are part of
+    /// the network.
+    ///
+    /// Nodes that are discovered might disappear over time. In other words, there is no guarantee
+    /// that a node that has been added through [`ChainNetwork::discover`] will later be returned
+    /// by [`ChainNetwork::discovered_nodes`].
+    pub fn discovered_nodes(
+        &'_ self,
+        chain_index: usize,
+    ) -> impl Iterator<Item = (&'_ PeerId, impl Iterator<Item = &'_ multiaddr::Multiaddr>)> + '_
+    {
+        let kbuckets = &self.chains[chain_index].kbuckets;
+        kbuckets
+            .iter_ordered()
+            .map(|(peer_id, addresses)| (peer_id, addresses.iter()))
     }
 
     /// After calling [`ChainNetwork::next_start_connect`], notifies the [`ChainNetwork`] of the
@@ -1129,7 +1153,10 @@ where
                 } if ((protocol_index - 1) % REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN) == 0 => {
                     let chain_index = (protocol_index - 1) / REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN;
 
-                    match protocol::decode_block_request(&request_payload) {
+                    match protocol::decode_block_request(
+                        self.chains[chain_index].chain_config.block_number_bytes,
+                        &request_payload,
+                    ) {
                         Ok(config) => {
                             let _prev_value = self
                                 .in_requests_types
@@ -1176,17 +1203,19 @@ where
                         notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     // Check validity of the handshake.
-                    let remote_handshake =
-                        match protocol::decode_block_announces_handshake(&remote_handshake) {
-                            Ok(hs) => hs,
-                            Err(err) => {
-                                // TODO: must close the substream and unassigned the slot
-                                break Some(Event::ProtocolError {
-                                    error: ProtocolError::BadBlockAnnouncesHandshake(err),
-                                    peer_id,
-                                });
-                            }
-                        };
+                    let remote_handshake = match protocol::decode_block_announces_handshake(
+                        self.chains[chain_index].chain_config.block_number_bytes,
+                        &remote_handshake,
+                    ) {
+                        Ok(hs) => hs,
+                        Err(err) => {
+                            // TODO: must close the substream and unassigned the slot
+                            break Some(Event::ProtocolError {
+                                error: ProtocolError::BadBlockAnnouncesHandshake(err),
+                                peer_id,
+                            });
+                        }
+                    };
 
                     // The desirability of the transactions and grandpa substreams is always equal
                     // to whether the block announces substream is open.
@@ -1318,12 +1347,16 @@ where
                         let response = response
                             .map_err(StorageProofRequestError::Request)
                             .and_then(|payload| {
-                                if let Err(err) =
-                                    protocol::decode_storage_or_call_proof_response(&payload)
-                                {
+                                if let Err(err) = protocol::decode_storage_or_call_proof_response(
+                                    protocol::StorageOrCallProof::StorageProof,
+                                    &payload,
+                                ) {
                                     Err(StorageProofRequestError::Decode(err))
                                 } else {
-                                    Ok(EncodedMerkleProof(payload))
+                                    Ok(EncodedMerkleProof(
+                                        payload,
+                                        protocol::StorageOrCallProof::StorageProof,
+                                    ))
                                 }
                             });
 
@@ -1338,11 +1371,17 @@ where
                                 .map_err(CallProofRequestError::Request)
                                 .and_then(|payload| {
                                     if let Err(err) =
-                                        protocol::decode_storage_or_call_proof_response(&payload)
+                                        protocol::decode_storage_or_call_proof_response(
+                                            protocol::StorageOrCallProof::CallProof,
+                                            &payload,
+                                        )
                                     {
                                         Err(CallProofRequestError::Decode(err))
                                     } else {
-                                        Ok(EncodedMerkleProof(payload))
+                                        Ok(EncodedMerkleProof(
+                                            payload,
+                                            protocol::StorageOrCallProof::CallProof,
+                                        ))
                                     }
                                 });
 
@@ -1629,7 +1668,10 @@ where
                         notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN;
 
                     // Immediately reject the substream if the handshake fails to parse.
-                    if let Err(err) = protocol::decode_block_announces_handshake(&handshake) {
+                    if let Err(err) = protocol::decode_block_announces_handshake(
+                        self.chains[chain_index].chain_config.block_number_bytes,
+                        &handshake,
+                    ) {
                         self.inner
                             .in_notification_refuse(desired_in_notification_id);
 
@@ -1665,6 +1707,7 @@ where
                                 genesis_hash: &chain_config.genesis_hash,
                                 role: chain_config.role,
                             },
+                            chain_config.block_number_bytes,
                         )
                         .fold(Vec::new(), |mut a, b| {
                             a.extend_from_slice(b.as_ref());
@@ -1787,12 +1830,15 @@ where
 
             let handshake = if notifications_protocol_index % NOTIFICATIONS_PROTOCOLS_PER_CHAIN == 0
             {
-                protocol::encode_block_announces_handshake(protocol::BlockAnnouncesHandshakeRef {
-                    best_hash: &chain_config.best_hash,
-                    best_number: chain_config.best_number,
-                    genesis_hash: &chain_config.genesis_hash,
-                    role: chain_config.role,
-                })
+                protocol::encode_block_announces_handshake(
+                    protocol::BlockAnnouncesHandshakeRef {
+                        best_hash: &chain_config.best_hash,
+                        best_number: chain_config.best_number,
+                        genesis_hash: &chain_config.genesis_hash,
+                        role: chain_config.role,
+                    },
+                    chain_config.block_number_bytes,
+                )
                 .fold(Vec::new(), |mut a, b| {
                     a.extend_from_slice(b.as_ref());
                     a
@@ -1946,7 +1992,7 @@ where
                 let potential = self
                     .chains
                     .iter_mut()
-                    .flat_map(|chain| chain.kbuckets.iter_mut())
+                    .flat_map(|chain| chain.kbuckets.iter_mut_ordered())
                     .find(|(p, _)| **p == *entry.key())
                     .and_then(|(_, addrs)| addrs.addr_to_pending());
                 match potential {
@@ -2005,7 +2051,7 @@ where
         let chain = &mut self.chains[chain_index];
 
         let list = {
-            let mut list = chain.kbuckets.iter().collect::<Vec<_>>();
+            let mut list = chain.kbuckets.iter_ordered().collect::<Vec<_>>();
             list.shuffle(&mut self.randomness);
             list
         };
@@ -2327,12 +2373,16 @@ pub enum NotificationsOutErr {
 }
 
 /// Undecoded but valid block announce handshake.
-pub struct EncodedBlockAnnounceHandshake(Vec<u8>);
+pub struct EncodedBlockAnnounceHandshake {
+    handshake: Vec<u8>,
+    block_number_bytes: usize,
+}
 
 impl EncodedBlockAnnounceHandshake {
     /// Returns the decoded version of the handshake.
     pub fn decode(&self) -> protocol::BlockAnnouncesHandshakeRef {
-        protocol::decode_block_announces_handshake(&self.0).unwrap()
+        protocol::decode_block_announces_handshake(self.block_number_bytes, &self.handshake)
+            .unwrap()
     }
 }
 
@@ -2361,12 +2411,12 @@ impl fmt::Debug for EncodedBlockAnnounce {
 
 /// Undecoded but valid Merkle proof.
 #[derive(Clone)]
-pub struct EncodedMerkleProof(Vec<u8>);
+pub struct EncodedMerkleProof(Vec<u8>, protocol::StorageOrCallProof);
 
 impl EncodedMerkleProof {
     /// Returns the decoded version of the proof.
     pub fn decode(&self) -> Vec<&[u8]> {
-        protocol::decode_storage_or_call_proof_response(&self.0).unwrap()
+        protocol::decode_storage_or_call_proof_response(self.1, &self.0).unwrap()
     }
 }
 

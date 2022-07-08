@@ -203,6 +203,12 @@ export default function (config: Config): compat.WasmModuleImports {
             // should never be called.
         },
 
+        // Closes a substream on a multi-stream connection
+        connection_stream_close: (_connectionId: number, _streamId: number) => {
+            // Given that multi-stream connections are never opened at the moment, this function
+            // should never be called.
+        },
+
         // Must queue the data found in the WebAssembly memory at the given pointer. It is assumed
         // that this function is called only when the connection is in an open state.
         stream_send: (connectionId: number, _streamId: number, ptr: number, len: number) => {

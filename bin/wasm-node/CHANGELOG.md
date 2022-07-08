@@ -2,8 +2,35 @@
 
 ## Unreleased
 
+## Changed
+
+- No warning is generated anymore if the discovery process doesn't work due to having 0 peers, or failed due to a benign networking issue. ([#2476](https://github.com/paritytech/smoldot/pull/2476))
+
+### Fixed
+
+- Changes in the current best block of a parachain are now taken into account if the new best block had already been reported in the past. ([#2457](https://github.com/paritytech/smoldot/pull/2457))
+- Fix active `chain_subscribeAllHeads` subscriptions silently freezing when the number of non-finalized blocks gets above a certain threshold, which typically happens if Internet connectivity is lost for a long time. ([#2465](https://github.com/paritytech/smoldot/pull/2465))
+
+## 0.6.21 - 2022-06-30
+
+### Added
+
+- Block headers with a digest item of type `Other` no longer fail to parse. ([#2425](https://github.com/paritytech/smoldot/pull/2425))
+- Add support for the `state_getKeys` JSON-RPC method. ([#2438](https://github.com/paritytech/smoldot/pull/2438))
+
+### Fixed
+
+- The `chain_subscribeAllHeads`, `chain_subscribeNewHeads`, and `chain_subscribeFinalizedHeads` JSON-RPC functions no longer panic if connected to a chain whose headers are in a format that can't be decoded. Instead, no notification is sent and a warning is printed. ([#2442](https://github.com/paritytech/smoldot/pull/2442))
+
 ### Changed
 
+- The format of the database returned by `Client.databaseContent` has been changed to include the list of nodes that are known to be present on the peer-to-peer network. When the database is restored, these nodes are immediately discovered. This change aims at reducing the importance of bootnodes. This change is a breaking change, meaning that providing a database that has been obtained from a previous version of smoldot will have no effect. ([#2439](https://github.com/paritytech/smoldot/pull/2439))
+
+## 0.6.20 - 2022-06-23
+
+### Changed
+
+- `new Worker` is now called with the `{ type: "module" }` option. Despite not being supported by NodeJS or Firefox, indicating this option is technically more correct and is necessary in order for smoldot to run with Deno. ([#2426](https://github.com/paritytech/smoldot/pull/2426))
 - When a database and a chain specification checkpoint are both provided to `addChain`, the block in the database is used only if it has a higher block number than the block in the chain specification checkpoint. This makes it possible to bypass issues where smoldot is incapable of syncing over a certain block by updating the chain specification, without having to manually clear existing databases. ([#2401](https://github.com/paritytech/smoldot/pull/2401))
 
 ### Fixed

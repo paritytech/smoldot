@@ -65,7 +65,10 @@ pub enum BlocksRequestConfigStart {
 // for protocol definition.
 
 /// Builds the bytes corresponding to a block request.
-pub fn build_block_request(config: &BlocksRequestConfig) -> impl Iterator<Item = impl AsRef<[u8]>> {
+pub fn build_block_request(
+    block_number_bytes: usize,
+    config: &BlocksRequestConfig,
+) -> impl Iterator<Item = impl AsRef<[u8]>> {
     let mut fields = 0u32;
     if config.fields.header {
         fields |= 1 << 24;
@@ -82,23 +85,11 @@ pub fn build_block_request(config: &BlocksRequestConfig) -> impl Iterator<Item =
             either::Left(protobuf::bytes_tag_encode(2, h).map(either::Left))
         }
         BlocksRequestConfigStart::Number(n) => {
-            // The exact format is the SCALE encoding of a block number.
-            // The block number can have a varying number of bytes, and it is therefore
-            // not really possible to know how many bytes to send here.
-            // Fortunately, Substrate uses the `Decode` method of `parity_scale_codec`
-            // instead of `DecodeAll`, meaning that it will ignore any extra byte after
-            // the decoded value. We can thus send as many bytes as we want, as long as
-            // there are enough bytes Substrate will accept the request.
-            // Since the SCALE encoding of a number is in little endian, it's the higher
-            // bytes that get will discarded. These higher bytes are most likely 0s,
-            // otherwise the blockchain in question has a big problem.
-            // In other words, we send the bytes containing the little endian block number
-            // followed with enough 0s to make Substrate accept the request.
-            // This is a hack, but it is not really fixable in smoldot alone and shows a
-            // bigger problem in the Substrate network protocol/architecture. A better
-            // protocol would for example use the SCALE-compact encoding, which doesn't
-            // have this issue.
-            either::Right(protobuf::bytes_tag_encode(3, n.to_le_bytes()).map(either::Right))
+            let mut data = Vec::with_capacity(block_number_bytes);
+            data.extend_from_slice(&n.to_le_bytes());
+            // TODO: unclear what to do if the block number doesn't fit within `expected_block_number_bytes`
+            data.resize(block_number_bytes, 0);
+            either::Right(protobuf::bytes_tag_encode(3, data).map(either::Right))
         }
     };
 
@@ -139,6 +130,7 @@ pub fn build_block_request(config: &BlocksRequestConfig) -> impl Iterator<Item =
 /// Decodes a blocks request.
 // TODO: should have a more zero-cost API, but we're limited by the protobuf library for that
 pub fn decode_block_request(
+    expected_block_number_bytes: usize,
     request_bytes: &[u8],
 ) -> Result<BlocksRequestConfig, DecodeBlockRequestError> {
     let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
@@ -168,6 +160,10 @@ pub fn decode_block_request(
                     .map_err(|_| DecodeBlockRequestError::InvalidBlockHashLength)?,
             ),
             (None, Some(n)) => {
+                if n.len() != expected_block_number_bytes {
+                    return Err(DecodeBlockRequestError::InvalidBlockNumber);
+                }
+
                 // The exact format is the SCALE encoding of a block number.
                 // The block number can have a varying number of bytes, and it is therefore
                 // not really possible to know how many bytes to expect here.
@@ -411,7 +407,7 @@ mod tests {
     #[test]
     fn regression_2339() {
         // Regression test for https://github.com/paritytech/smoldot/issues/2339.
-        let _ = super::decode_block_request(&[26, 10]);
+        let _ = super::decode_block_request(4, &[26, 10]);
     }
 
     #[test]

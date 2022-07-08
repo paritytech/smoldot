@@ -59,6 +59,9 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         .finalized_block_header
         .scale_encoding_vec();
 
+    // Hash of the best parachain that has been reported to the output.
+    let mut best_parahead_hash = header::hash_from_scale_encoded_header(&finalized_parahead);
+
     // State machine that tracks the list of parachain network sources and their known blocks.
     let mut sync_sources = sources::AllForksSources::<(PeerId, protocol::Role)>::new(
         40,
@@ -66,10 +69,6 @@ pub(super) async fn start_parachain<TPlat: Platform>(
     );
     // Maps `PeerId`s to their indices within `sync_sources`.
     let mut sync_sources_map = HashMap::new();
-
-    // `true` after a parachain block has been fetched from the parachain.
-    // TODO: handled in a hacky way; unclear how to handle properly
-    let mut is_near_head_of_chain;
 
     // This function contains two loops within each other. If the relay chain syncing service has
     // a gap in its blocks, or if the node is overloaded and can't process blocks in time, then
@@ -90,8 +89,6 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                 &relay_chain_subscribe_all.finalized_block_scale_encoded_header
             ))
         );
-
-        is_near_head_of_chain = relay_chain_sync.is_near_head_of_chain_heuristic().await;
 
         // Tree of relay chain blocks. Blocks are inserted when received from the relay chain
         // sync service. Once inside, their corresponding parahead is fetched. Once the parahead
@@ -230,6 +227,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                 header::hash_from_scale_encoded_header(parahead.as_ref().unwrap())
                             })
                             .unwrap_or(hash);
+                        best_parahead_hash = best_block_hash;
 
                         // Elements in `all_subscriptions` are removed one by one and
                         // inserted back if the channel is still open.
@@ -244,9 +242,37 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             }
                         }
                     }
-                    async_tree::OutputUpdate::Finalized { .. } => {
-                        // Finalized parahead is same as was already finalized. Don't
-                        // report it again.
+                    async_tree::OutputUpdate::Finalized { .. }
+                    | async_tree::OutputUpdate::BestBlockChanged { .. } => {
+                        // Calculate hash of the parablock corresponding to the new best relay
+                        // chain block.
+                        let parahash = header::hash_from_scale_encoded_header(
+                            async_tree
+                                .best_block_index()
+                                .map(|(_, b)| b.as_ref().unwrap())
+                                .unwrap_or(&finalized_parahead),
+                        );
+
+                        if parahash != best_parahead_hash {
+                            best_parahead_hash = parahash;
+
+                            log::debug!(
+                                target: &log_target,
+                                "Subscriptions <= BestBlockChanged(hash={})",
+                                HashDisplay(&parahash)
+                            );
+
+                            // Elements in `all_subscriptions` are removed one by one and
+                            // inserted back if the channel is still open.
+                            for index in (0..all_subscriptions.len()).rev() {
+                                let mut sender = all_subscriptions.swap_remove(index);
+                                let notif =
+                                    super::Notification::BestBlockChanged { hash: parahash };
+                                if sender.try_send(notif).is_ok() {
+                                    all_subscriptions.push(sender);
+                                }
+                            }
+                        }
                     }
                     async_tree::OutputUpdate::Block(block) => {
                         // `block` borrows `async_tree`. We need to mutably access `async_tree`
@@ -254,6 +280,8 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         let is_new_best = block.is_new_best;
                         let scale_encoded_header: Vec<u8> =
                             block.async_op_user_data.clone().unwrap();
+                        let parahash =
+                            header::hash_from_scale_encoded_header(&scale_encoded_header);
                         let block_index = block.index;
 
                         // Do not report the new block if it has already been reported in the
@@ -267,18 +295,42 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                 .filter_map(|item| item.async_op_user_data)
                                 .any(|item| item.as_ref() == Some(&scale_encoded_header))
                         {
+                            // While the parablock has already been reported, it is possible that
+                            // it becomes the new best block while it wasn't before, in which
+                            // case we should send a notification.
+                            if is_new_best && parahash != best_parahead_hash {
+                                best_parahead_hash = parahash;
+
+                                log::debug!(
+                                    target: &log_target,
+                                    "Subscriptions <= BestBlockChanged(hash={})",
+                                    HashDisplay(&parahash)
+                                );
+
+                                // Elements in `all_subscriptions` are removed one by one and
+                                // inserted back if the channel is still open.
+                                for index in (0..all_subscriptions.len()).rev() {
+                                    let mut sender = all_subscriptions.swap_remove(index);
+                                    let notif =
+                                        super::Notification::BestBlockChanged { hash: parahash };
+                                    if sender.try_send(notif).is_ok() {
+                                        all_subscriptions.push(sender);
+                                    }
+                                }
+                            }
+
                             continue;
                         }
-
-                        // TODO: if parent wasn't best block but child is best block, and parent is equal to child, then we don't report the fact that the block is best to the subscribers, causing a state mismatch with potential new subscribers that are grabbed later
 
                         log::debug!(
                             target: &log_target,
                             "Subscriptions <= NewParablock(hash={})",
-                            HashDisplay(&header::hash_from_scale_encoded_header(
-                                &scale_encoded_header
-                            ))
+                            HashDisplay(&parahash)
                         );
+
+                        if is_new_best {
+                            best_parahead_hash = parahash;
+                        }
 
                         let parent_hash = header::hash_from_scale_encoded_header(
                             &async_tree
@@ -322,8 +374,6 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         None => break, // Jumps to the outer loop to recreate the channel.
                     };
 
-                    is_near_head_of_chain = relay_chain_sync.is_near_head_of_chain_heuristic().await;
-
                     // Update the local tree of blocks to match the update sent by the relay chain
                     // syncing service.
                     match relay_chain_notif {
@@ -351,6 +401,16 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             let parent = async_tree.input_iter_unordered().find(|b| *b.user_data == block.parent_hash).map(|b| b.id); // TODO: check if finalized
                             async_tree.input_insert_block(hash, parent, false, block.is_new_best);
                         }
+                        runtime_service::Notification::BestBlockChanged { hash } => {
+                            log::debug!(
+                                target: &log_target,
+                                "RelayChain => BestBlockChanged(hash={})",
+                                HashDisplay(&hash)
+                            );
+
+                            let node_idx = async_tree.input_iter_unordered().find(|b| *b.user_data == hash).unwrap().id;
+                            async_tree.input_set_best_block(node_idx);
+                        }
                     };
                 },
 
@@ -374,10 +434,14 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             }
                         },
                         Err(error) => {
-                            // Only a debug line is printed if not near the head of the chain,
-                            // to handle chains that have been upgraded later on to support
-                            // parachains later.
-                            if is_near_head_of_chain && !error.is_network_problem() { // TODO: is is_near_head_of_chain the correct flag?
+                            // Several chains initially didn't support parachains, and have later
+                            // been upgraded to support them. Similarly, the parachain might not
+                            // have had a core on the relay chain until recently. For these
+                            // reasons, errors when the relay chain is not near head of the chain
+                            // are most likely normal and do not warrant logging an error.
+                            if relay_chain_sync.is_near_head_of_chain_heuristic().await
+                                && !error.is_network_problem()
+                            {
                                 log::error!(
                                     target: &log_target,
                                     "Failed to fetch the parachain head from relay chain blocks {}: {}",
@@ -409,7 +473,13 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
                     match foreground_message {
                         ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
-                            let _ = send_back.send(is_near_head_of_chain);
+                            // Since there is a mapping between relay chain blocks and parachain
+                            // blocks, whether a parachain is at the head of the chain is the
+                            // same thing as whether its relay chain is at the head of the chain.
+                            // Note that there is no ordering guarantee of any kind w.r.t.
+                            // block subscriptions notifications.
+                            let val = relay_chain_sync.is_near_head_of_chain_heuristic().await;
+                            let _ = send_back.send(val);
                         },
                         ToBackground::SubscribeAll { send_back, buffer_size, .. } => {
                             let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
@@ -608,14 +678,29 @@ async fn parahead<TPlat: Platform>(
     }
 }
 
-// TODO: document and properly derive Display
+/// Error that can happen when fetching the parachain head corresponding to a relay chain block.
 #[derive(Debug, derive_more::Display)]
 enum ParaheadError {
+    /// Error while performing call request over the network.
+    #[display(fmt = "Error while performing call request over the network: {}", _0)]
     Call(runtime_service::RuntimeCallError),
+    /// Error while starting virtual machine to verify call proof.
+    #[display(
+        fmt = "Error while starting virtual machine to verify call proof: {}",
+        _0
+    )]
     StartError(host::StartErr),
+    /// Error during the execution of the virtual machine to verify call proof.
+    #[display(fmt = "Error during the call proof verification: {}", _0)]
     ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
+    /// Parachain doesn't have a core in the relay chain.
     NoCore,
+    /// Error while decoding the output of the call.
+    ///
+    /// This indicates some kind of incompatibility between smoldot and the relay chain.
+    #[display(fmt = "Error while decoding the output of the call: {}", _0)]
     InvalidRuntimeOutput(para::Error),
+    /// Fetching following keys is not supported by call proofs.
     NextKeyForbidden,
 }
 

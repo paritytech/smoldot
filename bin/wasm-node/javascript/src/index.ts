@@ -15,4 +15,16 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-export * from './client.js'; // TODO: precise exports
+export {
+  AddChainError,
+  AddChainOptions,
+  AlreadyDestroyedError,
+  Chain,
+  Client,
+  ClientOptions,
+  CrashError,
+  JsonRpcCallback,
+  JsonRpcDisabledError,
+  LogCallback,
+  start
+} from './client.js';

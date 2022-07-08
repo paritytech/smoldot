@@ -216,6 +216,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     None
                 },
                 protocol_id: chain.protocol_id.clone(),
+                block_number_bytes: 4, // TODO: correct value, maybe load from chain spec?
                 best_hash: chain.best_block.1,
                 best_number: chain.best_block.0,
                 genesis_hash: chain.genesis_block_hash,
@@ -444,7 +445,10 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
         if !log::log_enabled!(log::Level::Debug) {
             match &result {
-                Ok(_) | Err(service::BlocksRequestError::Request(_)) => {}
+                Ok(_)
+                | Err(service::BlocksRequestError::EmptyResponse)
+                | Err(service::BlocksRequestError::NotVerifiable) => {}
+                Err(service::BlocksRequestError::Request(err)) if !err.is_protocol_error() => {}
                 Err(err) => {
                     log::warn!(
                         target: "network",
@@ -789,6 +793,30 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         self.shared.wake_up_main_background_task.notify(1);
     }
 
+    /// Returns a list of nodes (their [`PeerId`] and multiaddresses) that we know are part of
+    /// the network.
+    ///
+    /// Nodes that are discovered might disappear over time. In other words, there is no guarantee
+    /// that a node that has been added through [`NetworkService::discover`] will later be
+    /// returned by [`NetworkService::discovered_nodes`].
+    pub async fn discovered_nodes(
+        &self,
+        chain_index: usize,
+    ) -> impl Iterator<Item = (PeerId, impl Iterator<Item = Multiaddr>)> {
+        let guarded = self.shared.guarded.lock().await;
+        guarded
+            .network
+            .discovered_nodes(chain_index)
+            .map(|(peer_id, addresses)| {
+                (
+                    peer_id.clone(),
+                    addresses.map(|a| a.clone()).collect::<Vec<_>>().into_iter(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
     /// with.
     pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
@@ -1126,12 +1154,31 @@ async fn update_round<TPlat: Platform>(
                             guarded.network.discover(&TPlat::now(), chain_index, nodes);
                         }
                         Err(error) => {
-                            log::warn!(
+                            log::debug!(
                                 target: "connections",
-                                "Problem during discovery on {}: {}",
-                                &shared.log_chain_names[chain_index],
+                                "Discovery => {:?}",
                                 error
                             );
+
+                            // No error is printed if the error is about the fact that we have
+                            // 0 peers, as this tends to happen quite frequently at initialization
+                            // and there is nothing that can be done against this error anyway.
+                            // No error is printed either if the request fails due to a benign
+                            // networking error such as an unresponsive peer.
+                            match error {
+                                service::DiscoveryError::NoPeer => {}
+                                service::DiscoveryError::FindNode(
+                                    service::KademliaFindNodeError::RequestFailed(err),
+                                ) if !err.is_protocol_error() => {}
+                                _ => {
+                                    log::warn!(
+                                        target: "connections",
+                                        "Problem during discovery on {}: {}",
+                                        &shared.log_chain_names[chain_index],
+                                        error
+                                    );
+                                }
+                            }
                         }
                     }
                 }

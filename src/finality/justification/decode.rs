@@ -22,7 +22,9 @@ use core::fmt;
 
 /// Attempt to decode the given SCALE-encoded justification.
 pub fn decode_grandpa(scale_encoded: &[u8]) -> Result<GrandpaJustificationRef, Error> {
-    match nom::combinator::all_consuming(grandpa_justification)(scale_encoded) {
+    match nom::combinator::complete(nom::combinator::all_consuming(grandpa_justification))(
+        scale_encoded,
+    ) {
         Ok((_, justification)) => Ok(justification),
         Err(nom::Err::Error(err) | nom::Err::Failure(err)) => Err(Error(err.code)),
         Err(_) => unreachable!(),
@@ -36,7 +38,7 @@ pub fn decode_grandpa(scale_encoded: &[u8]) -> Result<GrandpaJustificationRef, E
 pub fn decode_partial_grandpa(
     scale_encoded: &[u8],
 ) -> Result<(GrandpaJustificationRef, &[u8]), Error> {
-    match grandpa_justification(scale_encoded) {
+    match nom::combinator::complete(grandpa_justification)(scale_encoded) {
         Ok((remainder, justification)) => Ok((justification, remainder)),
         Err(nom::Err::Error(err) | nom::Err::Failure(err)) => Err(Error(err.code)),
         Err(_) => unreachable!(),

@@ -50,7 +50,7 @@ bs58 = { version = "0.4.0", default-features = false, features = ["alloc"] }
 crossbeam-queue = { version = "0.3.5", default-features = false, features = ["alloc"] }
 derive_more = "0.99.17"
 ed25519-zebra = { version = "3.0.0", default-features = false }
-either = { version = "1.6.1", default-features = false }
+either = { version = "1.7.0", default-features = false }
 event-listener = { version = "2.5.2" }  # TODO: no-std-ize
 fnv = { version = "1.0.7", default-features = false }
 futures = "0.3.21"   # TODO: no-std-ize
@@ -64,19 +64,19 @@ merlin = { version = "3.0", default-features = false }
 nom = { version = "7.1.1", default-features = false, features = ["alloc"] }
 no-std-net = { version = "0.6.0", default-features = false }
 num-bigint = { version = "0.4.3", default-features = false }
-num-rational = { version = "0.4.0", default-features = false, features = ["num-bigint"] }
+num-rational = { version = "0.4.1", default-features = false, features = ["num-bigint"] }
 num-traits = { version = "0.2.15", default-features = false }
 pbkdf2 = { version = "0.11.0", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }  # TODO: rand is used in hack-y ways at the moment ; these features should be removed
 rand_chacha = { version = "0.3.1", default-features = false }
-ruzstd = { version = "0.2.4" }  # TODO: doesn't support no_std :-/
+ruzstd = { version = "0.3.0" }  # TODO: doesn't support no_std :-/
 schnorrkel = { version = "0.10.2", default-features = false, features = ["preaudit_deprecated", "u64_backend"] }
-serde = { version = "1.0.137", default-features = false, features = ["alloc", "derive"] }
-serde_json = { version = "1.0.81", default-features = false, features = ["alloc", "raw_value"] }
+serde = { version = "1.0.138", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1.0.82", default-features = false, features = ["alloc", "raw_value"] }
 sha2 = { version = "0.10.2", default-features = false }
 siphasher = { version = "0.3.10", default-features = false }
 slab = { version = "0.4.6", default-features = false }
-smallvec = "1.8.0"
+smallvec = "1.9.0"
 snow = { version = "0.9.0", default-features = false, features = ["default-resolver"] }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
 twox-hash = { version = "1.6.3", default-features = false }
@@ -89,7 +89,7 @@ sqlite = { version = "0.26.0", optional = true, default-features = false, featur
 # Add here the crates that cannot function without the help of the operating system or environment.
 async-std = { version = "1.12.0", optional = true }
 parking_lot = { version = "0.12.1", optional = true }
-pin-project = { version = "1.0.8", optional = true }
+pin-project = { version = "1.0.11", optional = true }
 soketto = { version = "0.7.1", optional = true }
 
 # BELOW: DEPENDENCIES TO REMOVE
@@ -98,11 +98,11 @@ parity-scale-codec = { version = "3.1.5", features = ["derive"], default-feature
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # `std` feature
-wasmtime = { version = "0.36.0", default-features = false, features = ["async", "cranelift"], optional = true }
+wasmtime = { version = "0.38.1", default-features = false, features = ["async", "cranelift"], optional = true }
 
 [dev-dependencies]
 async-std = "1.12.0"
-criterion = "0.3.5"
+criterion = "0.3.6"
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]

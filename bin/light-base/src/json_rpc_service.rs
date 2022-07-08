@@ -652,7 +652,8 @@ impl<TPlat: Platform> Background<TPlat> {
                                     .recent_pinned_blocks
                                     .put(hash, block.scale_encoded_header);
                             }
-                            Some(runtime_service::Notification::Finalized { .. }) => {}
+                            Some(runtime_service::Notification::Finalized { .. })
+                            | Some(runtime_service::Notification::BestBlockChanged { .. }) => {}
                             None => break,
                         }
                     }
@@ -811,6 +812,10 @@ impl<TPlat: Platform> Background<TPlat> {
                     hash,
                 )
                 .await;
+            }
+            methods::MethodCall::state_getKeys { prefix, hash } => {
+                self.state_get_keys(request_id, &state_machine_request_id, prefix, hash)
+                    .await;
             }
             methods::MethodCall::state_getKeysPaged {
                 prefix,
@@ -1083,7 +1088,6 @@ impl<TPlat: Platform> Background<TPlat> {
             | methods::MethodCall::grandpa_roundState { .. }
             | methods::MethodCall::offchain_localStorageGet { .. }
             | methods::MethodCall::offchain_localStorageSet { .. }
-            | methods::MethodCall::state_getKeys { .. }
             | methods::MethodCall::state_getPairs { .. }
             | methods::MethodCall::state_getReadProof { .. }
             | methods::MethodCall::state_getStorageHash { .. }

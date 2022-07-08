@@ -581,18 +581,19 @@ async fn background_task<TPlat: Platform>(
                     block
                         .included_transactions
                         .iter()
-                        .map(|(_, _, body, _)| HashDisplay(&blake2_hash(body)).to_string())
+                        .map(|tx| HashDisplay(&blake2_hash(&tx.scale_encoding)).to_string())
                         .join(", ")
                 );
 
                 debug_assert!(!block.user_data.downloading);
-                for (_, body_index, _, mut tx) in block.included_transactions {
+                for mut tx in block.included_transactions {
                     // We assume that there's no more than 2<<32 transactions per block.
-                    let body_index = u32::try_from(body_index).unwrap();
-                    tx.update_status(TransactionStatus::Dropped(DropReason::Finalized {
-                        block_hash: block.block_hash,
-                        index: body_index,
-                    }));
+                    let body_index = u32::try_from(tx.index_in_block).unwrap();
+                    tx.user_data
+                        .update_status(TransactionStatus::Dropped(DropReason::Finalized {
+                            block_hash: block.block_hash,
+                            index: body_index,
+                        }));
                     // `tx` is no longer in the pool.
                 }
             }
@@ -628,6 +629,9 @@ async fn background_task<TPlat: Platform>(
                                 // Note that we could in principle interrupt any on-going
                                 // download of that block, but it is not worth the effort.
                             }
+                        },
+                        Some(runtime_service::Notification::BestBlockChanged { hash }) => {
+                            worker.set_best_block(&log_target, &hash);
                         },
                         None => continue 'channels_rebuild
                     }

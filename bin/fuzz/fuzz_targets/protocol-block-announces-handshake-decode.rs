@@ -17,6 +17,6 @@
 
 #![no_main]
 
-libfuzzer_sys::fuzz_target!(|data: &[u8]| {
-    let _ = smoldot::network::protocol::decode_block_announces_handshake(data);
+libfuzzer_sys::fuzz_target!(|params: (usize, &[u8])| {
+    let _ = smoldot::network::protocol::decode_block_announces_handshake(params.0, params.1);
 });

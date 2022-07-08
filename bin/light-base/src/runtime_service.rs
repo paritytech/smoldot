@@ -399,6 +399,10 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         subscription_id: SubscriptionId,
         block_hash: &[u8; 32],
     ) -> RuntimeLock<'a, TPlat> {
+        // Note: copying the hash ahead of time fixes some weird intermittent borrow checker
+        // issue.
+        let block_hash = *block_hash;
+
         let mut guarded = self.guarded.lock().await;
         let guarded = &mut *guarded;
 
@@ -406,10 +410,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             if let GuardedInner::FinalizedBlockRuntimeKnown { pinned_blocks, .. } =
                 &mut guarded.tree
             {
-                (*pinned_blocks
-                    .get(&(subscription_id.0, *block_hash))
-                    .unwrap())
-                .clone()
+                (*pinned_blocks.get(&(subscription_id.0, block_hash)).unwrap()).clone()
             } else {
                 panic!("Invalid subscription")
             }
@@ -417,7 +418,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
         RuntimeLock {
             service: self,
-            hash: *block_hash,
+            hash: block_hash,
             runtime,
             block_number,
             block_state_root_hash,
@@ -610,6 +611,15 @@ pub enum Notification {
 
     /// A new block has been added to the list of unfinalized blocks.
     Block(BlockNotification),
+
+    /// The best block has changed to a different one.
+    BestBlockChanged {
+        /// Hash of the new best block.
+        ///
+        /// This can be either the hash of the latest finalized block or the hash of a
+        /// non-finalized block.
+        hash: [u8; 32],
+    },
 }
 
 /// Notification about a new block.
@@ -1276,6 +1286,34 @@ async fn run_background<TPlat: Platform>(
 
                             background.finalize(hash, best_block_hash).await;
                         }
+                        Some(sync_service::Notification::BestBlockChanged { hash }) => {
+                            log::debug!(
+                                target: &log_target,
+                                "Worker <= BestBlockChanged(hash={})",
+                                HashDisplay(&hash)
+                            );
+
+                            let near_head_of_chain = background.sync_service.is_near_head_of_chain_heuristic().await;
+
+                            let mut guarded = background.guarded.lock().await;
+                            let mut guarded = &mut *guarded;
+                            guarded.best_near_head_of_chain = near_head_of_chain;
+
+                            match &mut guarded.tree {
+                                GuardedInner::FinalizedBlockRuntimeKnown {
+                                    tree, ..
+                                } => {
+                                    let idx = tree.input_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id;
+                                    tree.input_set_best_block(idx);
+                                }
+                                GuardedInner::FinalizedBlockRuntimeUnknown { tree, .. } => {
+                                    let idx = tree.input_iter_unordered().find(|block| block.user_data.hash == hash).unwrap().id;
+                                    tree.input_set_best_block(idx);
+                                }
+                            }
+
+                            background.advance_and_notify_subscribers(guarded);
+                        }
                     };
 
                     // TODO: process any other pending event from blocks_stream before doing that; otherwise we might start download for blocks that we don't care about because they're immediately overwritten by others
@@ -1601,12 +1639,43 @@ impl<TPlat: Platform> Background<TPlat> {
                             }
                         }
                     }
+                    Some(async_tree::OutputUpdate::BestBlockChanged { best_block_index }) => {
+                        let hash = best_block_index
+                            .map_or(&*finalized_block, |idx| tree.block_user_data(idx))
+                            .hash;
+
+                        log::debug!(
+                            target: &self.log_target,
+                            "Worker => OutputBestBlockChanged(hash={})",
+                            HashDisplay(&hash),
+                        );
+
+                        let notif = Notification::BestBlockChanged { hash };
+
+                        let mut to_remove = Vec::new();
+                        for (subscription_id, (sender, _)) in all_blocks_subscriptions.iter_mut() {
+                            if sender.try_send(notif.clone()).is_err() {
+                                to_remove.push(*subscription_id);
+                            }
+                        }
+                        for to_remove in to_remove {
+                            all_blocks_subscriptions.remove(&to_remove);
+                            let pinned_blocks_to_remove = pinned_blocks
+                                .range((to_remove, [0; 32])..=(to_remove, [0xff; 32]))
+                                .map(|((_, h), _)| *h)
+                                .collect::<Vec<_>>();
+                            for block in pinned_blocks_to_remove {
+                                pinned_blocks.remove(&(to_remove, block));
+                            }
+                        }
+                    }
                 },
                 GuardedInner::FinalizedBlockRuntimeUnknown { tree, when_known } => match tree
                     .try_advance_output()
                 {
                     None => break,
-                    Some(async_tree::OutputUpdate::Block(_)) => continue,
+                    Some(async_tree::OutputUpdate::Block(_))
+                    | Some(async_tree::OutputUpdate::BestBlockChanged { .. }) => continue,
                     Some(async_tree::OutputUpdate::Finalized {
                         user_data: new_finalized,
                         former_finalized_async_op_user_data,

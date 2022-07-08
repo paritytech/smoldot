@@ -244,17 +244,32 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                 // A GrandPa warp sync request has been finished.
                 // `result` is an error if the block request got cancelled by the sync state
                 // machine.
-                if let Ok(result) = result {
-                    // Inject the result of the request into the sync state machine.
-                    task.sync.grandpa_warp_sync_response(
-                        request_id,
-                        result.ok(),
-                    ).1
-
-                } else {
-                    // The sync state machine has emitted a `Action::Cancel` earlier, and is
-                    // thus no longer interested in the response.
-                    continue;
+                match result {
+                    Ok(Ok(result)) => {
+                        let fragments = result.fragments
+                            .into_iter()
+                            .map(|f| all::WarpSyncFragment {
+                                scale_encoded_header: f.scale_encoded_header,
+                                scale_encoded_justification: f.scale_encoded_justification,
+                            })
+                            .collect();
+                        task.sync.grandpa_warp_sync_response_ok(
+                            request_id,
+                            fragments,
+                            result.is_finished,
+                        ).1
+                    }
+                    Ok(Err(_)) => {
+                        task.sync.grandpa_warp_sync_response_err(
+                            request_id,
+                        );
+                        continue;
+                    }
+                    Err(_) => {
+                        // The sync state machine has emitted a `Action::Cancel` earlier, and is
+                        // thus no longer interested in the response.
+                        continue;
+                    }
                 }
             },
 
@@ -772,7 +787,14 @@ impl<TPlat: Platform> Task<TPlat> {
                             self.network_up_to_date_best = false;
                         }
                         self.network_up_to_date_finalized = false;
-                        self.known_finalized_runtime = None; // TODO: only do if there was no RuntimeUpdated log item
+                        // Invalidate the cache of the runtime of the finalized blocks if any
+                        // of the finalized blocks indicates that a runtime update happened.
+                        if finalized_blocks
+                            .iter()
+                            .any(|b| b.header.digest.has_runtime_environment_updated())
+                        {
+                            self.known_finalized_runtime = None;
+                        }
                         self.dispatch_all_subscribers(Notification::Finalized {
                             hash: self.sync.finalized_block_header().hash(),
                             best_block_hash: self.sync.best_block_hash(),
