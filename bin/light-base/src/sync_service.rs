@@ -77,6 +77,9 @@ pub struct ConfigParachain<TPlat: Platform> {
     /// Runtime service that synchronizes the relay chain of this parachain.
     pub relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
 
+    /// Number of bytes used by the block number in the relay chain.
+    pub relay_chain_block_number_bytes: usize,
+
     /// Id of the parachain within the relay chain.
     ///
     /// This is an arbitrary number used to identify the parachain within the storage of the
@@ -114,6 +117,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                     log_target,
                     config.chain_information,
                     config_parachain.relay_chain_sync.clone(),
+                    config_parachain.relay_chain_block_number_bytes,
                     config_parachain.parachain_id,
                     from_foreground,
                     config.network_service.1,
