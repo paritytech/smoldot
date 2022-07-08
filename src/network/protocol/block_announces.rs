@@ -158,21 +158,7 @@ pub fn decode_block_announces_handshake(
                     nom::combinator::map(nom::bytes::complete::tag(&[0b10]), |_| Role::Light),
                     nom::combinator::map(nom::bytes::complete::tag(&[0b100]), |_| Role::Authority),
                 )),
-                nom::combinator::map_res(
-                    nom::bytes::complete::take(expected_block_number_bytes),
-                    move |slice: &[u8]| {
-                        // `slice` contains the little endian block number. We extend the block
-                        // number to 64bits if it is smaller, or return an error if it is larger
-                        // than 64bits and doesn't fit in a u64.
-                        let mut slice_out = [0; 8];
-                        let clamp = cmp::min(8, expected_block_number_bytes);
-                        if slice.iter().skip(clamp).any(|b| *b != 0) {
-                            return Err(nom::error::ErrorKind::TooLarge);
-                        }
-                        slice_out[..clamp].copy_from_slice(&slice[..clamp]);
-                        Ok(u64::from_le_bytes(slice_out))
-                    },
-                ),
+                crate::util::nom_varsize_number_decode_u64(expected_block_number_bytes),
                 nom::bytes::complete::take(32u32),
                 nom::bytes::complete::take(32u32),
             )),

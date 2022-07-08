@@ -18,7 +18,7 @@
 //! Internal module. Contains functions that aren't Substrate/Polkadot-specific and should ideally
 //! be found in third party libraries, but that aren't worth a third-party library.
 
-use core::str;
+use core::{cmp, str};
 
 pub(crate) mod leb128;
 pub(crate) mod protobuf;
@@ -87,6 +87,29 @@ pub(crate) fn nom_bool_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
         nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| false),
         nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| true),
     ))(bytes)
+}
+
+/// Decodes into a u64 a SCALE-encoded number whose number of bytes isn't known at compile-time.
+///
+/// Returns an error if the decoded number doesn't fit into a `u64`.
+pub(crate) fn nom_varsize_number_decode_u64<'a, E: nom::error::ParseError<&'a [u8]>>(
+    num_bytes: usize,
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], u64, E> {
+    nom::combinator::map_opt(
+        nom::bytes::complete::take(num_bytes),
+        move |slice: &[u8]| {
+            // `slice` contains the little endian block number. We extend the block
+            // number to 64bits if it is smaller, or return an error if it is larger
+            // than 64bits and doesn't fit in a u64.
+            let mut slice_out = [0; 8];
+            let clamp = cmp::min(8, num_bytes);
+            if slice.iter().skip(clamp).any(|b| *b != 0) {
+                return None;
+            }
+            slice_out[..clamp].copy_from_slice(&slice[..clamp]);
+            Some(u64::from_le_bytes(slice_out))
+        },
+    )
 }
 
 macro_rules! decode_scale_compact {
