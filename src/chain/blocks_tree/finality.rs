@@ -344,9 +344,11 @@ impl<T> NonFinalizedTreeInner<T> {
             return Err(CommitVerifyError::NotGrandpa);
         }
 
-        let decoded_commit =
-            grandpa::commit::decode::decode_grandpa_commit(verify_grandpa_commit_message)
-                .map_err(|_| CommitVerifyError::InvalidCommit)?;
+        let decoded_commit = grandpa::commit::decode::decode_grandpa_commit(
+            verify_grandpa_commit_message,
+            self.block_number_bytes,
+        )
+        .map_err(|_| CommitVerifyError::InvalidCommit)?;
 
         // Delegate the first step to the other function.
         let (block_index, expected_authorities_set_id, authorities_list) = self
@@ -358,6 +360,7 @@ impl<T> NonFinalizedTreeInner<T> {
 
         let mut verification = grandpa::commit::verify::verify(grandpa::commit::verify::Config {
             commit: verify_grandpa_commit_message,
+            block_number_bytes: self.block_number_bytes,
             expected_authorities_set_id,
             num_authorities: u32::try_from(authorities_list.clone().count()).unwrap(),
         });

@@ -1097,7 +1097,9 @@ impl<TPlat: Platform> Background<TPlat> {
             | methods::MethodCall::system_dryRun { .. }
             | methods::MethodCall::system_networkState { .. }
             | methods::MethodCall::system_nodeRoles { .. }
-            | methods::MethodCall::system_removeReservedPeer { .. }) => {
+            | methods::MethodCall::system_removeReservedPeer { .. }
+            | methods::MethodCall::network_unstable_subscribeEvents { .. }
+            | methods::MethodCall::network_unstable_unsubscribeEvents { .. }) => {
                 // TODO: implement the ones that make sense to implement ^
                 log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
                 self.requests_subscriptions

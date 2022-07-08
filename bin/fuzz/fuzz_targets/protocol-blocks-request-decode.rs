@@ -17,6 +17,6 @@
 
 #![no_main]
 
-libfuzzer_sys::fuzz_target!(|params: (usize, &[u8])| {
-    let _ = smoldot::network::protocol::decode_block_request(params.0, params.1);
+libfuzzer_sys::fuzz_target!(|params: (u8, &[u8])| {
+    let _ = smoldot::network::protocol::decode_block_request(usize::from(params.0) + 1, params.1);
 });

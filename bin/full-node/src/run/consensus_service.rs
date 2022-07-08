@@ -170,6 +170,8 @@ impl ConsensusService {
         (config.tasks_executor)({
             let mut sync = all::AllSync::new(all::Config {
                 chain_information: finalized_chain_information,
+                block_number_bytes: 4, // TODO: pass a proper value; for example load through chain spec
+                allow_unknown_consensus_engines: false,
                 sources_capacity: 32,
                 blocks_capacity: {
                     // This is the maximum number of blocks between two consecutive justifications.
@@ -364,9 +366,9 @@ impl SyncBackground {
                         chain_information::ChainInformationConsensusRef::Babe { .. } => {
                             Some(keystore::KeyNamespace::Babe)
                         }
-                        chain_information::ChainInformationConsensusRef::AllAuthorized => {
-                            // In `AllAuthorized` mode, all keys are accepted and there is no
-                            // filter on the namespace.
+                        chain_information::ChainInformationConsensusRef::Unknown => {
+                            // In `Unknown` mode, all keys are accepted and there is no
+                            // filter on the namespace, as we can't author blocks anyway.
                             // TODO: is that correct?
                             None
                         }

@@ -83,8 +83,21 @@ pub struct Config {
     /// Information about the latest finalized block and its ancestors.
     pub chain_information: chain_information::ValidChainInformation,
 
+    /// Number of bytes used when encoding/decoding the block number. Influences how various data
+    /// structures should be parsed.
+    pub block_number_bytes: usize,
+
     /// Pre-allocated size of the chain, in number of non-finalized blocks.
     pub blocks_capacity: usize,
+
+    /// If `false`, blocks containing digest items with an unknown consensus engine will fail to
+    /// verify.
+    ///
+    /// Passing `true` can lead to blocks being considered as valid when they shouldn't. However,
+    /// even if `true` is passed, a recognized consensus engine must always be present.
+    /// Consequently, both `true` and `false` guarantee that the number of authorable blocks over
+    /// the network is bounded.
+    pub allow_unknown_consensus_engines: bool,
 }
 
 /// Holds state about the current state of the chain for the purpose of verifying headers.
@@ -127,8 +140,8 @@ impl<T> NonFinalizedTree<T> {
                     },
                 },
                 finalized_consensus: match chain_information.consensus {
-                    chain_information::ChainInformationConsensus::AllAuthorized => {
-                        FinalizedConsensus::AllAuthorized
+                    chain_information::ChainInformationConsensus::Unknown => {
+                        FinalizedConsensus::Unknown
                     }
                     chain_information::ChainInformationConsensus::Aura {
                         finalized_authorities_list,
@@ -153,6 +166,8 @@ impl<T> NonFinalizedTree<T> {
                     Default::default(),
                 ),
                 current_best: None,
+                block_number_bytes: config.block_number_bytes,
+                allow_unknown_consensus_engines: config.allow_unknown_consensus_engines,
             })),
         }
     }
@@ -220,8 +235,8 @@ impl<T> NonFinalizedTree<T> {
         let attempt = chain_information::ChainInformationRef {
             finalized_block_header: (&inner.finalized_block_header).into(),
             consensus: match &inner.finalized_consensus {
-                FinalizedConsensus::AllAuthorized => {
-                    chain_information::ChainInformationConsensusRef::AllAuthorized
+                FinalizedConsensus::Unknown => {
+                    chain_information::ChainInformationConsensusRef::Unknown
                 }
                 FinalizedConsensus::Aura {
                     authorities_list,
@@ -303,8 +318,8 @@ impl<T> NonFinalizedTree<T> {
                 .current_best
                 .map(|idx| &inner.blocks.get(idx).unwrap().consensus),
         ) {
-            (FinalizedConsensus::AllAuthorized, _) => {
-                chain_information::ChainInformationConsensusRef::AllAuthorized
+            (FinalizedConsensus::Unknown, _) => {
+                chain_information::ChainInformationConsensusRef::Unknown
             }
             (
                 FinalizedConsensus::Aura {
@@ -441,12 +456,16 @@ struct NonFinalizedTreeInner<T> {
     /// Index within [`NonFinalizedTreeInner::blocks`] of the current best block. `None` if and
     /// only if the fork tree is empty.
     current_best: Option<fork_tree::NodeIndex>,
+    /// See [`Config::block_number_bytes`].
+    block_number_bytes: usize,
+    /// See [`Config::allow_unknown_consensus_engines`].
+    allow_unknown_consensus_engines: bool,
 }
 
 /// State of the consensus of the finalized block.
 #[derive(Clone)]
 enum FinalizedConsensus {
-    AllAuthorized,
+    Unknown,
     Aura {
         /// List of authorities that must sign the child of the finalized block.
         authorities_list: Arc<Vec<header::AuraAuthority>>,
@@ -498,7 +517,6 @@ struct Block<T> {
 /// Changes to the consensus made by a block.
 #[derive(Clone)]
 enum BlockConsensus {
-    AllAuthorized,
     Aura {
         /// If `Some`, list of authorities that must verify the child of this block.
         /// This can be a clone of the value of the parent, a clone of
