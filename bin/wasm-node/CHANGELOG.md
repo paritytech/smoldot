@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add support for CommonJS projects [#2487](https://github.com/paritytech/smoldot/pull/2487)
+
 ## Changed
 
 - No warning is generated anymore if the discovery process doesn't work due to having 0 peers, or failed due to a benign networking issue. ([#2476](https://github.com/paritytech/smoldot/pull/2476))
