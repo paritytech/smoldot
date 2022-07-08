@@ -107,6 +107,15 @@ pub struct Config<TBannedBlocksIter> {
     /// structures should be parsed.
     pub block_number_bytes: usize,
 
+    /// If `false`, blocks containing digest items with an unknown consensus engine will fail to
+    /// verify.
+    ///
+    /// Passing `true` can lead to blocks being considered as valid when they shouldn't. However,
+    /// even if `true` is passed, a recognized consensus engine must always be present.
+    /// Consequently, both `true` and `false` guarantee that the number of authorable blocks over
+    /// the network is bounded.
+    pub allow_unknown_consensus_engines: bool,
+
     /// Pre-allocated capacity for the number of block sources.
     pub sources_capacity: usize,
 
@@ -421,6 +430,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
             chain_information: config.chain_information,
             block_number_bytes: config.block_number_bytes,
             blocks_capacity: config.blocks_capacity,
+            allow_unknown_consensus_engines: config.allow_unknown_consensus_engines,
         });
 
         Self {
@@ -1970,6 +1980,15 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
 
                 Err(HeaderVerifyError::ConsensusMismatch)
             }
+            Err(blocks_tree::HeaderVerifyError::UnknownConsensusEngine) => {
+                // Remove the block from `pending_blocks`.
+                self.parent.inner.blocks.mark_unverified_block_as_bad(
+                    self.block_to_verify.block_number,
+                    &self.block_to_verify.block_hash,
+                );
+
+                Err(HeaderVerifyError::UnknownConsensusEngine)
+            }
             Ok(blocks_tree::HeaderVerifySuccess::Duplicate)
             | Err(
                 blocks_tree::HeaderVerifyError::BadParent { .. }
@@ -2156,6 +2175,8 @@ pub enum HeaderVerifyOutcome<TBl, TRq, TSrc> {
 /// Error that can happen when verifying a block header.
 #[derive(Debug, derive_more::Display)]
 pub enum HeaderVerifyError {
+    /// Block can't be verified as it uses an unknown consensus engine.
+    UnknownConsensusEngine,
     /// Block uses a different consensus than the rest of the chain.
     ConsensusMismatch,
     /// The block verification has failed. The block is invalid and should be thrown away.

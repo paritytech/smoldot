@@ -277,6 +277,12 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             chain_information: config.chain_information,
             block_number_bytes: config.block_number_bytes,
             blocks_capacity: config.blocks_capacity,
+            // Considering that we rely on justifications to sync, there is no drawback in
+            // accepting blocks with unrecognized consensus engines. While this could lead to
+            // accepting blocks that wouldn't otherwise be accepted, it is already the case that
+            // a malicious node could send non-finalized blocks. Accepting blocks with an
+            // unrecognized consensus engine doesn't add any additional risk.
+            allow_unknown_consensus_engines: true,
         };
 
         let chain = blocks_tree::NonFinalizedTree::new(blocks_tree_config.clone());

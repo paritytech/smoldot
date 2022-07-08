@@ -143,8 +143,7 @@ impl ChainSpec {
             (Err(err1), Err(err2))
                 if err1.is_function_not_found() && err2.is_function_not_found() =>
             {
-                // TODO: seems a bit risky to automatically fall back to this?
-                ChainInformationConsensus::AllAuthorized
+                ChainInformationConsensus::Unknown
             }
             (Err(error), _) => {
                 // Note that Babe might have produced an error as well, which is intentionally

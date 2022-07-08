@@ -59,6 +59,15 @@ pub struct Config {
     /// structures should be parsed.
     pub block_number_bytes: usize,
 
+    /// If `false`, blocks containing digest items with an unknown consensus engine will fail to
+    /// verify.
+    ///
+    /// Passing `true` can lead to blocks being considered as valid when they shouldn't. However,
+    /// even if `true` is passed, a recognized consensus engine must always be present.
+    /// Consequently, both `true` and `false` guarantee that the number of authorable blocks over
+    /// the network is bounded.
+    pub allow_unknown_consensus_engines: bool,
+
     /// Pre-allocated capacity for the number of block sources.
     pub sources_capacity: usize,
 
@@ -168,6 +177,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 max_disjoint_headers: config.max_disjoint_headers,
                 max_requests_per_block: config.max_requests_per_block,
                 block_number_bytes: config.block_number_bytes,
+                allow_unknown_consensus_engines: config.allow_unknown_consensus_engines,
             },
         }
     }
@@ -1871,6 +1881,9 @@ impl<TRq, TSrc, TBl> HeaderVerify<TRq, TSrc, TBl> {
                                 all_forks::HeaderVerifyError::VerificationFailed(error) => {
                                     HeaderVerifyError::VerificationFailed(error)
                                 }
+                                all_forks::HeaderVerifyError::UnknownConsensusEngine => {
+                                    HeaderVerifyError::UnknownConsensusEngine
+                                }
                                 all_forks::HeaderVerifyError::ConsensusMismatch => {
                                     HeaderVerifyError::ConsensusMismatch
                                 }
@@ -1908,6 +1921,8 @@ pub enum HeaderVerifyOutcome<TRq, TSrc, TBl> {
 /// Error that can happen when verifying a block header.
 #[derive(Debug, derive_more::Display)]
 pub enum HeaderVerifyError {
+    /// Block can't be verified as it uses an unknown consensus engine.
+    UnknownConsensusEngine,
     /// Block uses a different consensus than the rest of the chain.
     ConsensusMismatch,
     /// The block verification has failed. The block is invalid and should be thrown away.
@@ -2397,6 +2412,8 @@ struct Shared<TRq> {
     max_requests_per_block: NonZeroU32,
     /// Value passed through [`Config::block_number_bytes`].
     block_number_bytes: usize,
+    /// Value passed through [`Config::allow_unknown_consensus_engines`].
+    allow_unknown_consensus_engines: bool,
 }
 
 impl<TRq> Shared<TRq> {
@@ -2418,6 +2435,7 @@ impl<TRq> Shared<TRq> {
             blocks_capacity: self.blocks_capacity,
             max_disjoint_headers: self.max_disjoint_headers,
             max_requests_per_block: self.max_requests_per_block,
+            allow_unknown_consensus_engines: self.allow_unknown_consensus_engines,
             full: false,
             banned_blocks: iter::empty(), // TODO: not implemented, should be passed by config after the optimistic sync supports banned blocks too
         });
