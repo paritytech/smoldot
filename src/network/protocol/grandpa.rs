@@ -97,6 +97,10 @@ impl NeighborPacket {
         ));
         commit_finalized_height.extend(self.commit_finalized_height.to_le_bytes());
         // TODO: unclear what to do if the block number doesn't fit in `block_number_bytes`
+        debug_assert!(!commit_finalized_height
+            .iter()
+            .skip(block_number_bytes)
+            .any(|b| *b != 0));
         commit_finalized_height.resize(block_number_bytes, 0);
 
         iter::once(either::Right(either::Left([1u8])))
