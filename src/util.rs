@@ -89,7 +89,7 @@ pub(crate) fn nom_bool_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     ))(bytes)
 }
 
-/// Decodes into a u64 a SCALE-encoded number whose number of bytes isn't known at compile-time.
+/// Decodes into a `u64` a SCALE-encoded number whose number of bytes isn't known at compile-time.
 ///
 /// Returns an error if the decoded number doesn't fit into a `u64`.
 pub(crate) fn nom_varsize_number_decode_u64<'a, E: nom::error::ParseError<&'a [u8]>>(
