@@ -910,13 +910,14 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         &mut self,
         source_id: SourceId,
         scale_encoded_commit: &[u8],
+        block_number_bytes: usize,
     ) -> Result<(), blocks_tree::CommitVerifyError> {
         // Grabbing the source is done early on in order to panic if the `source_id` is invalid.
         let source = &mut self.inner.blocks[source_id];
 
         let block_number = match self
             .chain
-            .verify_grandpa_commit_message(scale_encoded_commit)
+            .verify_grandpa_commit_message(scale_encoded_commit, block_number_bytes)
         {
             Ok(apply) => {
                 apply.apply();
@@ -2014,7 +2015,7 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                 match self
                     .parent
                     .chain
-                    .verify_grandpa_commit_message(&scale_encoded_commit)
+                    .verify_grandpa_commit_message(&scale_encoded_commit, 4) // TODO: no
                 {
                     Ok(success) => {
                         // TODO: DRY

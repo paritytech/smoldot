@@ -207,8 +207,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                 grandpa_protocol_config: if chain.has_grandpa_protocol {
                     // TODO: dummy values
                     Some(service::GrandpaState {
-                        commit_finalized_height: u32::try_from(chain.finalized_block_height)
-                            .unwrap(), // TODO: unwrap()?!
+                        commit_finalized_height: chain.finalized_block_height,
                         round_number: 1,
                         set_id: 0,
                     })

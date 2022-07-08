@@ -18,7 +18,7 @@
 use crate::header;
 
 use alloc::vec;
-use core::{cmp, iter};
+use core::iter;
 use nom::Finish as _;
 
 /// Decoded handshake sent or received when opening a block announces notifications substream.

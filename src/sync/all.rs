@@ -1128,7 +1128,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         // TODO: clearly indicate if message has been ignored
         match (&mut self.inner, source_id) {
             (AllSyncInner::AllForks(sync), SourceMapping::AllForks(source_id)) => {
-                sync.grandpa_commit_message(*source_id, scale_encoded_message)
+                sync.grandpa_commit_message(*source_id, scale_encoded_message, 4)
+                // TODO: not 4
             }
             (AllSyncInner::Optimistic { .. }, _) => Ok(()),
             (AllSyncInner::GrandpaWarpSync { .. }, _) => Ok(()),
