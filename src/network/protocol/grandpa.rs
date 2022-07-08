@@ -20,7 +20,7 @@
 use crate::finality::{grandpa::commit::decode, justification::decode::PrecommitRef};
 
 use alloc::vec::Vec;
-use core::iter;
+use core::{cmp, iter, mem};
 use nom::Finish as _;
 
 pub use crate::finality::grandpa::commit::decode::{CommitMessageRef, UnsignedPrecommitRef};
@@ -89,13 +89,21 @@ impl NeighborPacket {
     /// encoding of that object.
     pub fn scale_encoding(
         &self,
-        block_number_bytes: usize, // TODO: unused
+        block_number_bytes: usize,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
+        let mut commit_finalized_height = Vec::with_capacity(cmp::max(
+            block_number_bytes,
+            mem::size_of_val(&self.commit_finalized_height),
+        ));
+        commit_finalized_height.extend(self.commit_finalized_height.to_le_bytes());
+        // TODO: unclear what to do if the block number doesn't fit in `block_number_bytes`
+        commit_finalized_height.resize(block_number_bytes, 0);
+
         iter::once(either::Right(either::Left([1u8])))
             .chain(iter::once(either::Left(self.round_number.to_le_bytes())))
             .chain(iter::once(either::Left(self.set_id.to_le_bytes())))
             .chain(iter::once(either::Right(either::Right(
-                self.commit_finalized_height.to_le_bytes(),
+                commit_finalized_height,
             ))))
     }
 }
