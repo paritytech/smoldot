@@ -42,6 +42,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
     log_target: String,
     chain_information: chain::chain_information::ValidChainInformation,
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
+    relay_chain_block_number_bytes: usize,
     parachain_id: u32,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     network_chain_index: usize,
@@ -172,6 +173,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                     async_op_id,
                                     parahead(
                                         &relay_chain_sync,
+                                        relay_chain_block_number_bytes,
                                         subscription_id,
                                         parachain_id,
                                         &block_hash,
@@ -593,6 +595,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
 async fn parahead<TPlat: Platform>(
     relay_chain_sync: &Arc<runtime_service::RuntimeService<TPlat>>,
+    relay_chain_block_number_bytes: usize,
     subscription_id: runtime_service::SubscriptionId,
     parachain_id: u32,
     block_hash: &[u8; 32],
@@ -671,7 +674,10 @@ async fn parahead<TPlat: Platform>(
     // Try decode the result of the runtime call.
     // If this fails, it indicates an incompatibility between smoldot and the relay
     // chain.
-    match para::decode_persisted_validation_data_return_value(&output) {
+    match para::decode_persisted_validation_data_return_value(
+        &output,
+        relay_chain_block_number_bytes,
+    ) {
         Ok(Some(pvd)) => Ok(pvd.parent_head.to_vec()),
         Ok(None) => Err(ParaheadError::NoCore),
         Err(error) => Err(ParaheadError::InvalidRuntimeOutput(error)),
