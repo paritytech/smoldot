@@ -24,11 +24,11 @@
   },
   "scripts": {
     "buildAll": "tsc -p tsconfig-mjs.json && tsc -p tsconfig-cjs.json && bash fix-package-type",
-    "prepublishOnly": "node prepare.mjs --release && rimraf ./dist && yarn run buildAll",
-    "build": "node prepare.mjs --release && rimraf ./dist && yarn run buildAll",
-    "demo:cjs": "node prepare.mjs --debug && rimraf ./dist && yarn run buildAll && node demo/demo.cjs",
-    "demo:mjs": "node prepare.mjs --debug && rimraf ./dist && yarn run buildAll && node demo/demo.mjs",
-    "test": "node prepare.mjs --debug && rimraf ./dist && yarn run buildAll && ava --timeout=2m --concurrency 2 --no-worker-threads"
+    "prepublishOnly": "node prepare.mjs --release && rimraf ./dist && npm run buildAll",
+    "build": "node prepare.mjs --release && rimraf ./dist && npm run buildAll",
+    "demo:cjs": "node prepare.mjs --debug && rimraf ./dist && npm run buildAll && node demo/demo.cjs",
+    "demo:mjs": "node prepare.mjs --debug && rimraf ./dist && npm run buildAll && node demo/demo.mjs",
+    "test": "node prepare.mjs --debug && rimraf ./dist && npm run buildAll && ava --timeout=2m --concurrency 2 --no-worker-threads"
   },
   "browser": {
     "./dist/mjs/compat/index.js": "./dist/mjs/compat/index-browser-overwrite.js",
