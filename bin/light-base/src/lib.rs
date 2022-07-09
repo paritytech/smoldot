@@ -1133,6 +1133,7 @@ async fn start_services<TPlat: Platform>(
                 parachain: Some(sync_service::ConfigParachain {
                     parachain_id: chain_spec.relay_chain().unwrap().1,
                     relay_chain_sync: relay_chain.runtime_service.clone(),
+                    relay_chain_block_number_bytes: 4, // TODO: load from chain specs or something
                 }),
             })
             .await,
