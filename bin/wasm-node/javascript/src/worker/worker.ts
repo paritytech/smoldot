@@ -77,6 +77,7 @@ let state: { initialized: false, promise: Promise<SmoldotWasmInstance> } | { ini
       // configuration.
       instance.exports.init(configMessage.maxLogLevel, configMessage.enableCurrentTask ? 1 : 0, cpuRateLimit);
 
+      state = { initialized: true, instance };
       return instance;
     }) };
 
