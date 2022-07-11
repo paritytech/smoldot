@@ -27,7 +27,7 @@ export interface Worker {
   databaseContent: (message: messages.ToWorkerDatabaseContent) => Promise<string>
 }
 
-export function start(configMessage: messages.ToWorkerConfig, messagesCallback: (msg: messages.FromWorker) => void): Worker {
+export function start(configMessage: messages.ToWorkerConfig): Worker {
 
 // This variable represents the state of the worker, and serves two different purposes:
 //
@@ -38,17 +38,18 @@ let state: { initialized: false, promise: Promise<SmoldotWasmInstance> } | { ini
 
   // Contains the information of each chain that is currently alive.
   let chains: Map<number, {
-    // TODO: jsonRpcCallback?: (response: string) => void,
+    jsonRpcCallback?: (response: string) => void,
     databasePromises: DatabasePromise[],
   }> = new Map();
 
     // Start initialization of the Wasm VM.
     const config: instance.Config = {
       logCallback: (level, target, message) => {
-        messagesCallback({ kind: 'log', level, target, message });
+        configMessage.logCallback(level, target, message)
       },
       jsonRpcCallback: (data, chainId) => {
-        messagesCallback({ kind: 'jsonrpc', data, chainId });
+        const cb = chains.get(chainId)?.jsonRpcCallback;
+        if (cb) cb(data);
       },
       databaseContentCallback: (data, chainId) => {
         const promises = chains.get(chainId)?.databasePromises!;
@@ -139,7 +140,7 @@ return {
       const chainId = instance.exports.add_chain(
         chainSpecPtr, chainSpecLen,
         databaseContentPtr, databaseContentLen,
-        message.jsonRpcRunning ? 1 : 0,
+        !!message.jsonRpcCallback ? 1 : 0,
         potentialRelayChainsPtr, potentialRelayChainsLen
       );
 
@@ -147,7 +148,7 @@ return {
         if (chains.has(chainId)) // Sanity check.
           throw 'Unexpected reuse of a chain ID';
         chains.set(chainId, {
-          // TODO: jsonRpcCallback: options.jsonRpcCallback,
+          jsonRpcCallback: message.jsonRpcCallback,
           databasePromises: new Array()
         });
         return { success: true, chainId };

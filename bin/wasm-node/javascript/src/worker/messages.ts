@@ -25,17 +25,13 @@ export type ToWorker = ToWorkerConfig | ToWorkerNonConfig;
 export type ToWorkerNonConfig = ToWorkerRpcRequest | ToWorkerAddChain | ToWorkerRemoveChain;
 
 /**
- * Message that the worker can send to the outside.
- */
-export type FromWorker = FromWorkerLog | FromWorkerJsonRpc;
-
-/**
  * Contains the initial configuration of the worker.
  *
  * This message is only ever sent once, and it is always the first ever message sent to the
  * worker.
  */
 export interface ToWorkerConfig {
+  logCallback: (level: number, target: string, message: string) => void
   maxLogLevel: number;
   enableCurrentTask: boolean;
   cpuRateLimit: number,
@@ -64,7 +60,7 @@ export interface ToWorkerAddChain {
   chainSpec: string,
   databaseContent: string,
   potentialRelayChains: number[],
-  jsonRpcRunning: boolean,
+  jsonRpcCallback?: (response: string) => void,
 }
 
 /**
@@ -86,17 +82,4 @@ export interface ToWorkerDatabaseContent {
   ty: 'databaseContent',
   chainId: number,
   maxUtf8BytesSize: number,
-}
-
-export interface FromWorkerLog {
-  kind: 'log',
-  level: number,
-  target: string,
-  message: string,
-}
-
-export interface FromWorkerJsonRpc {
-  kind: 'jsonrpc',
-  data: string,
-  chainId: number,
 }

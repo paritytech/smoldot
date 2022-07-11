@@ -15,7 +15,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import * as messages from './worker/messages.js';
 import { start as startWorker } from './worker/worker.js';
 
 /**
@@ -383,11 +382,11 @@ export function start(options?: ClientOptions): Client {
   // The actual execution of Smoldot is performed in a worker thread.
   // Because this specific line of code is a bit sensitive, it is done in a separate file.
   let workerError: null | Error = null;
-  const worker = startWorker(
-  {
+  const worker = startWorker({
     // Maximum level of log entries sent by the client.
     // 0 = Logging disabled, 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
     maxLogLevel: options.maxLogLevel || 3,
+    logCallback,
     // `enableCurrentTask` adds a small performance hit, but adds some additional information to
     // crash reports. Whether this should be enabled is very opiniated and not that important. At
     // the moment, we enable it all the time, except if the user has logging disabled altogether.
@@ -397,28 +396,6 @@ export function start(options?: ClientOptions): Client {
     forbidWs: options.forbidWs || false,
     forbidNonLocalWs: options.forbidNonLocalWs || false,
     forbidWss: options.forbidWss || false,
-  },
-  
-  (message: messages.FromWorker): void => {
-    // The worker can send us messages whose type is identified through a `kind` field.
-    switch (message.kind) {
-      case 'jsonrpc': {
-        const cb = chains.get(message.chainId)?.jsonRpcCallback;
-        if (cb) cb(message.data);
-        break;
-      }
-
-      case 'log': {
-        logCallback(message.level, message.target, message.message);
-        break;
-      }
-
-      default: {
-        // Exhaustive check.
-        const _exhaustiveCheck: never = message;
-        return _exhaustiveCheck;
-      }
-    }
   });
 
   // TODO: restore
@@ -479,7 +456,7 @@ export function start(options?: ClientOptions): Client {
         chainSpec: options.chainSpec,
         databaseContent: typeof options.databaseContent === 'string' ? options.databaseContent : "",
         potentialRelayChains: potentialRelayChainsIds,
-        jsonRpcRunning: !!options.jsonRpcCallback,
+        jsonRpcCallback: options.jsonRpcCallback,
       });
 
       if (!outcome.success)
