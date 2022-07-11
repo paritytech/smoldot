@@ -73,22 +73,3 @@ chains must be passed as parameter to `addChain` as well. In situations where th
 specifications passed to `addChain` are not trusted, it is important for security reasons to not
 establish a parachain-relay-chain link between two chains that aren't part of the same "trust
 sandbox".
-
-# About the worker
-
-The code in this package uses a web worker (in browsers) or a worker thread (on NodeJS). The
-line of JavaScript that creates the worker is of the following form:
-
-``` js
-new Worker(new URL('./worker.js', import.meta.url), { type: "module" });
-```
-
-This format is compatible [with Webpack 5](https://webpack.js.org/guides/web-workers/), meaning
-that Webpack will be able to resolve the imports in `worker.js` and adjust this little snippet.
-
-This format also works in NodeJS without any issue.
-
-However, at the time of writing of this comment, this format doesn't work with Parcel (both 1 and
-2) due to various bugs.
-
-As a general warning, be aware of the fact that this line might cause issues if you use a bundler.
