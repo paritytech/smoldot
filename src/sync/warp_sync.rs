@@ -94,6 +94,11 @@ pub enum Error {
 pub struct Config {
     /// The chain information of the starting point of the warp syncing.
     pub start_chain_information: ValidChainInformation,
+
+    /// Number of bytes used when encoding/decoding the block number. Influences how various data
+    /// structures should be parsed.
+    pub block_number_bytes: usize,
+
     /// The initial capacity of the list of sources.
     pub sources_capacity: usize,
 }
@@ -117,6 +122,7 @@ pub fn warp_sync<TSrc>(
     Ok(InProgressWarpSync::WaitingForSources(WaitingForSources {
         state: PreVerificationState {
             start_chain_information: config.start_chain_information,
+            block_number_bytes: config.block_number_bytes,
         },
         sources: slab::Slab::with_capacity(config.sources_capacity),
         previous_verifier_values: None,
@@ -234,6 +240,7 @@ impl<TSrc> WarpSync<TSrc> {
                                             PreVerificationState {
                                                 start_chain_information: state
                                                     .start_chain_information,
+                                                block_number_bytes: state.block_number_bytes,
                                             },
                                             None,
                                         ),
@@ -284,6 +291,7 @@ impl<TSrc> WarpSync<TSrc> {
                             state.sources,
                             PreVerificationState {
                                 start_chain_information: state.start_chain_information,
+                                block_number_bytes: state.block_number_bytes,
                             },
                             None,
                         )),
@@ -550,6 +558,7 @@ impl<TSrc> StorageGet<TSrc> {
             self.state.sources,
             PreVerificationState {
                 start_chain_information: self.state.start_chain_information,
+                block_number_bytes: self.state.block_number_bytes,
             },
             None,
         )
@@ -693,6 +702,7 @@ impl<TSrc> Verifier<TSrc> {
                             .as_ref()
                             .finality
                             .into(),
+                        block_number_bytes: self.state.block_number_bytes,
                         start_chain_information: self.state.start_chain_information,
                         sources: self.sources,
                         warp_sync_source_id: self.warp_sync_source_id,
@@ -715,6 +725,7 @@ impl<TSrc> Verifier<TSrc> {
                                 header,
                                 chain_information_finality,
                                 start_chain_information: self.state.start_chain_information,
+                                block_number_bytes: self.state.block_number_bytes,
                                 sources: self.sources,
                                 warp_sync_source_id: self.warp_sync_source_id,
                             },
@@ -747,12 +758,14 @@ impl<TSrc> Verifier<TSrc> {
 
 struct PreVerificationState {
     start_chain_information: ValidChainInformation,
+    block_number_bytes: usize,
 }
 
 struct PostVerificationState<TSrc> {
     header: Header,
     chain_information_finality: ChainInformationFinality,
     start_chain_information: ValidChainInformation,
+    block_number_bytes: usize,
     sources: slab::Slab<Source<TSrc>>,
     warp_sync_source_id: SourceId,
 }
@@ -770,6 +783,7 @@ impl<TSrc> PostVerificationState<TSrc> {
                         self.sources,
                         PreVerificationState {
                             start_chain_information: self.start_chain_information,
+                            block_number_bytes: self.block_number_bytes,
                         },
                         None,
                     ),
@@ -862,11 +876,13 @@ impl<TSrc> GrandpaWarpSyncRequest<TSrc> {
         let verifier = match &self.previous_verifier_values {
             Some((_, chain_information_finality)) => warp_sync::Verifier::new(
                 chain_information_finality.into(),
+                self.state.block_number_bytes,
                 fragments,
                 final_set_of_fragments,
             ),
             None => warp_sync::Verifier::new(
                 self.state.start_chain_information.as_ref().finality,
+                self.state.block_number_bytes,
                 fragments,
                 final_set_of_fragments,
             ),
@@ -933,6 +949,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
             self.state.sources,
             PreVerificationState {
                 start_chain_information: self.state.start_chain_information,
+                block_number_bytes: self.state.block_number_bytes,
             },
             None,
         )
@@ -955,6 +972,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                         self.state.sources,
                         PreVerificationState {
                             start_chain_information: self.state.start_chain_information,
+                            block_number_bytes: self.state.block_number_bytes,
                         },
                         None,
                     )),
@@ -973,6 +991,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                                 self.state.sources,
                                 PreVerificationState {
                                     start_chain_information: self.state.start_chain_information,
+                                    block_number_bytes: self.state.block_number_bytes,
                                 },
                                 None,
                             ),
@@ -1012,6 +1031,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                     self.state.sources,
                     PreVerificationState {
                         start_chain_information: self.state.start_chain_information,
+                        block_number_bytes: self.state.block_number_bytes,
                     },
                     None,
                 )),
