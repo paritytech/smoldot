@@ -24,7 +24,7 @@ export interface Worker {
   request: (message: messages.ToWorkerRpcRequest) => void
   addChain: (message: messages.ToWorkerAddChain) => Promise<{ success: true, chainId: number } | { success: false, error: string }>
   removeChain: (message: messages.ToWorkerRemoveChain) => void
-  databaseContent: (message: messages.ToWorkerDatabaseContent) => void
+  databaseContent: (message: messages.ToWorkerDatabaseContent) => Promise<string>
 }
 
 export function start(configMessage: messages.ToWorkerConfig, messagesCallback: (msg: messages.FromWorker) => void): Worker {
@@ -51,7 +51,8 @@ let state: { initialized: false, promise: Promise<SmoldotWasmInstance> } | { ini
         messagesCallback({ kind: 'jsonrpc', data, chainId });
       },
       databaseContentCallback: (data, chainId) => {
-        messagesCallback({ kind: 'databaseContent', data, chainId });
+        const promises = chains.get(chainId)?.databasePromises!;
+        (promises.shift() as DatabasePromise).resolve(data);
       },
       currentTaskCallback: (_taskName) => {
         // TODO: do something here?
@@ -175,12 +176,17 @@ return {
     state.instance.exports.remove_chain(message.chainId);
   },
 
-  databaseContent: (message: messages.ToWorkerDatabaseContent) => {
+  databaseContent: (message: messages.ToWorkerDatabaseContent): Promise<string> => {
     // Because `databaseContent` is passed as parameter an identifier returned by `addChain`, it
     // is always the case that the Wasm instance is already initialized. The only possibility for
     // it to not be the case is if the user completely invented the `chainId`.
     if (!state.initialized)
       throw new Error("Internal error");
+
+    const databaseContentPromises = chains.get(message.chainId)?.databasePromises!;
+    const promise: Promise<string> = new Promise((resolve, reject) => {
+      databaseContentPromises.push({ resolve, reject });
+    });
 
     // The value of `maxUtf8BytesSize` is guaranteed (by `index.js`) to always fit in 32 bits, in
     // other words, that `maxUtf8BytesSize < (1 << 32)`.
@@ -194,6 +200,8 @@ return {
     const converted = (message.maxUtf8BytesSize >= twoPower31) ?
       (message.maxUtf8BytesSize - (twoPower31 * 2)) : message.maxUtf8BytesSize;
     state.instance.exports.database_content(message.chainId, converted);
+
+    return promise;
   }
 }
 

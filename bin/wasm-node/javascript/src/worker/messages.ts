@@ -22,12 +22,12 @@
  * messages must be `ToWorkerNonConfig`s.
  */
 export type ToWorker = ToWorkerConfig | ToWorkerNonConfig;
-export type ToWorkerNonConfig = ToWorkerRpcRequest | ToWorkerAddChain | ToWorkerRemoveChain | ToWorkerDatabaseContent;
+export type ToWorkerNonConfig = ToWorkerRpcRequest | ToWorkerAddChain | ToWorkerRemoveChain;
 
 /**
  * Message that the worker can send to the outside.
  */
-export type FromWorker = FromWorkerLog | FromWorkerJsonRpc | FromWorkerDatabaseContent;
+export type FromWorker = FromWorkerLog | FromWorkerJsonRpc;
 
 /**
  * Contains the initial configuration of the worker.
@@ -97,12 +97,6 @@ export interface FromWorkerLog {
 
 export interface FromWorkerJsonRpc {
   kind: 'jsonrpc',
-  data: string,
-  chainId: number,
-}
-
-export interface FromWorkerDatabaseContent {
-  kind: 'databaseContent',
   data: string,
   chainId: number,
 }

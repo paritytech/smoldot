@@ -373,7 +373,6 @@ export function start(options?: ClientOptions): Client {
   // This map is also used in general as a way to check whether a chain still exists.
   let chains: Map<number, {
     jsonRpcCallback?: JsonRpcCallback,
-    databasePromises: DatabasePromise[],
   }> = new Map();
 
   // For each chain object returned by `addChain`, the associated internal chain id.
@@ -406,12 +405,6 @@ export function start(options?: ClientOptions): Client {
       case 'jsonrpc': {
         const cb = chains.get(message.chainId)?.jsonRpcCallback;
         if (cb) cb(message.data);
-        break;
-      }
-
-      case 'databaseContent': {
-        const promises = chains.get(message.chainId)?.databasePromises;
-        if (promises) (promises.shift() as DatabasePromise).resolve(message.data);
         break;
       }
 
@@ -497,8 +490,7 @@ export function start(options?: ClientOptions): Client {
       if (chains.has(chainId)) // Sanity check.
         throw 'Unexpected reuse of a chain ID';
       chains.set(chainId, {
-        jsonRpcCallback: options.jsonRpcCallback,
-        databasePromises: new Array()
+        jsonRpcCallback: options.jsonRpcCallback
       });
 
       // `expected` was pushed by the `addChain` method.
@@ -519,21 +511,11 @@ export function start(options?: ClientOptions): Client {
           if (workerError)
             return Promise.reject(workerError);
 
-          const databaseContentPromises = chains.get(chainId)?.databasePromises;
-          if (!databaseContentPromises)
-            return Promise.reject(new AlreadyDestroyedError());
-
-          const promise: Promise<string> = new Promise((resolve, reject) => {
-            databaseContentPromises.push({ resolve, reject });
-          });
-
           const twoPower32 = (1 << 30) * 4;  // `1 << 31` and `1 << 32` in JavaScript don't give the value that you expect.
           const maxSize = maxUtf8BytesSize || (twoPower32 - 1);
           const cappedMaxSize = (maxSize >= twoPower32) ? (twoPower32 - 1) : maxSize;
 
-          worker.databaseContent({ ty: 'databaseContent', chainId, maxUtf8BytesSize: cappedMaxSize });
-
-          return promise;
+          return worker.databaseContent({ ty: 'databaseContent', chainId, maxUtf8BytesSize: cappedMaxSize });
         },
         remove: () => {
           if (workerError)
@@ -560,9 +542,4 @@ export function start(options?: ClientOptions): Client {
       //return workerTerminate(worker)
     }
   }
-}
-
-interface DatabasePromise {
-  resolve: (data: string) => void,
-  reject: (error: Error) => void,
 }
