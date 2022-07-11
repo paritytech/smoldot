@@ -16,15 +16,6 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 /**
- * Message to the worker.
- *
- * The first ever message sent to the worker must be a `ToWorkerConfig`, then all subsequent
- * messages must be `ToWorkerNonConfig`s.
- */
-export type ToWorker = ToWorkerConfig | ToWorkerNonConfig;
-export type ToWorkerNonConfig = ToWorkerRpcRequest | ToWorkerAddChain | ToWorkerRemoveChain;
-
-/**
  * Contains the initial configuration of the worker.
  *
  * This message is only ever sent once, and it is always the first ever message sent to the
@@ -39,47 +30,4 @@ export interface ToWorkerConfig {
   forbidWs: boolean;
   forbidNonLocalWs: boolean;
   forbidWss: boolean;
-}
-
-/**
- * Start a JSON-RPC request.
- */
-export interface ToWorkerRpcRequest {
-  ty: 'request',
-  request: string,
-  chainId: number,
-}
-
-/**
- * Add a new chain.
- *
- * The worker must reply with either a `FromWorkerChainAddedOk` or a `FromWorkerChainAddedError`.
- */
-export interface ToWorkerAddChain {
-  ty: 'addChain',
-  chainSpec: string,
-  databaseContent: string,
-  potentialRelayChains: number[],
-  jsonRpcCallback?: (response: string) => void,
-}
-
-/**
- * Remove a chain.
- *
- * The worker must reply with a `FromWorkerChainRemoved`.
- */
-export interface ToWorkerRemoveChain {
-  ty: 'removeChain',
-  chainId: number,
-}
-
-/**
- * Get the database content of a chain.
- *
- * The worker must reply with a `FromWorkerDatabaseContent`.
- */
-export interface ToWorkerDatabaseContent {
-  ty: 'databaseContent',
-  chainId: number,
-  maxUtf8BytesSize: number,
 }

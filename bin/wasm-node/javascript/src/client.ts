@@ -451,13 +451,7 @@ export function start(options?: ClientOptions): Client {
         }
       }
 
-      const outcome = await worker.addChain({
-        ty: 'addChain',
-        chainSpec: options.chainSpec,
-        databaseContent: typeof options.databaseContent === 'string' ? options.databaseContent : "",
-        potentialRelayChains: potentialRelayChainsIds,
-        jsonRpcCallback: options.jsonRpcCallback,
-      });
+      const outcome = await worker.addChain(options.chainSpec, typeof options.databaseContent === 'string' ? options.databaseContent : "", potentialRelayChainsIds, options.jsonRpcCallback);
 
       if (!outcome.success)
         throw new AddChainError(outcome.error);
@@ -482,7 +476,7 @@ export function start(options?: ClientOptions): Client {
             throw new JsonRpcDisabledError();
           if (request.length >= 8 * 1024 * 1024)
             return;
-          worker.request({ ty: 'request', request, chainId });
+          worker.request(request, chainId);
         },
         databaseContent: (maxUtf8BytesSize) => {
           if (workerError)
@@ -492,7 +486,7 @@ export function start(options?: ClientOptions): Client {
           const maxSize = maxUtf8BytesSize || (twoPower32 - 1);
           const cappedMaxSize = (maxSize >= twoPower32) ? (twoPower32 - 1) : maxSize;
 
-          return worker.databaseContent({ ty: 'databaseContent', chainId, maxUtf8BytesSize: cappedMaxSize });
+          return worker.databaseContent(chainId, cappedMaxSize);
         },
         remove: () => {
           if (workerError)
@@ -504,7 +498,7 @@ export function start(options?: ClientOptions): Client {
             throw new AlreadyDestroyedError();
           console.assert(chainIds.has(newChain));
           chainIds.delete(newChain);
-          worker.removeChain({ ty: 'removeChain', chainId });
+          worker.removeChain(chainId);
         },
       };
 

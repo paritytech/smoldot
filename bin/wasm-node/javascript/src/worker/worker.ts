@@ -21,10 +21,10 @@ import * as messages from './messages.js';
 import { SmoldotWasmInstance } from './bindings.js';
 
 export interface Worker {
-  request: (message: messages.ToWorkerRpcRequest) => void
-  addChain: (message: messages.ToWorkerAddChain) => Promise<{ success: true, chainId: number } | { success: false, error: string }>
-  removeChain: (message: messages.ToWorkerRemoveChain) => void
-  databaseContent: (message: messages.ToWorkerDatabaseContent) => Promise<string>
+  request: (request: string, chainId: number) => void
+  addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], jsonRpcCallback?: (response: string) => void) => Promise<{ success: true, chainId: number } | { success: false, error: string }>
+  removeChain: (chainId: number) => void
+  databaseContent: (chainId: number, maxUtf8BytesSize: number) => Promise<string>
 }
 
 export function start(configMessage: messages.ToWorkerConfig): Worker {
@@ -98,39 +98,39 @@ async function queueOperation<T>(operation: (instance: SmoldotWasmInstance) => T
 }
 
 return {
-  request: (message: messages.ToWorkerRpcRequest) => {
+  request: (request: string, chainId: number) => {
     // Because `request` is passed as parameter an identifier returned by `addChain`, it is
     // always the case that the Wasm instance is already initialized. The only possibility for
     // it to not be the case is if the user completely invented the `chainId`.
     if (!state.initialized)
       throw new Error("Internal error");
 
-    const len = Buffer.byteLength(message.request, 'utf8');
+    const len = Buffer.byteLength(request, 'utf8');
     const ptr = state.instance.exports.alloc(len) >>> 0;
-    Buffer.from(state.instance.exports.memory.buffer).write(message.request, ptr);
-    state.instance.exports.json_rpc_send(ptr, len, message.chainId);
+    Buffer.from(state.instance.exports.memory.buffer).write(request, ptr);
+    state.instance.exports.json_rpc_send(ptr, len, chainId);
   },
 
-  addChain: (message: messages.ToWorkerAddChain): Promise<{ success: true, chainId: number } | { success: false, error: string }> => {
+  addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], jsonRpcCallback?: (response: string) => void): Promise<{ success: true, chainId: number } | { success: false, error: string }> => {
     return queueOperation((instance) => {
       // Write the chain specification into memory.
-      const chainSpecLen = Buffer.byteLength(message.chainSpec, 'utf8');
+      const chainSpecLen = Buffer.byteLength(chainSpec, 'utf8');
       const chainSpecPtr = instance.exports.alloc(chainSpecLen) >>> 0;
       Buffer.from(instance.exports.memory.buffer)
-        .write(message.chainSpec, chainSpecPtr);
+        .write(chainSpec, chainSpecPtr);
 
       // Write the database content into memory.
-      const databaseContentLen = Buffer.byteLength(message.databaseContent, 'utf8');
+      const databaseContentLen = Buffer.byteLength(databaseContent, 'utf8');
       const databaseContentPtr = instance.exports.alloc(databaseContentLen) >>> 0;
       Buffer.from(instance.exports.memory.buffer)
-        .write(message.databaseContent, databaseContentPtr);
+        .write(databaseContent, databaseContentPtr);
 
       // Write the potential relay chains into memory.
-      const potentialRelayChainsLen = message.potentialRelayChains.length;
+      const potentialRelayChainsLen = potentialRelayChains.length;
       const potentialRelayChainsPtr = instance.exports.alloc(potentialRelayChainsLen * 4) >>> 0;
-      for (let idx = 0; idx < message.potentialRelayChains.length; ++idx) {
+      for (let idx = 0; idx < potentialRelayChains.length; ++idx) {
         Buffer.from(instance.exports.memory.buffer)
-          .writeUInt32LE(message.potentialRelayChains[idx]!, potentialRelayChainsPtr + idx * 4);
+          .writeUInt32LE(potentialRelayChains[idx]!, potentialRelayChainsPtr + idx * 4);
       }
 
       // `add_chain` unconditionally allocates a chain id. If an error occurs, however, this chain
@@ -140,7 +140,7 @@ return {
       const chainId = instance.exports.add_chain(
         chainSpecPtr, chainSpecLen,
         databaseContentPtr, databaseContentLen,
-        !!message.jsonRpcCallback ? 1 : 0,
+        !!jsonRpcCallback ? 1 : 0,
         potentialRelayChainsPtr, potentialRelayChainsLen
       );
 
@@ -148,7 +148,7 @@ return {
         if (chains.has(chainId)) // Sanity check.
           throw 'Unexpected reuse of a chain ID';
         chains.set(chainId, {
-          jsonRpcCallback: message.jsonRpcCallback,
+          jsonRpcCallback,
           databasePromises: new Array()
         });
         return { success: true, chainId };
@@ -163,7 +163,7 @@ return {
     })
   },
 
-  removeChain: (message: messages.ToWorkerRemoveChain) => {
+  removeChain: (chainId: number) => {
     // Because `removeChain` is passed as parameter an identifier returned by `addChain`, it is
     // always the case that the Wasm instance is already initialized. The only possibility for
     // it to not be the case is if the user completely invented the `chainId`.
@@ -173,18 +173,18 @@ return {
     // Removing the chain synchronously avoids having to deal with race conditions such as a
     // JSON-RPC response corresponding to a chain that is going to be deleted but hasn't been yet.
     // These kind of race conditions are already delt with within smoldot.
-    chains.delete(message.chainId);
-    state.instance.exports.remove_chain(message.chainId);
+    chains.delete(chainId);
+    state.instance.exports.remove_chain(chainId);
   },
 
-  databaseContent: (message: messages.ToWorkerDatabaseContent): Promise<string> => {
+  databaseContent: (chainId: number, maxUtf8BytesSize: number): Promise<string> => {
     // Because `databaseContent` is passed as parameter an identifier returned by `addChain`, it
     // is always the case that the Wasm instance is already initialized. The only possibility for
     // it to not be the case is if the user completely invented the `chainId`.
     if (!state.initialized)
       throw new Error("Internal error");
 
-    const databaseContentPromises = chains.get(message.chainId)?.databasePromises!;
+    const databaseContentPromises = chains.get(chainId)?.databasePromises!;
     const promise: Promise<string> = new Promise((resolve, reject) => {
       databaseContentPromises.push({ resolve, reject });
     });
@@ -198,9 +198,9 @@ return {
     // if you decide to touch it. Ideally it would be unit-tested, but since it concerns the FFI
     // layer between JS and Rust, writing unit tests would be extremely complicated.
     const twoPower31 = (1 << 30) * 2;  // `1 << 31` in JavaScript doesn't give the value that you expect.
-    const converted = (message.maxUtf8BytesSize >= twoPower31) ?
-      (message.maxUtf8BytesSize - (twoPower31 * 2)) : message.maxUtf8BytesSize;
-    state.instance.exports.database_content(message.chainId, converted);
+    const converted = (maxUtf8BytesSize >= twoPower31) ?
+      (maxUtf8BytesSize - (twoPower31 * 2)) : maxUtf8BytesSize;
+    state.instance.exports.database_content(chainId, converted);
 
     return promise;
   }
