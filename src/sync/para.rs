@@ -74,9 +74,10 @@ impl OccupiedCoreAssumption {
 /// call.
 pub fn decode_persisted_validation_data_return_value(
     scale_encoded: &[u8],
+    block_number_bytes: usize,
 ) -> Result<Option<PersistedValidationDataRef>, Error> {
     let res: Result<_, nom::Err<nom::error::Error<_>>> = nom::combinator::all_consuming(
-        crate::util::nom_option_decode(persisted_validation_data),
+        crate::util::nom_option_decode(persisted_validation_data(block_number_bytes)),
     )(scale_encoded);
     match res {
         Ok((_, data)) => Ok(data),
@@ -99,7 +100,7 @@ pub struct PersistedValidationDataRef<'a> {
     /// The meaning of this data depends on the chain, but for chains built on top of Cumulus
     /// (i.e. the vast majority of chains) this consists in a block header.
     pub parent_head: &'a [u8],
-    pub relay_parent_number: u32,
+    pub relay_parent_number: u64,
     pub relay_parent_storage_root: &'a [u8; 32],
 
     /// Maximum legal size of a POV block, in bytes.
@@ -108,12 +109,12 @@ pub struct PersistedValidationDataRef<'a> {
 
 /// `Nom` combinator that parses a [`PersistedValidationDataRef`].
 fn persisted_validation_data<'a, E: nom::error::ParseError<&'a [u8]>>(
-    bytes: &'a [u8],
-) -> nom::IResult<&'a [u8], PersistedValidationDataRef, E> {
+    block_number_bytes: usize,
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], PersistedValidationDataRef, E> {
     nom::combinator::map(
         nom::sequence::tuple((
             crate::util::nom_bytes_decode,
-            nom::number::complete::le_u32,
+            crate::util::nom_varsize_number_decode_u64(block_number_bytes),
             nom::bytes::complete::take(32u32),
             nom::number::complete::le_u32,
         )),
@@ -126,7 +127,7 @@ fn persisted_validation_data<'a, E: nom::error::ParseError<&'a [u8]>>(
                 max_pov_size,
             }
         },
-    )(bytes)
+    )
 }
 
 #[cfg(test)]
@@ -171,7 +172,7 @@ mod tests {
         });
 
         assert_eq!(
-            super::decode_persisted_validation_data_return_value(&encoded).unwrap(),
+            super::decode_persisted_validation_data_return_value(&encoded, 4).unwrap(),
             expected
         );
     }
