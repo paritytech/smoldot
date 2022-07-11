@@ -364,12 +364,6 @@ export function start(options?: ClientOptions): Client {
     }
   });
 
-  // Whenever an `addChain` or `removeChain` message is sent to the worker, a corresponding entry
-  // is pushed to this array. The worker needs to send back a confirmation, which pops the first
-  // element of this array. In the case of `addChain`, additional fields are stored in this array
-  // to finish the initialization of the chain.
-  let pendingConfirmations: PendingConfirmation[] = [];
-
   // Contains the information of each chain that is currently.
   // Entries are instantly removed when the user desires to remove a chain even before the worker
   // has confirmed the removal. Doing so avoids a race condition where the worker sends back a
@@ -412,78 +406,6 @@ export function start(options?: ClientOptions): Client {
       case 'jsonrpc': {
         const cb = chains.get(message.chainId)?.jsonRpcCallback;
         if (cb) cb(message.data);
-        break;
-      }
-
-      case 'chainAddedOk': {
-        const expected = pendingConfirmations.shift()!;
-        const chainId = message.chainId;
-
-        if (chains.has(chainId)) // Sanity check.
-          throw 'Unexpected reuse of a chain ID';
-        chains.set(chainId, {
-          jsonRpcCallback: expected.jsonRpcCallback,
-          databasePromises: new Array()
-        });
-
-        // `expected` was pushed by the `addChain` method.
-        // Resolve the promise that `addChain` returned to the user.
-        const newChain: Chain = {
-          sendJsonRpc: (request) => {
-            if (workerError)
-              throw workerError;
-            if (!chains.has(chainId))
-              throw new AlreadyDestroyedError();
-            if (!(chains.get(chainId)?.jsonRpcCallback))
-              throw new JsonRpcDisabledError();
-            if (request.length >= 8 * 1024 * 1024)
-              return;
-            worker.request({ ty: 'request', request, chainId });
-          },
-          databaseContent: (maxUtf8BytesSize) => {
-            if (workerError)
-              return Promise.reject(workerError);
-
-            const databaseContentPromises = chains.get(chainId)?.databasePromises;
-            if (!databaseContentPromises)
-              return Promise.reject(new AlreadyDestroyedError());
-
-            const promise: Promise<string> = new Promise((resolve, reject) => {
-              databaseContentPromises.push({ resolve, reject });
-            });
-
-            const twoPower32 = (1 << 30) * 4;  // `1 << 31` and `1 << 32` in JavaScript don't give the value that you expect.
-            const maxSize = maxUtf8BytesSize || (twoPower32 - 1);
-            const cappedMaxSize = (maxSize >= twoPower32) ? (twoPower32 - 1) : maxSize;
-
-            worker.databaseContent({ ty: 'databaseContent', chainId, maxUtf8BytesSize: cappedMaxSize });
-
-            return promise;
-          },
-          remove: () => {
-            if (workerError)
-              throw workerError;
-            // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
-            // response or database content concerning that `chainId` to arrive after the `remove`
-            // function has returned. We solve that by removing the information immediately.
-            if (!chains.delete(chainId))
-              throw new AlreadyDestroyedError();
-            console.assert(chainIds.has(newChain));
-            chainIds.delete(newChain);
-            worker.removeChain({ ty: 'removeChain', chainId });
-          },
-        };
-
-        chainIds.set(newChain, chainId);
-        expected.resolve(newChain);
-        break;
-      }
-
-      case 'chainAddedErr': {
-        const expected = pendingConfirmations.shift()!;
-        // `expected` was pushed by the `addChain` method.
-        // Reject the promise that `addChain` returned to the user.
-        expected.reject(new AddChainError(message.error));
         break;
       }
 
@@ -559,23 +481,7 @@ export function start(options?: ClientOptions): Client {
         }
       }
 
-      // Build a promise that will be resolved or rejected after the chain has been added.
-      // TODO: because of https://github.com/microsoft/TypeScript/issues/11498 we need to define the callbacks as possibly null, and go through `unknown`
-      let chainAddedPromiseResolve;
-      let chainAddedPromiseReject;
-      const chainAddedPromise: Promise<Chain> = new Promise((resolve, reject) => {
-        chainAddedPromiseResolve = resolve;
-        chainAddedPromiseReject = reject;
-      });
-
-      pendingConfirmations.push({
-        ty: 'chainAdded',
-        reject: chainAddedPromiseReject as unknown as (error: AddChainError) => void,
-        resolve: chainAddedPromiseResolve as unknown as (c: Chain) => void,
-        jsonRpcCallback: options.jsonRpcCallback,
-      });
-
-      worker.addChain({
+      const promise = worker.addChain({
         ty: 'addChain',
         chainSpec: options.chainSpec,
         databaseContent: typeof options.databaseContent === 'string' ? options.databaseContent : "",
@@ -583,7 +489,70 @@ export function start(options?: ClientOptions): Client {
         jsonRpcRunning: !!options.jsonRpcCallback,
       });
 
-      return chainAddedPromise;
+      return promise.then((outcome) => {
+        if (!outcome.success)
+          throw new AddChainError(outcome.error);
+
+        const chainId = outcome.chainId;
+
+        if (chains.has(chainId)) // Sanity check.
+          throw 'Unexpected reuse of a chain ID';
+        chains.set(chainId, {
+          jsonRpcCallback: options.jsonRpcCallback,
+          databasePromises: new Array()
+        });
+
+        // `expected` was pushed by the `addChain` method.
+        // Resolve the promise that `addChain` returned to the user.
+        const newChain: Chain = {
+          sendJsonRpc: (request) => {
+            if (workerError)
+              throw workerError;
+            if (!chains.has(chainId))
+              throw new AlreadyDestroyedError();
+            if (!(chains.get(chainId)?.jsonRpcCallback))
+              throw new JsonRpcDisabledError();
+            if (request.length >= 8 * 1024 * 1024)
+              return;
+            worker.request({ ty: 'request', request, chainId });
+          },
+          databaseContent: (maxUtf8BytesSize) => {
+            if (workerError)
+              return Promise.reject(workerError);
+
+            const databaseContentPromises = chains.get(chainId)?.databasePromises;
+            if (!databaseContentPromises)
+              return Promise.reject(new AlreadyDestroyedError());
+
+            const promise: Promise<string> = new Promise((resolve, reject) => {
+              databaseContentPromises.push({ resolve, reject });
+            });
+
+            const twoPower32 = (1 << 30) * 4;  // `1 << 31` and `1 << 32` in JavaScript don't give the value that you expect.
+            const maxSize = maxUtf8BytesSize || (twoPower32 - 1);
+            const cappedMaxSize = (maxSize >= twoPower32) ? (twoPower32 - 1) : maxSize;
+
+            worker.databaseContent({ ty: 'databaseContent', chainId, maxUtf8BytesSize: cappedMaxSize });
+
+            return promise;
+          },
+          remove: () => {
+            if (workerError)
+              throw workerError;
+            // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
+            // response or database content concerning that `chainId` to arrive after the `remove`
+            // function has returned. We solve that by removing the information immediately.
+            if (!chains.delete(chainId))
+              throw new AlreadyDestroyedError();
+            console.assert(chainIds.has(newChain));
+            chainIds.delete(newChain);
+            worker.removeChain({ ty: 'removeChain', chainId });
+          },
+        };
+
+        chainIds.set(newChain, chainId);
+        return newChain;
+      })
     },
     terminate: async () => {
       if (workerError)
@@ -593,13 +562,6 @@ export function start(options?: ClientOptions): Client {
       //return workerTerminate(worker)
     }
   }
-}
-
-interface PendingConfirmation {
-  ty: 'chainAdded',
-  resolve: (c: Chain) => void,
-  reject: (error: AddChainError) => void,
-  jsonRpcCallback?: JsonRpcCallback,
 }
 
 interface DatabasePromise {

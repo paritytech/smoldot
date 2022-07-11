@@ -22,7 +22,7 @@ import { SmoldotWasmInstance } from './bindings.js';
 
 export interface Worker {
   request: (message: messages.ToWorkerRpcRequest) => void
-  addChain: (message: messages.ToWorkerAddChain) => void
+  addChain: (message: messages.ToWorkerAddChain) => Promise<{ success: true, chainId: number } | { success: false, error: string }>
   removeChain: (message: messages.ToWorkerRemoveChain) => void
   databaseContent: (message: messages.ToWorkerDatabaseContent) => void
 }
@@ -74,17 +74,17 @@ let state: { initialized: false, promise: Promise<SmoldotWasmInstance> } | { ini
       return instance;
     }) };
 
-function queueOperation(operation: (instance: SmoldotWasmInstance) => void) {
+async function queueOperation<T>(operation: (instance: SmoldotWasmInstance) => T): Promise<T> {
   // What to do depends on the type of `state`.
   // See the documentation of the `state` variable for information.
   if (!state.initialized) {
     // A message has been received while the Wasm VM is still initializing. Queue it for when
     // initialization is over.
-    state.promise.then((instance) => { operation(instance) })
+    return state.promise.then((instance) => operation(instance))
 
   } else {
     // Everything is already initialized. Process the message synchronously.
-    operation(state.instance)
+    return operation(state.instance)
   }
 }
 
@@ -98,8 +98,8 @@ return {
     })
   },
 
-  addChain: (message: messages.ToWorkerAddChain) => {
-    queueOperation((instance) => {
+  addChain: (message: messages.ToWorkerAddChain): Promise<{ success: true, chainId: number } | { success: false, error: string }> => {
+    return queueOperation((instance) => {
       // Write the chain specification into memory.
       const chainSpecLen = Buffer.byteLength(message.chainSpec, 'utf8');
       const chainSpecPtr = instance.exports.alloc(chainSpecLen) >>> 0;
@@ -132,14 +132,14 @@ return {
       );
 
       if (instance.exports.chain_is_ok(chainId) != 0) {
-        messagesCallback({ kind: 'chainAddedOk', chainId });
+        return { success: true, chainId };
       } else {
         const errorMsgLen = instance.exports.chain_error_len(chainId) >>> 0;
         const errorMsgPtr = instance.exports.chain_error_ptr(chainId) >>> 0;
         const errorMsg = Buffer.from(instance.exports.memory.buffer)
           .toString('utf8', errorMsgPtr, errorMsgPtr + errorMsgLen);
         instance.exports.remove_chain(chainId);
-        messagesCallback({ kind: 'chainAddedErr', error: errorMsg });
+        return { success: false, error: errorMsg };
       }
     })
   },
