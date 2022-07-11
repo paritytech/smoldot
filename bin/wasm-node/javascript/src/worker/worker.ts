@@ -17,7 +17,7 @@
 
 import { Buffer } from 'buffer';
 import * as compat from './../compat/index.js';
-import * as instance from './instance.js';
+import * as instance from './raw-instance.js';
 import * as messages from './messages.js';
 import { SmoldotWasmInstance } from './bindings.js';
 
