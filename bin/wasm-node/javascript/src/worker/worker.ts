@@ -28,11 +28,10 @@ export function start(configMessage: messages.ToWorkerConfig, messagesCallback: 
 
 // This variable represents the state of the worker, and serves two different purposes:
 //
-// - At initialization, it is an array filled with the messages that are received while the Wasm
-//   VM is still initializing.
+// - At initialization, it is a Promise containing the Wasm VM is still initializing.
 // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
 //
-let state: messages.ToWorkerNonConfig[] | SmoldotWasmInstance = [];
+let state: { initialized: false, promise: Promise<SmoldotWasmInstance> } | { initialized: true, instance: SmoldotWasmInstance };
 
 // Inject a message coming from `index.js` to a running Wasm VM.
 function injectMessage(instance: SmoldotWasmInstance, message: messages.ToWorkerNonConfig): void {
@@ -141,7 +140,7 @@ function injectMessage(instance: SmoldotWasmInstance, message: messages.ToWorker
       forbidWss: configMessage.forbidWss,
     };
 
-    instance.startInstance(config).then((instance) => {
+    state = { initialized: false, promise: instance.startInstance(config).then((instance) => {
       // `config.cpuRateLimit` is a floating point that should be between 0 and 1, while the value
       // to pass as parameter must be between `0` and `2^32-1`.
       // The few lines of code below should handle all possible values of `number`, including
@@ -155,27 +154,22 @@ function injectMessage(instance: SmoldotWasmInstance, message: messages.ToWorker
       // configuration.
       instance.exports.init(configMessage.maxLogLevel, configMessage.enableCurrentTask ? 1 : 0, cpuRateLimit);
 
-      // Smoldot has finished initializing.
-      // Since this function is an asynchronous function, it is possible that messages have been
-      // received from the parent while it was executing. These messages are now handled.
-      (state as messages.ToWorkerNonConfig[]).forEach((message) => {
-        injectMessage(instance, message);
-      });
-
-      state = instance;
-    });
+      return instance;
+    }) };
 
 function handleMessage(message: messages.ToWorker) {
   // What to do depends on the type of `state`.
   // See the documentation of the `state` variable for information.
-  if (Array.isArray(state)) {
+  if (!state.initialized) {
     // A message has been received while the Wasm VM is still initializing. Queue it for when
     // initialization is over.
-    state.push(message as messages.ToWorkerNonConfig);
+    state.promise.then((instance) => {
+      injectMessage(instance, message as messages.ToWorkerNonConfig);
+    })
 
   } else {
     // Everything is already initialized. Process the message synchronously.
-    injectMessage(state, message as messages.ToWorkerNonConfig);
+    injectMessage(state.instance, message as messages.ToWorkerNonConfig);
   }
 }
 
