@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fix `state_getKeys` and `state_getKeysPaged` almost always erroneously returning an empty result.
+- Fix `state_getKeys` and `state_getKeysPaged` almost always erroneously returning an empty result. ([#2491](https://github.com/paritytech/smoldot/pull/2491))
 
 ## 0.6.22 - 2022-07-11
 
