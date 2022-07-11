@@ -438,7 +438,7 @@ export function start(options?: ClientOptions): Client {
               throw new JsonRpcDisabledError();
             if (request.length >= 8 * 1024 * 1024)
               return;
-            worker.handleMessage({ ty: 'request', request, chainId });
+            worker.request({ ty: 'request', request, chainId });
           },
           databaseContent: (maxUtf8BytesSize) => {
             if (workerError)
@@ -456,7 +456,7 @@ export function start(options?: ClientOptions): Client {
             const maxSize = maxUtf8BytesSize || (twoPower32 - 1);
             const cappedMaxSize = (maxSize >= twoPower32) ? (twoPower32 - 1) : maxSize;
 
-            worker.handleMessage({ ty: 'databaseContent', chainId, maxUtf8BytesSize: cappedMaxSize });
+            worker.databaseContent({ ty: 'databaseContent', chainId, maxUtf8BytesSize: cappedMaxSize });
 
             return promise;
           },
@@ -470,7 +470,7 @@ export function start(options?: ClientOptions): Client {
               throw new AlreadyDestroyedError();
             console.assert(chainIds.has(newChain));
             chainIds.delete(newChain);
-            worker.handleMessage({ ty: 'removeChain', chainId });
+            worker.removeChain({ ty: 'removeChain', chainId });
           },
         };
 
@@ -575,7 +575,7 @@ export function start(options?: ClientOptions): Client {
         jsonRpcCallback: options.jsonRpcCallback,
       });
 
-      worker.handleMessage({
+      worker.addChain({
         ty: 'addChain',
         chainSpec: options.chainSpec,
         databaseContent: typeof options.databaseContent === 'string' ? options.databaseContent : "",
