@@ -90,12 +90,16 @@ async function queueOperation<T>(operation: (instance: SmoldotWasmInstance) => T
 
 return {
   request: (message: messages.ToWorkerRpcRequest) => {
-    queueOperation((instance) => {
-      const len = Buffer.byteLength(message.request, 'utf8');
-      const ptr = instance.exports.alloc(len) >>> 0;
-      Buffer.from(instance.exports.memory.buffer).write(message.request, ptr);
-      instance.exports.json_rpc_send(ptr, len, message.chainId);
-    })
+    // Because `request` is passed as parameter an identifier returned by `addChain`, it is
+    // always the case that the Wasm instance is already initialized. The only possibility for
+    // it to not be the case is if the user completely invented the `chainId`.
+    if (!state.initialized)
+      throw new Error("Internal error");
+
+    const len = Buffer.byteLength(message.request, 'utf8');
+    const ptr = state.instance.exports.alloc(len) >>> 0;
+    Buffer.from(state.instance.exports.memory.buffer).write(message.request, ptr);
+    state.instance.exports.json_rpc_send(ptr, len, message.chainId);
   },
 
   addChain: (message: messages.ToWorkerAddChain): Promise<{ success: true, chainId: number } | { success: false, error: string }> => {
@@ -145,26 +149,34 @@ return {
   },
 
   removeChain: (message: messages.ToWorkerRemoveChain) => {
-    queueOperation((instance) => {
-      instance.exports.remove_chain(message.chainId);
-    })
+    // Because `removeChain` is passed as parameter an identifier returned by `addChain`, it is
+    // always the case that the Wasm instance is already initialized. The only possibility for
+    // it to not be the case is if the user completely invented the `chainId`.
+    if (!state.initialized)
+      throw new Error("Internal error");
+
+    state.instance.exports.remove_chain(message.chainId);
   },
 
   databaseContent: (message: messages.ToWorkerDatabaseContent) => {
-    queueOperation((instance) => {
-      // The value of `maxUtf8BytesSize` is guaranteed (by `index.js`) to always fit in 32 bits, in
-      // other words, that `maxUtf8BytesSize < (1 << 32)`.
-      // We need to perform a conversion in such a way that the the bits of the output of
-      // `ToInt32(converted)`, when interpreted as u32, is equal to `maxUtf8BytesSize`.
-      // See ToInt32 here: https://tc39.es/ecma262/#sec-toint32
-      // Note that the code below has been tested against example values. Please be very careful
-      // if you decide to touch it. Ideally it would be unit-tested, but since it concerns the FFI
-      // layer between JS and Rust, writing unit tests would be extremely complicated.
-      const twoPower31 = (1 << 30) * 2;  // `1 << 31` in JavaScript doesn't give the value that you expect.
-      const converted = (message.maxUtf8BytesSize >= twoPower31) ?
-        (message.maxUtf8BytesSize - (twoPower31 * 2)) : message.maxUtf8BytesSize;
-      instance.exports.database_content(message.chainId, converted);
-    })
+    // Because `databaseContent` is passed as parameter an identifier returned by `addChain`, it
+    // is always the case that the Wasm instance is already initialized. The only possibility for
+    // it to not be the case is if the user completely invented the `chainId`.
+    if (!state.initialized)
+      throw new Error("Internal error");
+
+    // The value of `maxUtf8BytesSize` is guaranteed (by `index.js`) to always fit in 32 bits, in
+    // other words, that `maxUtf8BytesSize < (1 << 32)`.
+    // We need to perform a conversion in such a way that the the bits of the output of
+    // `ToInt32(converted)`, when interpreted as u32, is equal to `maxUtf8BytesSize`.
+    // See ToInt32 here: https://tc39.es/ecma262/#sec-toint32
+    // Note that the code below has been tested against example values. Please be very careful
+    // if you decide to touch it. Ideally it would be unit-tested, but since it concerns the FFI
+    // layer between JS and Rust, writing unit tests would be extremely complicated.
+    const twoPower31 = (1 << 30) * 2;  // `1 << 31` in JavaScript doesn't give the value that you expect.
+    const converted = (message.maxUtf8BytesSize >= twoPower31) ?
+      (message.maxUtf8BytesSize - (twoPower31 * 2)) : message.maxUtf8BytesSize;
+    state.instance.exports.database_content(message.chainId, converted);
   }
 }
 
