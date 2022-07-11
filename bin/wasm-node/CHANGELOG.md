@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.22 - 2022-07-11
+
 ## Changed
 
 - Block headers with an unknown consensus engine now parse successfully. This adds support for parachains using consensus engines that smoldot doesn't recognize. As smoldot cannot verify the validity of their blocks, standalone/relay chains using an unrecognized consensus engine remain unsupported. ([#2481](https://github.com/paritytech/smoldot/pull/2481))
