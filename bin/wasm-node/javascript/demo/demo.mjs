@@ -17,7 +17,7 @@
 
 // This file launches a WebSocket server that exposes JSON-RPC functions.
 
-import { start } from '../dist/mjs/index.js';
+import * as smoldot from '../dist/mjs/index.js';
 import { default as websocket } from 'websocket';
 import * as http from 'node:http';
 import * as process from 'node:process';
@@ -45,14 +45,14 @@ for (const file of chainSpecsFiles) {
     const content = fs.readFileSync(file, 'utf8');
     const decoded = JSON.parse(content);
     if (!firstChainSpecId)
-        firstChainSpecId = decoded.id;
+        firstChainSpecId = decoded.id;  
     chainSpecsById[decoded.id] = {
         chainSpec: content,
         relayChain: decoded.relay_chain,
     };
 }
 
-const client = start({
+const client = smoldot.start({
     maxLogLevel: 3,  // Can be increased for more verbosity
     forbidTcp: false,
     forbidWs: false,
