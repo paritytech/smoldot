@@ -36,6 +36,12 @@ export function start(configMessage: messages.ToWorkerConfig, messagesCallback: 
 //
 let state: { initialized: false, promise: Promise<SmoldotWasmInstance> } | { initialized: true, instance: SmoldotWasmInstance };
 
+  // Contains the information of each chain that is currently alive.
+  let chains: Map<number, {
+    // TODO: jsonRpcCallback?: (response: string) => void,
+    databasePromises: DatabasePromise[],
+  }> = new Map();
+
     // Start initialization of the Wasm VM.
     const config: instance.Config = {
       logCallback: (level, target, message) => {
@@ -136,6 +142,12 @@ return {
       );
 
       if (instance.exports.chain_is_ok(chainId) != 0) {
+        if (chains.has(chainId)) // Sanity check.
+          throw 'Unexpected reuse of a chain ID';
+        chains.set(chainId, {
+          // TODO: jsonRpcCallback: options.jsonRpcCallback,
+          databasePromises: new Array()
+        });
         return { success: true, chainId };
       } else {
         const errorMsgLen = instance.exports.chain_error_len(chainId) >>> 0;
@@ -155,6 +167,10 @@ return {
     if (!state.initialized)
       throw new Error("Internal error");
 
+    // Removing the chain synchronously avoids having to deal with race conditions such as a
+    // JSON-RPC response corresponding to a chain that is going to be deleted but hasn't been yet.
+    // These kind of race conditions are already delt with within smoldot.
+    chains.delete(message.chainId);
     state.instance.exports.remove_chain(message.chainId);
   },
 
@@ -180,4 +196,9 @@ return {
   }
 }
 
+}
+
+interface DatabasePromise {
+  resolve: (data: string) => void,
+  reject: (error: Error) => void,
 }
