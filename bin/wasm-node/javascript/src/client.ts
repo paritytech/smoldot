@@ -363,17 +363,6 @@ export function start(options?: ClientOptions): Client {
     }
   });
 
-  // Contains the information of each chain that is currently.
-  // Entries are instantly removed when the user desires to remove a chain even before the worker
-  // has confirmed the removal. Doing so avoids a race condition where the worker sends back a
-  // database content or a JSON-RPC response/notification even though we've already sent a
-  // `removeChain` message to it.
-  //
-  // This map is also used in general as a way to check whether a chain still exists.
-  let chains: Map<number, {
-    jsonRpcCallback?: JsonRpcCallback,
-  }> = new Map();
-
   // For each chain object returned by `addChain`, the associated internal chain id.
   //
   // Immediately cleared when `remove()` is called on a chain.
@@ -457,12 +446,7 @@ export function start(options?: ClientOptions): Client {
         throw new AddChainError(outcome.error);
 
       const chainId = outcome.chainId;
-
-      if (chains.has(chainId)) // Sanity check.
-        throw 'Unexpected reuse of a chain ID';
-      chains.set(chainId, {
-        jsonRpcCallback: options.jsonRpcCallback
-      });
+      const wasDestroyed = { destroyed: false };
 
       // `expected` was pushed by the `addChain` method.
       // Resolve the promise that `addChain` returned to the user.
@@ -470,9 +454,9 @@ export function start(options?: ClientOptions): Client {
         sendJsonRpc: (request) => {
           if (workerError)
             throw workerError;
-          if (!chains.has(chainId))
+          if (wasDestroyed.destroyed)
             throw new AlreadyDestroyedError();
-          if (!(chains.get(chainId)?.jsonRpcCallback))
+          if (!options.jsonRpcCallback)
             throw new JsonRpcDisabledError();
           if (request.length >= 8 * 1024 * 1024)
             return;
@@ -481,6 +465,8 @@ export function start(options?: ClientOptions): Client {
         databaseContent: (maxUtf8BytesSize) => {
           if (workerError)
             return Promise.reject(workerError);
+          if (wasDestroyed.destroyed)
+            throw new AlreadyDestroyedError();
 
           const twoPower32 = (1 << 30) * 4;  // `1 << 31` and `1 << 32` in JavaScript don't give the value that you expect.
           const maxSize = maxUtf8BytesSize || (twoPower32 - 1);
@@ -491,11 +477,9 @@ export function start(options?: ClientOptions): Client {
         remove: () => {
           if (workerError)
             throw workerError;
-          // Because the `removeChain` message is asynchronous, it is possible for a JSON-RPC
-          // response or database content concerning that `chainId` to arrive after the `remove`
-          // function has returned. We solve that by removing the information immediately.
-          if (!chains.delete(chainId))
+          if (wasDestroyed.destroyed)
             throw new AlreadyDestroyedError();
+          wasDestroyed.destroyed = true;
           console.assert(chainIds.has(newChain));
           chainIds.delete(newChain);
           worker.removeChain(chainId);
