@@ -17,8 +17,24 @@
 
 import { Buffer } from 'buffer';
 import * as instance from './raw-instance.js';
-import * as messages from './messages.js';
 import { SmoldotWasmInstance } from './bindings.js';
+
+/**
+ * Contains the initial configuration of the worker.
+ *
+ * This message is only ever sent once, and it is always the first ever message sent to the
+ * worker.
+ */
+ export interface Config {
+  logCallback: (level: number, target: string, message: string) => void
+  maxLogLevel: number;
+  enableCurrentTask: boolean;
+  cpuRateLimit: number,
+  forbidTcp: boolean;
+  forbidWs: boolean;
+  forbidNonLocalWs: boolean;
+  forbidWss: boolean;
+}
 
 export interface Worker {
   request: (request: string, chainId: number) => void
@@ -27,7 +43,7 @@ export interface Worker {
   databaseContent: (chainId: number, maxUtf8BytesSize: number) => Promise<string>
 }
 
-export function start(configMessage: messages.ToWorkerConfig): Worker {
+export function start(configMessage: Config): Worker {
 
 // This variable represents the state of the worker, and serves two different purposes:
 //
