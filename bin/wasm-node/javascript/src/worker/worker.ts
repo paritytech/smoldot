@@ -146,7 +146,7 @@ compat.setOnMessage((message: messages.ToWorker) => {
         postMessage({ kind: 'databaseContent', data, chainId });
       },
       currentTaskCallback: (taskName) => {
-        postMessage({ kind: 'currentTask', taskName });
+        // TODO: do something here?
       },
       cpuRateLimit: configMessage.cpuRateLimit,
       forbidTcp: configMessage.forbidTcp,

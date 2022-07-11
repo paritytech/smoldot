@@ -393,10 +393,6 @@ export function start(options?: ClientOptions): Client {
   // Immediately cleared when `remove()` is called on a chain.
   let chainIds: WeakMap<Chain, number> = new WeakMap();
 
-  // The worker periodically reports the name of the task it is currently in. This makes it
-  // possible, when the worker is frozen, to know which task it was in when frozen.
-  const workerCurrentTask: { name: string | null } = { name: null };
-
   // The worker can send us messages whose type is identified through a `kind` field.
   workerOnMessage(worker, (message: messages.FromWorker): void => {
     switch (message.kind) {
@@ -489,11 +485,6 @@ export function start(options?: ClientOptions): Client {
         break;
       }
 
-      case 'currentTask': {
-        workerCurrentTask.name = message.taskName;
-        break;
-      }
-
       default: {
         // Exhaustive check.
         const _exhaustiveCheck: never = message;
@@ -506,13 +497,14 @@ export function start(options?: ClientOptions): Client {
     // A worker error should only happen in case of a critical error as the result of a bug
     // somewhere. Consequently, nothing is really in place to cleanly report the error.
     const errorToString = error.toString();
-    console.error(
+    // TODO: restore after having updated `workerCurrentTask`
+    /*console.error(
       "Smoldot has panicked" +
       (workerCurrentTask.name ? (" while executing task `" + workerCurrentTask.name + "`") : "") +
       ". This is a bug in smoldot. Please open an issue at " +
       "https://github.com/paritytech/smoldot/issues with the following message:\n" +
       errorToString
-    );
+    );*/
     workerError = new CrashError(errorToString);
 
     // Reject all promises returned by `addChain`.
