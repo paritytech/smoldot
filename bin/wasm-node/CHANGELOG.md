@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix `state_getKeys` and `state_getKeysPaged` almost always erroneously returning an empty result.
+
 ## 0.6.22 - 2022-07-11
 
 ## Changed
