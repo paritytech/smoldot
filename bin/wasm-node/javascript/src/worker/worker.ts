@@ -161,8 +161,7 @@ return {
       );
 
       if (instance.exports.chain_is_ok(chainId) != 0) {
-        if (chains.has(chainId)) // Sanity check.
-          throw 'Unexpected reuse of a chain ID';
+        console.assert(!chains.has(chainId));
         chains.set(chainId, {
           jsonRpcCallback,
           databasePromises: new Array()
@@ -189,6 +188,7 @@ return {
     // Removing the chain synchronously avoids having to deal with race conditions such as a
     // JSON-RPC response corresponding to a chain that is going to be deleted but hasn't been yet.
     // These kind of race conditions are already delt with within smoldot.
+    console.assert(chains.has(chainId));
     chains.delete(chainId);
     state.instance.exports.remove_chain(chainId);
   },
@@ -200,6 +200,7 @@ return {
     if (!state.initialized)
       throw new Error("Internal error");
 
+    console.assert(chains.has(chainId));
     const databaseContentPromises = chains.get(chainId)?.databasePromises!;
     const promise: Promise<string> = new Promise((resolve, reject) => {
       databaseContentPromises.push({ resolve, reject });
