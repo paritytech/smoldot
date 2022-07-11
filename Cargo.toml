@@ -54,7 +54,7 @@ either = { version = "1.7.0", default-features = false }
 event-listener = { version = "2.5.2" }  # TODO: no-std-ize
 fnv = { version = "1.0.7", default-features = false }
 futures = "0.3.21"   # TODO: no-std-ize
-hashbrown = { version = "0.12.1", default-features = false, features = ["serde"] }   # TODO: remove serde feature
+hashbrown = { version = "0.12.2", default-features = false, features = ["serde"] }   # TODO: remove serde feature
 hex = { version = "0.4.3", default-features = false }
 hmac = { version = "0.12.1", default-features = false }
 itertools = { version = "0.10.3", default-features = false }
