@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { start as startWorker } from './worker/worker.js';
+import { start as startWorker } from './instance/instance.js';
 
 /**
  * Thrown in case of a problem when initializing the chain.
@@ -368,10 +368,8 @@ export function start(options?: ClientOptions): Client {
   // Immediately cleared when `remove()` is called on a chain.
   let chainIds: WeakMap<Chain, number> = new WeakMap();
 
-  // The actual execution of Smoldot is performed in a worker thread.
-  // Because this specific line of code is a bit sensitive, it is done in a separate file.
-  let workerError: null | Error = null;
-  const worker = startWorker({
+  let instanceError: null | Error = null;
+  const instance = startWorker({
     // Maximum level of log entries sent by the client.
     // 0 = Logging disabled, 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
     maxLogLevel: options.maxLogLevel || 3,
@@ -388,8 +386,8 @@ export function start(options?: ClientOptions): Client {
   });
 
   // TODO: restore
-  /*workerOnError(worker, (error) => {
-    // A worker error should only happen in case of a critical error as the result of a bug
+  /*workerOnError(instance, (error) => {
+    // An instance error should only happen in case of a critical error as the result of a bug
     // somewhere. Consequently, nothing is really in place to cleanly report the error.
     const errorToString = error.toString();
     // TODO: restore after having updated `workerCurrentTask`
@@ -420,8 +418,8 @@ export function start(options?: ClientOptions): Client {
 
   return {
     addChain: async (options: AddChainOptions): Promise<Chain> => {
-      if (workerError)
-        throw workerError;
+      if (instanceError)
+        throw instanceError;
 
       // Passing a JSON object for the chain spec is an easy mistake, so we provide a more
       // readable error.
@@ -440,7 +438,7 @@ export function start(options?: ClientOptions): Client {
         }
       }
 
-      const outcome = await worker.addChain(options.chainSpec, typeof options.databaseContent === 'string' ? options.databaseContent : "", potentialRelayChainsIds, options.jsonRpcCallback);
+      const outcome = await instance.addChain(options.chainSpec, typeof options.databaseContent === 'string' ? options.databaseContent : "", potentialRelayChainsIds, options.jsonRpcCallback);
 
       if (!outcome.success)
         throw new AddChainError(outcome.error);
@@ -452,32 +450,32 @@ export function start(options?: ClientOptions): Client {
       // Resolve the promise that `addChain` returned to the user.
       const newChain: Chain = {
         sendJsonRpc: (request) => {
-          if (workerError)
-            throw workerError;
+          if (instanceError)
+            throw instanceError;
           if (wasDestroyed.destroyed)
             throw new AlreadyDestroyedError();
           if (!options.jsonRpcCallback)
             throw new JsonRpcDisabledError();
           if (request.length >= 8 * 1024 * 1024)
             return;
-          worker.request(request, chainId);
+          instance.request(request, chainId);
         },
         databaseContent: (maxUtf8BytesSize) => {
-          if (workerError)
-            return Promise.reject(workerError);
+          if (instanceError)
+            return Promise.reject(instanceError);
           if (wasDestroyed.destroyed)
             throw new AlreadyDestroyedError();
-          return worker.databaseContent(chainId, maxUtf8BytesSize);
+          return instance.databaseContent(chainId, maxUtf8BytesSize);
         },
         remove: () => {
-          if (workerError)
-            throw workerError;
+          if (instanceError)
+            throw instanceError;
           if (wasDestroyed.destroyed)
             throw new AlreadyDestroyedError();
           wasDestroyed.destroyed = true;
           console.assert(chainIds.has(newChain));
           chainIds.delete(newChain);
-          worker.removeChain(chainId);
+          instance.removeChain(chainId);
         },
       };
 
@@ -485,11 +483,11 @@ export function start(options?: ClientOptions): Client {
       return newChain;
     },
     terminate: async () => {
-      if (workerError)
-        return Promise.reject(workerError)
-      workerError = new AlreadyDestroyedError();
+      if (instanceError)
+        return Promise.reject(instanceError)
+      instanceError = new AlreadyDestroyedError();
       // TODO: restore
-      //return workerTerminate(worker)
+      //return workerTerminate(instance)
     }
   }
 }

@@ -20,10 +20,7 @@ import * as instance from './raw-instance.js';
 import { SmoldotWasmInstance } from './bindings.js';
 
 /**
- * Contains the initial configuration of the worker.
- *
- * This message is only ever sent once, and it is always the first ever message sent to the
- * worker.
+ * Contains the configuration of the instance.
  */
  export interface Config {
   logCallback: (level: number, target: string, message: string) => void
@@ -36,16 +33,16 @@ import { SmoldotWasmInstance } from './bindings.js';
   forbidWss: boolean;
 }
 
-export interface Worker {
+export interface Instance {
   request: (request: string, chainId: number) => void
   addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], jsonRpcCallback?: (response: string) => void) => Promise<{ success: true, chainId: number } | { success: false, error: string }>
   removeChain: (chainId: number) => void
   databaseContent: (chainId: number, maxUtf8BytesSize?: number) => Promise<string>
 }
 
-export function start(configMessage: Config): Worker {
+export function start(configMessage: Config): Instance {
 
-// This variable represents the state of the worker, and serves two different purposes:
+// This variable represents the state of the instance, and serves two different purposes:
 //
 // - At initialization, it is a Promise containing the Wasm VM is still initializing.
 // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
