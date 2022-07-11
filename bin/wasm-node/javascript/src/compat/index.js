@@ -24,26 +24,6 @@ import { hrtime } from 'node:process';
 import { createConnection as nodeCreateConnection } from 'node:net';
 import { randomFillSync } from 'node:crypto';
 
-export function workerOnMessage(worker, callback) {
-    worker.on('message', callback);
-}
-
-export function workerOnError(worker, callback) {
-    worker.on('error', callback);
-}
-
-export function workerTerminate(worker) {
-    return worker.terminate().then(() => { });
-}
-
-export function postMessage(msg) {
-    parentPort.postMessage(msg);
-}
-
-export function setOnMessage(callback) {
-    parentPort.on('message', callback);
-}
-
 export function performanceNow() {
     const time = hrtime();
     return ((time[0] * 1e3) + (time[1] / 1e6));

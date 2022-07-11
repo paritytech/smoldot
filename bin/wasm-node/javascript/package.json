@@ -23,8 +23,7 @@
     "test": "node prepare.js --debug && rimraf ./dist && tsc && ava --timeout=2m --concurrency 2 --no-worker-threads"
   },
   "browser": {
-    "./dist/compat/index.js": "./dist/compat/index-browser-overwrite.js",
-    "./dist/worker/spawn.js": "./dist/worker/spawn-browser-overwrite.js"
+    "./dist/compat/index.js": "./dist/compat/index-browser-overwrite.js"
   },
   "dependencies": {
     "buffer": "^6.0.1",
