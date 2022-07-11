@@ -16,10 +16,15 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { Buffer } from 'buffer';
-import * as compat from './../compat/index.js';
 import * as instance from './raw-instance.js';
 import * as messages from './messages.js';
 import { SmoldotWasmInstance } from './bindings.js';
+
+export interface Worker {
+  handleMessage: (msg: messages.ToWorker) => void
+}
+
+export function start(messagesCallback: (msg: messages.FromWorker) => void): Worker {
 
 // This variable represents the state of the worker, and serves three different purposes:
 //
@@ -75,14 +80,14 @@ function injectMessage(instance: SmoldotWasmInstance, message: messages.ToWorker
       );
 
       if (instance.exports.chain_is_ok(chainId) != 0) {
-        postMessage({ kind: 'chainAddedOk', chainId });
+        messagesCallback({ kind: 'chainAddedOk', chainId });
       } else {
         const errorMsgLen = instance.exports.chain_error_len(chainId) >>> 0;
         const errorMsgPtr = instance.exports.chain_error_ptr(chainId) >>> 0;
         const errorMsg = Buffer.from(instance.exports.memory.buffer)
           .toString('utf8', errorMsgPtr, errorMsgPtr + errorMsgLen);
         instance.exports.remove_chain(chainId);
-        postMessage({ kind: 'chainAddedErr', error: errorMsg });
+        messagesCallback({ kind: 'chainAddedErr', error: errorMsg });
       }
 
       break;
@@ -117,13 +122,7 @@ function injectMessage(instance: SmoldotWasmInstance, message: messages.ToWorker
   }
 };
 
-function postMessage(message: messages.FromWorker) {
-  // `compat.postMessage` is the same as `postMessage`, but works across environments.
-  compat.postMessage(message)
-}
-
-// `compat.setOnMessage` is the same as `onmessage = ...`, but works across environments.
-compat.setOnMessage((message: messages.ToWorker) => {
+function handleMessage(message: messages.ToWorker) {
   // What to do depends on the type of `state`.
   // See the documentation of the `state` variable for information.
   if (state == null) {
@@ -137,15 +136,15 @@ compat.setOnMessage((message: messages.ToWorker) => {
     // Start initialization of the Wasm VM.
     const config: instance.Config = {
       logCallback: (level, target, message) => {
-        postMessage({ kind: 'log', level, target, message });
+        messagesCallback({ kind: 'log', level, target, message });
       },
       jsonRpcCallback: (data, chainId) => {
-        postMessage({ kind: 'jsonrpc', data, chainId });
+        messagesCallback({ kind: 'jsonrpc', data, chainId });
       },
       databaseContentCallback: (data, chainId) => {
-        postMessage({ kind: 'databaseContent', data, chainId });
+        messagesCallback({ kind: 'databaseContent', data, chainId });
       },
-      currentTaskCallback: (taskName) => {
+      currentTaskCallback: (_taskName) => {
         // TODO: do something here?
       },
       cpuRateLimit: configMessage.cpuRateLimit,
@@ -188,4 +187,10 @@ compat.setOnMessage((message: messages.ToWorker) => {
     // Everything is already initialized. Process the message synchronously.
     injectMessage(state, message as messages.ToWorkerNonConfig);
   }
-});
+}
+
+return {
+  handleMessage
+}
+
+}

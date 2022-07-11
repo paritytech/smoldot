@@ -15,9 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { CompatWorker, workerOnMessage, workerOnError, workerTerminate } from './compat/index.js';
 import * as messages from './worker/messages.js';
-import spawnWorker from './worker/spawn.js';
+import { start as startWorker } from './worker/worker.js';
 
 /**
  * Thrown in case of a problem when initializing the chain.
@@ -365,11 +364,6 @@ export function start(options?: ClientOptions): Client {
     }
   });
 
-  // The actual execution of Smoldot is performed in a worker thread.
-  // Because this specific line of code is a bit sensitive, it is done in a separate file.
-  const worker = spawnWorker();
-  let workerError: null | Error = null;
-
   // Whenever an `addChain` or `removeChain` message is sent to the worker, a corresponding entry
   // is pushed to this array. The worker needs to send back a confirmation, which pops the first
   // element of this array. In the case of `addChain`, additional fields are stored in this array
@@ -393,8 +387,11 @@ export function start(options?: ClientOptions): Client {
   // Immediately cleared when `remove()` is called on a chain.
   let chainIds: WeakMap<Chain, number> = new WeakMap();
 
-  // The worker can send us messages whose type is identified through a `kind` field.
-  workerOnMessage(worker, (message: messages.FromWorker): void => {
+  // The actual execution of Smoldot is performed in a worker thread.
+  // Because this specific line of code is a bit sensitive, it is done in a separate file.
+  let workerError: null | Error = null;
+  const worker = startWorker((message: messages.FromWorker): void => {
+    // The worker can send us messages whose type is identified through a `kind` field.
     switch (message.kind) {
       case 'jsonrpc': {
         const cb = chains.get(message.chainId)?.jsonRpcCallback;
@@ -425,7 +422,7 @@ export function start(options?: ClientOptions): Client {
               throw new JsonRpcDisabledError();
             if (request.length >= 8 * 1024 * 1024)
               return;
-            postMessage(worker, { ty: 'request', request, chainId });
+            worker.handleMessage({ ty: 'request', request, chainId });
           },
           databaseContent: (maxUtf8BytesSize) => {
             if (workerError)
@@ -443,7 +440,7 @@ export function start(options?: ClientOptions): Client {
             const maxSize = maxUtf8BytesSize || (twoPower32 - 1);
             const cappedMaxSize = (maxSize >= twoPower32) ? (twoPower32 - 1) : maxSize;
 
-            postMessage(worker, { ty: 'databaseContent', chainId, maxUtf8BytesSize: cappedMaxSize });
+            worker.handleMessage({ ty: 'databaseContent', chainId, maxUtf8BytesSize: cappedMaxSize });
 
             return promise;
           },
@@ -457,7 +454,7 @@ export function start(options?: ClientOptions): Client {
               throw new AlreadyDestroyedError();
             console.assert(chainIds.has(newChain));
             chainIds.delete(newChain);
-            postMessage(worker, { ty: 'removeChain', chainId });
+            worker.handleMessage({ ty: 'removeChain', chainId });
           },
         };
 
@@ -493,18 +490,19 @@ export function start(options?: ClientOptions): Client {
     }
   });
 
-  workerOnError(worker, (error) => {
+  // TODO: restore
+  /*workerOnError(worker, (error) => {
     // A worker error should only happen in case of a critical error as the result of a bug
     // somewhere. Consequently, nothing is really in place to cleanly report the error.
     const errorToString = error.toString();
     // TODO: restore after having updated `workerCurrentTask`
-    /*console.error(
+    console.error(
       "Smoldot has panicked" +
       (workerCurrentTask.name ? (" while executing task `" + workerCurrentTask.name + "`") : "") +
       ". This is a bug in smoldot. Please open an issue at " +
       "https://github.com/paritytech/smoldot/issues with the following message:\n" +
       errorToString
-    );*/
+    );
     workerError = new CrashError(errorToString);
 
     // Reject all promises returned by `addChain`.
@@ -521,10 +519,10 @@ export function start(options?: ClientOptions): Client {
       }
     }
     chains.clear();
-  });
+  });*/
 
   // The first message expected by the worker contains the configuration.
-  postMessage(worker, {
+  worker.handleMessage({
     // Maximum level of log entries sent by the client.
     // 0 = Logging disabled, 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
     maxLogLevel: options.maxLogLevel || 3,
@@ -577,7 +575,7 @@ export function start(options?: ClientOptions): Client {
         jsonRpcCallback: options.jsonRpcCallback,
       });
 
-      postMessage(worker, {
+      worker.handleMessage({
         ty: 'addChain',
         chainSpec: options.chainSpec,
         databaseContent: typeof options.databaseContent === 'string' ? options.databaseContent : "",
@@ -587,18 +585,14 @@ export function start(options?: ClientOptions): Client {
 
       return chainAddedPromise;
     },
-    terminate: () => {
+    terminate: async () => {
       if (workerError)
         return Promise.reject(workerError)
       workerError = new AlreadyDestroyedError();
-      return workerTerminate(worker)
+      // TODO: restore
+      //return workerTerminate(worker)
     }
   }
-}
-
-// Separate function in order to enforce types.
-function postMessage(worker: CompatWorker, message: messages.ToWorker) {
-  worker.postMessage(message)
 }
 
 interface PendingConfirmation {
