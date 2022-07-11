@@ -397,31 +397,6 @@ export function start(options?: ClientOptions): Client {
   // possible, when the worker is frozen, to know which task it was in when frozen.
   const workerCurrentTask: { name: string | null } = { name: null };
 
-  // The worker periodically sends a message of kind 'livenessPing' in order to notify that it is
-  // still alive.
-  // If this liveness ping isn't received for a long time, an error is reported in the logs.
-  // The first check is delayed in order to account for the fact that the worker has to perform
-  // an expensive initialization step when initializing the Wasm VM.
-  let livenessTimeout: null | ReturnType<typeof globalThis.setTimeout> = null;
-  const resetLivenessTimeout = () => {
-    if (livenessTimeout !== null)
-      globalThis.clearTimeout(livenessTimeout);
-    livenessTimeout = globalThis.setTimeout(() => {
-      livenessTimeout = null;
-      if (workerError)
-        return; // The unresponsiveness is due to a crash. No need to print more warnings.
-      console.warn(
-        "Smoldot appears unresponsive" +
-        (workerCurrentTask.name ? (" while executing task `" + workerCurrentTask.name + "`") : "") +
-        ". Please open an issue at https://github.com/paritytech/smoldot/issues. If you have a " +
-        "debugger available, please pause execution, generate a stack trace of the thread " +
-        "that isn't the main execution thread, and paste it in the issue. Please also include " +
-        "any other log found in the console or elsewhere."
-      );
-    }, 10000);
-  };
-  globalThis.setTimeout(() => resetLivenessTimeout(), 15000);
-
   // The worker can send us messages whose type is identified through a `kind` field.
   workerOnMessage(worker, (message: messages.FromWorker): void => {
     switch (message.kind) {
@@ -511,11 +486,6 @@ export function start(options?: ClientOptions): Client {
 
       case 'log': {
         logCallback(message.level, message.target, message.message);
-        break;
-      }
-
-      case 'livenessPing': {
-        resetLivenessTimeout();
         break;
       }
 
@@ -629,10 +599,6 @@ export function start(options?: ClientOptions): Client {
       if (workerError)
         return Promise.reject(workerError)
       workerError = new AlreadyDestroyedError();
-
-      if (livenessTimeout !== null)
-        globalThis.clearTimeout(livenessTimeout)
-
       return workerTerminate(worker)
     }
   }

@@ -189,8 +189,3 @@ compat.setOnMessage((message: messages.ToWorker) => {
     injectMessage(state, message as messages.ToWorkerNonConfig);
   }
 });
-
-// Periodically send a ping message to the outside, as a way to report liveness.
-setInterval(() => {
-  postMessage({ kind: 'livenessPing' });
-}, 2500);
