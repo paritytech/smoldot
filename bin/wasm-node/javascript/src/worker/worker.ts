@@ -157,24 +157,24 @@ function injectMessage(instance: SmoldotWasmInstance, message: messages.ToWorker
       return instance;
     }) };
 
-function handleMessage(message: messages.ToWorker) {
+function queueOperation(operation: (instance: SmoldotWasmInstance) => void) {
   // What to do depends on the type of `state`.
   // See the documentation of the `state` variable for information.
   if (!state.initialized) {
     // A message has been received while the Wasm VM is still initializing. Queue it for when
     // initialization is over.
-    state.promise.then((instance) => {
-      injectMessage(instance, message as messages.ToWorkerNonConfig);
-    })
+    state.promise.then((instance) => { operation(instance) })
 
   } else {
     // Everything is already initialized. Process the message synchronously.
-    injectMessage(state.instance, message as messages.ToWorkerNonConfig);
+    operation(state.instance)
   }
 }
 
 return {
-  handleMessage
+  handleMessage: (message: messages.ToWorker) => {
+    queueOperation((instance) => injectMessage(instance, message as messages.ToWorkerNonConfig))
+  }
 }
 
 }
