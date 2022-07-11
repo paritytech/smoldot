@@ -1320,8 +1320,10 @@ where
                         let response = response
                             .map_err(GrandpaWarpSyncRequestError::Request)
                             .and_then(|payload| {
-                                protocol::decode_grandpa_warp_sync_response(&payload)
-                                    .map_err(GrandpaWarpSyncRequestError::Decode)
+                                protocol::decode_grandpa_warp_sync_response(
+                                    &payload, 4, // TODO: no
+                                )
+                                .map_err(GrandpaWarpSyncRequestError::Decode)
                             });
 
                         break Some(Event::GrandpaWarpSyncRequestResult {

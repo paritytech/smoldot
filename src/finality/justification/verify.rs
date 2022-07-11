@@ -18,12 +18,15 @@
 use crate::finality::justification::decode;
 
 use alloc::vec::Vec;
+use core::{cmp, iter, mem};
 
 /// Configuration for a justification verification process.
 #[derive(Debug)]
 pub struct Config<'a, I> {
     /// Justification to verify.
     pub justification: decode::GrandpaJustificationRef<'a>,
+
+    pub block_number_bytes: usize,
 
     // TODO: document
     pub authorities_set_id: u64,
@@ -82,7 +85,23 @@ pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>) ->
         let mut msg = Vec::with_capacity(1 + 32 + 4 + 8 + 8);
         msg.push(1u8); // This `1` indicates which kind of message is being signed.
         msg.extend_from_slice(&precommit.target_hash[..]);
-        msg.extend_from_slice(&u32::to_le_bytes(precommit.target_number)[..]);
+        // The message contains the little endian block number. While simple in concept,
+        // in reality it is more complicated because we don't know the number of bytes of
+        // this block number at compile time. We thus copy as many bytes as appropriate and
+        // pad with 0s if necessary.
+        msg.extend_from_slice(
+            &precommit.target_number.to_le_bytes()[..cmp::min(
+                mem::size_of_val(&precommit.target_number),
+                config.block_number_bytes,
+            )],
+        );
+        msg.extend(
+            iter::repeat(0).take(
+                config
+                    .block_number_bytes
+                    .saturating_sub(mem::size_of_val(&precommit.target_number)),
+            ),
+        );
         msg.extend_from_slice(&u64::to_le_bytes(config.justification.round)[..]);
         msg.extend_from_slice(&u64::to_le_bytes(config.authorities_set_id)[..]);
         debug_assert_eq!(msg.len(), msg.capacity());

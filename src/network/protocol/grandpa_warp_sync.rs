@@ -78,9 +78,13 @@ pub struct DecodeGrandpaWarpSyncResponseError;
 // TODO: make this a zero-cost API
 pub fn decode_grandpa_warp_sync_response(
     encoded: &[u8],
+    block_number_bytes: usize,
 ) -> Result<GrandpaWarpSyncResponse, DecodeGrandpaWarpSyncResponseError> {
     nom::combinator::all_consuming(nom::combinator::map(
-        nom::sequence::tuple((decode_fragments, nom::number::complete::le_u8)),
+        nom::sequence::tuple((
+            decode_fragments(block_number_bytes),
+            nom::number::complete::le_u8,
+        )),
         |(fragments, is_finished)| GrandpaWarpSyncResponse {
             fragments,
             is_finished: is_finished != 0,
@@ -90,13 +94,17 @@ pub fn decode_grandpa_warp_sync_response(
     .map_err(|_| DecodeGrandpaWarpSyncResponseError)
 }
 
-fn decode_fragments(bytes: &[u8]) -> nom::IResult<&[u8], Vec<GrandpaWarpSyncResponseFragment>> {
-    nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-        nom::multi::many_m_n(num_elems, num_elems, decode_fragment)
-    })(bytes)
+fn decode_fragments<'a>(
+    block_number_bytes: usize,
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], Vec<GrandpaWarpSyncResponseFragment>> {
+    nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
+        nom::multi::many_m_n(num_elems, num_elems, decode_fragment(block_number_bytes))
+    })
 }
 
-fn decode_fragment(bytes: &[u8]) -> nom::IResult<&[u8], GrandpaWarpSyncResponseFragment> {
+fn decode_fragment<'a>(
+    block_number_bytes: usize,
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], GrandpaWarpSyncResponseFragment> {
     nom::combinator::map(
         nom::sequence::tuple((
             nom::combinator::recognize(|s| {
@@ -104,8 +112,8 @@ fn decode_fragment(bytes: &[u8]) -> nom::IResult<&[u8], GrandpaWarpSyncResponseF
                     nom::Err::Failure(nom::error::make_error(s, nom::error::ErrorKind::Verify))
                 })
             }),
-            nom::combinator::recognize(|s| {
-                finality::justification::decode::decode_partial_grandpa(s)
+            nom::combinator::recognize(move |s| {
+                finality::justification::decode::decode_partial_grandpa(s, block_number_bytes)
                     .map(|(a, b)| (b, a))
                     .map_err(|_| {
                         nom::Err::Failure(nom::error::make_error(s, nom::error::ErrorKind::Verify))
@@ -116,5 +124,5 @@ fn decode_fragment(bytes: &[u8]) -> nom::IResult<&[u8], GrandpaWarpSyncResponseF
             scale_encoded_header: header.into(),
             scale_encoded_justification: justification.into(),
         },
-    )(bytes)
+    )
 }
