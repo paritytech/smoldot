@@ -24,17 +24,15 @@ export interface Worker {
   handleMessage: (msg: messages.ToWorker) => void
 }
 
-export function start(messagesCallback: (msg: messages.FromWorker) => void): Worker {
+export function start(configMessage: messages.ToWorkerConfig, messagesCallback: (msg: messages.FromWorker) => void): Worker {
 
-// This variable represents the state of the worker, and serves three different purposes:
+// This variable represents the state of the worker, and serves two different purposes:
 //
-// - At initialization, it is set to `null`.
-// - Once the first message, containing the configuration, has been received from the parent, it
-//   becomes an array filled with the messages that are received while the Wasm VM is still
-//   initializing.
+// - At initialization, it is an array filled with the messages that are received while the Wasm
+//   VM is still initializing.
 // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
 //
-let state: null | messages.ToWorkerNonConfig[] | SmoldotWasmInstance = null;
+let state: messages.ToWorkerNonConfig[] | SmoldotWasmInstance = [];
 
 // Inject a message coming from `index.js` to a running Wasm VM.
 function injectMessage(instance: SmoldotWasmInstance, message: messages.ToWorkerNonConfig): void {
@@ -122,17 +120,6 @@ function injectMessage(instance: SmoldotWasmInstance, message: messages.ToWorker
   }
 };
 
-function handleMessage(message: messages.ToWorker) {
-  // What to do depends on the type of `state`.
-  // See the documentation of the `state` variable for information.
-  if (state == null) {
-    // First ever message received by the worker. Always contains the initial configuration.
-    const configMessage = message as messages.ToWorkerConfig;
-
-    // Transition to the next phase: an array during which messages are stored while the
-    // initialization is in progress.
-    state = [];
-
     // Start initialization of the Wasm VM.
     const config: instance.Config = {
       logCallback: (level, target, message) => {
@@ -178,7 +165,10 @@ function handleMessage(message: messages.ToWorker) {
       state = instance;
     });
 
-  } else if (Array.isArray(state)) {
+function handleMessage(message: messages.ToWorker) {
+  // What to do depends on the type of `state`.
+  // See the documentation of the `state` variable for information.
+  if (Array.isArray(state)) {
     // A message has been received while the Wasm VM is still initializing. Queue it for when
     // initialization is over.
     state.push(message as messages.ToWorkerNonConfig);
