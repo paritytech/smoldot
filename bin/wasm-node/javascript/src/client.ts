@@ -467,12 +467,7 @@ export function start(options?: ClientOptions): Client {
             return Promise.reject(workerError);
           if (wasDestroyed.destroyed)
             throw new AlreadyDestroyedError();
-
-          const twoPower32 = (1 << 30) * 4;  // `1 << 31` and `1 << 32` in JavaScript don't give the value that you expect.
-          const maxSize = maxUtf8BytesSize || (twoPower32 - 1);
-          const cappedMaxSize = (maxSize >= twoPower32) ? (twoPower32 - 1) : maxSize;
-
-          return worker.databaseContent(chainId, cappedMaxSize);
+          return worker.databaseContent(chainId, maxUtf8BytesSize);
         },
         remove: () => {
           if (workerError)
