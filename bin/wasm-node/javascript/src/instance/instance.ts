@@ -219,6 +219,8 @@ export function start(configMessage: Config): Instance {
       // it to not be the case is if the user completely invented the `chainId`.
       if (!state.initialized)
         throw new Error("Internal error");
+      if (crashError.error)
+        throw crashError.error;
 
       // Removing the chain synchronously avoids having to deal with race conditions such as a
       // JSON-RPC response corresponding to a chain that is going to be deleted but hasn't been yet.
@@ -239,6 +241,9 @@ export function start(configMessage: Config): Instance {
       // it to not be the case is if the user completely invented the `chainId`.
       if (!state.initialized)
         throw new Error("Internal error");
+
+      if (crashError.error)
+        throw crashError.error;
 
       console.assert(chains.has(chainId));
       const databaseContentPromises = chains.get(chainId)?.databasePromises!;
