@@ -368,7 +368,10 @@ export function start(options?: ClientOptions): Client {
   // Immediately cleared when `remove()` is called on a chain.
   let chainIds: WeakMap<Chain, number> = new WeakMap();
 
-  let instanceError: null | Error = null;
+  // If `Client.terminate()̀  is called, this error is set to a value.
+  // All the functions of the public API check if this contains a value.
+  let alreadyDestroyedError: null | AlreadyDestroyedError = null;
+
   const instance = startWorker({
     // Maximum level of log entries sent by the client.
     // 0 = Logging disabled, 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
@@ -387,8 +390,8 @@ export function start(options?: ClientOptions): Client {
 
   return {
     addChain: async (options: AddChainOptions): Promise<Chain> => {
-      if (instanceError)
-        throw instanceError;
+      if (alreadyDestroyedError)
+        throw alreadyDestroyedError;
 
       // Passing a JSON object for the chain spec is an easy mistake, so we provide a more
       // readable error.
@@ -419,8 +422,8 @@ export function start(options?: ClientOptions): Client {
       // Resolve the promise that `addChain` returned to the user.
       const newChain: Chain = {
         sendJsonRpc: (request) => {
-          if (instanceError)
-            throw instanceError;
+          if (alreadyDestroyedError)
+            throw alreadyDestroyedError;
           if (wasDestroyed.destroyed)
             throw new AlreadyDestroyedError();
           if (!options.jsonRpcCallback)
@@ -430,15 +433,15 @@ export function start(options?: ClientOptions): Client {
           instance.request(request, chainId);
         },
         databaseContent: (maxUtf8BytesSize) => {
-          if (instanceError)
-            return Promise.reject(instanceError);
+          if (alreadyDestroyedError)
+            return Promise.reject(alreadyDestroyedError);
           if (wasDestroyed.destroyed)
             throw new AlreadyDestroyedError();
           return instance.databaseContent(chainId, maxUtf8BytesSize);
         },
         remove: () => {
-          if (instanceError)
-            throw instanceError;
+          if (alreadyDestroyedError)
+            throw alreadyDestroyedError;
           if (wasDestroyed.destroyed)
             throw new AlreadyDestroyedError();
           wasDestroyed.destroyed = true;
@@ -452,9 +455,9 @@ export function start(options?: ClientOptions): Client {
       return newChain;
     },
     terminate: async () => {
-      if (instanceError)
-        throw instanceError
-      instanceError = new AlreadyDestroyedError();
+      if (alreadyDestroyedError)
+        throw alreadyDestroyedError
+      alreadyDestroyedError = new AlreadyDestroyedError();
       instance.startShutdown()
     }
   }
