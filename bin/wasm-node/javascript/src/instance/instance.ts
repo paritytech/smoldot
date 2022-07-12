@@ -53,7 +53,7 @@ export function start(configMessage: Config): Instance {
 
   const crashError: { error?: CrashError } = {};
 
-  const workerCurrentTask: { name: string | null } = { name: null };
+  const currentTask: { name: string | null } = { name: null };
 
   const printError = { printError: true }
 
@@ -72,7 +72,7 @@ export function start(configMessage: Config): Instance {
         return;
       console.error(
         "Smoldot has panicked" +
-        (workerCurrentTask.name ? (" while executing task `" + workerCurrentTask.name + "`") : "") +
+        (currentTask.name ? (" while executing task `" + currentTask.name + "`") : "") +
         ". This is a bug in smoldot. Please open an issue at " +
         "https://github.com/paritytech/smoldot/issues with the following message:\n" +
         message
@@ -90,7 +90,7 @@ export function start(configMessage: Config): Instance {
       (promises.shift() as DatabasePromise).resolve(data);
     },
     currentTaskCallback: (taskName) => {
-      workerCurrentTask.name = taskName
+      currentTask.name = taskName
     },
     cpuRateLimit: configMessage.cpuRateLimit,
     forbidTcp: configMessage.forbidTcp,
