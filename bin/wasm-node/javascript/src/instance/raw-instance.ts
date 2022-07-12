@@ -47,6 +47,9 @@ export async function startInstance(config: Config): Promise<SmoldotWasmInstance
 
     // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
     const smoldotJsConfig: SmoldotBindingsConfig = {
+        onPanic: (message) => {
+            throw new Error(message);
+        },
         ...config
     };
 

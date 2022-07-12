@@ -27,6 +27,14 @@ import type { SmoldotWasmInstance } from './bindings.js';
 
 export interface Config {
     instance?: SmoldotWasmInstance,
+    
+    /**
+     * Closure to call when the Wasm instance calls `panic`.
+     *
+     * This callback will always be invoked from within a binding called the Wasm instance.
+     */
+    onPanic: (message: string) => never,
+    
     logCallback: (level: number, target: string, message: string) => void,
     jsonRpcCallback: (response: string, chainId: number) => void,
     databaseContentCallback: (data: string, chainId: number) => void,
@@ -52,7 +60,7 @@ export default function (config: Config): compat.WasmModuleImports {
             len >>>= 0;
 
             const message = Buffer.from(instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
-            throw new Error(message);
+            config.onPanic(message);
         },
 
         // Used by the Rust side to emit a JSON-RPC response or subscription notification.
