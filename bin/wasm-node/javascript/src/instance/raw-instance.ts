@@ -53,6 +53,7 @@ export async function startInstance(config: Config): Promise<SmoldotWasmInstance
     // Used to bind with the Wasi bindings. See the `bindings-wasi.js` file.
     const wasiConfig: WasiConfig = {
         envVars: [],
+        onProcExit: (retCode) => { throw new Error(`proc_exit called: ${retCode}`); }
     };
 
     // Start the Wasm virtual machine.
