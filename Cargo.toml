@@ -54,7 +54,7 @@ either = { version = "1.7.0", default-features = false }
 event-listener = { version = "2.5.2" }  # TODO: no-std-ize
 fnv = { version = "1.0.7", default-features = false }
 futures = "0.3.21"   # TODO: no-std-ize
-hashbrown = { version = "0.12.1", default-features = false, features = ["serde"] }   # TODO: remove serde feature
+hashbrown = { version = "0.12.2", default-features = false, features = ["serde"] }   # TODO: remove serde feature
 hex = { version = "0.4.3", default-features = false }
 hmac = { version = "0.12.1", default-features = false }
 itertools = { version = "0.10.3", default-features = false }
@@ -71,7 +71,7 @@ rand = { version = "0.8.5", default-features = false, features = ["std", "std_rn
 rand_chacha = { version = "0.3.1", default-features = false }
 ruzstd = { version = "0.3.0" }  # TODO: doesn't support no_std :-/
 schnorrkel = { version = "0.10.2", default-features = false, features = ["preaudit_deprecated", "u64_backend"] }
-serde = { version = "1.0.138", default-features = false, features = ["alloc", "derive"] }
+serde = { version = "1.0.139", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.82", default-features = false, features = ["alloc", "raw_value"] }
 sha2 = { version = "0.10.2", default-features = false }
 siphasher = { version = "0.3.10", default-features = false }

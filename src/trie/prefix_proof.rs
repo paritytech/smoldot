@@ -27,8 +27,6 @@
 
 // TODO: usage example
 
-// TODO: this code is entirely untested; no idea if it works
-
 use super::{nibble, proof_verify};
 
 use alloc::{vec, vec::Vec};
@@ -89,6 +87,7 @@ impl PrefixScan {
             // Controls whether we continue iterating.
             let mut any_successful_proof = false;
 
+            debug_assert!(!self.next_queries.is_empty());
             for query in &self.next_queries {
                 let info = match proof_verify::trie_node_info(proof_verify::TrieNodeInfoConfig {
                     requested_key: query.iter().copied(),
@@ -128,6 +127,14 @@ impl PrefixScan {
                 }
             }
 
+            // If we have failed to make any progress during this iteration, return `InProgress`.
+            if !any_successful_proof {
+                debug_assert!(next.is_empty());
+                // Errors are immediately returned if `is_first_iteration`.
+                debug_assert!(!is_first_iteration);
+                break;
+            }
+
             // Finished when nothing more to request.
             if next.is_empty() {
                 return Ok(ResumeOutcome::Success {
@@ -137,10 +144,6 @@ impl PrefixScan {
 
             // Update `next_queries` for the next iteration.
             self.next_queries = next;
-
-            if !any_successful_proof {
-                break;
-            }
         }
 
         Ok(ResumeOutcome::InProgress(self))

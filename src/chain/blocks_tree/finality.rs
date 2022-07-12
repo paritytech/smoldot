@@ -309,8 +309,11 @@ impl<T> NonFinalizedTreeInner<T> {
         match (&self.finality, &consensus_engine_id) {
             (Finality::Grandpa { .. }, b"FRNK") => {
                 // Turn justification into a strongly-typed struct.
-                let decoded = justification::decode::decode_grandpa(scale_encoded_justification)
-                    .map_err(JustificationVerifyError::InvalidJustification)?;
+                let decoded = justification::decode::decode_grandpa(
+                    scale_encoded_justification,
+                    self.block_number_bytes,
+                )
+                .map_err(JustificationVerifyError::InvalidJustification)?;
 
                 // Delegate the first step to the other function.
                 let (block_index, authorities_set_id, authorities_list) = self
@@ -319,6 +322,7 @@ impl<T> NonFinalizedTreeInner<T> {
 
                 justification::verify::verify(justification::verify::Config {
                     justification: decoded,
+                    block_number_bytes: self.block_number_bytes,
                     authorities_set_id,
                     authorities_list,
                 })
