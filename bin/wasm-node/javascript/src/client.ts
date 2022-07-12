@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { start as startWorker } from './instance/instance.js';
+import { start as startInstance } from './instance/instance.js';
 
 /**
  * Thrown in case of a problem when initializing the chain.
@@ -372,7 +372,7 @@ export function start(options?: ClientOptions): Client {
   // All the functions of the public API check if this contains a value.
   let alreadyDestroyedError: null | AlreadyDestroyedError = null;
 
-  const instance = startWorker({
+  const instance = startInstance({
     // Maximum level of log entries sent by the client.
     // 0 = Logging disabled, 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
     maxLogLevel: options.maxLogLevel || 3,
