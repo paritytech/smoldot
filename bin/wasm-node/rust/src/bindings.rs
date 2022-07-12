@@ -283,6 +283,10 @@ pub extern "C" fn init(max_log_level: u32, enable_current_task: u32, cpu_rate_li
 /// Instructs the client to start shutting down.
 ///
 /// Later, the client will use `exit` to stop.
+///
+/// It is still legal to call all the other functions of these bindings. The client continues to
+/// operate normally until the call to `exit`, which happens at some undeterminate point in the
+/// future.
 // TODO: can this be called multiple times?
 #[no_mangle]
 pub extern "C" fn start_shutdown() {
