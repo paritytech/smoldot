@@ -385,37 +385,6 @@ export function start(options?: ClientOptions): Client {
     forbidWss: options.forbidWss || false,
   });
 
-  // TODO: restore
-  /*workerOnError(instance, (error) => {
-    // An instance error should only happen in case of a critical error as the result of a bug
-    // somewhere. Consequently, nothing is really in place to cleanly report the error.
-    const errorToString = error.toString();
-    // TODO: restore after having updated `workerCurrentTask`
-    console.error(
-      "Smoldot has panicked" +
-      (workerCurrentTask.name ? (" while executing task `" + workerCurrentTask.name + "`") : "") +
-      ". This is a bug in smoldot. Please open an issue at " +
-      "https://github.com/paritytech/smoldot/issues with the following message:\n" +
-      errorToString
-    );
-    workerError = new CrashError(errorToString);
-
-    // Reject all promises returned by `addChain`.
-    for (var pending of pendingConfirmations) {
-      if (pending.ty == 'chainAdded')
-        pending.reject(workerError);
-    }
-    pendingConfirmations = [];
-
-    // Reject all promises for database contents.
-    for (const chain of chains) {
-      for (const promise of chain[1].databasePromises) {
-        promise.reject(workerError)
-      }
-    }
-    chains.clear();
-  });*/
-
   return {
     addChain: async (options: AddChainOptions): Promise<Chain> => {
       if (instanceError)
