@@ -18,6 +18,7 @@
 import { Buffer } from 'buffer';
 import * as instance from './raw-instance.js';
 import { SmoldotWasmInstance } from './bindings.js';
+import { CrashError } from '../client.js';
 
 /**
  * Contains the configuration of the instance.
@@ -49,6 +50,8 @@ export function start(configMessage: Config): Instance {
 //
 let state: { initialized: false, promise: Promise<SmoldotWasmInstance> } | { initialized: true, instance: SmoldotWasmInstance };
 
+const crashError: { error?: CrashError } = {};
+
 const workerCurrentTask: { name: string | null } = { name: null };
 
   // Contains the information of each chain that is currently alive.
@@ -60,8 +63,8 @@ const workerCurrentTask: { name: string | null } = { name: null };
     // Start initialization of the Wasm VM.
     const config: instance.Config = {
       onWasmPanic: (message) => {
-        // TODO: must remember that a panic happened and not invoke any other function
-        // TODO: must add try-catch blocks when invoking Wasm VM
+        // TODO: consider obtaining a backtrace here
+        crashError.error = new CrashError(message);
         console.error(
           "Smoldot has panicked" +
           (workerCurrentTask.name ? (" while executing task `" + workerCurrentTask.name + "`") : "") +
@@ -130,15 +133,26 @@ return {
     // it to not be the case is if the user completely invented the `chainId`.
     if (!state.initialized)
       throw new Error("Internal error");
+    if (crashError.error)
+      throw crashError.error;
 
-    const len = Buffer.byteLength(request, 'utf8');
-    const ptr = state.instance.exports.alloc(len) >>> 0;
-    Buffer.from(state.instance.exports.memory.buffer).write(request, ptr);
-    state.instance.exports.json_rpc_send(ptr, len, chainId);
+    try {
+      const len = Buffer.byteLength(request, 'utf8');
+      const ptr = state.instance.exports.alloc(len) >>> 0;
+      Buffer.from(state.instance.exports.memory.buffer).write(request, ptr);
+      state.instance.exports.json_rpc_send(ptr, len, chainId);
+    } catch(_error) {
+      console.assert(crashError.error);
+      throw crashError.error
+    }
   },
 
   addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], jsonRpcCallback?: (response: string) => void): Promise<{ success: true, chainId: number } | { success: false, error: string }> => {
     return queueOperation((instance) => {
+      if (crashError.error)
+        throw crashError.error;
+
+      try {
       // Write the chain specification into memory.
       const chainSpecLen = Buffer.byteLength(chainSpec, 'utf8');
       const chainSpecPtr = instance.exports.alloc(chainSpecLen) >>> 0;
@@ -185,6 +199,10 @@ return {
         instance.exports.remove_chain(chainId);
         return { success: false, error: errorMsg };
       }
+      } catch(_error) {
+        console.assert(crashError.error);
+        throw crashError.error
+      }
     })
   },
 
@@ -200,7 +218,12 @@ return {
     // These kind of race conditions are already delt with within smoldot.
     console.assert(chains.has(chainId));
     chains.delete(chainId);
-    state.instance.exports.remove_chain(chainId);
+    try {
+      state.instance.exports.remove_chain(chainId);
+    } catch(_error) {
+      console.assert(crashError.error);
+      throw crashError.error
+    }
   },
 
   databaseContent: (chainId: number, maxUtf8BytesSize?: number): Promise<string> => {
@@ -232,9 +255,14 @@ return {
     const twoPower31 = (1 << 30) * 2;  // `1 << 31` in JavaScript doesn't give the value that you expect.
     const converted = (cappedMaxSize >= twoPower31) ?
       (cappedMaxSize - twoPower32) : cappedMaxSize;
-    state.instance.exports.database_content(chainId, converted);
 
-    return promise;
+    try {
+      state.instance.exports.database_content(chainId, converted);
+      return promise;
+    } catch(_error) {
+      console.assert(crashError.error);
+      throw crashError.error
+    }
   }
 }
 
