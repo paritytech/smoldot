@@ -453,10 +453,9 @@ export function start(options?: ClientOptions): Client {
     },
     terminate: async () => {
       if (instanceError)
-        return Promise.reject(instanceError)
+        throw instanceError
       instanceError = new AlreadyDestroyedError();
-      // TODO: restore
-      //return workerTerminate(instance)
+      instance.startShutdown()
     }
   }
 }

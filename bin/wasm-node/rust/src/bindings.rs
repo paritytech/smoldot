@@ -280,6 +280,15 @@ pub extern "C" fn init(max_log_level: u32, enable_current_task: u32, cpu_rate_li
     crate::init(max_log_level, enable_current_task, cpu_rate_limit)
 }
 
+/// Instructs the client to start shutting down.
+///
+/// Later, the client will use `exit` to stop.
+// TODO: can this be called multiple times?
+#[no_mangle]
+pub extern "C" fn start_shutdown() {
+    crate::start_shutdown()
+}
+
 /// Allocates a buffer of the given length, with an alignment of 1.
 ///
 /// This must be used in the context of [`add_chain`] and other functions that similarly require

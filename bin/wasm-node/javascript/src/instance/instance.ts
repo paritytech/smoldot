@@ -39,6 +39,7 @@ export interface Instance {
   addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], jsonRpcCallback?: (response: string) => void) => Promise<{ success: true, chainId: number } | { success: false, error: string }>
   removeChain: (chainId: number) => void
   databaseContent: (chainId: number, maxUtf8BytesSize?: number) => Promise<string>
+  startShutdown: () => void
 }
 
 export function start(configMessage: Config): Instance {
@@ -54,6 +55,8 @@ export function start(configMessage: Config): Instance {
 
   const workerCurrentTask: { name: string | null } = { name: null };
 
+  const printError = { printError: true }
+
   // Contains the information of each chain that is currently alive.
   let chains: Map<number, {
     jsonRpcCallback?: (response: string) => void,
@@ -65,6 +68,8 @@ export function start(configMessage: Config): Instance {
     onWasmPanic: (message) => {
       // TODO: consider obtaining a backtrace here
       crashError.error = new CrashError(message);
+      if (!printError.printError)
+        return;
       console.error(
         "Smoldot has panicked" +
         (workerCurrentTask.name ? (" while executing task `" + workerCurrentTask.name + "`") : "") +
@@ -265,6 +270,21 @@ export function start(configMessage: Config): Instance {
         console.assert(crashError.error);
         throw crashError.error
       }
+    },
+
+    startShutdown: () => {
+      return queueOperation((instance) => {
+        if (crashError.error)
+          throw crashError.error;
+
+        try {
+          instance.exports.start_shutdown()
+          printError.printError = false
+        } catch (_error) {
+          console.assert(crashError.error);
+          throw crashError.error
+        }
+      })
     }
   }
 
