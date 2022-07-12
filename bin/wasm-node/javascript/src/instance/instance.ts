@@ -279,15 +279,19 @@ export function start(configMessage: Config): Instance {
 
     startShutdown: () => {
       return queueOperation((instance) => {
+        // `startShutdown` is a bit special in its handling of crashes.
+        // Shutting down will lead to `onWasmPanic` being called at some point, possibly during
+        // the call to `start_shutdown` itself. As such, we move into "don't print errors anymore"
+        // mode even before calling `start_shutdown`.
+        //
+        // Furthermore, if a crash happened in the past, there is no point in throwing an
+        // exception when the user wants the shutdown to happen.
         if (crashError.error)
-          throw crashError.error;
-
+          return;
         try {
-          instance.exports.start_shutdown()
           printError.printError = false
+          instance.exports.start_shutdown()
         } catch (_error) {
-          console.assert(crashError.error);
-          throw crashError.error
         }
       })
     }
