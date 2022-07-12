@@ -23,7 +23,7 @@ import { CrashError } from '../client.js';
 /**
  * Contains the configuration of the instance.
  */
- export interface Config {
+export interface Config {
   logCallback: (level: number, target: string, message: string) => void
   maxLogLevel: number;
   enableCurrentTask: boolean;
@@ -43,16 +43,16 @@ export interface Instance {
 
 export function start(configMessage: Config): Instance {
 
-// This variable represents the state of the instance, and serves two different purposes:
-//
-// - At initialization, it is a Promise containing the Wasm VM is still initializing.
-// - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
-//
-let state: { initialized: false, promise: Promise<SmoldotWasmInstance> } | { initialized: true, instance: SmoldotWasmInstance };
+  // This variable represents the state of the instance, and serves two different purposes:
+  //
+  // - At initialization, it is a Promise containing the Wasm VM is still initializing.
+  // - After the Wasm VM has finished initialization, contains the `WebAssembly.Instance` object.
+  //
+  let state: { initialized: false, promise: Promise<SmoldotWasmInstance> } | { initialized: true, instance: SmoldotWasmInstance };
 
-const crashError: { error?: CrashError } = {};
+  const crashError: { error?: CrashError } = {};
 
-const workerCurrentTask: { name: string | null } = { name: null };
+  const workerCurrentTask: { name: string | null } = { name: null };
 
   // Contains the information of each chain that is currently alive.
   let chains: Map<number, {
@@ -60,41 +60,42 @@ const workerCurrentTask: { name: string | null } = { name: null };
     databasePromises: DatabasePromise[],
   }> = new Map();
 
-    // Start initialization of the Wasm VM.
-    const config: instance.Config = {
-      onWasmPanic: (message) => {
-        // TODO: consider obtaining a backtrace here
-        crashError.error = new CrashError(message);
-        console.error(
-          "Smoldot has panicked" +
-          (workerCurrentTask.name ? (" while executing task `" + workerCurrentTask.name + "`") : "") +
-          ". This is a bug in smoldot. Please open an issue at " +
-          "https://github.com/paritytech/smoldot/issues with the following message:\n" +
-          message
-        );
-      },
-      logCallback: (level, target, message) => {
-        configMessage.logCallback(level, target, message)
-      },
-      jsonRpcCallback: (data, chainId) => {
-        const cb = chains.get(chainId)?.jsonRpcCallback;
-        if (cb) cb(data);
-      },
-      databaseContentCallback: (data, chainId) => {
-        const promises = chains.get(chainId)?.databasePromises!;
-        (promises.shift() as DatabasePromise).resolve(data);
-      },
-      currentTaskCallback: (taskName) => {
-        workerCurrentTask.name = taskName
-      },
-      cpuRateLimit: configMessage.cpuRateLimit,
-      forbidTcp: configMessage.forbidTcp,
-      forbidWs: configMessage.forbidWs,
-      forbidNonLocalWs: configMessage.forbidNonLocalWs,
-      forbidWss: configMessage.forbidWss,
-    };
+  // Start initialization of the Wasm VM.
+  const config: instance.Config = {
+    onWasmPanic: (message) => {
+      // TODO: consider obtaining a backtrace here
+      crashError.error = new CrashError(message);
+      console.error(
+        "Smoldot has panicked" +
+        (workerCurrentTask.name ? (" while executing task `" + workerCurrentTask.name + "`") : "") +
+        ". This is a bug in smoldot. Please open an issue at " +
+        "https://github.com/paritytech/smoldot/issues with the following message:\n" +
+        message
+      );
+    },
+    logCallback: (level, target, message) => {
+      configMessage.logCallback(level, target, message)
+    },
+    jsonRpcCallback: (data, chainId) => {
+      const cb = chains.get(chainId)?.jsonRpcCallback;
+      if (cb) cb(data);
+    },
+    databaseContentCallback: (data, chainId) => {
+      const promises = chains.get(chainId)?.databasePromises!;
+      (promises.shift() as DatabasePromise).resolve(data);
+    },
+    currentTaskCallback: (taskName) => {
+      workerCurrentTask.name = taskName
+    },
+    cpuRateLimit: configMessage.cpuRateLimit,
+    forbidTcp: configMessage.forbidTcp,
+    forbidWs: configMessage.forbidWs,
+    forbidNonLocalWs: configMessage.forbidNonLocalWs,
+    forbidWss: configMessage.forbidWss,
+  };
 
-    state = { initialized: false, promise: instance.startInstance(config).then((instance) => {
+  state = {
+    initialized: false, promise: instance.startInstance(config).then((instance) => {
       // `config.cpuRateLimit` is a floating point that should be between 0 and 1, while the value
       // to pass as parameter must be between `0` and `2^32-1`.
       // The few lines of code below should handle all possible values of `number`, including
@@ -110,161 +111,162 @@ const workerCurrentTask: { name: string | null } = { name: null };
 
       state = { initialized: true, instance };
       return instance;
-    }) };
+    })
+  };
 
-async function queueOperation<T>(operation: (instance: SmoldotWasmInstance) => T): Promise<T> {
-  // What to do depends on the type of `state`.
-  // See the documentation of the `state` variable for information.
-  if (!state.initialized) {
-    // A message has been received while the Wasm VM is still initializing. Queue it for when
-    // initialization is over.
-    return state.promise.then((instance) => operation(instance))
+  async function queueOperation<T>(operation: (instance: SmoldotWasmInstance) => T): Promise<T> {
+    // What to do depends on the type of `state`.
+    // See the documentation of the `state` variable for information.
+    if (!state.initialized) {
+      // A message has been received while the Wasm VM is still initializing. Queue it for when
+      // initialization is over.
+      return state.promise.then((instance) => operation(instance))
 
-  } else {
-    // Everything is already initialized. Process the message synchronously.
-    return operation(state.instance)
-  }
-}
-
-return {
-  request: (request: string, chainId: number) => {
-    // Because `request` is passed as parameter an identifier returned by `addChain`, it is
-    // always the case that the Wasm instance is already initialized. The only possibility for
-    // it to not be the case is if the user completely invented the `chainId`.
-    if (!state.initialized)
-      throw new Error("Internal error");
-    if (crashError.error)
-      throw crashError.error;
-
-    try {
-      const len = Buffer.byteLength(request, 'utf8');
-      const ptr = state.instance.exports.alloc(len) >>> 0;
-      Buffer.from(state.instance.exports.memory.buffer).write(request, ptr);
-      state.instance.exports.json_rpc_send(ptr, len, chainId);
-    } catch(_error) {
-      console.assert(crashError.error);
-      throw crashError.error
+    } else {
+      // Everything is already initialized. Process the message synchronously.
+      return operation(state.instance)
     }
-  },
+  }
 
-  addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], jsonRpcCallback?: (response: string) => void): Promise<{ success: true, chainId: number } | { success: false, error: string }> => {
-    return queueOperation((instance) => {
+  return {
+    request: (request: string, chainId: number) => {
+      // Because `request` is passed as parameter an identifier returned by `addChain`, it is
+      // always the case that the Wasm instance is already initialized. The only possibility for
+      // it to not be the case is if the user completely invented the `chainId`.
+      if (!state.initialized)
+        throw new Error("Internal error");
       if (crashError.error)
         throw crashError.error;
 
       try {
-      // Write the chain specification into memory.
-      const chainSpecLen = Buffer.byteLength(chainSpec, 'utf8');
-      const chainSpecPtr = instance.exports.alloc(chainSpecLen) >>> 0;
-      Buffer.from(instance.exports.memory.buffer)
-        .write(chainSpec, chainSpecPtr);
-
-      // Write the database content into memory.
-      const databaseContentLen = Buffer.byteLength(databaseContent, 'utf8');
-      const databaseContentPtr = instance.exports.alloc(databaseContentLen) >>> 0;
-      Buffer.from(instance.exports.memory.buffer)
-        .write(databaseContent, databaseContentPtr);
-
-      // Write the potential relay chains into memory.
-      const potentialRelayChainsLen = potentialRelayChains.length;
-      const potentialRelayChainsPtr = instance.exports.alloc(potentialRelayChainsLen * 4) >>> 0;
-      for (let idx = 0; idx < potentialRelayChains.length; ++idx) {
-        Buffer.from(instance.exports.memory.buffer)
-          .writeUInt32LE(potentialRelayChains[idx]!, potentialRelayChainsPtr + idx * 4);
-      }
-
-      // `add_chain` unconditionally allocates a chain id. If an error occurs, however, this chain
-      // id will refer to an *erroneous* chain. `chain_is_ok` is used below to determine whether it
-      // has succeeeded or not.
-      // Note that `add_chain` properly de-allocates buffers even if it failed.
-      const chainId = instance.exports.add_chain(
-        chainSpecPtr, chainSpecLen,
-        databaseContentPtr, databaseContentLen,
-        !!jsonRpcCallback ? 1 : 0,
-        potentialRelayChainsPtr, potentialRelayChainsLen
-      );
-
-      if (instance.exports.chain_is_ok(chainId) != 0) {
-        console.assert(!chains.has(chainId));
-        chains.set(chainId, {
-          jsonRpcCallback,
-          databasePromises: new Array()
-        });
-        return { success: true, chainId };
-      } else {
-        const errorMsgLen = instance.exports.chain_error_len(chainId) >>> 0;
-        const errorMsgPtr = instance.exports.chain_error_ptr(chainId) >>> 0;
-        const errorMsg = Buffer.from(instance.exports.memory.buffer)
-          .toString('utf8', errorMsgPtr, errorMsgPtr + errorMsgLen);
-        instance.exports.remove_chain(chainId);
-        return { success: false, error: errorMsg };
-      }
-      } catch(_error) {
+        const len = Buffer.byteLength(request, 'utf8');
+        const ptr = state.instance.exports.alloc(len) >>> 0;
+        Buffer.from(state.instance.exports.memory.buffer).write(request, ptr);
+        state.instance.exports.json_rpc_send(ptr, len, chainId);
+      } catch (_error) {
         console.assert(crashError.error);
         throw crashError.error
       }
-    })
-  },
+    },
 
-  removeChain: (chainId: number) => {
-    // Because `removeChain` is passed as parameter an identifier returned by `addChain`, it is
-    // always the case that the Wasm instance is already initialized. The only possibility for
-    // it to not be the case is if the user completely invented the `chainId`.
-    if (!state.initialized)
-      throw new Error("Internal error");
+    addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], jsonRpcCallback?: (response: string) => void): Promise<{ success: true, chainId: number } | { success: false, error: string }> => {
+      return queueOperation((instance) => {
+        if (crashError.error)
+          throw crashError.error;
 
-    // Removing the chain synchronously avoids having to deal with race conditions such as a
-    // JSON-RPC response corresponding to a chain that is going to be deleted but hasn't been yet.
-    // These kind of race conditions are already delt with within smoldot.
-    console.assert(chains.has(chainId));
-    chains.delete(chainId);
-    try {
-      state.instance.exports.remove_chain(chainId);
-    } catch(_error) {
-      console.assert(crashError.error);
-      throw crashError.error
-    }
-  },
+        try {
+          // Write the chain specification into memory.
+          const chainSpecLen = Buffer.byteLength(chainSpec, 'utf8');
+          const chainSpecPtr = instance.exports.alloc(chainSpecLen) >>> 0;
+          Buffer.from(instance.exports.memory.buffer)
+            .write(chainSpec, chainSpecPtr);
 
-  databaseContent: (chainId: number, maxUtf8BytesSize?: number): Promise<string> => {
-    // Because `databaseContent` is passed as parameter an identifier returned by `addChain`, it
-    // is always the case that the Wasm instance is already initialized. The only possibility for
-    // it to not be the case is if the user completely invented the `chainId`.
-    if (!state.initialized)
-      throw new Error("Internal error");
+          // Write the database content into memory.
+          const databaseContentLen = Buffer.byteLength(databaseContent, 'utf8');
+          const databaseContentPtr = instance.exports.alloc(databaseContentLen) >>> 0;
+          Buffer.from(instance.exports.memory.buffer)
+            .write(databaseContent, databaseContentPtr);
 
-    console.assert(chains.has(chainId));
-    const databaseContentPromises = chains.get(chainId)?.databasePromises!;
-    const promise: Promise<string> = new Promise((resolve, reject) => {
-      databaseContentPromises.push({ resolve, reject });
-    });
+          // Write the potential relay chains into memory.
+          const potentialRelayChainsLen = potentialRelayChains.length;
+          const potentialRelayChainsPtr = instance.exports.alloc(potentialRelayChainsLen * 4) >>> 0;
+          for (let idx = 0; idx < potentialRelayChains.length; ++idx) {
+            Buffer.from(instance.exports.memory.buffer)
+              .writeUInt32LE(potentialRelayChains[idx]!, potentialRelayChainsPtr + idx * 4);
+          }
 
-    // Cap `maxUtf8BytesSize` and set a default value.
-    const twoPower32 = (1 << 30) * 4;  // `1 << 31` and `1 << 32` in JavaScript don't give the value that you expect.
-    const maxSize = maxUtf8BytesSize || (twoPower32 - 1);
-    const cappedMaxSize = (maxSize >= twoPower32) ? (twoPower32 - 1) : maxSize;
+          // `add_chain` unconditionally allocates a chain id. If an error occurs, however, this chain
+          // id will refer to an *erroneous* chain. `chain_is_ok` is used below to determine whether it
+          // has succeeeded or not.
+          // Note that `add_chain` properly de-allocates buffers even if it failed.
+          const chainId = instance.exports.add_chain(
+            chainSpecPtr, chainSpecLen,
+            databaseContentPtr, databaseContentLen,
+            !!jsonRpcCallback ? 1 : 0,
+            potentialRelayChainsPtr, potentialRelayChainsLen
+          );
 
-    // The value of `maxUtf8BytesSize` is guaranteed to always fit in 32 bits, in
-    // other words, that `maxUtf8BytesSize < (1 << 32)`.
-    // We need to perform a conversion in such a way that the the bits of the output of
-    // `ToInt32(converted)`, when interpreted as u32, is equal to `maxUtf8BytesSize`.
-    // See ToInt32 here: https://tc39.es/ecma262/#sec-toint32
-    // Note that the code below has been tested against example values. Please be very careful
-    // if you decide to touch it. Ideally it would be unit-tested, but since it concerns the FFI
-    // layer between JS and Rust, writing unit tests would be extremely complicated.
-    const twoPower31 = (1 << 30) * 2;  // `1 << 31` in JavaScript doesn't give the value that you expect.
-    const converted = (cappedMaxSize >= twoPower31) ?
-      (cappedMaxSize - twoPower32) : cappedMaxSize;
+          if (instance.exports.chain_is_ok(chainId) != 0) {
+            console.assert(!chains.has(chainId));
+            chains.set(chainId, {
+              jsonRpcCallback,
+              databasePromises: new Array()
+            });
+            return { success: true, chainId };
+          } else {
+            const errorMsgLen = instance.exports.chain_error_len(chainId) >>> 0;
+            const errorMsgPtr = instance.exports.chain_error_ptr(chainId) >>> 0;
+            const errorMsg = Buffer.from(instance.exports.memory.buffer)
+              .toString('utf8', errorMsgPtr, errorMsgPtr + errorMsgLen);
+            instance.exports.remove_chain(chainId);
+            return { success: false, error: errorMsg };
+          }
+        } catch (_error) {
+          console.assert(crashError.error);
+          throw crashError.error
+        }
+      })
+    },
 
-    try {
-      state.instance.exports.database_content(chainId, converted);
-      return promise;
-    } catch(_error) {
-      console.assert(crashError.error);
-      throw crashError.error
+    removeChain: (chainId: number) => {
+      // Because `removeChain` is passed as parameter an identifier returned by `addChain`, it is
+      // always the case that the Wasm instance is already initialized. The only possibility for
+      // it to not be the case is if the user completely invented the `chainId`.
+      if (!state.initialized)
+        throw new Error("Internal error");
+
+      // Removing the chain synchronously avoids having to deal with race conditions such as a
+      // JSON-RPC response corresponding to a chain that is going to be deleted but hasn't been yet.
+      // These kind of race conditions are already delt with within smoldot.
+      console.assert(chains.has(chainId));
+      chains.delete(chainId);
+      try {
+        state.instance.exports.remove_chain(chainId);
+      } catch (_error) {
+        console.assert(crashError.error);
+        throw crashError.error
+      }
+    },
+
+    databaseContent: (chainId: number, maxUtf8BytesSize?: number): Promise<string> => {
+      // Because `databaseContent` is passed as parameter an identifier returned by `addChain`, it
+      // is always the case that the Wasm instance is already initialized. The only possibility for
+      // it to not be the case is if the user completely invented the `chainId`.
+      if (!state.initialized)
+        throw new Error("Internal error");
+
+      console.assert(chains.has(chainId));
+      const databaseContentPromises = chains.get(chainId)?.databasePromises!;
+      const promise: Promise<string> = new Promise((resolve, reject) => {
+        databaseContentPromises.push({ resolve, reject });
+      });
+
+      // Cap `maxUtf8BytesSize` and set a default value.
+      const twoPower32 = (1 << 30) * 4;  // `1 << 31` and `1 << 32` in JavaScript don't give the value that you expect.
+      const maxSize = maxUtf8BytesSize || (twoPower32 - 1);
+      const cappedMaxSize = (maxSize >= twoPower32) ? (twoPower32 - 1) : maxSize;
+
+      // The value of `maxUtf8BytesSize` is guaranteed to always fit in 32 bits, in
+      // other words, that `maxUtf8BytesSize < (1 << 32)`.
+      // We need to perform a conversion in such a way that the the bits of the output of
+      // `ToInt32(converted)`, when interpreted as u32, is equal to `maxUtf8BytesSize`.
+      // See ToInt32 here: https://tc39.es/ecma262/#sec-toint32
+      // Note that the code below has been tested against example values. Please be very careful
+      // if you decide to touch it. Ideally it would be unit-tested, but since it concerns the FFI
+      // layer between JS and Rust, writing unit tests would be extremely complicated.
+      const twoPower31 = (1 << 30) * 2;  // `1 << 31` in JavaScript doesn't give the value that you expect.
+      const converted = (cappedMaxSize >= twoPower31) ?
+        (cappedMaxSize - twoPower32) : cappedMaxSize;
+
+      try {
+        state.instance.exports.database_content(chainId, converted);
+        return promise;
+      } catch (_error) {
+        console.assert(crashError.error);
+        throw crashError.error
+      }
     }
   }
-}
 
 }
 
