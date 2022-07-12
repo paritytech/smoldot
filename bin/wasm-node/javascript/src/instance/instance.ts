@@ -49,6 +49,8 @@ export function start(configMessage: Config): Instance {
 //
 let state: { initialized: false, promise: Promise<SmoldotWasmInstance> } | { initialized: true, instance: SmoldotWasmInstance };
 
+const workerCurrentTask: { name: string | null } = { name: null };
+
   // Contains the information of each chain that is currently alive.
   let chains: Map<number, {
     jsonRpcCallback?: (response: string) => void,
@@ -57,6 +59,17 @@ let state: { initialized: false, promise: Promise<SmoldotWasmInstance> } | { ini
 
     // Start initialization of the Wasm VM.
     const config: instance.Config = {
+      onWasmPanic: (message) => {
+        // TODO: must remember that a panic happened and not invoke any other function
+        // TODO: must add try-catch blocks when invoking Wasm VM
+        console.error(
+          "Smoldot has panicked" +
+          (workerCurrentTask.name ? (" while executing task `" + workerCurrentTask.name + "`") : "") +
+          ". This is a bug in smoldot. Please open an issue at " +
+          "https://github.com/paritytech/smoldot/issues with the following message:\n" +
+          message
+        );
+      },
       logCallback: (level, target, message) => {
         configMessage.logCallback(level, target, message)
       },
@@ -68,8 +81,8 @@ let state: { initialized: false, promise: Promise<SmoldotWasmInstance> } | { ini
         const promises = chains.get(chainId)?.databasePromises!;
         (promises.shift() as DatabasePromise).resolve(data);
       },
-      currentTaskCallback: (_taskName) => {
-        // TODO: do something here?
+      currentTaskCallback: (taskName) => {
+        workerCurrentTask.name = taskName
       },
       cpuRateLimit: configMessage.cpuRateLimit,
       forbidTcp: configMessage.forbidTcp,

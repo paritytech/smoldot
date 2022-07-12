@@ -19,7 +19,7 @@ import pako from 'pako';
 
 import { Buffer } from 'buffer';
 
-import { Config as SmoldotBindingsConfig, default as smolditLightBindingsBuilder } from './bindings-smoldot-light.js';
+import { Config as SmoldotBindingsConfig, default as smoldotLightBindingsBuilder } from './bindings-smoldot-light.js';
 import { Config as WasiConfig, default as wasiBindingsBuilder } from './bindings-wasi.js';
 
 import { default as wasmBase64 } from './autogen/wasm.js';
@@ -27,6 +27,18 @@ import { default as wasmBase64 } from './autogen/wasm.js';
 import { SmoldotWasmInstance } from './bindings.js';
 
 export interface Config {
+    /**
+     * Closure to call when the Wasm instance panics.
+     *
+     * This callback will always be invoked from within a binding called the Wasm instance.
+     *
+     * After this callback has been called, it is forbidden to invoke any function from the Wasm
+     * VM.
+     *
+     * If this callback is called while invoking a function from the Wasm VM, this function will
+     * throw a dummy exception.
+     */
+    onWasmPanic: (message: string) => void,
     logCallback: (level: number, target: string, message: string) => void,
     jsonRpcCallback: (response: string, chainId: number) => void,
     databaseContentCallback: (data: string, chainId: number) => void,
@@ -45,10 +57,14 @@ export async function startInstance(config: Config): Promise<SmoldotWasmInstance
     // cross-platform cross-bundler approach.
     const wasmBytecode = pako.inflate(new Uint8Array(Buffer.from(wasmBase64, 'base64')));
 
+    let killAll: () => void;
+
     // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
     const smoldotJsConfig: SmoldotBindingsConfig = {
         onPanic: (message) => {
-            throw new Error(message);
+            killAll();
+            config.onWasmPanic(message);
+            throw new Error();
         },
         ...config
     };
@@ -56,15 +72,24 @@ export async function startInstance(config: Config): Promise<SmoldotWasmInstance
     // Used to bind with the Wasi bindings. See the `bindings-wasi.js` file.
     const wasiConfig: WasiConfig = {
         envVars: [],
-        onProcExit: (retCode) => { throw new Error(`proc_exit called: ${retCode}`); }
+        onProcExit: (retCode) => {
+            killAll();
+            config.onWasmPanic(`proc_exit called: ${retCode}`)
+            throw new Error();
+        }
     };
+
+    const { imports: smoldotBindings, killAll: smoldotBindingsKillAll } =
+        smoldotLightBindingsBuilder(smoldotJsConfig);
+
+    killAll = smoldotBindingsKillAll;
 
     // Start the Wasm virtual machine.
     // The Rust code defines a list of imports that must be fulfilled by the environment. The second
     // parameter provides their implementations.
     const result = await WebAssembly.instantiate(wasmBytecode, {
         // The functions with the "smoldot" prefix are specific to smoldot.
-        "smoldot": smolditLightBindingsBuilder(smoldotJsConfig),
+        "smoldot": smoldotBindings,
         // As the Rust code is compiled for wasi, some more wasi-specific imports exist.
         "wasi_snapshot_preview1": wasiBindingsBuilder(wasiConfig),
     });

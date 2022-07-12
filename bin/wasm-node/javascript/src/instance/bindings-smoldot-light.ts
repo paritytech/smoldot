@@ -45,12 +45,25 @@ export interface Config {
     forbidWss: boolean,
 }
 
-export default function (config: Config): compat.WasmModuleImports {
+export default function (config: Config): { imports: compat.WasmModuleImports, killAll: () => void } {
     // Used below to store the list of all connections.
     // The indices within this array are chosen by the Rust code.
     let connections: Record<number, connection.Connection> = {};
 
-    return {
+    // Object containing a boolean indicating whether the `killAll` function has been invoked by
+    // the user.
+    const killedTracked = { killed: false };
+
+    const killAll = () => {
+        killedTracked.killed = true;
+        // TODO: kill timers as well?
+        for (const connection in connections) {
+            connections[connection]!.close()
+            delete connections[connection]
+        }
+    };
+
+    const imports = {
         // Must exit with an error. A human-readable message can be found in the WebAssembly
         // memory in the given buffer.
         panic: (ptr: number, len: number) => {
@@ -65,6 +78,8 @@ export default function (config: Config): compat.WasmModuleImports {
 
         // Used by the Rust side to emit a JSON-RPC response or subscription notification.
         json_rpc_respond: (ptr: number, len: number, chainId: number) => {
+            if (killedTracked.killed) return;
+
             const instance = config.instance!;
 
             ptr >>>= 0;
@@ -78,6 +93,8 @@ export default function (config: Config): compat.WasmModuleImports {
 
         // Used by the Rust side in response to asking for the database content of a chain.
         database_content_ready: (ptr: number, len: number, chainId: number) => {
+            if (killedTracked.killed) return;
+
             const instance = config.instance!;
 
             ptr >>>= 0;
@@ -92,6 +109,8 @@ export default function (config: Config): compat.WasmModuleImports {
         // Used by the Rust side to emit a log entry.
         // See also the `max_log_level` parameter in the configuration.
         log: (level: number, targetPtr: number, targetLen: number, messagePtr: number, messageLen: number) => {
+            if (killedTracked.killed) return;
+
             const instance = config.instance!;
 
             targetPtr >>>= 0;
@@ -116,6 +135,8 @@ export default function (config: Config): compat.WasmModuleImports {
 
         // Must call `timer_finished` after the given number of milliseconds has elapsed.
         start_timer: (id: number, ms: number) => {
+            if (killedTracked.killed) return;
+
             const instance = config.instance!;
 
             // In both NodeJS and browsers, if `setTimeout` is called with a value larger than
@@ -130,11 +151,17 @@ export default function (config: Config): compat.WasmModuleImports {
             // with `1`) and wants you to use `setImmediate` instead.
             if (ms == 0 && typeof setImmediate === "function") {
                 setImmediate(() => {
-                    instance.exports.timer_finished(id);
+                    if (killedTracked.killed) return;
+                    try {
+                        instance.exports.timer_finished(id);
+                    } catch(_error) {}
                 })
             } else {
                 setTimeout(() => {
-                    instance.exports.timer_finished(id);
+                    if (killedTracked.killed) return;
+                    try {
+                        instance.exports.timer_finished(id);
+                    } catch(_error) {}
                 }, ms)
             }
         },
@@ -153,6 +180,9 @@ export default function (config: Config): compat.WasmModuleImports {
             }
 
             try {
+                if (killedTracked.killed)
+                    throw new Error("killAll invoked");
+
                 const address = Buffer.from(instance.exports.memory.buffer)
                     .toString('utf8', addrPtr, addrPtr + addrLen);
 
@@ -163,18 +193,27 @@ export default function (config: Config): compat.WasmModuleImports {
                     forbidNonLocalWs: config.forbidNonLocalWs,
                     forbidWss: config.forbidWss,
                     onOpen: () => {
-                        instance.exports.connection_open_single_stream(connectionId);
+                        if (killedTracked.killed) return;
+                        try {
+                            instance.exports.connection_open_single_stream(connectionId);
+                        } catch(_error) {}
                     },
                     onClose: (message: string) => {
-                        const len = Buffer.byteLength(message, 'utf8');
-                        const ptr = instance.exports.alloc(len) >>> 0;
-                        Buffer.from(instance.exports.memory.buffer).write(message, ptr);
-                        instance.exports.connection_closed(connectionId, ptr, len);
+                        if (killedTracked.killed) return;
+                        try {
+                            const len = Buffer.byteLength(message, 'utf8');
+                            const ptr = instance.exports.alloc(len) >>> 0;
+                            Buffer.from(instance.exports.memory.buffer).write(message, ptr);
+                            instance.exports.connection_closed(connectionId, ptr, len);
+                        } catch(_error) {}
                     },
                     onMessage: (message: Buffer) => {
-                        const ptr = instance.exports.alloc(message.length) >>> 0;
-                        message.copy(Buffer.from(instance.exports.memory.buffer), ptr);
-                        instance.exports.stream_message(connectionId, 0, ptr, message.length);
+                        if (killedTracked.killed) return;
+                        try {
+                            const ptr = instance.exports.alloc(message.length) >>> 0;
+                            message.copy(Buffer.from(instance.exports.memory.buffer), ptr);
+                            instance.exports.stream_message(connectionId, 0, ptr, message.length);
+                        } catch(_error) {}
                     }
                 });
 
@@ -200,6 +239,7 @@ export default function (config: Config): compat.WasmModuleImports {
 
         // Must close and destroy the connection object.
         connection_close: (connectionId: number) => {
+            if (killedTracked.killed) return;
             const connection = connections[connectionId]!;
             connection.close();
             delete connections[connectionId];
@@ -220,6 +260,8 @@ export default function (config: Config): compat.WasmModuleImports {
         // Must queue the data found in the WebAssembly memory at the given pointer. It is assumed
         // that this function is called only when the connection is in an open state.
         stream_send: (connectionId: number, _streamId: number, ptr: number, len: number) => {
+            if (killedTracked.killed) return;
+    
             const instance = config.instance!;
 
             ptr >>>= 0;
@@ -231,6 +273,8 @@ export default function (config: Config): compat.WasmModuleImports {
         },
 
         current_task_entered: (ptr: number, len: number) => {
+            if (killedTracked.killed) return;
+
             const instance = config.instance!;
 
             ptr >>>= 0;
@@ -242,8 +286,11 @@ export default function (config: Config): compat.WasmModuleImports {
         },
 
         current_task_exit: () => {
+            if (killedTracked.killed) return;
             if (config.currentTaskCallback)
                 config.currentTaskCallback(null);
         }
     };
+
+    return { imports, killAll }
 }
