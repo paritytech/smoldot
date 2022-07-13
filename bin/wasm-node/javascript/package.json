@@ -30,7 +30,8 @@
     "test": "node prepare.mjs --debug && rimraf ./dist && npm run buildAll && ava --timeout=2m --concurrency 2 --no-worker-threads"
   },
   "browser": {
-    "./dist/mjs/compat/index.js": "./dist/mjs/compat/index-browser-overwrite.js"
+    "./dist/mjs/compat/index.js": "./dist/mjs/compat/index-browser-overwrite.js",
+    "./dist/cjs/compat/index.js": "./dist/cjs/compat/index-browser-overwrite.js"
   },
   "dependencies": {
     "buffer": "^6.0.1",
