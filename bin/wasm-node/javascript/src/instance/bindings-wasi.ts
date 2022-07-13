@@ -181,7 +181,7 @@ export default (config: Config): compat.WasmModuleImports => {
 
                 mem.set(encoded, argvBuf + argvBufPos);
                 argvBufPos += encoded.length;
-                mem[argvBuf + argvBufPos] = 0;
+                buffer.writeUInt8(mem, argvBuf + argvBufPos, 0);
                 argvBufPos += 1;
             });
 

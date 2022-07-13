@@ -28,6 +28,17 @@ export function readUInt32LE(buffer: Uint8Array, offset: number): number {
     return (buffer[offset]! | (buffer[offset + 1]! << 8) | (buffer[offset + 2]! << 16)) + (buffer[offset + 3]! * 0x1000000)
 }
 
+/**
+ * Sets the value of a given byte in the buffer.
+ *
+ * This function is equivalent to `buffer[offset] = value`, except that an exception is thrown
+ * if `offset` is out of range.
+ */
+export function writeUInt8(buffer: Uint8Array, offset: number, value: number) {
+    checkRange(buffer, offset, 1)
+    buffer[offset] = value & 0xff
+}
+
 export function writeUInt32LE(buffer: Uint8Array, offset: number, value: number) {
     checkRange(buffer, offset, 4);
     buffer[offset + 3] = (value >>> 24) & 0xff

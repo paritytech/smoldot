@@ -230,7 +230,7 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
                 mem.set(encoded, ptr);
                 buffer.writeUInt32LE(mem, errorPtrPtr, ptr);
                 buffer.writeUInt32LE(mem, errorPtrPtr + 4, encoded.length);
-                mem[errorPtrPtr + 8] = (isBadAddress ? 1 : 0);
+                buffer.writeUInt8(mem, errorPtrPtr + 8, isBadAddress ? 1 : 0);
                 return 1;
             }
         },
