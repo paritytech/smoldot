@@ -428,8 +428,10 @@ export function start(options?: ClientOptions): Client {
             throw new AlreadyDestroyedError();
           if (!options.jsonRpcCallback)
             throw new JsonRpcDisabledError();
-          if (request.length >= 8 * 1024 * 1024)
-            return;
+          if (request.length >= 64 * 1024 * 1024) {
+            console.error("Client.sendJsonRpc ignored a JSON-RPC request because it was too large (" + request.length + " bytes)");
+            return
+          };
           instance.request(request, chainId);
         },
         databaseContent: (maxUtf8BytesSize) => {
