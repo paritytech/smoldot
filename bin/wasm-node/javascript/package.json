@@ -26,7 +26,7 @@
     "buildAll": "tsc -p tsconfig-mjs.json && tsc -p tsconfig-cjs.json && bash fix-package-type",
     "prepublishOnly": "node prepare.mjs --release && rimraf ./dist && npm run buildAll",
     "build": "node prepare.mjs --release && rimraf ./dist && npm run buildAll",
-    "demo": "node prepare.mjs --debug && rimraf ./dist && npm run buildAll && node demo/demo.mjs",
+    "start": "node prepare.mjs --debug && rimraf ./dist && npm run buildAll && node demo/demo.mjs",
     "test": "node prepare.mjs --debug && rimraf ./dist && npm run buildAll && ava --timeout=2m --concurrency 2 --no-worker-threads"
   },
   "browser": {
