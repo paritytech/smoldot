@@ -786,12 +786,17 @@ impl ReadyToRun {
             }};
         }
 
-        // TODO: implement properly and use an enum instead;  cc https://github.com/paritytech/smoldot/issues/1967
         macro_rules! expect_state_version {
             ($num:expr) => {{
                 match &params[$num] {
                     vm::WasmValue::I32(0) => trie::TrieEntryVersion::V0,
                     vm::WasmValue::I32(1) => trie::TrieEntryVersion::V1,
+                    vm::WasmValue::I32(_) => {
+                        return HostVm::Error {
+                            error: Error::ParamDecodeError,
+                            prototype: self.inner.into_prototype(),
+                        }
+                    }
                     v => {
                         return HostVm::Error {
                             error: Error::WrongParamTy {
