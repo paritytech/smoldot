@@ -26,7 +26,6 @@
     "./dist/compat/index.js": "./dist/compat/index-browser-overwrite.js"
   },
   "dependencies": {
-    "buffer": "^6.0.1",
     "pako": "^2.0.4",
     "websocket": "^1.0.32"
   },

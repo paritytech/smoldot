@@ -15,7 +15,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { Buffer } from 'buffer';
 import Websocket from 'websocket';
 import * as compat from '../compat/index.js';
 
@@ -59,7 +58,7 @@ export interface Connection {
      *
      * The connection must currently be in the `Open` state.
      */
-    send(data: Buffer): void;
+    send(data: Uint8Array): void;
 }
 
 /**
@@ -95,7 +94,7 @@ export interface Config {
      *
      * Can only happen while the connection is in the `Open` state.
      */
-    onMessage: (message: Buffer) => void;
+    onMessage: (message: Uint8Array) => void;
 }
 
 /**
@@ -153,7 +152,7 @@ export function connect(config: Config): Connection {
             config.onClose(message);
         };
         connection.socket.onmessage = (msg) => {
-            config.onMessage(Buffer.from(msg.data as ArrayBuffer));
+            config.onMessage(new Uint8Array(msg.data as ArrayBuffer));
         };
 
     } else if (tcpParsed != null) {
@@ -184,7 +183,7 @@ export function connect(config: Config): Connection {
         connection.socket.on('error', () => { });
         connection.socket.on('data', (message) => {
             if (socket.destroyed) return;
-            config.onMessage(message);
+            config.onMessage(new Uint8Array(message.buffer));
         });
 
     } else {
@@ -208,7 +207,7 @@ export function connect(config: Config): Connection {
             }
         },
 
-        send: (data: Buffer): void => {
+        send: (data: Uint8Array): void => {
             if (connection.ty == 'websocket') {
                 // WebSocket
                 connection.socket.send(data);

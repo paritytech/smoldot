@@ -23,7 +23,7 @@
 //! In order to use this code, call the function passing an object, then fill the `instance` field
 //! of that object with the Wasm instance.
 
-import { Buffer } from 'buffer';
+import * as buffer from './buffer.js';
 import * as compat from '../compat/index.js';
 import type { SmoldotWasmInstance } from './bindings.js';
 
@@ -61,7 +61,7 @@ export default (config: Config): compat.WasmModuleImports => {
             ptr >>>= 0;
             len >>>= 0;
 
-            const baseBuffer = Buffer.from(instance.exports.memory.buffer)
+            const baseBuffer = new Uint8Array(instance.exports.memory.buffer)
                 .slice(ptr, ptr + len);
             for (let iter = 0; iter < len; iter += 65536) {
                 // `baseBuffer.slice` automatically saturates at the end of the buffer
@@ -82,16 +82,16 @@ export default (config: Config): compat.WasmModuleImports => {
                 return 8;
             }
 
-            const mem = Buffer.from(instance.exports.memory.buffer);
+            const mem = new Uint8Array(instance.exports.memory.buffer);
 
             // `fd_write` passes a buffer containing itself a list of pointers and lengths to the
             // actual buffers. See writev(2).
             let toWrite = "";
             let totalLength = 0;
             for (let i = 0; i < num; i++) {
-                const buf = mem.readUInt32LE(addr + 4 * i * 2);
-                const bufLen = mem.readUInt32LE(addr + 4 * (i * 2 + 1));
-                toWrite += mem.toString('utf8', buf, buf + bufLen);
+                const buf = buffer.readUInt32LE(mem, addr + 4 * i * 2);
+                const bufLen = buffer.readUInt32LE(mem, addr + 4 * (i * 2 + 1));
+                toWrite += buffer.utf8BytesToString(mem, buf, bufLen);
                 totalLength += bufLen;
             }
 
@@ -126,7 +126,7 @@ export default (config: Config): compat.WasmModuleImports => {
             }
 
             // Need to write in `out_ptr` how much data was "written".
-            mem.writeUInt32LE(totalLength, outPtr);
+            buffer.writeUInt32LE(mem, outPtr, totalLength);
             return 0;
         },
 
@@ -149,11 +149,11 @@ export default (config: Config): compat.WasmModuleImports => {
             argvBufSizeOut >>>= 0;
 
             let totalLen = 0;
-            config.envVars.forEach(e => totalLen += Buffer.byteLength(e, 'utf8') + 1); // +1 for trailing \0
+            config.envVars.forEach(e => totalLen += new TextEncoder().encode(e).length + 1); // +1 for trailing \0
 
-            const mem = Buffer.from(instance.exports.memory.buffer);
-            mem.writeUInt32LE(config.envVars.length, argcOut);
-            mem.writeUInt32LE(totalLen, argvBufSizeOut);
+            const mem = new Uint8Array(instance.exports.memory.buffer);
+            buffer.writeUInt32LE(mem, argcOut, config.envVars.length);
+            buffer.writeUInt32LE(mem, argvBufSizeOut, totalLen);
             return 0;
         },
 
@@ -168,20 +168,20 @@ export default (config: Config): compat.WasmModuleImports => {
             argv >>>= 0;
             argvBuf >>>= 0;
 
-            const mem = Buffer.from(instance.exports.memory.buffer);
+            const mem = new Uint8Array(instance.exports.memory.buffer);
 
             let argvPos = 0;
             let argvBufPos = 0;
 
             config.envVars.forEach(envVar => {
-                let envVarLen = Buffer.byteLength(envVar, 'utf8');
+                const encoded = new TextEncoder().encode(envVar);
 
-                mem.writeUInt32LE(argvBuf + argvBufPos, argv + argvPos);
+                buffer.writeUInt32LE(mem, argv + argvPos, argvBuf + argvBufPos);
                 argvPos += 4;
 
-                mem.write(envVar, argvBuf + argvBufPos, envVarLen, 'utf8');
-                argvBufPos += envVarLen;
-                mem.writeUInt8(0, argvBuf + argvBufPos);
+                mem.set(encoded, argvBuf + argvBufPos);
+                argvBufPos += encoded.length;
+                mem[argvBuf + argvBufPos] = 0;
                 argvBufPos += 1;
             });
 
