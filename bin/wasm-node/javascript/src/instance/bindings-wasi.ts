@@ -37,6 +37,13 @@ export interface Config {
      * Must never be modified after the bindings have been initialized.
      */
     envVars: string[],
+
+    /**
+     * Closure to call when the Wasm instance calls `proc_exit`.
+     *
+     * This callback will always be invoked from within a binding called the Wasm instance.
+     */
+    onProcExit: (retCode: number) => never,
 }
 
 export default (config: Config): compat.WasmModuleImports => {
@@ -130,7 +137,7 @@ export default (config: Config): compat.WasmModuleImports => {
 
         // Used by Rust in catastrophic situations, such as a double panic.
         proc_exit: (retCode: number) => {
-            throw new Error(`proc_exit called: ${retCode}`);
+            config.onProcExit(retCode)
         },
 
         // Return the number of environment variables and the total size of all environment

@@ -29,7 +29,7 @@ test('too large json-rpc requests rejected', async t => {
   // Generate a very long string. We start with a length of 1 and double for every iteration.
   // Thus the final length of the string is `2^i` where `i` is the number of iterations.
   let veryLongString = 'a';
-  for (let i = 0; i < 24; ++i) {
+  for (let i = 0; i < 27; ++i) {
     veryLongString += veryLongString;
   }
 
