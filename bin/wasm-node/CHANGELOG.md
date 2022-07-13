@@ -4,7 +4,7 @@
 
 ### Added
 
-- Add support for CommonJS projects [#2487](https://github.com/paritytech/smoldot/pull/2487)
+- Add support for CommonJS projects. ([#2487](https://github.com/paritytech/smoldot/pull/2487))
 
 ### Changed
 
