@@ -125,6 +125,11 @@ fn init(max_log_level: u32, enable_current_task: u32, cpu_rate_limit: u32) {
     *client_lock = Some(init_out);
 }
 
+fn start_shutdown() {
+    // TODO: do this in a clean way
+    std::process::exit(0)
+}
+
 fn add_chain(
     chain_spec_pointer: u32,
     chain_spec_len: u32,
