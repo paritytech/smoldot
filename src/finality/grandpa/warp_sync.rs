@@ -84,11 +84,14 @@ pub struct Verifier {
     authorities_list: Vec<GrandpaAuthority>,
     fragments: Vec<WarpSyncFragment>,
     is_proof_complete: bool,
+
+    block_number_bytes: usize,
 }
 
 impl Verifier {
     pub fn new(
         start_chain_information_finality: ChainInformationFinalityRef,
+        block_number_bytes: usize,
         warp_sync_response_fragments: Vec<WarpSyncFragment>,
         is_proof_complete: bool,
     ) -> Self {
@@ -116,6 +119,7 @@ impl Verifier {
             authorities_list,
             fragments: warp_sync_response_fragments,
             is_proof_complete,
+            block_number_bytes,
         }
     }
 
@@ -139,19 +143,21 @@ impl Verifier {
         let justification = finality::justification::decode::decode_partial_grandpa(
             // TODO: don't use decode_partial but decode
             &fragment.scale_encoded_justification,
+            self.block_number_bytes,
         )
         .map_err(Error::InvalidJustification)?
         .0;
         if *justification.target_hash != fragment_header_hash {
             return Err(Error::TargetHashMismatch {
                 justification_target_hash: *justification.target_hash,
-                justification_target_height: justification.target_number.into(), // TODO: some u32/u64 mismatch here; figure out
+                justification_target_height: justification.target_number,
                 header_hash: fragment_header_hash,
             });
         }
 
         verify(VerifyConfig {
             justification,
+            block_number_bytes: self.block_number_bytes,
             authorities_list: self.authorities_list.iter().map(|a| &a.public_key),
             authorities_set_id: self.authorities_set_id,
         })

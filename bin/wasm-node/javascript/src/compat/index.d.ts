@@ -22,20 +22,6 @@ import type { Socket as TcpSocket, NetConnectOpts } from 'node:net';
 
 export type WasmModuleImports = WebAssembly.ModuleImports;
 
-export class CompatWorker {
-    postMessage(value: any, transferList?: ReadonlyArray<ArrayBuffer | Blob>): void;
-}
-
-export function workerOnMessage(worker: CompatWorker, callback: (value: any) => void): void;
-
-export function workerOnError(worker: CompatWorker, callback: (err: Error) => void): void;
-
-export function workerTerminate(worker: CompatWorker): Promise<void>;
-
-export function postMessage(message: any): void;
-
-export function setOnMessage(callback: (message: any) => void): void;
-
 export function performanceNow(): number;
 
 export function isTcpAvailable(): boolean;

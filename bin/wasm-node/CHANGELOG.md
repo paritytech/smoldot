@@ -6,7 +6,19 @@
 
 - Add support for CommonJS projects [#2487](https://github.com/paritytech/smoldot/pull/2487)
 
-## Changed
+### Changed
+
+- No WebWorker/worker thread is spawned anymore by the JavaScript code. The WebAssembly virtual machine that runs smoldot is now directly instantiated by the `start` function. This should fix compatibility issues with various JavaScript bundlers. ([#2498](https://github.com/paritytech/smoldot/pull/2498))
+
+## 0.6.23 - 2022-07-11
+
+### Fixed
+
+- Fix `state_getKeys` and `state_getKeysPaged` almost always erroneously returning an empty result. ([#2491](https://github.com/paritytech/smoldot/pull/2491))
+
+## 0.6.22 - 2022-07-11
+
+### Changed
 
 - Block headers with an unknown consensus engine now parse successfully. This adds support for parachains using consensus engines that smoldot doesn't recognize. As smoldot cannot verify the validity of their blocks, standalone/relay chains using an unrecognized consensus engine remain unsupported. ([#2481](https://github.com/paritytech/smoldot/pull/2481))
 - Standalone/relay chains that use neither Aura nor Babe are no longer supported as they are vulnerable to DoS attacks. Parachains that don't use Aura/Babe continue to work. ([#2481](https://github.com/paritytech/smoldot/pull/2481))
