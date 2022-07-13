@@ -45,7 +45,7 @@ for (const file of chainSpecsFiles) {
     const content = fs.readFileSync(file, 'utf8');
     const decoded = JSON.parse(content);
     if (!firstChainSpecId)
-        firstChainSpecId = decoded.id;  
+        firstChainSpecId = decoded.id;
     chainSpecsById[decoded.id] = {
         chainSpec: content,
         relayChain: decoded.relay_chain,
