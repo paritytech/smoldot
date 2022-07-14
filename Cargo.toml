@@ -58,7 +58,7 @@ hashbrown = { version = "0.12.2", default-features = false, features = ["serde"]
 hex = { version = "0.4.3", default-features = false }
 hmac = { version = "0.12.1", default-features = false }
 itertools = { version = "0.10.3", default-features = false }
-libsecp256k1 = { version = "0.7.0", default-features = false, features = ["static-context", "hmac"] }
+libsecp256k1 = { version = "0.7.1", default-features = false, features = ["static-context", "hmac"] }
 # Reminder: `log` is forbidden
 merlin = { version = "3.0", default-features = false }
 nom = { version = "7.1.1", default-features = false, features = ["alloc"] }
