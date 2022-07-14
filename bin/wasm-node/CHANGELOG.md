@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add support for CommonJS projects. ([#2487](https://github.com/paritytech/smoldot/pull/2487))
+
 ### Changed
 
 - No WebWorker/worker thread is spawned anymore by the JavaScript code. The WebAssembly virtual machine that runs smoldot is now directly instantiated by the `start` function. This should fix compatibility issues with various JavaScript bundlers. ([#2498](https://github.com/paritytech/smoldot/pull/2498))
