@@ -103,15 +103,16 @@ try {
     }
 
     // At the time of writing, there is unfortunately no standard cross-platform solution to the
-    // problem of importing WebAssembly files. We base64-encode the .wasm file and integrate it as a
-    // string. It is the safe but non-optimal solution.
-    // Because raw .wasm compresses better than base64-encoded .wasm, we gzip the .wasm before base64
-    // encoding it. For some reason, `gzip(base64(gzip(wasm)))` is 15% to 20% smaller than
-    // `gzip(base64(wasm))`.
-    // Additionally, because the Mozilla extension store refuses packages containing individual files
-    // that are more than 4 MiB, we have to split our base64-encoded gzip-encoded wasm into multiple
-    // small size files.
-    let base64Data = zlib.deflateSync(fs.readFileSync(optimisationStageOutput)).toString('base64');
+    // problem of importing WebAssembly files. We base64-encode the .wasm file and integrate it as
+    // a string. It is the safe but non-optimal solution.
+    // Because raw .wasm compresses better than base64-encoded .wasm, we deflate the .wasm before
+    // base64 encoding it. For some reason, `deflate(base64(deflate(wasm)))` is 15% to 20% smaller
+    // than `deflate(base64(wasm))`.
+    // Additionally, because the Mozilla extension store refuses packages containing individual
+    // files that are more than 4 MiB, we have to split our base64-encoded deflate-encoded wasm
+    // into multiple small size files.
+    const finalWasmData = fs.readFileSync(optimisationStageOutput);
+    let base64Data = zlib.deflateRawSync(finalWasmData).toString('base64');
     let imports = '';
     let fileNum = 0;
     let chunksSum = '""';
@@ -125,7 +126,12 @@ try {
         fileNum += 1;
         base64Data = base64Data.slice(1024 * 1024);
     }
-    fs.writeFileSync('./src/instance/autogen/wasm.ts', imports + 'export default ' + chunksSum + ';');
+    fs.writeFileSync(
+        './src/instance/autogen/wasm.ts',
+        imports +
+        'export default ' + chunksSum + ';\n' +
+        'export const decompressedSize = ' + finalWasmData.length + ';'
+    );
 
 } finally {
     fs.rmSync(tmpDir, { recursive: true });

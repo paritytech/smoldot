@@ -34,7 +34,6 @@
     "./dist/cjs/compat/index.js": "./dist/cjs/compat/index-browser-overwrite.js"
   },
   "dependencies": {
-    "pako": "^2.0.4",
     "websocket": "^1.0.32"
   },
   "devDependencies": {
