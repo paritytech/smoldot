@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.24 - 2022-07-14
+
 ### Added
 
 - Add support for CommonJS projects. ([#2487](https://github.com/paritytech/smoldot/pull/2487))
