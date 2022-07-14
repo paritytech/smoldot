@@ -20,7 +20,7 @@
 //! In order to use this code, call the function passing an object, then fill the `instance` field
 //! of that object with the Wasm instance.
 
-import { Buffer } from 'buffer';
+import * as buffer from './buffer.js';
 import * as compat from '../compat/index.js';
 import * as connection from './connection.js';
 import type { SmoldotWasmInstance } from './bindings.js';
@@ -72,7 +72,7 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
             ptr >>>= 0;
             len >>>= 0;
 
-            const message = Buffer.from(instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
+            const message = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), ptr, len);
             config.onPanic(message);
         },
 
@@ -85,7 +85,7 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
             ptr >>>= 0;
             len >>>= 0;
 
-            let message = Buffer.from(instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
+            let message = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), ptr, len);
             if (config.jsonRpcCallback) {
                 config.jsonRpcCallback(message, chainId);
             }
@@ -100,7 +100,7 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
             ptr >>>= 0;
             len >>>= 0;
 
-            let content = Buffer.from(instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
+            let content = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), ptr, len);
             if (config.databaseContentCallback) {
                 config.databaseContentCallback(content, chainId);
             }
@@ -119,10 +119,9 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
             messageLen >>>= 0;
 
             if (config.logCallback) {
-                let target = Buffer.from(instance.exports.memory.buffer)
-                    .toString('utf8', targetPtr, targetPtr + targetLen);
-                let message = Buffer.from(instance.exports.memory.buffer)
-                    .toString('utf8', messagePtr, messagePtr + messageLen);
+                const mem = new Uint8Array(instance.exports.memory.buffer);
+                let target = buffer.utf8BytesToString(mem, targetPtr, targetLen);
+                let message = buffer.utf8BytesToString(mem, messagePtr, messageLen);
                 config.logCallback(level, target, message);
             }
         },
@@ -183,8 +182,7 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
                 if (killedTracked.killed)
                     throw new Error("killAll invoked");
 
-                const address = Buffer.from(instance.exports.memory.buffer)
-                    .toString('utf8', addrPtr, addrPtr + addrLen);
+                const address = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), addrPtr, addrLen);
 
                 const connec = connection.connect({
                     address,
@@ -201,17 +199,17 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
                     onClose: (message: string) => {
                         if (killedTracked.killed) return;
                         try {
-                            const len = Buffer.byteLength(message, 'utf8');
-                            const ptr = instance.exports.alloc(len) >>> 0;
-                            Buffer.from(instance.exports.memory.buffer).write(message, ptr);
-                            instance.exports.connection_closed(connectionId, ptr, len);
+                            const encoded = new TextEncoder().encode(message)
+                            const ptr = instance.exports.alloc(encoded.length) >>> 0;
+                            new Uint8Array(instance.exports.memory.buffer).set(encoded, ptr);
+                            instance.exports.connection_closed(connectionId, ptr, encoded.length);
                         } catch(_error) {}
                     },
-                    onMessage: (message: Buffer) => {
+                    onMessage: (message: Uint8Array) => {
                         if (killedTracked.killed) return;
                         try {
                             const ptr = instance.exports.alloc(message.length) >>> 0;
-                            message.copy(Buffer.from(instance.exports.memory.buffer), ptr);
+                            new Uint8Array(instance.exports.memory.buffer).set(message, ptr)
                             instance.exports.stream_message(connectionId, 0, ptr, message.length);
                         } catch(_error) {}
                     }
@@ -226,13 +224,13 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
                 if (error instanceof Error) {
                     errorStr = error.toString();
                 }
-                const mem = Buffer.from(instance.exports.memory.buffer);
-                const len = Buffer.byteLength(errorStr, 'utf8');
-                const ptr = instance.exports.alloc(len) >>> 0;
-                mem.write(errorStr, ptr);
-                mem.writeUInt32LE(ptr, errorPtrPtr);
-                mem.writeUInt32LE(len, errorPtrPtr + 4);
-                mem.writeUInt8(isBadAddress ? 1 : 0, errorPtrPtr + 8);
+                const mem = new Uint8Array(instance.exports.memory.buffer);
+                const encoded = new TextEncoder().encode(errorStr)
+                const ptr = instance.exports.alloc(encoded.length) >>> 0;
+                mem.set(encoded, ptr);
+                buffer.writeUInt32LE(mem, errorPtrPtr, ptr);
+                buffer.writeUInt32LE(mem, errorPtrPtr + 4, encoded.length);
+                buffer.writeUInt8(mem, errorPtrPtr + 8, isBadAddress ? 1 : 0);
                 return 1;
             }
         },
@@ -267,7 +265,7 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
             ptr >>>= 0;
             len >>>= 0;
 
-            const data = Buffer.from(instance.exports.memory.buffer).slice(ptr, ptr + len);
+            const data = new Uint8Array(instance.exports.memory.buffer).slice(ptr, ptr + len);
             const connection = connections[connectionId]!;
             connection.send(data);
         },
@@ -280,7 +278,7 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
             ptr >>>= 0;
             len >>>= 0;
 
-            const taskName = Buffer.from(instance.exports.memory.buffer).toString('utf8', ptr, ptr + len);
+            const taskName = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), ptr, len);
             if (config.currentTaskCallback)
                 config.currentTaskCallback(taskName);
         },

@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { Buffer } from 'buffer';
+import * as buffer from './buffer.js';
 import * as instance from './raw-instance.js';
 import { SmoldotWasmInstance } from './bindings.js';
 import { CrashError } from '../client.js';
@@ -144,10 +144,10 @@ export function start(configMessage: Config): Instance {
         throw crashError.error;
 
       try {
-        const len = Buffer.byteLength(request, 'utf8');
-        const ptr = state.instance.exports.alloc(len) >>> 0;
-        Buffer.from(state.instance.exports.memory.buffer).write(request, ptr);
-        state.instance.exports.json_rpc_send(ptr, len, chainId);
+        const encoded = new TextEncoder().encode(request)
+        const ptr = state.instance.exports.alloc(encoded.length) >>> 0;
+        new Uint8Array(state.instance.exports.memory.buffer).set(encoded, ptr);
+        state.instance.exports.json_rpc_send(ptr, encoded.length, chainId);
       } catch (_error) {
         console.assert(crashError.error);
         throw crashError.error
@@ -161,23 +161,20 @@ export function start(configMessage: Config): Instance {
 
         try {
           // Write the chain specification into memory.
-          const chainSpecLen = Buffer.byteLength(chainSpec, 'utf8');
-          const chainSpecPtr = instance.exports.alloc(chainSpecLen) >>> 0;
-          Buffer.from(instance.exports.memory.buffer)
-            .write(chainSpec, chainSpecPtr);
+          const chainSpecEncoded = new TextEncoder().encode(chainSpec)
+          const chainSpecPtr = instance.exports.alloc(chainSpecEncoded.length) >>> 0;
+          new Uint8Array(instance.exports.memory.buffer).set(chainSpecEncoded, chainSpecPtr);
 
           // Write the database content into memory.
-          const databaseContentLen = Buffer.byteLength(databaseContent, 'utf8');
-          const databaseContentPtr = instance.exports.alloc(databaseContentLen) >>> 0;
-          Buffer.from(instance.exports.memory.buffer)
-            .write(databaseContent, databaseContentPtr);
+          const databaseContentEncoded = new TextEncoder().encode(databaseContent)
+          const databaseContentPtr = instance.exports.alloc(databaseContentEncoded.length) >>> 0;
+          new Uint8Array(instance.exports.memory.buffer).set(databaseContentEncoded, databaseContentPtr);
 
           // Write the potential relay chains into memory.
           const potentialRelayChainsLen = potentialRelayChains.length;
           const potentialRelayChainsPtr = instance.exports.alloc(potentialRelayChainsLen * 4) >>> 0;
           for (let idx = 0; idx < potentialRelayChains.length; ++idx) {
-            Buffer.from(instance.exports.memory.buffer)
-              .writeUInt32LE(potentialRelayChains[idx]!, potentialRelayChainsPtr + idx * 4);
+            buffer.writeUInt32LE(new Uint8Array(instance.exports.memory.buffer), potentialRelayChainsPtr + idx * 4, potentialRelayChains[idx]!);
           }
 
           // `add_chain` unconditionally allocates a chain id. If an error occurs, however, this chain
@@ -185,8 +182,8 @@ export function start(configMessage: Config): Instance {
           // has succeeeded or not.
           // Note that `add_chain` properly de-allocates buffers even if it failed.
           const chainId = instance.exports.add_chain(
-            chainSpecPtr, chainSpecLen,
-            databaseContentPtr, databaseContentLen,
+            chainSpecPtr, chainSpecEncoded.length,
+            databaseContentPtr, databaseContentEncoded.length,
             !!jsonRpcCallback ? 1 : 0,
             potentialRelayChainsPtr, potentialRelayChainsLen
           );
@@ -201,8 +198,7 @@ export function start(configMessage: Config): Instance {
           } else {
             const errorMsgLen = instance.exports.chain_error_len(chainId) >>> 0;
             const errorMsgPtr = instance.exports.chain_error_ptr(chainId) >>> 0;
-            const errorMsg = Buffer.from(instance.exports.memory.buffer)
-              .toString('utf8', errorMsgPtr, errorMsgPtr + errorMsgLen);
+            const errorMsg = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), errorMsgPtr, errorMsgLen);
             instance.exports.remove_chain(chainId);
             return { success: false, error: errorMsg };
           }
