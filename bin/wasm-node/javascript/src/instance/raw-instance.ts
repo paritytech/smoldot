@@ -17,7 +17,7 @@
 
 import pako from 'pako';
 
-import { Buffer } from 'buffer';
+import * as buffer from './buffer.js';
 
 import { Config as SmoldotBindingsConfig, default as smoldotLightBindingsBuilder } from './bindings-smoldot-light.js';
 import { Config as WasiConfig, default as wasiBindingsBuilder } from './bindings-wasi.js';
@@ -55,7 +55,7 @@ export async function startInstance(config: Config): Promise<SmoldotWasmInstance
     // different file.
     // This is suboptimal compared to using `instantiateStreaming`, but it is the most
     // cross-platform cross-bundler approach.
-    const wasmBytecode = pako.inflate(new Uint8Array(Buffer.from(wasmBase64, 'base64')));
+    const wasmBytecode = pako.inflate(buffer.trustedBase64Decode(wasmBase64));
 
     let killAll: () => void;
 
