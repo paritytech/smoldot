@@ -130,7 +130,9 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
         unix_time_ms: () => Date.now(),
 
         // Must return the value of a monotonic clock in milliseconds.
-        monotonic_clock_ms: () => compat.performanceNow(),
+        monotonic_clock_ms: () => {
+            return globalThis.performance.now()
+        },
 
         // Must call `timer_finished` after the given number of milliseconds has elapsed.
         start_timer: (id: number, ms: number) => {

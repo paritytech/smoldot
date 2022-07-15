@@ -22,8 +22,6 @@ import type { Socket as TcpSocket, NetConnectOpts } from 'node:net';
 
 export type WasmModuleImports = WebAssembly.ModuleImports;
 
-export function performanceNow(): number;
-
 export function isTcpAvailable(): boolean;
 
 export function createConnection(options: NetConnectOpts, connectionListener?: () => void): TcpSocket;

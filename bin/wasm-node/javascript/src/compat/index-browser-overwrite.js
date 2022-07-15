@@ -17,10 +17,6 @@
 
 // Overrides `index.js` when in a browser.
 
-export function performanceNow() {
-    return performance.now()
-}
-
 export function isTcpAvailable() {
     return false;
 }

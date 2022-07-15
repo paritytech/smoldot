@@ -19,14 +19,8 @@
 //
 // A rule in the `package.json` overrides it with `index-browser-override.js` when in a browser.
 
-import { hrtime } from 'node:process';
 import { createConnection as nodeCreateConnection } from 'node:net';
 import { randomFillSync } from 'node:crypto';
-
-export function performanceNow() {
-    const time = hrtime();
-    return ((time[0] * 1e3) + (time[1] / 1e6));
-}
 
 export function isTcpAvailable() {
     return true;
