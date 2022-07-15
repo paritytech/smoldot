@@ -191,7 +191,8 @@ pub struct ChainNetwork<TNow> {
     in_requests_types: hashbrown::HashMap<InRequestId, InRequestTy, fnv::FnvBuildHasher>,
 
     // TODO: could be a user data in the request
-    out_requests_types: hashbrown::HashMap<OutRequestId, OutRequestTy, fnv::FnvBuildHasher>,
+    out_requests_types:
+        hashbrown::HashMap<OutRequestId, (OutRequestTy, usize), fnv::FnvBuildHasher>,
 }
 
 struct Chain<TNow> {
@@ -584,9 +585,12 @@ where
 
         let _prev_value = self.out_requests_types.insert(
             id,
-            OutRequestTy::Blocks {
-                checked: if checked { Some(config) } else { None },
-            },
+            (
+                OutRequestTy::Blocks {
+                    checked: if checked { Some(config) } else { None },
+                },
+                chain_index,
+            ),
         );
         debug_assert!(_prev_value.is_none());
 
@@ -615,7 +619,7 @@ where
 
         let _prev_value = self
             .out_requests_types
-            .insert(id, OutRequestTy::GrandpaWarpSync);
+            .insert(id, (OutRequestTy::GrandpaWarpSync, chain_index));
         debug_assert!(_prev_value.is_none());
 
         id
@@ -661,7 +665,9 @@ where
             now + timeout,
         );
 
-        let _prev_value = self.out_requests_types.insert(id, OutRequestTy::State);
+        let _prev_value = self
+            .out_requests_types
+            .insert(id, (OutRequestTy::State, chain_index));
         debug_assert!(_prev_value.is_none());
 
         id
@@ -695,7 +701,7 @@ where
 
         let _prev_value = self
             .out_requests_types
-            .insert(id, OutRequestTy::StorageProof);
+            .insert(id, (OutRequestTy::StorageProof, chain_index));
         debug_assert!(_prev_value.is_none());
 
         id
@@ -735,7 +741,9 @@ where
             now + timeout,
         );
 
-        let _prev_value = self.out_requests_types.insert(id, OutRequestTy::CallProof);
+        let _prev_value = self
+            .out_requests_types
+            .insert(id, (OutRequestTy::CallProof, chain_index));
         debug_assert!(_prev_value.is_none());
 
         id
@@ -1296,7 +1304,7 @@ where
                     request_id,
                     response,
                 } => match self.out_requests_types.remove(&request_id).unwrap() {
-                    OutRequestTy::Blocks { checked } => {
+                    (OutRequestTy::Blocks { checked }, _) => {
                         let mut response =
                             response
                                 .map_err(BlocksRequestError::Request)
@@ -1316,12 +1324,13 @@ where
                             response,
                         });
                     }
-                    OutRequestTy::GrandpaWarpSync => {
+                    (OutRequestTy::GrandpaWarpSync, chain_index) => {
                         let response = response
                             .map_err(GrandpaWarpSyncRequestError::Request)
                             .and_then(|payload| {
                                 protocol::decode_grandpa_warp_sync_response(
-                                    &payload, 4, // TODO: no
+                                    &payload,
+                                    self.chains[chain_index].chain_config.block_number_bytes,
                                 )
                                 .map_err(GrandpaWarpSyncRequestError::Decode)
                             });
@@ -1331,7 +1340,7 @@ where
                             response,
                         });
                     }
-                    OutRequestTy::State => {
+                    (OutRequestTy::State, _) => {
                         let response =
                             response
                                 .map_err(StateRequestError::Request)
@@ -1345,7 +1354,7 @@ where
                             response,
                         });
                     }
-                    OutRequestTy::StorageProof => {
+                    (OutRequestTy::StorageProof, _) => {
                         let response = response
                             .map_err(StorageProofRequestError::Request)
                             .and_then(|payload| {
@@ -1367,7 +1376,7 @@ where
                             response,
                         });
                     }
-                    OutRequestTy::CallProof => {
+                    (OutRequestTy::CallProof, _) => {
                         let response =
                             response
                                 .map_err(CallProofRequestError::Request)
@@ -1392,7 +1401,7 @@ where
                             response,
                         });
                     }
-                    OutRequestTy::KademliaFindNode => {
+                    (OutRequestTy::KademliaFindNode, _) => {
                         let response = response
                             .map_err(KademliaFindNodeError::RequestFailed)
                             .and_then(|payload| {
@@ -1405,7 +1414,7 @@ where
                             response,
                         });
                     }
-                    OutRequestTy::KademliaDiscoveryFindNode(operation_id) => {
+                    (OutRequestTy::KademliaDiscoveryFindNode(operation_id), _) => {
                         let result = response
                             .map_err(KademliaFindNodeError::RequestFailed)
                             .and_then(|payload| {
@@ -1958,11 +1967,14 @@ where
 
         let _prev_value = self.out_requests_types.insert(
             id,
-            if let Some(operation_id) = part_of_operation {
-                OutRequestTy::KademliaDiscoveryFindNode(operation_id)
-            } else {
-                OutRequestTy::KademliaFindNode
-            },
+            (
+                if let Some(operation_id) = part_of_operation {
+                    OutRequestTy::KademliaDiscoveryFindNode(operation_id)
+                } else {
+                    OutRequestTy::KademliaFindNode
+                },
+                chain_index,
+            ),
         );
         debug_assert!(_prev_value.is_none());
 
