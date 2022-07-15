@@ -103,6 +103,9 @@ pub struct ConfigChain {
     /// chain, so as to not introduce conflicts in the networking messages.
     pub protocol_id: String,
 
+    /// Number of bytes of the block number in the networking protocol.
+    pub block_number_bytes: usize,
+
     /// If true, the chain uses the GrandPa networking protocol.
     pub has_grandpa_protocol: bool,
 }
@@ -215,7 +218,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     None
                 },
                 protocol_id: chain.protocol_id.clone(),
-                block_number_bytes: 4, // TODO: correct value, maybe load from chain spec?
+                block_number_bytes: chain.block_number_bytes,
                 best_hash: chain.best_block.1,
                 best_number: chain.best_block.0,
                 genesis_hash: chain.genesis_block_hash,

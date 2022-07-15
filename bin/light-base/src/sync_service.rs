@@ -56,6 +56,9 @@ pub struct Config<TPlat: Platform> {
     /// State of the finalized chain.
     pub chain_information: chain::chain_information::ValidChainInformation,
 
+    /// Number of bytes of the block number in the networking protocol.
+    pub block_number_bytes: usize,
+
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
@@ -130,6 +133,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                 Box::pin(standalone::start_standalone_chain(
                     log_target,
                     config.chain_information,
+                    config.block_number_bytes,
                     from_foreground,
                     config.network_service.0.clone(),
                     config.network_service.1,

@@ -263,6 +263,11 @@ impl ChainSpec {
         }
     }
 
+    /// Returns the number of bytes that the "block number" field of various data structures uses.
+    pub fn block_number_bytes(&self) -> u8 {
+        self.client_spec.block_number_bytes.unwrap_or(4)
+    }
+
     /// Returns true if the chain is of a type for which a live network is expected.
     pub fn has_live_network(&self) -> bool {
         match &self.client_spec.chain_type {
