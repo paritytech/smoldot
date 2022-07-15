@@ -4,7 +4,7 @@
 
 ### Added
 
-- Add an optional `blockNumberBytes` field to chain specifications indicating the number of bytes used to encode the block number of the chain. If the field is missing, the value defaults to 4. Prior to this change, the value was always hardcoded to 4. This field is at the moment specific to smoldot, and Substrate will fail to parse chain specifications containing it. ([#2487](https://github.com/paritytech/smoldot/pull/2487))
+- Add an optional `blockNumberBytes` field to chain specifications indicating the number of bytes used to encode the block number of the chain. If the field is missing, the value defaults to 4. Prior to this change, the value was always hardcoded to 4. This field is at the moment specific to smoldot, and Substrate will fail to parse chain specifications containing it. ([#2512](https://github.com/paritytech/smoldot/pull/2512))
 
 ## 0.6.24 - 2022-07-14
 
