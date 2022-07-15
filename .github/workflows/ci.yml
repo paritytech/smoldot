@@ -54,7 +54,7 @@ jobs:
     - uses: Swatinem/rust-cache@v1
     - uses: actions/setup-node@v3.3.0
       with:
-        node-version: '14'
+        node-version: '12'  # An old version is intentionally used in order to check compatibility
     - run: cd bin/wasm-node/javascript && RUSTFLAGS=-Dwarnings npm install-ci-test
 
   wasm-node-size-diff:
@@ -69,7 +69,7 @@ jobs:
     - uses: Swatinem/rust-cache@v1
     - uses: actions/setup-node@v3.3.0
       with:
-        node-version: '14'
+        node-version: '12'  # An old version is intentionally used in order to check compatibility
     - uses: baptiste0928/cargo-install@v1  # This action ensures that the twiggy compilation is cached.
       with:
         crate: twiggy
