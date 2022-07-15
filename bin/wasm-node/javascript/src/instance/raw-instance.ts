@@ -80,7 +80,7 @@ export async function startInstance(config: Config): Promise<SmoldotWasmInstance
     };
 
     const { imports: smoldotBindings, killAll: smoldotBindingsKillAll } =
-        smoldotLightBindingsBuilder(smoldotJsConfig);
+        await smoldotLightBindingsBuilder(smoldotJsConfig);
 
     killAll = smoldotBindingsKillAll;
 
@@ -91,7 +91,7 @@ export async function startInstance(config: Config): Promise<SmoldotWasmInstance
         // The functions with the "smoldot" prefix are specific to smoldot.
         "smoldot": smoldotBindings,
         // As the Rust code is compiled for wasi, some more wasi-specific imports exist.
-        "wasi_snapshot_preview1": wasiBindingsBuilder(wasiConfig),
+        "wasi_snapshot_preview1": await wasiBindingsBuilder(wasiConfig),
     });
 
     const instance = result.instance as SmoldotWasmInstance;

@@ -27,14 +27,14 @@ import type { SmoldotWasmInstance } from './bindings.js';
 
 export interface Config {
     instance?: SmoldotWasmInstance,
-    
+
     /**
      * Closure to call when the Wasm instance calls `panic`.
      *
      * This callback will always be invoked from within a binding called the Wasm instance.
      */
     onPanic: (message: string) => never,
-    
+
     logCallback: (level: number, target: string, message: string) => void,
     jsonRpcCallback: (response: string, chainId: number) => void,
     databaseContentCallback: (data: string, chainId: number) => void,
@@ -45,7 +45,7 @@ export interface Config {
     forbidWss: boolean,
 }
 
-export default function (config: Config): { imports: compat.WasmModuleImports, killAll: () => void } {
+export default async function (config: Config): Promise<{ imports: compat.WasmModuleImports, killAll: () => void }> {
     // Used below to store the list of all connections.
     // The indices within this array are chosen by the Rust code.
     let connections: Record<number, connection.Connection> = {};
@@ -62,6 +62,15 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
             delete connections[connection]
         }
     };
+
+    // Try to import the `node:process` module if it is available.
+    let nodeProcessModule: undefined | {
+        hrtime: {
+            (time?: [number, number]): [number, number];
+            bigint(): bigint;
+        }
+    };
+    try { nodeProcessModule = await import('node:process'); } catch (_error) { }
 
     const imports = {
         // Must exit with an error. A human-readable message can be found in the WebAssembly
@@ -130,7 +139,14 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
         unix_time_ms: () => Date.now(),
 
         // Must return the value of a monotonic clock in milliseconds.
-        monotonic_clock_ms: () => compat.performanceNow(),
+        monotonic_clock_ms: () => {
+            if (nodeProcessModule) {
+                const time = nodeProcessModule.hrtime();
+                return ((time[0] * 1e3) + (time[1] / 1e6));
+            } else {
+                return globalThis.performance.now()
+            }
+        },
 
         // Must call `timer_finished` after the given number of milliseconds has elapsed.
         start_timer: (id: number, ms: number) => {
@@ -153,14 +169,14 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
                     if (killedTracked.killed) return;
                     try {
                         instance.exports.timer_finished(id);
-                    } catch(_error) {}
+                    } catch (_error) { }
                 })
             } else {
                 setTimeout(() => {
                     if (killedTracked.killed) return;
                     try {
                         instance.exports.timer_finished(id);
-                    } catch(_error) {}
+                    } catch (_error) { }
                 }, ms)
             }
         },
@@ -194,7 +210,7 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
                         if (killedTracked.killed) return;
                         try {
                             instance.exports.connection_open_single_stream(connectionId);
-                        } catch(_error) {}
+                        } catch (_error) { }
                     },
                     onClose: (message: string) => {
                         if (killedTracked.killed) return;
@@ -203,7 +219,7 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
                             const ptr = instance.exports.alloc(encoded.length) >>> 0;
                             new Uint8Array(instance.exports.memory.buffer).set(encoded, ptr);
                             instance.exports.connection_closed(connectionId, ptr, encoded.length);
-                        } catch(_error) {}
+                        } catch (_error) { }
                     },
                     onMessage: (message: Uint8Array) => {
                         if (killedTracked.killed) return;
@@ -211,7 +227,7 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
                             const ptr = instance.exports.alloc(message.length) >>> 0;
                             new Uint8Array(instance.exports.memory.buffer).set(message, ptr)
                             instance.exports.stream_message(connectionId, 0, ptr, message.length);
-                        } catch(_error) {}
+                        } catch (_error) { }
                     }
                 });
 
@@ -259,7 +275,7 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
         // that this function is called only when the connection is in an open state.
         stream_send: (connectionId: number, _streamId: number, ptr: number, len: number) => {
             if (killedTracked.killed) return;
-    
+
             const instance = config.instance!;
 
             ptr >>>= 0;

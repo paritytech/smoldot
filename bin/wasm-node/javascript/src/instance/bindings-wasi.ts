@@ -46,11 +46,17 @@ export interface Config {
     onProcExit: (retCode: number) => never,
 }
 
-export default (config: Config): compat.WasmModuleImports => {
+export default async (config: Config): Promise<compat.WasmModuleImports> => {
     // Buffers holding temporary data being written by the Rust code to respectively stdout and
     // stderr.
     let stdoutBuffer = "";
     let stderrBuffer = "";
+
+    // Try to import the `node:crypto` module if it is available.
+    let nodeCryptoModule: undefined | {
+        randomFillSync: <T extends NodeJS.ArrayBufferView>(buffer: T, offset?: number, size?: number) => T
+    };
+    try { nodeCryptoModule = await import('node:crypto'); } catch (_error) { }
 
     return {
         // Need to fill the buffer described by `ptr` and `len` with random data.
@@ -65,7 +71,15 @@ export default (config: Config): compat.WasmModuleImports => {
                 .slice(ptr, ptr + len);
             for (let iter = 0; iter < len; iter += 65536) {
                 // `baseBuffer.slice` automatically saturates at the end of the buffer
-                compat.getRandomValues(baseBuffer.slice(iter, iter + 65536))
+                const slice = baseBuffer.slice(iter, iter + 65536);
+                if (nodeCryptoModule) {
+                    nodeCryptoModule.randomFillSync(slice)
+                } else {
+                    const crypto = globalThis.crypto;
+                    if (!crypto)
+                        throw new Error('randomness not available');
+                    crypto.getRandomValues(slice);
+                }
             }
 
             return 0;
