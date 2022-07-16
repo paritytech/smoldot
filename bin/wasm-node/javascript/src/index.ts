@@ -15,6 +15,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import { Client, ClientOptions, start as innerStart } from './client.js'
+
 export {
   AddChainError,
   AddChainOptions,
@@ -25,6 +27,16 @@ export {
   CrashError,
   JsonRpcCallback,
   JsonRpcDisabledError,
-  LogCallback,
-  start
+  LogCallback
 } from './client.js';
+
+/**
+ * Initializes a new client. This is a pre-requisite to connecting to a blockchain.
+ *
+ * Can never fail.
+ *
+ * @param options Configuration of the client. Defaults to `{}`.
+ */
+export function start(options?: ClientOptions): Client {
+  return innerStart(options)
+}

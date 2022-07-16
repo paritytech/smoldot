@@ -336,13 +336,9 @@ export interface AddChainOptions {
   jsonRpcCallback?: JsonRpcCallback;
 }
 
-/**
- * Initializes a new client. This is a pre-requisite to connecting to a blockchain.
- *
- * Can never fail.
- *
- * @param options Configuration of the client. Defaults to `{}`.
- */
+// This function is similar to the `start` function found in `index.ts`, except with an extra
+// parameter containing the platform-specific bindings.
+// Contrary to the one within `index.js`, this function is not supposed to be directly used.
 export function start(options?: ClientOptions): Client {
   options = options || {};
 
