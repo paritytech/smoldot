@@ -43,5 +43,7 @@ export function start(options?: ClientOptions): Client {
   return innerStart(options || {}, {
     performanceNow: compat.performanceNow,
     getRandomValues: compat.getRandomValues,
+    isTcpAvailable: compat.isTcpAvailable,
+    createConnection: compat.createConnection,
   })
 }

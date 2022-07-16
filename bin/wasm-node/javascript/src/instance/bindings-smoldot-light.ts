@@ -23,6 +23,7 @@
 import * as buffer from './buffer.js';
 import * as connection from './connection.js';
 import type { SmoldotWasmInstance } from './bindings.js';
+import type { Socket as TcpSocket, NetConnectOpts } from 'node:net';
 
 export interface Config {
     instance?: SmoldotWasmInstance,
@@ -31,6 +32,18 @@ export interface Config {
      * Returns the number of milliseconds since an arbitrary epoch.
      */
     performanceNow: () => number,
+
+    /**
+     * Returns true if the platform is capable of opening TCP connections.
+     */
+    isTcpAvailable: () => boolean,
+
+    /**
+     * Opens a TCP connection.
+     *
+     * Throws an exception if TCP connections aren't supported.
+     */
+    createConnection(options: NetConnectOpts, connectionListener?: () => void): TcpSocket;
     
     /**
      * Closure to call when the Wasm instance calls `panic`.
@@ -194,6 +207,8 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                     forbidWs: config.forbidWs,
                     forbidNonLocalWs: config.forbidNonLocalWs,
                     forbidWss: config.forbidWss,
+                    isTcpAvailable: config.isTcpAvailable,
+                    createConnection: config.createConnection,
                     onOpen: () => {
                         if (killedTracked.killed) return;
                         try {

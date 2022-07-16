@@ -16,9 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import Websocket from 'websocket';
-import * as compat from '../compat/index.js';
-
-import type { Socket as TcpSocket } from 'node:net';
+import type { Socket as TcpSocket, NetConnectOpts } from 'node:net';
 
 /**
  * Connection to a remote node.
@@ -76,6 +74,18 @@ export interface Config {
     forbidWs: boolean,
     forbidNonLocalWs: boolean,
     forbidWss: boolean,
+
+    /**
+     * Returns true if the platform is capable of opening TCP connections.
+     */
+    isTcpAvailable: () => boolean,
+
+     /**
+      * Opens a TCP connection.
+      *
+      * Throws an exception if TCP connections aren't supported.
+      */
+    createConnection(options: NetConnectOpts, connectionListener?: () => void): TcpSocket;
 
     /**
      * Callback called when the connection transitions from the `Opening` to the `Open` state.
@@ -157,11 +167,11 @@ export function connect(config: Config): Connection {
 
     } else if (tcpParsed != null) {
         // `net` module will be missing when we're not in NodeJS.
-        if (!compat.isTcpAvailable() || config.forbidTcp) {
+        if (!config.isTcpAvailable() || config.forbidTcp) {
             throw new ConnectionError('TCP connections not available');
         }
 
-        const socket = compat.createConnection({
+        const socket = config.createConnection({
             host: tcpParsed[2],
             port: parseInt(tcpParsed[3]!, 10),
         });
