@@ -27,6 +27,11 @@ import type { SmoldotWasmInstance } from './bindings.js';
 
 export interface Config {
     instance?: SmoldotWasmInstance,
+
+    /**
+     * Returns the number of milliseconds since an arbitrary epoch.
+     */
+    performanceNow: () => number,
     
     /**
      * Closure to call when the Wasm instance calls `panic`.
@@ -130,7 +135,7 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
         unix_time_ms: () => Date.now(),
 
         // Must return the value of a monotonic clock in milliseconds.
-        monotonic_clock_ms: () => compat.performanceNow(),
+        monotonic_clock_ms: () => config.performanceNow(),
 
         // Must call `timer_finished` after the given number of milliseconds has elapsed.
         start_timer: (id: number, ms: number) => {

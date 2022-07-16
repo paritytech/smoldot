@@ -17,6 +17,8 @@
 
 import { Client, ClientOptions, start as innerStart } from './client.js'
 
+import * as compat from './compat/index.js';
+
 export {
   AddChainError,
   AddChainOptions,
@@ -38,5 +40,8 @@ export {
  * @param options Configuration of the client. Defaults to `{}`.
  */
 export function start(options?: ClientOptions): Client {
-  return innerStart(options)
+  return innerStart(options || {}, {
+    performanceNow: compat.performanceNow,
+    getRandomValues: compat.getRandomValues,
+  })
 }
