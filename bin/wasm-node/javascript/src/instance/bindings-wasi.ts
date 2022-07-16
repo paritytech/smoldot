@@ -24,7 +24,6 @@
 //! of that object with the Wasm instance.
 
 import * as buffer from './buffer.js';
-import * as compat from '../compat/index.js';
 import type { SmoldotWasmInstance } from './bindings.js';
 
 export interface Config {
@@ -51,7 +50,7 @@ export interface Config {
     onProcExit: (retCode: number) => never,
 }
 
-export default (config: Config): compat.WasmModuleImports => {
+export default (config: Config): WebAssembly.ModuleImports => {
     // Buffers holding temporary data being written by the Rust code to respectively stdout and
     // stderr.
     let stdoutBuffer = "";

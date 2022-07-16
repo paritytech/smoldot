@@ -21,7 +21,6 @@
 //! of that object with the Wasm instance.
 
 import * as buffer from './buffer.js';
-import * as compat from '../compat/index.js';
 import * as connection from './connection.js';
 import type { SmoldotWasmInstance } from './bindings.js';
 
@@ -50,7 +49,7 @@ export interface Config {
     forbidWss: boolean,
 }
 
-export default function (config: Config): { imports: compat.WasmModuleImports, killAll: () => void } {
+export default function (config: Config): { imports: WebAssembly.ModuleImports, killAll: () => void } {
     // Used below to store the list of all connections.
     // The indices within this array are chosen by the Rust code.
     let connections: Record<number, connection.Connection> = {};
