@@ -106,12 +106,10 @@ export function start(options?: ClientOptions): Client {
 
   return {
     close: (): void => {
-        // We can't set these fields to null because the TypeScript definitions don't
-        // allow it, but we can set them to dummy values.
-        connection.onopen = () => { };
-        connection.onclose = () => { };
-        connection.onmessage = () => { };
-        connection.onerror = () => { };
+        connection.onopen = null;
+        connection.onclose = null;
+        connection.onmessage = null;
+        connection.onerror = null;
         connection.close();
     },
 
