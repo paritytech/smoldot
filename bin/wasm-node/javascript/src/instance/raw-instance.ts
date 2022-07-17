@@ -25,8 +25,6 @@ import { default as wasmBase64, decompressedSize as wasmDecompressedSize } from 
 
 import { SmoldotWasmInstance } from './bindings.js';
 
-import type { Socket as TcpSocket, NetConnectOpts } from 'node:net';
-
 export { ConnectionConfig, ConnectionError, Connection } from './bindings-smoldot-light.js';
 
 export interface Config {
@@ -68,18 +66,6 @@ export interface PlatformBindings {
     getRandomValues: (buffer: Uint8Array) => void,
 
     /**
-     * Returns true if the platform is capable of opening TCP connections.
-     */
-    isTcpAvailable: () => boolean,
-
-    /**
-     * Opens a TCP connection.
-     *
-     * Throws an exception if TCP connections aren't supported.
-     */
-    createConnection(options: NetConnectOpts, connectionListener?: () => void): TcpSocket;
-
-    /**
      * Tries to open a new connection using the given configuration.
      *
      * @see Connection
@@ -101,8 +87,6 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     // Used to bind with the smoldot-light bindings. See the `bindings-smoldot-light.js` file.
     const smoldotJsConfig: SmoldotBindingsConfig = {
         performanceNow: platformBindings.performanceNow,
-        isTcpAvailable: platformBindings.isTcpAvailable,
-        createConnection: platformBindings.createConnection,
         connect: platformBindings.connect,
         onPanic: (message) => {
             killAll();

@@ -56,12 +56,6 @@ export function start(options?: ClientOptions): Client {
         throw new Error('getRandomValues buffer too large')
       randomFillSync(buffer)
     },
-    isTcpAvailable: () => {
-      return true;
-    },
-    createConnection: (opts, connectionListener) => {
-      return nodeCreateConnection(opts, connectionListener)
-    },
     connect: (config) => {
       return connect(config)
     }
@@ -117,11 +111,11 @@ function connect(config: ConnectionConfig): Connection {
 
     } else if (tcpParsed != null) {
         // `net` module will be missing when we're not in NodeJS.
-        if (!config.isTcpAvailable() || config.forbidTcp) {
+        if (!config.forbidTcp) {
             throw new ConnectionError('TCP connections not available');
         }
 
-        const socket = config.createConnection({
+        const socket = nodeCreateConnection({
             host: tcpParsed[2],
             port: parseInt(tcpParsed[3]!, 10),
         });

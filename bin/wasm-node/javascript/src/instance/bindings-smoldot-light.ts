@@ -22,7 +22,6 @@
 
 import * as buffer from './buffer.js';
 import type { SmoldotWasmInstance } from './bindings.js';
-import type { Socket as TcpSocket, NetConnectOpts } from 'node:net';
 
 export interface Config {
     instance?: SmoldotWasmInstance,
@@ -31,18 +30,6 @@ export interface Config {
      * Returns the number of milliseconds since an arbitrary epoch.
      */
     performanceNow: () => number,
-
-    /**
-     * Returns true if the platform is capable of opening TCP connections.
-     */
-    isTcpAvailable: () => boolean,
-
-    /**
-     * Opens a TCP connection.
-     *
-     * Throws an exception if TCP connections aren't supported.
-     */
-    createConnection(options: NetConnectOpts, connectionListener?: () => void): TcpSocket;
 
     /**
      * Tries to open a new connection using the given configuration.
@@ -125,18 +112,6 @@ export interface ConnectionConfig {
     forbidWs: boolean,
     forbidNonLocalWs: boolean,
     forbidWss: boolean,
-
-    /**
-     * Returns true if the platform is capable of opening TCP connections.
-     */
-    isTcpAvailable: () => boolean,
-
-     /**
-      * Opens a TCP connection.
-      *
-      * Throws an exception if TCP connections aren't supported.
-      */
-    createConnection(options: NetConnectOpts, connectionListener?: () => void): TcpSocket;
 
     /**
      * Callback called when the connection transitions from the `Opening` to the `Open` state.
@@ -314,8 +289,6 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                     forbidWs: config.forbidWs,
                     forbidNonLocalWs: config.forbidNonLocalWs,
                     forbidWss: config.forbidWss,
-                    isTcpAvailable: config.isTcpAvailable,
-                    createConnection: config.createConnection,
                     onOpen: () => {
                         if (killedTracked.killed) return;
                         try {

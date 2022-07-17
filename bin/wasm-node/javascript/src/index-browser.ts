@@ -51,12 +51,6 @@ export function start(options?: ClientOptions): Client {
           throw new Error('randomness not available');
       crypto.getRandomValues(buffer);
     },
-    isTcpAvailable: () => {
-      return false
-    },
-    createConnection: () => {
-      throw new Error('TCP connections not available')
-    },
     connect: (config) => {
       return connect(config)
     }
