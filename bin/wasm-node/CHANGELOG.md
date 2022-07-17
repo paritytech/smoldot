@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Refactored the `package.json` file. The `browser` field has been removed. The library now exports by default code reliant on web platform APIs. An `exports` -> `node` field has been added (supported since NodeJS v13.2.0 and NodeJS v12.16.0) in order to export code reliant on NodeJS APIs when NodeJS is importing the library.
+
 ## 0.6.24 - 2022-07-14
 
 ### Added
