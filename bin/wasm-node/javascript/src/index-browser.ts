@@ -41,7 +41,9 @@ export {
  * @param options Configuration of the client. Defaults to `{}`.
  */
 export function start(options?: ClientOptions): Client {
-  return innerStart(options || {}, {
+  options = options || {}
+
+  return innerStart(options, {
     performanceNow: () => {
       return performance.now()
     },
@@ -52,7 +54,7 @@ export function start(options?: ClientOptions): Client {
       crypto.getRandomValues(buffer);
     },
     connect: (config) => {
-      return connect(config)
+      return connect(config, options?.forbidWs || false, options?.forbidNonLocalWs || false, options?.forbidWss || false)
     }
   })
 }
@@ -63,7 +65,7 @@ export function start(options?: ClientOptions): Client {
  * @see Connection
  * @throws ConnectionError If the multiaddress couldn't be parsed or contains an invalid protocol.
  */
- function connect(config: ConnectionConfig): Connection {
+ function connect(config: ConnectionConfig, forbidWs: boolean, forbidNonLocalWs: boolean, forbidWss: boolean): Connection {
   let connection: WebSocket;
 
   // Attempt to parse the multiaddress.
@@ -75,9 +77,9 @@ export function start(options?: ClientOptions): Client {
   if (wsParsed != null) {
       const proto = (wsParsed[4] == 'ws') ? 'ws' : 'wss';
       if (
-          (proto == 'ws' && config.forbidWs) ||
-          (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && config.forbidNonLocalWs) ||
-          (proto == 'wss' && config.forbidWss)
+          (proto == 'ws' && forbidWs) ||
+          (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && forbidNonLocalWs) ||
+          (proto == 'wss' && forbidWss)
       ) {
           throw new ConnectionError('Connection type not allowed');
       }

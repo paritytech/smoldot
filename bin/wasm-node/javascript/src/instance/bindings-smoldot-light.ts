@@ -50,10 +50,6 @@ export interface Config {
     jsonRpcCallback: (response: string, chainId: number) => void,
     databaseContentCallback: (data: string, chainId: number) => void,
     currentTaskCallback?: (taskName: string | null) => void,
-    forbidTcp: boolean,
-    forbidWs: boolean,
-    forbidNonLocalWs: boolean,
-    forbidWss: boolean,
 }
 
 /**
@@ -107,11 +103,6 @@ export interface ConnectionConfig {
      * Multiaddress in string format that describes which node to try to connect to.
      */
     address: string,
-
-    forbidTcp: boolean,
-    forbidWs: boolean,
-    forbidNonLocalWs: boolean,
-    forbidWss: boolean,
 
     /**
      * Callback called when the connection transitions from the `Opening` to the `Open` state.
@@ -285,10 +276,6 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
 
                 const connec = config.connect({
                     address,
-                    forbidTcp: config.forbidTcp,
-                    forbidWs: config.forbidWs,
-                    forbidNonLocalWs: config.forbidNonLocalWs,
-                    forbidWss: config.forbidWss,
                     onOpen: () => {
                         if (killedTracked.killed) return;
                         try {

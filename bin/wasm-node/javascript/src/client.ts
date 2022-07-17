@@ -180,6 +180,7 @@ export type LogCallback = (level: number, target: string, message: string) => vo
 /**
  * Configuration of a client.
  */
+// TODO: these options aren't all used by the inner start; a bit spaghetti
 export interface ClientOptions {
   /**
    * Callback that the client will invoke in order to report a log event.
@@ -376,10 +377,6 @@ export function start(options: ClientOptions, platformBindings: PlatformBindings
     // the moment, we enable it all the time, except if the user has logging disabled altogether.
     enableCurrentTask: options.maxLogLevel ? options.maxLogLevel >= 1 : true,
     cpuRateLimit: options.cpuRateLimit || 1.0,
-    forbidTcp: options.forbidTcp || false,
-    forbidWs: options.forbidWs || false,
-    forbidNonLocalWs: options.forbidNonLocalWs || false,
-    forbidWss: options.forbidWss || false,
   }, platformBindings);
 
   return {

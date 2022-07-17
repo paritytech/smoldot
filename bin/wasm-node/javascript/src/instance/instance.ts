@@ -30,10 +30,6 @@ export interface Config {
   maxLogLevel: number;
   enableCurrentTask: boolean;
   cpuRateLimit: number,
-  forbidTcp: boolean;
-  forbidWs: boolean;
-  forbidNonLocalWs: boolean;
-  forbidWss: boolean;
 }
 
 export interface Instance {
@@ -95,10 +91,6 @@ export function start(configMessage: Config, platformBindings: instance.Platform
       currentTask.name = taskName
     },
     cpuRateLimit: configMessage.cpuRateLimit,
-    forbidTcp: configMessage.forbidTcp,
-    forbidWs: configMessage.forbidWs,
-    forbidNonLocalWs: configMessage.forbidNonLocalWs,
-    forbidWss: configMessage.forbidWss,
   };
 
   state = {
