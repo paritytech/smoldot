@@ -101,6 +101,9 @@ export interface Config {
 export interface ConnectionConfig {
     /**
      * Multiaddress in string format that describes which node to try to connect to.
+     *
+     * Note that this address shouldn't be trusted. The value in this field might have been chosen
+     * by a potentially malicious peer.
      */
     address: string,
 

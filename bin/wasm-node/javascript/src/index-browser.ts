@@ -69,8 +69,6 @@ export function start(options?: ClientOptions): Client {
   let connection: WebSocket;
 
   // Attempt to parse the multiaddress.
-  // Note: peers can decide of the content of `addr`, meaning that it shouldn't be
-  // trusted.
   // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
   const wsParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
 
