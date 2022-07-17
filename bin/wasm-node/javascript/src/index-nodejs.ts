@@ -16,10 +16,13 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { Client, ClientOptions, start as innerStart } from './client.js'
-import { connect } from './connection.js'
+import { Connection, ConnectionError, ConnectionConfig } from './instance/instance.js';
+
+import Websocket from 'websocket';
 
 import { hrtime } from 'node:process';
 import { createConnection as nodeCreateConnection } from 'node:net';
+import type { Socket as TcpSocket } from 'node:net';
 import { randomFillSync } from 'node:crypto';
 
 export {
@@ -63,4 +66,125 @@ export function start(options?: ClientOptions): Client {
       return connect(config)
     }
   })
+}
+
+/**
+ * Tries to open a new connection using the given configuration.
+ *
+ * @see Connection
+ * @throws ConnectionError If the multiaddress couldn't be parsed or contains an invalid protocol.
+ */
+function connect(config: ConnectionConfig): Connection {
+    let connection: TcpWrapped | WebSocketWrapped;
+
+    // Attempt to parse the multiaddress.
+    // Note: peers can decide of the content of `addr`, meaning that it shouldn't be
+    // trusted.
+    // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
+    const wsParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
+    const tcpParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)$/);
+
+    if (wsParsed != null) {
+        const proto = (wsParsed[4] == 'ws') ? 'ws' : 'wss';
+        if (
+            (proto == 'ws' && config.forbidWs) ||
+            (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && config.forbidNonLocalWs) ||
+            (proto == 'wss' && config.forbidWss)
+        ) {
+            throw new ConnectionError('Connection type not allowed');
+        }
+
+        const url = (wsParsed[1] == 'ip6') ?
+            (proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]) :
+            (proto + "://" + wsParsed[2] + ":" + wsParsed[3]);
+
+        connection = {
+            ty: 'websocket',
+            socket: new Websocket.w3cwebsocket(url)
+        };
+        connection.socket.binaryType = 'arraybuffer';
+
+        connection.socket.onopen = () => {
+            config.onOpen();
+        };
+        connection.socket.onclose = (event) => {
+            const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
+            config.onClose(message);
+        };
+        connection.socket.onmessage = (msg) => {
+            config.onMessage(new Uint8Array(msg.data as ArrayBuffer));
+        };
+
+    } else if (tcpParsed != null) {
+        // `net` module will be missing when we're not in NodeJS.
+        if (!config.isTcpAvailable() || config.forbidTcp) {
+            throw new ConnectionError('TCP connections not available');
+        }
+
+        const socket = config.createConnection({
+            host: tcpParsed[2],
+            port: parseInt(tcpParsed[3]!, 10),
+        });
+
+        connection = { ty: 'tcp', socket };
+        connection.socket.setNoDelay();
+
+        connection.socket.on('connect', () => {
+            if (socket.destroyed) return;
+            config.onOpen();
+        });
+        connection.socket.on('close', (hasError) => {
+            if (socket.destroyed) return;
+            // NodeJS doesn't provide a reason why the closing happened, but only
+            // whether it was caused by an error.
+            const message = hasError ? "Error" : "Closed gracefully";
+            config.onClose(message);
+        });
+        connection.socket.on('error', () => { });
+        connection.socket.on('data', (message) => {
+            if (socket.destroyed) return;
+            config.onMessage(new Uint8Array(message.buffer));
+        });
+
+    } else {
+        throw new ConnectionError('Unrecognized multiaddr format');
+    }
+
+    return {
+        close: (): void => {
+            if (connection.ty == 'websocket') {
+                // WebSocket
+                // We can't set these fields to null because the TypeScript definitions don't
+                // allow it, but we can set them to dummy values.
+                connection.socket.onopen = () => { };
+                connection.socket.onclose = () => { };
+                connection.socket.onmessage = () => { };
+                connection.socket.onerror = () => { };
+                connection.socket.close();
+            } else {
+                // TCP
+                connection.socket.destroy();
+            }
+        },
+
+        send: (data: Uint8Array): void => {
+            if (connection.ty == 'websocket') {
+                // WebSocket
+                connection.socket.send(data);
+            } else {
+                // TCP
+                connection.socket.write(data);
+            }
+        }
+    };
+}
+
+interface TcpWrapped {
+    ty: 'tcp',
+    socket: TcpSocket,
+}
+
+interface WebSocketWrapped {
+    ty: 'websocket',
+    socket: Websocket.w3cwebsocket,
 }
