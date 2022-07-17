@@ -18,7 +18,7 @@
 import * as buffer from './buffer.js';
 import { default as tinyInflate } from '../tiny-inflate/index.js'
 
-import { Config as SmoldotBindingsConfig, default as smoldotLightBindingsBuilder } from './bindings-smoldot-light.js';
+import { ConnectionConfig, Connection, Config as SmoldotBindingsConfig, default as smoldotLightBindingsBuilder } from './bindings-smoldot-light.js';
 import { Config as WasiConfig, default as wasiBindingsBuilder } from './bindings-wasi.js';
 
 import { default as wasmBase64, decompressedSize as wasmDecompressedSize } from './autogen/wasm.js';
@@ -26,6 +26,8 @@ import { default as wasmBase64, decompressedSize as wasmDecompressedSize } from 
 import { SmoldotWasmInstance } from './bindings.js';
 
 import type { Socket as TcpSocket, NetConnectOpts } from 'node:net';
+
+export { ConnectionConfig, ConnectionError, Connection } from './bindings-smoldot-light.js';
 
 export interface Config {
     /**
@@ -76,6 +78,14 @@ export interface PlatformBindings {
      * Throws an exception if TCP connections aren't supported.
      */
     createConnection(options: NetConnectOpts, connectionListener?: () => void): TcpSocket;
+
+    /**
+     * Tries to open a new connection using the given configuration.
+     *
+     * @see Connection
+     * @throws ConnectionError If the multiaddress couldn't be parsed or contains an invalid protocol.
+     */
+     connect(config: ConnectionConfig): Connection;
 }
 
 export async function startInstance(config: Config, platformBindings: PlatformBindings): Promise<SmoldotWasmInstance> {
@@ -93,6 +103,7 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
         performanceNow: platformBindings.performanceNow,
         isTcpAvailable: platformBindings.isTcpAvailable,
         createConnection: platformBindings.createConnection,
+        connect: platformBindings.connect,
         onPanic: (message) => {
             killAll();
             config.onWasmPanic(message);

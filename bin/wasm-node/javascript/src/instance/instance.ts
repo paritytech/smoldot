@@ -20,7 +20,7 @@ import * as instance from './raw-instance.js';
 import { SmoldotWasmInstance } from './bindings.js';
 import { CrashError } from '../client.js';
 
-export { PlatformBindings } from './raw-instance.js';
+export { PlatformBindings, ConnectionError, ConnectionConfig, Connection } from './raw-instance.js';
 
 /**
  * Contains the configuration of the instance.

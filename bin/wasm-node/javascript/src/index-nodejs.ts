@@ -16,6 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { Client, ClientOptions, start as innerStart } from './client.js'
+import { connect } from './connection.js'
 
 import { hrtime } from 'node:process';
 import { createConnection as nodeCreateConnection } from 'node:net';
@@ -58,5 +59,8 @@ export function start(options?: ClientOptions): Client {
     createConnection: (opts, connectionListener) => {
       return nodeCreateConnection(opts, connectionListener)
     },
+    connect: (config) => {
+      return connect(config)
+    }
   })
 }

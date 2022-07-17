@@ -16,107 +16,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import Websocket from 'websocket';
-import type { Socket as TcpSocket, NetConnectOpts } from 'node:net';
-
-/**
- * Connection to a remote node.
- *
- * At any time, a connection can be in one of the three following states:
- *
- * - `Opening` (initial state)
- * - `Open`
- * - `Closed`
- *
- * When in the `Opening` or `Open` state, the connection can transition to the `Closed` state
- * if the remote closes the connection or refuses the connection altogether. When that
- * happens, `config.onClosed` is called. Once in the `Closed` state, the connection cannot
- * transition back to another state.
- *
- * Initially in the `Opening` state, the connection can transition to the `Open` state if the
- * remote accepts the connection. When that happens, `config.onOpen` is called.
- *
- * When in the `Open` state, the connection can receive messages. When a message is received,
- * `config.onMessage` is called.
- *
- * @see connect
- */
-export interface Connection {
-    /**
-     * Transitions the connection to the `Closed` state.
-     *
-     * The `config.onClose` callback is **not** called.
-     *
-     * The transition is performed in the background.
-     * None of the callbacks passed to the `Config` will be called again.
-     */
-    close(): void;
-
-    /**
-     * Queues data to be sent on the given connection.
-     *
-     * The connection must currently be in the `Open` state.
-     */
-    send(data: Uint8Array): void;
-}
-
-/**
- * Configuration for a connection.
- *
- * @see connect
- */
-export interface Config {
-    /**
-     * Multiaddress in string format that describes which node to try to connect to.
-     */
-    address: string,
-
-    forbidTcp: boolean,
-    forbidWs: boolean,
-    forbidNonLocalWs: boolean,
-    forbidWss: boolean,
-
-    /**
-     * Returns true if the platform is capable of opening TCP connections.
-     */
-    isTcpAvailable: () => boolean,
-
-     /**
-      * Opens a TCP connection.
-      *
-      * Throws an exception if TCP connections aren't supported.
-      */
-    createConnection(options: NetConnectOpts, connectionListener?: () => void): TcpSocket;
-
-    /**
-     * Callback called when the connection transitions from the `Opening` to the `Open` state.
-     */
-    onOpen: () => void;
-
-    /**
-     * Callback called when the connection transitions to the `Closed` state.
-     *
-     * It it **not** called if `Connection.close` is manually called by the API user.
-     */
-    onClose: (message: string) => void;
-
-    /**
-     * Callback called when a message sent by the remote has been received.
-     *
-     * Can only happen while the connection is in the `Open` state.
-     */
-    onMessage: (message: Uint8Array) => void;
-}
-
-/**
- * Emitted by `connect` if the multiaddress couldn't be parsed or contains an invalid protocol.
- *
- * @see connect
- */
-export class ConnectionError extends Error {
-    constructor(message: string) {
-        super(message);
-    }
-}
+import type { Socket as TcpSocket } from 'node:net';
+import { Connection, ConnectionError, ConnectionConfig } from './instance/instance.js';
 
 /**
  * Tries to open a new connection using the given configuration.
@@ -124,7 +25,7 @@ export class ConnectionError extends Error {
  * @see Connection
  * @throws ConnectionError If the multiaddress couldn't be parsed or contains an invalid protocol.
  */
-export function connect(config: Config): Connection {
+export function connect(config: ConnectionConfig): Connection {
     let connection: TcpWrapped | WebSocketWrapped;
 
     // Attempt to parse the multiaddress.

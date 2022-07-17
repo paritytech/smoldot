@@ -15,7 +15,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+/// <reference lib="dom" />
+
 import { Client, ClientOptions, start as innerStart } from './client.js'
+import { connect } from './connection.js'
 
 export {
   AddChainError,
@@ -54,5 +57,8 @@ export function start(options?: ClientOptions): Client {
     createConnection: () => {
       throw new Error('TCP connections not available')
     },
+    connect: (config) => {
+      return connect(config)
+    }
   })
 }
