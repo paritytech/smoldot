@@ -339,6 +339,7 @@ struct ChainServices<TPlat: Platform> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
+    block_number_bytes: usize,
 }
 
 impl<TPlat: Platform> Clone for ChainServices<TPlat> {
@@ -349,6 +350,7 @@ impl<TPlat: Platform> Clone for ChainServices<TPlat> {
             sync_service: self.sync_service.clone(),
             runtime_service: self.runtime_service.clone(),
             transactions_service: self.transactions_service.clone(),
+            block_number_bytes: self.block_number_bytes,
         }
     }
 }
@@ -1110,6 +1112,7 @@ async fn start_services<TPlat: Platform>(
                     chain_information.as_ref().finalized_block_header.hash(),
                 ),
                 protocol_id: chain_spec.protocol_id().to_string(),
+                block_number_bytes: usize::from(chain_spec.block_number_bytes()),
             }],
         })
         .await;
@@ -1124,6 +1127,7 @@ async fn start_services<TPlat: Platform>(
             sync_service::SyncService::new(sync_service::Config {
                 log_name: log_name.clone(),
                 chain_information: chain_information.clone(),
+                block_number_bytes: usize::from(chain_spec.block_number_bytes()),
                 tasks_executor: Box::new({
                     let new_task_tx = new_task_tx.clone();
                     move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
@@ -1133,7 +1137,7 @@ async fn start_services<TPlat: Platform>(
                 parachain: Some(sync_service::ConfigParachain {
                     parachain_id: chain_spec.relay_chain().unwrap().1,
                     relay_chain_sync: relay_chain.runtime_service.clone(),
-                    relay_chain_block_number_bytes: 4, // TODO: load from chain specs or something
+                    relay_chain_block_number_bytes: relay_chain.block_number_bytes,
                 }),
             })
             .await,
@@ -1165,6 +1169,7 @@ async fn start_services<TPlat: Platform>(
             sync_service::SyncService::new(sync_service::Config {
                 log_name: log_name.clone(),
                 chain_information: chain_information.clone(),
+                block_number_bytes: usize::from(chain_spec.block_number_bytes()),
                 tasks_executor: Box::new({
                     let new_task_tx = new_task_tx.clone();
                     move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
@@ -1220,6 +1225,7 @@ async fn start_services<TPlat: Platform>(
         runtime_service,
         sync_service,
         transactions_service,
+        block_number_bytes: usize::from(chain_spec.block_number_bytes()),
     }
 }
 

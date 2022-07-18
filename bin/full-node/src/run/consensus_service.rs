@@ -57,6 +57,9 @@ pub struct Config<'a> {
     /// Database to use to read and write information about the chain.
     pub database: Arc<database_thread::DatabaseThread>,
 
+    /// Number of bytes of the block number in the networking protocol.
+    pub block_number_bytes: usize,
+
     /// Stores of key to use for all block-production-related purposes.
     pub keystore: Arc<keystore::Keystore>,
 
@@ -170,7 +173,7 @@ impl ConsensusService {
         (config.tasks_executor)({
             let mut sync = all::AllSync::new(all::Config {
                 chain_information: finalized_chain_information,
-                block_number_bytes: 4, // TODO: pass a proper value; for example load through chain spec
+                block_number_bytes: config.block_number_bytes,
                 allow_unknown_consensus_engines: false,
                 sources_capacity: 32,
                 blocks_capacity: {

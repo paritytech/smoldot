@@ -50,6 +50,13 @@ pub(super) struct ClientSpec {
     pub(super) protocol_id: Option<String>,
     #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
     pub(super) fork_id: Option<String>,
+    /// The `blockNumberBytes` field is (at the time of writing of this comment) a custom addition
+    /// to the format of smoldot chain specs compared to Substrate. It is necessary because,
+    /// contrary to Substrate, smoldot has no way to know the size of the block number field of
+    /// various data structures. If the field is missing, a value of 4 is assumed.
+    // TODO: revisit this field in the future to maybe bring compatibility with Substrate
+    #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
+    pub(super) block_number_bytes: Option<u8>,
     pub(super) properties: Option<Box<serde_json::value::RawValue>>,
     // TODO: make use of this
     pub(super) fork_blocks: Option<Vec<(u64, HashHexString)>>,
