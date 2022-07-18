@@ -31,7 +31,7 @@
     "prepublishOnly": "node prepare.mjs --release && rimraf ./dist && npm run buildModules",
     "build": "node prepare.mjs --release && rimraf ./dist && npm run buildModules",
     "start": "node prepare.mjs --debug && rimraf ./dist && npm run buildModules && node demo/demo.mjs",
-    "test": "node prepare.mjs --debug && rimraf ./dist && npm run buildModules && ava --timeout=2m --concurrency 2 --no-worker-threads"
+    "test": "node prepare.mjs --debug && rimraf ./dist && npm run buildModules && deno run ./dist/mjs/index-deno.js && ava --timeout=2m --concurrency 2 --no-worker-threads"
   },
   "dependencies": {
     "websocket": "^1.0.32"
