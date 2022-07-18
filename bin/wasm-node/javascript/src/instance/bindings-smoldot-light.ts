@@ -21,12 +21,23 @@
 //! of that object with the Wasm instance.
 
 import * as buffer from './buffer.js';
-import * as compat from '../compat/index.js';
-import * as connection from './connection.js';
 import type { SmoldotWasmInstance } from './bindings.js';
 
 export interface Config {
     instance?: SmoldotWasmInstance,
+
+    /**
+     * Returns the number of milliseconds since an arbitrary epoch.
+     */
+    performanceNow: () => number,
+
+    /**
+     * Tries to open a new connection using the given configuration.
+     *
+     * @see Connection
+     * @throws ConnectionError If the multiaddress couldn't be parsed or contains an invalid protocol.
+     */
+    connect(config: ConnectionConfig): Connection;
     
     /**
      * Closure to call when the Wasm instance calls `panic`.
@@ -39,16 +50,98 @@ export interface Config {
     jsonRpcCallback: (response: string, chainId: number) => void,
     databaseContentCallback: (data: string, chainId: number) => void,
     currentTaskCallback?: (taskName: string | null) => void,
-    forbidTcp: boolean,
-    forbidWs: boolean,
-    forbidNonLocalWs: boolean,
-    forbidWss: boolean,
 }
 
-export default function (config: Config): { imports: compat.WasmModuleImports, killAll: () => void } {
+/**
+ * Connection to a remote node.
+ *
+ * At any time, a connection can be in one of the three following states:
+ *
+ * - `Opening` (initial state)
+ * - `Open`
+ * - `Closed`
+ *
+ * When in the `Opening` or `Open` state, the connection can transition to the `Closed` state
+ * if the remote closes the connection or refuses the connection altogether. When that
+ * happens, `config.onClosed` is called. Once in the `Closed` state, the connection cannot
+ * transition back to another state.
+ *
+ * Initially in the `Opening` state, the connection can transition to the `Open` state if the
+ * remote accepts the connection. When that happens, `config.onOpen` is called.
+ *
+ * When in the `Open` state, the connection can receive messages. When a message is received,
+ * `config.onMessage` is called.
+ *
+ * @see connect
+ */
+ export interface Connection {
+    /**
+     * Transitions the connection to the `Closed` state.
+     *
+     * The `config.onClose` callback is **not** called.
+     *
+     * The transition is performed in the background.
+     * None of the callbacks passed to the `Config` will be called again.
+     */
+    close(): void;
+
+    /**
+     * Queues data to be sent on the given connection.
+     *
+     * The connection must currently be in the `Open` state.
+     */
+    send(data: Uint8Array): void;
+}
+
+/**
+ * Configuration for a connection.
+ *
+ * @see connect
+ */
+export interface ConnectionConfig {
+    /**
+     * Multiaddress in string format that describes which node to try to connect to.
+     *
+     * Note that this address shouldn't be trusted. The value in this field might have been chosen
+     * by a potentially malicious peer.
+     */
+    address: string,
+
+    /**
+     * Callback called when the connection transitions from the `Opening` to the `Open` state.
+     */
+    onOpen: () => void;
+
+    /**
+     * Callback called when the connection transitions to the `Closed` state.
+     *
+     * It it **not** called if `Connection.close` is manually called by the API user.
+     */
+    onClose: (message: string) => void;
+
+    /**
+     * Callback called when a message sent by the remote has been received.
+     *
+     * Can only happen while the connection is in the `Open` state.
+     */
+    onMessage: (message: Uint8Array) => void;
+}
+
+/**
+ * Emitted by `connect` if the multiaddress couldn't be parsed or contains an invalid protocol.
+ *
+ * @see connect
+ */
+export class ConnectionError extends Error {
+    constructor(message: string) {
+        super(message);
+    }
+}
+
+export default function (config: Config): { imports: WebAssembly.ModuleImports, killAll: () => void } {
     // Used below to store the list of all connections.
     // The indices within this array are chosen by the Rust code.
-    let connections: Record<number, connection.Connection> = {};
+    let connections: Record<number, Connection> = {};
 
     // Object containing a boolean indicating whether the `killAll` function has been invoked by
     // the user.
@@ -130,7 +223,7 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
         unix_time_ms: () => Date.now(),
 
         // Must return the value of a monotonic clock in milliseconds.
-        monotonic_clock_ms: () => compat.performanceNow(),
+        monotonic_clock_ms: () => config.performanceNow(),
 
         // Must call `timer_finished` after the given number of milliseconds has elapsed.
         start_timer: (id: number, ms: number) => {
@@ -184,12 +277,8 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
 
                 const address = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), addrPtr, addrLen);
 
-                const connec = connection.connect({
+                const connec = config.connect({
                     address,
-                    forbidTcp: config.forbidTcp,
-                    forbidWs: config.forbidWs,
-                    forbidNonLocalWs: config.forbidNonLocalWs,
-                    forbidWss: config.forbidWss,
                     onOpen: () => {
                         if (killedTracked.killed) return;
                         try {
@@ -219,7 +308,7 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
                 return 0;
 
             } catch (error) {
-                const isBadAddress = error instanceof connection.ConnectionError;
+                const isBadAddress = error instanceof ConnectionError;
                 let errorStr = "Unknown error";
                 if (error instanceof Error) {
                     errorStr = error.toString();

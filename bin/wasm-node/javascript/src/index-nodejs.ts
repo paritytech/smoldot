@@ -15,97 +15,53 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import { Client, ClientOptions, start as innerStart } from './client.js'
+import { Connection, ConnectionError, ConnectionConfig } from './instance/instance.js';
+
 import Websocket from 'websocket';
-import * as compat from '../compat/index.js';
 
+import { hrtime } from 'node:process';
+import { createConnection as nodeCreateConnection } from 'node:net';
 import type { Socket as TcpSocket } from 'node:net';
+import { randomFillSync } from 'node:crypto';
+
+export {
+  AddChainError,
+  AddChainOptions,
+  AlreadyDestroyedError,
+  Chain,
+  Client,
+  ClientOptions,
+  CrashError,
+  JsonRpcCallback,
+  JsonRpcDisabledError,
+  LogCallback
+} from './client.js';
 
 /**
- * Connection to a remote node.
+ * Initializes a new client. This is a pre-requisite to connecting to a blockchain.
  *
- * At any time, a connection can be in one of the three following states:
+ * Can never fail.
  *
- * - `Opening` (initial state)
- * - `Open`
- * - `Closed`
- *
- * When in the `Opening` or `Open` state, the connection can transition to the `Closed` state
- * if the remote closes the connection or refuses the connection altogether. When that
- * happens, `config.onClosed` is called. Once in the `Closed` state, the connection cannot
- * transition back to another state.
- *
- * Initially in the `Opening` state, the connection can transition to the `Open` state if the
- * remote accepts the connection. When that happens, `config.onOpen` is called.
- *
- * When in the `Open` state, the connection can receive messages. When a message is received,
- * `config.onMessage` is called.
- *
- * @see connect
+ * @param options Configuration of the client. Defaults to `{}`.
  */
-export interface Connection {
-    /**
-     * Transitions the connection to the `Closed` state.
-     *
-     * The `config.onClose` callback is **not** called.
-     *
-     * The transition is performed in the background.
-     * None of the callbacks passed to the `Config` will be called again.
-     */
-    close(): void;
+export function start(options?: ClientOptions): Client {
+  options = options || {};
 
-    /**
-     * Queues data to be sent on the given connection.
-     *
-     * The connection must currently be in the `Open` state.
-     */
-    send(data: Uint8Array): void;
-}
-
-/**
- * Configuration for a connection.
- *
- * @see connect
- */
-export interface Config {
-    /**
-     * Multiaddress in string format that describes which node to try to connect to.
-     */
-    address: string,
-
-    forbidTcp: boolean,
-    forbidWs: boolean,
-    forbidNonLocalWs: boolean,
-    forbidWss: boolean,
-
-    /**
-     * Callback called when the connection transitions from the `Opening` to the `Open` state.
-     */
-    onOpen: () => void;
-
-    /**
-     * Callback called when the connection transitions to the `Closed` state.
-     *
-     * It it **not** called if `Connection.close` is manually called by the API user.
-     */
-    onClose: (message: string) => void;
-
-    /**
-     * Callback called when a message sent by the remote has been received.
-     *
-     * Can only happen while the connection is in the `Open` state.
-     */
-    onMessage: (message: Uint8Array) => void;
-}
-
-/**
- * Emitted by `connect` if the multiaddress couldn't be parsed or contains an invalid protocol.
- *
- * @see connect
- */
-export class ConnectionError extends Error {
-    constructor(message: string) {
-        super(message);
+  return innerStart(options || {}, {
+    performanceNow: () => {
+      const time = hrtime();
+      return ((time[0] * 1e3) + (time[1] / 1e6));
+    },
+    getRandomValues: (buffer) => {
+      if (buffer.length >= 65536)
+        throw new Error('getRandomValues buffer too large')
+      randomFillSync(buffer)
+    },
+    connect: (config) => {
+      return connect(config, options?.forbidTcp || false, options?.forbidWs || false, options?.forbidNonLocalWs || false, options?.forbidWss || false)
     }
+  })
 }
 
 /**
@@ -114,12 +70,10 @@ export class ConnectionError extends Error {
  * @see Connection
  * @throws ConnectionError If the multiaddress couldn't be parsed or contains an invalid protocol.
  */
-export function connect(config: Config): Connection {
+function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean, forbidNonLocalWs: boolean, forbidWss: boolean): Connection {
     let connection: TcpWrapped | WebSocketWrapped;
 
     // Attempt to parse the multiaddress.
-    // Note: peers can decide of the content of `addr`, meaning that it shouldn't be
-    // trusted.
     // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
     const wsParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
     const tcpParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)$/);
@@ -127,9 +81,9 @@ export function connect(config: Config): Connection {
     if (wsParsed != null) {
         const proto = (wsParsed[4] == 'ws') ? 'ws' : 'wss';
         if (
-            (proto == 'ws' && config.forbidWs) ||
-            (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && config.forbidNonLocalWs) ||
-            (proto == 'wss' && config.forbidWss)
+            (proto == 'ws' && forbidWs) ||
+            (proto == 'ws' && wsParsed[2] != 'localhost' && wsParsed[2] != '127.0.0.1' && forbidNonLocalWs) ||
+            (proto == 'wss' && forbidWss)
         ) {
             throw new ConnectionError('Connection type not allowed');
         }
@@ -157,11 +111,11 @@ export function connect(config: Config): Connection {
 
     } else if (tcpParsed != null) {
         // `net` module will be missing when we're not in NodeJS.
-        if (!compat.isTcpAvailable() || config.forbidTcp) {
+        if (forbidTcp) {
             throw new ConnectionError('TCP connections not available');
         }
 
-        const socket = compat.createConnection({
+        const socket = nodeCreateConnection({
             host: tcpParsed[2],
             port: parseInt(tcpParsed[3]!, 10),
         });

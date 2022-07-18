@@ -6,6 +6,10 @@
 
 - Add an optional `blockNumberBytes` field to chain specifications indicating the number of bytes used to encode the block number of the chain. If the field is missing, the value defaults to 4. Prior to this change, the value was always hardcoded to 4. This field is at the moment specific to smoldot, and Substrate will fail to parse chain specifications containing it. ([#2512](https://github.com/paritytech/smoldot/pull/2512))
 
+### Changed
+
+- Refactored the `package.json` file. The `browser` field has been removed. The library now exports by default code reliant on web platform APIs. An `exports` -> `node` field has been added (supported since NodeJS v13.2.0 and NodeJS v12.16.0) in order to export code reliant on NodeJS APIs when NodeJS is importing the library. ([#2519](https://github.com/paritytech/smoldot/pull/2519))
+
 ## 0.6.24 - 2022-07-14
 
 ### Added
