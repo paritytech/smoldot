@@ -230,6 +230,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             num_events_receivers: 2 + if relay_chain_database.is_some() { 1 } else { 0 },
             chains: iter::once(network_service::ChainConfig {
                 protocol_id: chain_spec.protocol_id().to_owned(),
+                block_number_bytes: usize::from(chain_spec.block_number_bytes()),
                 database: database.clone(),
                 has_grandpa_protocol: matches!(
                     genesis_chain_information.finality,
@@ -279,6 +280,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 if let Some(relay_chains_specs) = &relay_chain_spec {
                     Some(network_service::ChainConfig {
                         protocol_id: relay_chains_specs.protocol_id().to_owned(),
+                        block_number_bytes: usize::from(relay_chains_specs.block_number_bytes()),
                         database: relay_chain_database.clone().unwrap(),
                         has_grandpa_protocol: matches!(
                             relay_genesis_chain_information.as_ref().unwrap().finality,
@@ -352,6 +354,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         network_events_receiver: network_events_receivers.next().unwrap(),
         network_service: (network_service.clone(), 0),
         database,
+        block_number_bytes: usize::from(chain_spec.block_number_bytes()),
         keystore,
         jaeger_service: jaeger_service.clone(),
         slot_duration_author_ratio: 43691_u16,
@@ -366,6 +369,9 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 network_events_receiver: network_events_receivers.next().unwrap(),
                 network_service: (network_service.clone(), 1),
                 database: relay_chain_database,
+                block_number_bytes: usize::from(
+                    relay_chain_spec.as_ref().unwrap().block_number_bytes(),
+                ),
                 keystore: Arc::new(keystore::Keystore::new(rand::random())),
                 jaeger_service, // TODO: consider passing a different jaeger service with a different service name
                 slot_duration_author_ratio: 43691_u16,

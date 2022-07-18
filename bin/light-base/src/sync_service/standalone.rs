@@ -39,6 +39,7 @@ use std::{
 pub(super) async fn start_standalone_chain<TPlat: Platform>(
     log_target: String,
     chain_information: chain::chain_information::ValidChainInformation,
+    block_number_bytes: usize,
     mut from_foreground: mpsc::Receiver<ToBackground>,
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_chain_index: usize,
@@ -47,7 +48,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
     let mut task = Task {
         sync: all::AllSync::new(all::Config {
             chain_information,
-            block_number_bytes: 4, // TODO: pass a proper value; for example load through chain spec
+            block_number_bytes,
             allow_unknown_consensus_engines: true,
             sources_capacity: 32,
             blocks_capacity: {
