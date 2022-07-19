@@ -1026,9 +1026,6 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
         };
 
         match self.state.start_chain_information.as_ref().consensus {
-            ChainInformationConsensusRef::Aura { .. } => {
-                todo!()
-            }
             ChainInformationConsensusRef::Babe { .. } => {
                 let babe_current_epoch_query =
                     babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
@@ -1048,6 +1045,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
 
                 (warp_sync, error)
             }
+            ChainInformationConsensusRef::Aura { .. } |  // TODO: https://github.com/paritytech/smoldot/issues/933
             ChainInformationConsensusRef::Unknown => {
                 return (
                     WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
