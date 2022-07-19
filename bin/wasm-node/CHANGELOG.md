@@ -6,6 +6,10 @@
 
 - Add support for Deno. Smoldot is now available on the deno.land/x package registry. This doesn't modify anything to the behaviour of the smoldot NPM package. ([#2522](https://github.com/paritytech/smoldot/pull/2522))
 
+### Fixed
+
+- Exceptions thrown in the JSON-RPC callback no longer crash smoldot. ([#2527](https://github.com/paritytech/smoldot/pull/2527))
+
 ## 0.6.25 - 2022-07-18
 
 ### Added
