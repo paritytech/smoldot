@@ -88,6 +88,8 @@ pub enum Error {
     /// Parameters produced by the runtime are incoherent.
     #[display(fmt = "Parameters produced by the runtime are incoherent: {}", _0)]
     InvalidChain(chain_information::ValidityError),
+    /// Chain uses an unrecognized consensus mechanism.
+    UnknownConsensus,
 }
 
 /// The configuration for [`warp_sync()`].
@@ -1023,23 +1025,43 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
             }
         };
 
-        let babe_current_epoch_query =
-            babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
-                runtime,
-                epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch,
-            });
+        match self.state.start_chain_information.as_ref().consensus {
+            ChainInformationConsensusRef::Aura { .. } => {
+                todo!()
+            }
+            ChainInformationConsensusRef::Babe { .. } => {
+                let babe_current_epoch_query =
+                    babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
+                        runtime,
+                        epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch,
+                    });
 
-        let (warp_sync, error) = WarpSync::from_babe_fetch_epoch_query(
-            babe_current_epoch_query,
-            None,
-            self.state,
-            PostRuntimeDownloadState {
-                finalized_storage_code: Some(code),
-                finalized_storage_heap_pages: heap_pages.map(|hp| hp.as_ref().to_vec()),
-            },
-        );
+                let (warp_sync, error) = WarpSync::from_babe_fetch_epoch_query(
+                    babe_current_epoch_query,
+                    None,
+                    self.state,
+                    PostRuntimeDownloadState {
+                        finalized_storage_code: Some(code),
+                        finalized_storage_heap_pages: heap_pages.map(|hp| hp.as_ref().to_vec()),
+                    },
+                );
 
-        (warp_sync, error)
+                (warp_sync, error)
+            }
+            ChainInformationConsensusRef::Unknown => {
+                return (
+                    WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
+                        self.state.sources,
+                        PreVerificationState {
+                            start_chain_information: self.state.start_chain_information,
+                            block_number_bytes: self.state.block_number_bytes,
+                        },
+                        None,
+                    )),
+                    Some(Error::UnknownConsensus),
+                )
+            }
+        }
     }
 }
 
