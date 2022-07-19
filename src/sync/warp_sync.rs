@@ -1001,43 +1001,45 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                 }
             };
 
-        match HostVmPrototype::new(host::Config {
+        let runtime = match HostVmPrototype::new(host::Config {
             module: &code,
             heap_pages: decoded_heap_pages,
             exec_hint,
             allow_unresolved_imports,
         }) {
-            Ok(runtime) => {
-                let babe_current_epoch_query =
-                    babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
-                        runtime,
-                        epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch,
-                    });
-
-                let (warp_sync, error) = WarpSync::from_babe_fetch_epoch_query(
-                    babe_current_epoch_query,
-                    None,
-                    self.state,
-                    PostRuntimeDownloadState {
-                        finalized_storage_code: Some(code),
-                        finalized_storage_heap_pages: heap_pages.map(|hp| hp.as_ref().to_vec()),
-                    },
-                );
-
-                (warp_sync, error)
+            Ok(runtime) => runtime,
+            Err(error) => {
+                return (
+                    WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
+                        self.state.sources,
+                        PreVerificationState {
+                            start_chain_information: self.state.start_chain_information,
+                            block_number_bytes: self.state.block_number_bytes,
+                        },
+                        None,
+                    )),
+                    Some(Error::NewRuntime(error)),
+                )
             }
-            Err(error) => (
-                WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
-                    self.state.sources,
-                    PreVerificationState {
-                        start_chain_information: self.state.start_chain_information,
-                        block_number_bytes: self.state.block_number_bytes,
-                    },
-                    None,
-                )),
-                Some(Error::NewRuntime(error)),
-            ),
-        }
+        };
+
+        let babe_current_epoch_query =
+            babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
+                runtime,
+                epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch,
+            });
+
+        let (warp_sync, error) = WarpSync::from_babe_fetch_epoch_query(
+            babe_current_epoch_query,
+            None,
+            self.state,
+            PostRuntimeDownloadState {
+                finalized_storage_code: Some(code),
+                finalized_storage_heap_pages: heap_pages.map(|hp| hp.as_ref().to_vec()),
+            },
+        );
+
+        (warp_sync, error)
     }
 }
 
