@@ -53,20 +53,3 @@ function checkRange(buffer: Uint8Array, offset: number, length: number) {
     if (offset + length > buffer.length)
         throw new RangeError()
 }
-
-/**
- * Decodes a base64 string.
- *
- * The input is assumed to be correct.
- */
-export function trustedBase64Decode(base64: string): Uint8Array {
-    // This code is a bit sketchy due to the fact that we decode into a string, but it seems to
-    // work.
-    const binaryString = atob(base64);
-    const size = binaryString.length;
-    const bytes = new Uint8Array(size);
-    for (let i = 0; i < size; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-    }
-    return bytes;
-}
