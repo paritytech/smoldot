@@ -16,12 +16,11 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import * as buffer from './buffer.js';
-import { default as tinyInflate } from '../tiny-inflate/index.js'
 
 import { ConnectionConfig, Connection, Config as SmoldotBindingsConfig, default as smoldotLightBindingsBuilder } from './bindings-smoldot-light.js';
 import { Config as WasiConfig, default as wasiBindingsBuilder } from './bindings-wasi.js';
 
-import { default as wasmBase64, decompressedSize as wasmDecompressedSize } from './autogen/wasm.js';
+import { default as wasmBase64 } from './autogen/wasm.js';
 
 import { SmoldotWasmInstance } from './bindings.js';
 
@@ -52,6 +51,11 @@ export interface Config {
  */
 export interface PlatformBindings {
     /**
+     * Decompresses the given buffer using the inflate algorithm with zlib header.
+     */
+    zlibInflate: (buffer: Uint8Array) => Uint8Array,
+
+    /**
      * Returns the number of milliseconds since an arbitrary epoch.
      */
     performanceNow: () => number,
@@ -75,8 +79,7 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     // different file.
     // This is suboptimal compared to using `instantiateStreaming`, but it is the most
     // cross-platform cross-bundler approach.
-    const wasmBytecode = new Uint8Array(wasmDecompressedSize)
-    tinyInflate(buffer.trustedBase64Decode(wasmBase64), wasmBytecode)
+    const wasmBytecode = platformBindings.zlibInflate(buffer.trustedBase64Decode(wasmBase64))
 
     let killAll: () => void;
 
