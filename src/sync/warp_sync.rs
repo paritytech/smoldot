@@ -88,6 +88,8 @@ pub enum Error {
     /// Parameters produced by the runtime are incoherent.
     #[display(fmt = "Parameters produced by the runtime are incoherent: {}", _0)]
     InvalidChain(chain_information::ValidityError),
+    /// Chain uses an unrecognized consensus mechanism.
+    UnknownConsensus,
 }
 
 /// The configuration for [`warp_sync()`].
@@ -1001,13 +1003,30 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                 }
             };
 
-        match HostVmPrototype::new(host::Config {
+        let runtime = match HostVmPrototype::new(host::Config {
             module: &code,
             heap_pages: decoded_heap_pages,
             exec_hint,
             allow_unresolved_imports,
         }) {
-            Ok(runtime) => {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                return (
+                    WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
+                        self.state.sources,
+                        PreVerificationState {
+                            start_chain_information: self.state.start_chain_information,
+                            block_number_bytes: self.state.block_number_bytes,
+                        },
+                        None,
+                    )),
+                    Some(Error::NewRuntime(error)),
+                )
+            }
+        };
+
+        match self.state.start_chain_information.as_ref().consensus {
+            ChainInformationConsensusRef::Babe { .. } => {
                 let babe_current_epoch_query =
                     babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
                         runtime,
@@ -1026,17 +1045,20 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
 
                 (warp_sync, error)
             }
-            Err(error) => (
-                WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
-                    self.state.sources,
-                    PreVerificationState {
-                        start_chain_information: self.state.start_chain_information,
-                        block_number_bytes: self.state.block_number_bytes,
-                    },
-                    None,
-                )),
-                Some(Error::NewRuntime(error)),
-            ),
+            ChainInformationConsensusRef::Aura { .. } |  // TODO: https://github.com/paritytech/smoldot/issues/933
+            ChainInformationConsensusRef::Unknown => {
+                return (
+                    WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
+                        self.state.sources,
+                        PreVerificationState {
+                            start_chain_information: self.state.start_chain_information,
+                            block_number_bytes: self.state.block_number_bytes,
+                        },
+                        None,
+                    )),
+                    Some(Error::UnknownConsensus),
+                )
+            }
         }
     }
 }
