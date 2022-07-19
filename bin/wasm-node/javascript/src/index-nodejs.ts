@@ -50,8 +50,8 @@ export function start(options?: ClientOptions): Client {
   options = options || {};
 
   return innerStart(options || {}, {
-    zlibInflate: (buffer) => {
-        return pako.inflate(buffer)
+    base64DecodeAndZlibInflate: (input) => {
+        return pako.inflate(Buffer.from(input, 'base64'))
     },
     performanceNow: () => {
       const time = hrtime();
