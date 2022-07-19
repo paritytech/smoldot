@@ -112,7 +112,7 @@ try {
     // files that are more than 4 MiB, we have to split our base64-encoded deflate-encoded wasm
     // into multiple small size files.
     const finalWasmData = fs.readFileSync(optimisationStageOutput);
-    let base64Data = zlib.deflateRawSync(finalWasmData).toString('base64');
+    let base64Data = zlib.deflateSync(finalWasmData).toString('base64');
     let imports = '';
     let fileNum = 0;
     let chunksSum = '""';
@@ -129,8 +129,7 @@ try {
     fs.writeFileSync(
         './src/instance/autogen/wasm.ts',
         imports +
-        'export default ' + chunksSum + ';\n' +
-        'export const decompressedSize = ' + finalWasmData.length + ';'
+        'export default ' + chunksSum
     );
 
 } finally {
