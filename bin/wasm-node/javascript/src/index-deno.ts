@@ -43,6 +43,8 @@ export function start(options?: ClientOptions): Client {
 
     return innerStart(options || {}, {
         zlibInflate: async (buffer) => {
+            // This code has been copy-pasted from the official streams draft specification.
+            // At the moment, it is found here: https://wicg.github.io/compression/#example-deflate-compress
             const ds = new DecompressionStream('deflate');
             const writer = ds.writable.getWriter();
             writer.write(buffer);
