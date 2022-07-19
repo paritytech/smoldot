@@ -19,6 +19,7 @@
 
 import { Client, ClientOptions, start as innerStart } from './client.js'
 import { Connection, ConnectionError, ConnectionConfig } from './instance/instance.js';
+import pako from 'pako';
 
 export {
   AddChainError,
@@ -44,6 +45,9 @@ export function start(options?: ClientOptions): Client {
   options = options || {}
 
   return innerStart(options, {
+    zlibInflate: (buffer) => {
+        return pako.inflate(buffer)
+    },
     performanceNow: () => {
       return performance.now()
     },
