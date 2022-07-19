@@ -15,8 +15,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import * as buffer from './buffer.js';
-
 import { ConnectionConfig, Connection, Config as SmoldotBindingsConfig, default as smoldotLightBindingsBuilder } from './bindings-smoldot-light.js';
 import { Config as WasiConfig, default as wasiBindingsBuilder } from './bindings-wasi.js';
 
@@ -51,9 +49,13 @@ export interface Config {
  */
 export interface PlatformBindings {
     /**
-     * Decompresses the given buffer using the inflate algorithm with zlib header.
+     * Base64-decode the given buffer then decompress its content using the inflate algorithm
+     * with zlib header.
+     *
+     * The input is considered trusted. In other words, the implementation doesn't have to
+     * resist malicious input.
      */
-    zlibInflate: (buffer: Uint8Array) => Uint8Array,
+    base64DecodeAndZlibInflate: (input: string) => Uint8Array,
 
     /**
      * Returns the number of milliseconds since an arbitrary epoch.
@@ -79,7 +81,7 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     // different file.
     // This is suboptimal compared to using `instantiateStreaming`, but it is the most
     // cross-platform cross-bundler approach.
-    const wasmBytecode = platformBindings.zlibInflate(buffer.trustedBase64Decode(wasmBase64))
+    const wasmBytecode = platformBindings.base64DecodeAndZlibInflate(wasmBase64)
 
     let killAll: () => void;
 

@@ -45,8 +45,8 @@ export function start(options?: ClientOptions): Client {
   options = options || {}
 
   return innerStart(options, {
-    zlibInflate: (buffer) => {
-        return pako.inflate(buffer)
+    base64DecodeAndZlibInflate: (input) => {
+        return pako.inflate(trustedBase64Decode(input))
     },
     performanceNow: () => {
       return performance.now()
@@ -61,6 +61,23 @@ export function start(options?: ClientOptions): Client {
       return connect(config, options?.forbidWs || false, options?.forbidNonLocalWs || false, options?.forbidWss || false)
     }
   })
+}
+
+/**
+ * Decodes a base64 string.
+ *
+ * The input is assumed to be correct.
+ */
+function trustedBase64Decode(base64: string): Uint8Array {
+    // This code is a bit sketchy due to the fact that we decode into a string, but it seems to
+    // work.
+    const binaryString = atob(base64);
+    const size = binaryString.length;
+    const bytes = new Uint8Array(size);
+    for (let i = 0; i < size; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
 }
 
 /**
