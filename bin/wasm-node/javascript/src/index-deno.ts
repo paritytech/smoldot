@@ -43,8 +43,8 @@ export function start(options?: ClientOptions): Client {
 
     return innerStart(options || {}, {
         zlibInflate: async (buffer) => {
-            const decompressedStream = new Blob([buffer.buffer]).stream()
-                .pipeThrough(new DecompressionStream('deflate'));
+            const inputStream = new Blob([buffer.buffer]).stream();
+            const decompressedStream = ((inputStream as any)['pipeThrough'] as <O>(trans: TransformStream<any, O>) => O)(new DecompressionStream('deflate'));
             return new Uint8Array(await new Response(decompressedStream).arrayBuffer());
         },
         performanceNow: () => {
