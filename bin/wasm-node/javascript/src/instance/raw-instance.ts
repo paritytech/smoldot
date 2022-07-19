@@ -52,8 +52,11 @@ export interface Config {
 export interface PlatformBindings {
     /**
      * Decompresses the given buffer using the inflate algorithm with zlib header.
+     *
+     * Note that this function is asynchronous because for whatever reason the compression streams
+     * Web API is asynchronous.
      */
-    zlibInflate: (buffer: Uint8Array) => Uint8Array,
+    zlibInflate: (buffer: Uint8Array) => Promise<Uint8Array>,
 
     /**
      * Returns the number of milliseconds since an arbitrary epoch.
@@ -79,7 +82,7 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     // different file.
     // This is suboptimal compared to using `instantiateStreaming`, but it is the most
     // cross-platform cross-bundler approach.
-    const wasmBytecode = platformBindings.zlibInflate(buffer.trustedBase64Decode(wasmBase64))
+    const wasmBytecode = await platformBindings.zlibInflate(buffer.trustedBase64Decode(wasmBase64))
 
     let killAll: () => void;
 

@@ -46,7 +46,7 @@ export function start(options?: ClientOptions): Client {
 
   return innerStart(options, {
     zlibInflate: (buffer) => {
-        return pako.inflate(buffer)
+        return Promise.resolve(pako.inflate(buffer))
     },
     performanceNow: () => {
       return performance.now()

@@ -42,6 +42,11 @@ export function start(options?: ClientOptions): Client {
     options = options || {};
 
     return innerStart(options || {}, {
+        zlibInflate: async (buffer) => {
+            const decompressedStream = new Blob([buffer.buffer]).stream()
+                .pipeThrough(new DecompressionStream('deflate'));
+            return new Uint8Array(await new Response(decompressedStream).arrayBuffer());
+        },
         performanceNow: () => {
             return performance.now()
         },
@@ -136,7 +141,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                 let outcome: null | number | string = null;
                 try {
                     outcome = await established.read(readBuffer);
-                } catch(error) {
+                } catch (error) {
                     // The type of `error` is unclear, but we assume that it implements `Error`
                     outcome = (error as Error).toString()
                 }
@@ -153,7 +158,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                 config.onMessage(readBuffer.slice(0, outcome));
                 return read(readBuffer)
             }
-            ;read(new Uint8Array(1024));
+                ; read(new Uint8Array(1024));
 
             return established;
         });
@@ -196,7 +201,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                         let outcome: number | string;
                         try {
                             outcome = await c.write(dataCopy);
-                        } catch(error) {
+                        } catch (error) {
                             // The type of `error` is unclear, but we assume that it implements `Error`
                             outcome = (error as Error).toString()
                         }
@@ -405,4 +410,32 @@ declare namespace Deno {
          */
         setKeepAlive(keepalive?: boolean): void;
     }
+}
+
+// Original can be found here: https://github.com/denoland/deno/blob/main/ext/web/lib.deno_web.d.ts
+/**
+ * An API for decompressing a stream of data.
+ *
+ * @example
+ * ```ts
+ * const input = await Deno.open("./file.txt.gz");
+ * const output = await Deno.create("./file.txt");
+ *
+ * await input.readable
+ *   .pipeThrough(new DecompressionStream("gzip"))
+ *   .pipeTo(output.writable);
+ * ```
+ */
+declare class DecompressionStream {
+    /**
+     * Creates a new `DecompressionStream` object which decompresses a stream of
+     * data.
+     *
+     * Throws a `TypeError` if the format passed to the constructor is not
+     * supported.
+     */
+    constructor(format: string);
+
+    readonly readable: ReadableStream<Uint8Array>;
+    readonly writable: WritableStream<Uint8Array>;
 }
