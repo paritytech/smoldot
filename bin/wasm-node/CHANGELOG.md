@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Exceptions thrown in the JSON-RPC callback no longer crash smoldot.
+
 ## 0.6.25 - 2022-07-18
 
 ### Added
