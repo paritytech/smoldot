@@ -31,13 +31,15 @@
     "prepublishOnly": "node prepare.mjs --release && rimraf ./dist && npm run buildModules",
     "build": "node prepare.mjs --release && rimraf ./dist && npm run buildModules",
     "start": "node prepare.mjs --debug && rimraf ./dist && npm run buildModules && node demo/demo.mjs",
-    "test": "node prepare.mjs --debug && rimraf ./dist && npm run buildModules && ava --timeout=2m --concurrency 2 --no-worker-threads"
+    "test": "node prepare.mjs --debug && rimraf ./dist && npm run buildModules && deno run ./dist/mjs/index-deno.js && ava --timeout=2m --concurrency 2 --no-worker-threads"
   },
   "dependencies": {
+    "pako": "^2.0.4",
     "websocket": "^1.0.32"
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
+    "@types/pako": "^2.0.0",
     "@types/websocket": "^1.0.4",
     "ava": "^4.0.0",
     "dtslint": "^4.0.6",

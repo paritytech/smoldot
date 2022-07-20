@@ -55,6 +55,9 @@ jobs:
     - uses: actions/setup-node@v3.4.1
       with:
         node-version: '14'
+    - uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.x
     - run: cd bin/wasm-node/javascript && RUSTFLAGS=-Dwarnings npm install-ci-test
 
   wasm-node-size-diff:

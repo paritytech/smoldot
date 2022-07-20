@@ -19,6 +19,7 @@ import { Client, ClientOptions, start as innerStart } from './client.js'
 import { Connection, ConnectionError, ConnectionConfig } from './instance/instance.js';
 
 import Websocket from 'websocket';
+import pako from 'pako';
 
 import { hrtime } from 'node:process';
 import { createConnection as nodeCreateConnection } from 'node:net';
@@ -49,6 +50,9 @@ export function start(options?: ClientOptions): Client {
   options = options || {};
 
   return innerStart(options || {}, {
+    base64DecodeAndZlibInflate: (input) => {
+        return Promise.resolve(pako.inflate(Buffer.from(input, 'base64')))
+    },
     performanceNow: () => {
       const time = hrtime();
       return ((time[0] * 1e3) + (time[1] / 1e6));

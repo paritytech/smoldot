@@ -401,6 +401,18 @@ export function start(options: ClientOptions, platformBindings: PlatformBindings
         }
       }
 
+      // We need to tweak the JSON-RPC callback to absorb exceptions that the user might throw.
+      if (options.jsonRpcCallback) {
+        const cb = options.jsonRpcCallback;
+        options.jsonRpcCallback = (response) => {
+          try {
+            cb(response)
+          } catch(error) {
+            console.warn("Uncaught exception in JSON-RPC callback:", error)
+          }
+        };
+      }
+
       const outcome = await instance.addChain(options.chainSpec, typeof options.databaseContent === 'string' ? options.databaseContent : "", potentialRelayChainsIds, options.jsonRpcCallback);
 
       if (!outcome.success)
