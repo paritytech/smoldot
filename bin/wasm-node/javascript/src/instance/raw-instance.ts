@@ -54,8 +54,11 @@ export interface PlatformBindings {
      *
      * The input is considered trusted. In other words, the implementation doesn't have to
      * resist malicious input.
+     *
+     * This function is asynchronous because implementations might use the compression streams
+     * Web API, which for whatever reason is asynchronous.
      */
-    base64DecodeAndZlibInflate: (input: string) => Uint8Array,
+    base64DecodeAndZlibInflate: (input: string) => Promise<Uint8Array>,
 
     /**
      * Returns the number of milliseconds since an arbitrary epoch.
@@ -81,7 +84,7 @@ export async function startInstance(config: Config, platformBindings: PlatformBi
     // different file.
     // This is suboptimal compared to using `instantiateStreaming`, but it is the most
     // cross-platform cross-bundler approach.
-    const wasmBytecode = platformBindings.base64DecodeAndZlibInflate(wasmBase64)
+    const wasmBytecode = await platformBindings.base64DecodeAndZlibInflate(wasmBase64)
 
     let killAll: () => void;
 
