@@ -7,6 +7,7 @@ BLAKE2
 Base58
 CLI
 ChaCha20
+Deno
 Deserialize/S
 DoS
 ECDH

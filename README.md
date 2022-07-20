@@ -38,8 +38,8 @@ The wasm light node can be tested with `cd bin/wasm-node/javascript` and `npm in
 
 The Wasm light node is published:
 
-- On NPM: https://www.npmjs.com/package/@substrate/smoldot-light
-- On Deno.land/x: https://deno.land/x/smoldot (URL to import: `https://deno.land/x/smoldot/index-deno.js`)
+- On NPM: <https://www.npmjs.com/package/@substrate/smoldot-light>
+- On Deno.land/x: <https://deno.land/x/smoldot> (URL to import: `https://deno.land/x/smoldot/index-deno.js`)
 
 # Objectives
 
