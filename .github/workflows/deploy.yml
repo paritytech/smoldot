@@ -85,7 +85,7 @@ jobs:
       - uses: denoland/setup-deno@v1
         with:
           deno-version: v1.x
-      - run: apt-get update && apt install -y binaryen # For `wasm-opt`
+      - run: sudo apt-get update && apt install -y binaryen # For `wasm-opt`
       - uses: actions-rs/toolchain@v1
         with:
           # Ideally we don't want to install any toolchain, but the GH action doesn't support this.
