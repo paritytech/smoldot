@@ -79,6 +79,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0   # Necessary for checking if the tag exists below.
       - uses: actions/setup-node@v3.4.1
         with:
           node-version: 14
