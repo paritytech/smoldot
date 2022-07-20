@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.26 - 2022-07-20
+
 ### Added
 
 - Add support for Deno. Smoldot is now available on the deno.land/x package registry. This doesn't modify anything to the behaviour of the smoldot NPM package. ([#2522](https://github.com/paritytech/smoldot/pull/2522))
