@@ -95,6 +95,9 @@ jobs:
       - id: compute-tag
         run: echo "::set-output name=tag::light-js-deno-v`jq -r .version ./bin/wasm-node/javascript/package.json`"
       - run: npm install
+      - id: check-tag-exists
+        run: echo "::set-output name=num-existing::`git tag -l | grep ${{ steps.compute-tag.outputs.tag }} | wc -l`"
+      - run: npm install
         working-directory: ./bin/wasm-node/javascript
       - run: npm publish --unsafe-perm --dry-run
         working-directory: ./bin/wasm-node/javascript
@@ -103,8 +106,11 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git commit -m "Deno version publishing"
+      - run: |
           git tag ${{ steps.compute-tag.outputs.tag }}
-          git push origin ${{ steps.compute-tag.outputs.tag }}
+        if: ${{ steps.check-tag-exists.outputs.num-existing == 0 }}
+      - run: git push origin ${{ steps.compute-tag.outputs.tag }}
+        if: ${{ steps.check-tag-exists.outputs.num-existing == 0 && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
   all-deploy:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
