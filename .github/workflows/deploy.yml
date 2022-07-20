@@ -93,7 +93,7 @@ jobs:
           profile: minimal
       - uses: Swatinem/rust-cache@v1
       - id: compute-tag
-        run: echo "::set-output name=tag::light-js-deno-v`jq .version ./bin/wasm-node/javascript/package.json`"
+        run: echo "::set-output name=tag::light-js-deno-v`jq -r .version ./bin/wasm-node/javascript/package.json`"
       - run: npm install
         working-directory: ./bin/wasm-node/javascript
       - run: npm publish --unsafe-perm --dry-run
@@ -103,8 +103,8 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git commit -m "Deno version publishing"
-          git tag light-js-deno-v${{ steps.compute-tag.outputs.tag }}
-          git push origin light-js-deno-v${{ steps.compute-tag.outputs.tag }}
+          git tag ${{ steps.compute-tag.outputs.tag }}
+          git push origin ${{ steps.compute-tag.outputs.tag }}
 
   all-deploy:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
