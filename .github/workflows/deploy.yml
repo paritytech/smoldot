@@ -77,10 +77,12 @@ jobs:
 
   deno-publish:
     runs-on: ubuntu-latest
+    # This action checks if a certain git tag exists. If not, it compiles the JavaScript package,
+    # then commits the compilation artifacts, tags the commit, and pushes the tag.
     steps:
       - uses: actions/checkout@v3
         with:
-          fetch-depth: 0   # Necessary for checking if the tag exists below.
+          fetch-depth: 0   # Necessary below for checking if the tag exists.
       - uses: actions/setup-node@v3.4.1
         with:
           node-version: 14
@@ -94,16 +96,16 @@ jobs:
           toolchain: stable
           profile: minimal
       - uses: Swatinem/rust-cache@v1
-      - id: compute-tag
+      - id: compute-tag  # Compute the tag that we might push.
         run: echo "::set-output name=tag::light-js-deno-v`jq -r .version ./bin/wasm-node/javascript/package.json`"
-      - id: check-tag-exists
+      - id: check-tag-exists  # Check whether the tag already exists.
         run: echo "::set-output name=num-existing::`git tag -l | grep ${{ steps.compute-tag.outputs.tag }} | wc -l`"
       - run: npm install
         working-directory: ./bin/wasm-node/javascript
       - run: npm publish --unsafe-perm --dry-run
         working-directory: ./bin/wasm-node/javascript
       - run: |
-          git add --force ./bin/wasm-node/javascript/dist/mjs  # Bypass the .gitignore
+          git add --force ./bin/wasm-node/javascript/dist/mjs  # --force bypasses the .gitignore
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git commit -m "Deno version publishing"
