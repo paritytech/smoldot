@@ -36,7 +36,10 @@ The wasm light node can be tested with `cd bin/wasm-node/javascript` and `npm in
 
 > Note: The `npm start` command starts a small JavaScript shim, on top of the wasm light node, that hard codes the chain to Westend and starts the WebSocket server. The wasm light node itself can connect to a variety of different chains (not only Westend) and doesn't start any server.
 
-The Wasm light node is published on NPM: https://www.npmjs.com/package/@substrate/smoldot-light
+The Wasm light node is published:
+
+- On NPM: <https://www.npmjs.com/package/@substrate/smoldot-light>
+- On Deno.land/x: <https://deno.land/x/smoldot> (URL to import: `https://deno.land/x/smoldot/index-deno.js`)
 
 # Objectives
 
