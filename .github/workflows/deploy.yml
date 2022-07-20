@@ -96,7 +96,6 @@ jobs:
       - uses: Swatinem/rust-cache@v1
       - id: compute-tag
         run: echo "::set-output name=tag::light-js-deno-v`jq -r .version ./bin/wasm-node/javascript/package.json`"
-      - run: npm install
       - id: check-tag-exists
         run: echo "::set-output name=num-existing::`git tag -l | grep ${{ steps.compute-tag.outputs.tag }} | wc -l`"
       - run: npm install
