@@ -98,7 +98,13 @@ jobs:
         working-directory: ./bin/wasm-node/javascript
       - run: npm publish --unsafe-perm --dry-run
         working-directory: ./bin/wasm-node/javascript
-      - run: git tag light-js-deno-v${{ steps.compute-tag.outputs.tag }}
+      - run: |
+          git add --force ./bin/wasm-node/javascript/dist/mjs  # Bypass the .gitignore
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git commit -m "Deno version publishing"
+          git tag light-js-deno-v${{ steps.compute-tag.outputs.tag }}
+          git push origin light-js-deno-v${{ steps.compute-tag.outputs.tag }}
 
   all-deploy:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
