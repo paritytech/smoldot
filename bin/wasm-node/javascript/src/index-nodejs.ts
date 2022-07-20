@@ -51,7 +51,7 @@ export function start(options?: ClientOptions): Client {
 
   return innerStart(options || {}, {
     base64DecodeAndZlibInflate: (input) => {
-        return pako.inflate(Buffer.from(input, 'base64'))
+        return Promise.resolve(pako.inflate(Buffer.from(input, 'base64')))
     },
     performanceNow: () => {
       const time = hrtime();
