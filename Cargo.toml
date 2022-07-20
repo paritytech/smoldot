@@ -75,7 +75,7 @@ serde = { version = "1.0.139", default-features = false, features = ["alloc", "d
 serde_json = { version = "1.0.82", default-features = false, features = ["alloc", "raw_value"] }
 sha2 = { version = "0.10.2", default-features = false }
 siphasher = { version = "0.3.10", default-features = false }
-slab = { version = "0.4.6", default-features = false }
+slab = { version = "0.4.7", default-features = false }
 smallvec = "1.9.0"
 snow = { version = "0.9.0", default-features = false, features = ["default-resolver"] }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
