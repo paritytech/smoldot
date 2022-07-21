@@ -136,11 +136,11 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
         connection.socket.binaryType = 'arraybuffer';
 
         connection.socket.onopen = () => {
-            config.onOpen();
+            config.onOpen({ type: 'single-stream' });
         };
         connection.socket.onclose = (event) => {
             const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
-            config.onClose(message);
+            config.onConnectionClose(message);
         };
         connection.socket.onmessage = (msg) => {
             config.onMessage(new Uint8Array(msg.data as ArrayBuffer));
@@ -168,7 +168,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
 
             if (socket.destroyed)
                 return established;
-            config.onOpen();
+            config.onOpen({ type: 'single-stream' });
 
             // Spawns an asynchronous task that continuously reads from the socket.
             // Every time data is read, the task re-executes itself in order to continue reading.
@@ -190,7 +190,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                     // The socket is reported closed, but `socket.destroyed` is still `false` (see
                     // check above). As such, we must inform the inner layers.
                     socket.destroyed = true;
-                    config.onClose(outcome === null ? "EOF when reading socket" : outcome);
+                    config.onConnectionClose(outcome === null ? "EOF when reading socket" : outcome);
                     return;
                 }
                 console.assert(outcome !== 0); // `read` guarantees to return a non-zero value.
@@ -248,7 +248,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                             // The socket is reported closed, but `socket.destroyed` is still
                             // `false` (see check above). As such, we must inform the inner layers.
                             socket.destroyed = true;
-                            config.onClose(outcome);
+                            config.onConnectionClose(outcome);
                             return c;
                         }
                         // Note that, contrary to `read`, it is possible for `outcome` to be 0.
@@ -259,7 +259,9 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                     return c;
                 });
             }
-        }
+        },
+
+        openOutSubstream: () => { throw new Error('Wrong connection type') }
     };
 }
 
