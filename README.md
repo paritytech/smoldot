@@ -4,12 +4,6 @@ Lightweight Substrate and Polkadot client.
 
 `smoldot` is a prototype of an alternative client of [Substrate](https://github.com/paritytech/substrate)-based chains, including [Polkadot](https://github.com/paritytech/polkadot/).
 
-In order to simplify the code, two main design decisions have been made compared to Substrate:
-
-- No native runtime. The execution time of the `wasmtime` library is satisfying enough that having a native runtime isn't critical anymore.
-
-- No pluggable architecture. `smoldot` supports a certain hard coded list of consensus algorithms, at the moment Babe, Aura, and GrandPa. Support for other algorithms can only be added by modifying the code of smoldot, and it is not possible to plug a custom algorithm from outside.
-
 There exists two clients: the full client and the wasm light node.
 
 The main development focus is currently around the wasm light node. Using https://github.com/polkadot-js/api/ and https://github.com/paritytech/substrate-connect/ (which uses smoldot as an implementation detail), one can easily connect to a chain and interact in a fully trust-less way with it, from JavaScript.
@@ -48,3 +42,11 @@ There exists multiple objectives behind this repository:
 - Write a client implementation that is as comprehensive as possible, to make it easier to understand the various components of a Substrate/Polkadot client. A large emphasis is put on documentation.
 - Implement a client that is lighter than Substrate, in terms of memory consumption, number of threads, and code size, in order to compile it to WebAssembly and distribute it in web pages.
 - Experiment with a new code architecture, to maybe upstream some components to Substrate and Polkadot.
+
+# Trade-offs
+
+In order to simplify the code, two main design decisions have been made compared to Substrate:
+
+- No native runtime. The execution time of the `wasmtime` library is satisfying enough that having a native runtime isn't critical anymore.
+
+- No pluggable architecture. `smoldot` supports a certain hard coded list of consensus algorithms, at the moment Babe, Aura, and GrandPa. Support for other algorithms can only be added by modifying the code of smoldot, and it is not possible to plug a custom algorithm from outside.
