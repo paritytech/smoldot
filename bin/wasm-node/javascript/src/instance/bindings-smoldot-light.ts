@@ -356,7 +356,11 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                     onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound') => {
                         if (killedTracked.killed) return;
                         try {
-                            instance.exports.connection_stream_opened(connectionId, streamId, direction === 'outbound');
+                            instance.exports.connection_stream_opened(
+                                connectionId,
+                                streamId,
+                                direction === 'outbound' ? 1 : 0
+                            );
                         } catch(_error) {}
                     },
                     onStreamClose: (streamId: number) => {
