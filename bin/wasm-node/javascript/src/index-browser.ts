@@ -111,11 +111,11 @@ function trustedBase64Decode(base64: string): Uint8Array {
       connection.binaryType = 'arraybuffer';
 
       connection.onopen = () => {
-          config.onOpen();
+          config.onOpen({ type: 'single-stream' });
       };
       connection.onclose = (event) => {
           const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
-          config.onClose(message);
+          config.onConnectionClose(message);
       };
       connection.onmessage = (msg) => {
           config.onMessage(new Uint8Array(msg.data as ArrayBuffer));
@@ -136,6 +136,8 @@ function trustedBase64Decode(base64: string): Uint8Array {
 
     send: (data: Uint8Array): void => {
         connection.send(data);
-    }
+    },
+
+    openOutSubstream: () => { throw new Error('Wrong connection type') }
   };
 }

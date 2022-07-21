@@ -103,11 +103,11 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
         connection.socket.binaryType = 'arraybuffer';
 
         connection.socket.onopen = () => {
-            config.onOpen();
+            config.onOpen({ type: 'single-stream' });
         };
         connection.socket.onclose = (event) => {
             const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
-            config.onClose(message);
+            config.onConnectionClose(message);
         };
         connection.socket.onmessage = (msg) => {
             config.onMessage(new Uint8Array(msg.data as ArrayBuffer));
@@ -129,14 +129,14 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
 
         connection.socket.on('connect', () => {
             if (socket.destroyed) return;
-            config.onOpen();
+            config.onOpen({ type: 'single-stream' });
         });
         connection.socket.on('close', (hasError) => {
             if (socket.destroyed) return;
             // NodeJS doesn't provide a reason why the closing happened, but only
             // whether it was caused by an error.
             const message = hasError ? "Error" : "Closed gracefully";
-            config.onClose(message);
+            config.onConnectionClose(message);
         });
         connection.socket.on('error', () => { });
         connection.socket.on('data', (message) => {
@@ -173,7 +173,9 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
                 // TCP
                 connection.socket.write(data);
             }
-        }
+        },
+
+        openOutSubstream: () => { throw new Error('Wrong connection type') }
     };
 }
 
