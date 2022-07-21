@@ -17,13 +17,6 @@
 
 // TODO: work in progress
 
-use crate::{
-    libp2p::{multiaddr, peer_id},
-    util::protobuf,
-};
-
-use alloc::vec::Vec;
-
 pub mod kbuckets;
 
 /// Data structure containing the k-buckets and the state of the current Kademlia queries.
@@ -42,88 +35,3 @@ impl Default for Kademlia {
         Self::new()
     }
 }
-
-// See https://github.com/libp2p/specs/tree/master/kad-dht#rpc-messages for the protobuf format.
-
-/// Builds a wire message to send on the Kademlia request-response protocol to ask the target to
-/// return the nodes closest to the parameter.
-// TODO: parameter type?
-pub fn build_find_node_request(peer_id: &[u8]) -> Vec<u8> {
-    // The capacity is arbitrary but large enough to avoid Vec reallocations.
-    let mut out = Vec::with_capacity(64 + peer_id.len());
-    for slice in protobuf::enum_tag_encode(1, 4) {
-        out.extend_from_slice(slice.as_ref());
-    }
-    for slice in protobuf::bytes_tag_encode(2, peer_id) {
-        out.extend_from_slice(slice.as_ref());
-    }
-    out
-}
-
-/// Decodes a response to a request built using [`build_find_node_request`].
-// TODO: return a borrow of the response bytes ; we're limited by protobuf library
-pub fn decode_find_node_response(
-    response_bytes: &[u8],
-) -> Result<Vec<(peer_id::PeerId, Vec<multiaddr::Multiaddr>)>, DecodeFindNodeResponseError> {
-    let mut parser = nom::combinator::all_consuming::<_, _, nom::error::Error<&[u8]>, _>(
-        nom::combinator::complete(protobuf::message_decode::<((_,), Vec<_>), _, _>((
-            protobuf::enum_tag_decode(1),
-            protobuf::message_tag_decode(
-                8,
-                protobuf::message_decode::<((_,), Vec<_>), _, _>((
-                    protobuf::bytes_tag_decode(1),
-                    protobuf::bytes_tag_decode(2),
-                )),
-            ),
-        ))),
-    );
-
-    let closer_peers: Vec<_> = match nom::Finish::finish(parser(response_bytes)) {
-        Ok((_, ((4,), peers))) => peers,
-        Ok((_, ((_other_message_ty,), _))) => {
-            return Err(DecodeFindNodeResponseError::BadResponseTy)
-        }
-        Err(_) => {
-            return Err(DecodeFindNodeResponseError::ProtobufDecode(
-                ProtobufDecodeError,
-            ))
-        }
-    };
-
-    let mut result = Vec::with_capacity(closer_peers.len());
-    for ((peer_id,), addrs) in closer_peers {
-        let peer_id = peer_id::PeerId::from_bytes(peer_id.to_vec())
-            .map_err(|(err, _)| DecodeFindNodeResponseError::BadPeerId(err))?;
-
-        let mut multiaddrs = Vec::with_capacity(addrs.len());
-        for addr in addrs {
-            let addr = multiaddr::Multiaddr::try_from(addr.to_vec())
-                .map_err(DecodeFindNodeResponseError::BadMultiaddr)?;
-            multiaddrs.push(addr);
-        }
-
-        result.push((peer_id, multiaddrs));
-    }
-
-    Ok(result)
-}
-
-/// Error potentially returned by [`decode_find_node_response`].
-#[derive(Debug, derive_more::Display)]
-pub enum DecodeFindNodeResponseError {
-    /// Error while decoding the Protobuf encoding.
-    #[display(fmt = "Error decoding the response: {}", _0)]
-    ProtobufDecode(ProtobufDecodeError),
-    /// Response isn't a response to a find node request.
-    BadResponseTy,
-    /// Error while parsing a [`peer_id::PeerId`] in the response.
-    #[display(fmt = "Invalid PeerId: {}", _0)]
-    BadPeerId(peer_id::FromBytesError),
-    /// Error while parsing a [`multiaddr::Multiaddr`] in the response.
-    #[display(fmt = "Invalid multiaddress: {}", _0)]
-    BadMultiaddr(multiaddr::FromVecError),
-}
-
-/// Error while decoding the Protobuf encoding.
-#[derive(Debug, derive_more::Display)]
-pub struct ProtobufDecodeError;

@@ -1405,7 +1405,7 @@ where
                         let response = response
                             .map_err(KademliaFindNodeError::RequestFailed)
                             .and_then(|payload| {
-                                kademlia::decode_find_node_response(&payload)
+                                protocol::decode_find_node_response(&payload)
                                     .map_err(KademliaFindNodeError::DecodeError)
                             });
 
@@ -1418,7 +1418,7 @@ where
                         let result = response
                             .map_err(KademliaFindNodeError::RequestFailed)
                             .and_then(|payload| {
-                                kademlia::decode_find_node_response(&payload)
+                                protocol::decode_find_node_response(&payload)
                                     .map_err(KademliaFindNodeError::DecodeError)
                             })
                             .map_err(DiscoveryError::FindNode);
@@ -1953,7 +1953,7 @@ where
         close_to_key: &[u8],
         part_of_operation: Option<KademliaOperationId>,
     ) -> OutRequestId {
-        let request_data = kademlia::build_find_node_request(close_to_key);
+        let request_data = protocol::build_find_node_request(close_to_key);
         // The timeout needs to be long enough to potentially download the maximum
         // response size of 1 MiB. Assuming a 128 kiB/sec connection, that's 8 seconds.
         let timeout = now + Duration::from_secs(8);
@@ -2495,7 +2495,7 @@ pub enum KademliaFindNodeError {
     RequestFailed(peers::RequestError),
     /// Failed to decode the response.
     #[display(fmt = "Response decoding error: {}", _0)]
-    DecodeError(kademlia::DecodeFindNodeResponseError),
+    DecodeError(protocol::DecodeFindNodeResponseError),
 }
 
 /// Error returned by [`ChainNetwork::start_blocks_request`].
