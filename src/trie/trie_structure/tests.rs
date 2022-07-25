@@ -331,8 +331,8 @@ fn fuzzing() {
         Uniform::new_inclusive(min, max).sample(&mut rand::thread_rng())
     }
 
-    // We run the test a couple times because of randomness.
-    for _ in 0..16 {
+    // We run the test multiple times because of randomness.
+    for _ in 0..256 {
         // Generate a set of keys that will find themselves in the tries in the end.
         let final_storage: HashSet<Vec<Nibble>> = {
             let mut list = vec![Vec::new()];
