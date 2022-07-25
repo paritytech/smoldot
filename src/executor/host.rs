@@ -54,6 +54,13 @@
 //! If the code starts with the magic bytes `[82, 188, 83, 118, 70, 219, 142, 5]`, then it is
 //! assumed that the rest of the data is a zstandard-compressed WebAssembly module.
 //!
+//! ## Runtime specification in custom section
+//!
+//! Wasm files can contain so-called custom sections. A runtime can contain a custom section whose
+//! name is `"runtime_version"`, in which case it must contain a runtime specification.
+//!
+//! See the parent module for more information about runtime specifications.
+//!
 //! ## Memory allocations
 //!
 //! One of the instructions available in WebAssembly code is
