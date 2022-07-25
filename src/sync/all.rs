@@ -1298,7 +1298,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Panics if the [`RequestId`] doesn't correspond to any request, or corresponds to a request
     /// of a different type.
     ///
-    pub fn grandpa_warp_sync_response_ok<'a>(
+    pub fn grandpa_warp_sync_response_ok(
         &mut self,
         request_id: RequestId,
         fragments: Vec<WarpSyncFragment>,

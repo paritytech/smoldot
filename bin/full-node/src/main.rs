@@ -28,7 +28,7 @@ fn main() {
 
 async fn async_main() {
     match <cli::CliOptions as clap::Parser>::parse() {
-        cli::CliOptions::Run(r) => run::run(r).await,
+        cli::CliOptions::Run(r) => run::run(*r).await,
         cli::CliOptions::Blake264BitsHash(opt) => {
             let hash = blake2_rfc::blake2b::blake2b(8, &[], opt.payload.as_bytes());
             println!("0x{}", hex::encode(hash));

@@ -235,10 +235,9 @@ impl SourcePendingJustificationProofs {
 
     fn insert(&mut self, new_target_height: u64, new_proof: FinalityProofs) {
         // An empty list of justifications is an invalid state.
-        debug_assert!(match &new_proof {
-            FinalityProofs::Justifications(list) if list.is_empty() => false,
-            _ => true,
-        });
+        debug_assert!(
+            !matches!(&new_proof, FinalityProofs::Justifications(list) if list.is_empty())
+        );
 
         match mem::replace(self, SourcePendingJustificationProofs::None) {
             SourcePendingJustificationProofs::None => {

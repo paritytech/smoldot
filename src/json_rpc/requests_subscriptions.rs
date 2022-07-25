@@ -470,7 +470,7 @@ impl RequestsSubscriptions {
 
             // Try increment `total_requests_in_fly`, capping at a maximum of
             // `max_requests_per_client`.
-            if client
+            let could_increase = client
                 .total_requests_in_fly
                 .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |old_value| {
                     if old_value >= self.max_requests_per_client {
@@ -482,8 +482,8 @@ impl RequestsSubscriptions {
                     // There's no risk of overflow.
                     Some(old_value + 1)
                 })
-                .is_ok()
-            {
+                .is_ok();
+            if could_increase {
                 break;
             }
 
@@ -525,7 +525,7 @@ impl RequestsSubscriptions {
 
         // Try increment `total_requests_in_fly`, capping at a maximum of
         // `max_requests_per_client`.
-        if client
+        let failed_to_increase = client
             .total_requests_in_fly
             .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |old_value| {
                 if old_value >= self.max_requests_per_client {
@@ -537,8 +537,8 @@ impl RequestsSubscriptions {
                 // There's no risk of overflow.
                 Some(old_value + 1)
             })
-            .is_err()
-        {
+            .is_err();
+        if failed_to_increase {
             return Err(TryQueueClientRequestError { request });
         }
 
