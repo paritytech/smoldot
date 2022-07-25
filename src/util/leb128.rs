@@ -72,6 +72,8 @@ pub fn encode(value: impl Into<u64>) -> impl ExactSizeIterator<Item = u8> + Clon
 ///
 /// See also [`encode`].
 pub fn encode_usize(value: usize) -> impl ExactSizeIterator<Item = u8> + Clone {
+    // `encode_usize` can leverage `encode` thanks to the property checked in this debug_assert.
+    debug_assert!(usize::BITS <= u64::BITS);
     encode(u64::try_from(value).unwrap())
 }
 
