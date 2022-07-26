@@ -178,19 +178,10 @@ impl ChainSpec {
             (finality, vm_prototype)
         };
 
-        let (state_version, vm_prototype) = {
-            match executor::core_version(vm_prototype) {
-                (Ok(runtime_spec), vm_prototype) => {
-                    let state_version = match runtime_spec.decode().state_version {
-                        Some(0) | None => trie::TrieEntryVersion::V0,
-                        Some(1) => trie::TrieEntryVersion::V1,
-                        Some(_) => return Err(FromGenesisStorageError::UnknownStateVersion),
-                    };
-
-                    (state_version, vm_prototype)
-                }
-                (Err(err), _) => return Err(FromGenesisStorageError::CoreVersionLoad(err)),
-            }
+        let state_version = match vm_prototype.runtime_version().decode().state_version {
+            Some(0) | None => trie::TrieEntryVersion::V0,
+            Some(1) => trie::TrieEntryVersion::V1,
+            Some(_) => return Err(FromGenesisStorageError::UnknownStateVersion),
         };
 
         let chain_info = ChainInformation {
@@ -544,9 +535,6 @@ pub enum FromGenesisStorageError {
     /// Error when retrieving the Babe algorithm configuration.
     #[display(fmt = "Error when retrieving the Babe configuration: {}", _0)]
     BabeConfigLoad(babe_genesis_config::FromVmPrototypeError),
-    /// Failed to retrieve the core version of the runtime.
-    #[display(fmt = "Failed to retrieve the core version of the runtime: {}", _0)]
-    CoreVersionLoad(executor::CoreVersionError),
     /// State version in runtime specification is not supported.
     UnknownStateVersion,
     /// Multiple consensus algorithms have been detected.

@@ -74,10 +74,13 @@ pub enum InvalidHeapPagesError {
     TooLarge,
 }
 
+// TODO: consider moving all the core-version-related code in host
+
 /// Runs the `Core_version` function using the given virtual machine prototype, and returns
 /// the output.
 ///
 /// All host functions are forbidden.
+// TODO: this function is probably not needed
 pub fn core_version(
     vm_proto: host::HostVmPrototype,
 ) -> (Result<CoreVersion, CoreVersionError>, host::HostVmPrototype) {
