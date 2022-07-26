@@ -39,10 +39,11 @@ pub fn find_embedded_runtime_version(
         Err(()) => return Err(FindEmbeddedRuntimeVersionError::RuntimeVersionDecode),
     };
 
-    decoded_runtime_version.apis = match CoreVersionApisRefIter::from_slice(runtime_apis_content) {
-        Ok(d) => d,
-        Err(()) => return Err(FindEmbeddedRuntimeVersionError::RuntimeApisDecode),
-    };
+    decoded_runtime_version.apis =
+        match CoreVersionApisRefIter::from_slice_no_length(runtime_apis_content) {
+            Ok(d) => d,
+            Err(()) => return Err(FindEmbeddedRuntimeVersionError::RuntimeApisDecode),
+        };
 
     Ok(Some(CoreVersion(
         decoded_runtime_version.scale_encoding_vec(),
