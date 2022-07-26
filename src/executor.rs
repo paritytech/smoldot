@@ -201,7 +201,36 @@ pub struct CoreVersionRef<'a> {
 impl<'a> CoreVersionRef<'a> {
     /// Returns the SCALE encoding of this data structure.
     pub fn scale_encoding_vec(&self) -> Vec<u8> {
-        todo!()
+        let mut out = Vec::<u8>::with_capacity(
+            1 + self.spec_name.len() + 1 + self.impl_name.len() + 4 + 4 + 4 + 32 + 4 + 1,
+        );
+
+        out.extend(crate::util::encode_scale_compact_usize(self.spec_name.len()).as_ref());
+        out.extend(self.spec_name.as_bytes());
+
+        out.extend(crate::util::encode_scale_compact_usize(self.impl_name.len()).as_ref());
+        out.extend(self.impl_name.as_bytes());
+
+        out.extend(self.authoring_version.to_le_bytes());
+        out.extend(self.spec_version.to_le_bytes());
+        out.extend(self.impl_version.to_le_bytes());
+
+        out.extend(crate::util::encode_scale_compact_usize(self.apis.clone().len()).as_ref());
+        for api in self.apis.clone() {
+            out.extend(api.name_hash);
+            out.extend(api.version.to_le_bytes());
+        }
+
+        if let Some(transaction_version) = self.transaction_version {
+            out.extend(transaction_version.to_le_bytes());
+        }
+
+        // TODO: it's not supposed to be allowed to have a CoreVersionRef with a state_version but no transaction_version; the CoreVersionRef struct lets you do that because it was initially designed only for decoding
+        if let Some(state_version) = self.state_version {
+            out.extend(state_version.to_le_bytes());
+        }
+
+        out
     }
 }
 
