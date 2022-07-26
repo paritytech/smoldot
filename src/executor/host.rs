@@ -185,7 +185,7 @@
 //! }
 //! ```
 
-use super::{allocator, vm};
+use super::{allocator, vm, CoreVersion};
 use crate::{trie, util};
 
 use alloc::{borrow::ToOwned as _, format, string::String, vec, vec::Vec};
@@ -337,6 +337,11 @@ impl HostVmPrototype {
     /// Returns the number of heap pages that were passed to [`HostVmPrototype::new`].
     pub fn heap_pages(&self) -> HeapPages {
         self.heap_pages
+    }
+
+    /// Returns the runtime version found in the module.
+    pub fn runtime_version(&self) -> &CoreVersion {
+        todo!()
     }
 
     /// Starts the VM, calling the function passed as parameter.

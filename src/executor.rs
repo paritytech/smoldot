@@ -74,6 +74,8 @@ pub enum InvalidHeapPagesError {
     TooLarge,
 }
 
+// TODO: consider moving all the core-version-related code in host
+
 /// Runs the `Core_version` function using the given virtual machine prototype, and returns
 /// the output.
 ///

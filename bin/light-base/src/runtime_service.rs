@@ -1953,7 +1953,10 @@ impl SuccessfulRuntime {
                             function
                         );
 
-                        Self::from_virtual_machine(vm).await
+                        Ok(SuccessfulRuntime {
+                            runtime_spec: vm.runtime_version().into(),
+                            virtual_machine: Mutex::new(Some(vm)),
+                        })
                     }
                     Err(executor::host::NewErr::VirtualMachine(
                         executor::vm::NewErr::UnresolvedFunctionImport { .. },
@@ -1967,25 +1970,6 @@ impl SuccessfulRuntime {
             }
             Err(error) => Err(RuntimeError::Build(error)),
         }
-    }
-
-    async fn from_virtual_machine(
-        vm: executor::host::HostVmPrototype,
-    ) -> Result<Self, RuntimeError> {
-        // Since getting the runtime spec is a CPU-intensive operation, we yield once before.
-        crate::util::yield_once().await;
-
-        let (runtime_spec, vm) = match executor::core_version(vm) {
-            (Ok(spec), vm) => (spec, vm),
-            (Err(error), _) => {
-                return Err(RuntimeError::CoreVersion(error));
-            }
-        };
-
-        Ok(SuccessfulRuntime {
-            runtime_spec,
-            virtual_machine: Mutex::new(Some(vm)),
-        })
     }
 }
 

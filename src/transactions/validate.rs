@@ -281,7 +281,7 @@ pub fn validate_transaction(
 ) -> Query {
     // The parameters of the function, and whether to call `Core_initialize_block` beforehand,
     // depend on the API version.
-    // TODO: should the runtime spec be cached into the `HostVmPrototype`?
+    // TODO: we can't use the runtime spec cached in the HostVmPrototype, as its `apis` field is empty; requires clarification from the Substrate team
     let (api_version, virtual_machine) = match executor::core_version(config.runtime) {
         (Ok(runtime_spec), runtime) => {
             let expected = blake2_rfc::blake2b::blake2b(8, &[], b"TaggedTransactionQueue");
