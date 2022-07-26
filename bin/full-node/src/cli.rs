@@ -46,7 +46,7 @@ use std::{net::SocketAddr, path::PathBuf};
 #[clap(about, author, version)]
 pub enum CliOptions {
     /// Connects to the chain and synchronizes the local database with the network.
-    Run(CliOptionsRun),
+    Run(Box<CliOptionsRun>),
     /// Computes the 64 bits BLAKE2 hash of a string payload and prints the hexadecimal-encoded hash.
     #[structopt(name = "blake2-64bits-hash")]
     Blake264BitsHash(CliOptionsBlake264Hash),

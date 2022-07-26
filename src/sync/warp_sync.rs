@@ -1047,7 +1047,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
             }
             ChainInformationConsensusRef::Aura { .. } |  // TODO: https://github.com/paritytech/smoldot/issues/933
             ChainInformationConsensusRef::Unknown => {
-                return (
+                (
                     WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
                         self.state.sources,
                         PreVerificationState {

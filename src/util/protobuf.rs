@@ -127,10 +127,10 @@ pub(crate) fn message_decode<'a, O, E, F: MessageDecodeFields<'a, O, E>>(
 pub(crate) fn tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], (u64, u8), E> {
-    nom::combinator::map_opt(leb128::nom_leb128_u64, |num| {
+    nom::combinator::map(leb128::nom_leb128_u64, |num| {
         let wire_ty = u8::try_from(num & 0b111).unwrap();
-        let field = u64::try_from(num >> 3).ok()?;
-        Some((field, wire_ty))
+        let field = num >> 3;
+        (field, wire_ty)
     })(bytes)
 }
 

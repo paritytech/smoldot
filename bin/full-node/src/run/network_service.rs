@@ -538,13 +538,13 @@ impl NetworkService {
 
         // The call to `send_block_announce` below panics if we have no active connection.
         // TODO: not the correct check; must make sure that we have a substream open
-        if !guarded.network.has_established_connection(&target) {
+        if !guarded.network.has_established_connection(target) {
             return Err(QueueNotificationError::NoConnection);
         }
 
         let result = guarded
             .network
-            .send_block_announce(&target, chain_index, scale_encoded_header, is_best)
+            .send_block_announce(target, chain_index, scale_encoded_header, is_best)
             .map_err(QueueNotificationError::Queue);
 
         self.inner.wake_up_main_background_task.notify(1);
@@ -759,7 +759,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     let decoded = announce.decode();
                     let header_hash =
                         header::hash_from_scale_encoded_header(&decoded.scale_encoded_header);
-                    match header::decode(&decoded.scale_encoded_header) {
+                    match header::decode(decoded.scale_encoded_header) {
                         Ok(decoded_header) => {
                             let mut _jaeger_span =
                                 inner.jaeger_service.block_announce_receive_span(
@@ -985,7 +985,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
             break;
         }
 
-        let start_connect = match guarded.network.next_start_connect(|| Instant::now()) {
+        let start_connect = match guarded.network.next_start_connect(Instant::now) {
             Some(sc) => sc,
             None => break,
         };
@@ -1007,12 +1007,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
 
     // Pull messages that the coordinator has generated in destination to the various
     // connections.
-    loop {
-        let (connection_id, message) = match guarded.network.pull_message_to_connection() {
-            Some(m) => m,
-            None => break,
-        };
-
+    while let Some((connection_id, message)) = guarded.network.pull_message_to_connection() {
         // Note that it is critical for the sending to not take too long here, in order to not
         // block the process of the network service.
         // In particular, if sending the message to the connection is blocked due to sending
