@@ -205,6 +205,18 @@ pub struct CoreVersionApisRefIter<'a> {
 }
 
 impl<'a> CoreVersionApisRefIter<'a> {
+    /// Decodes a SCALE-encoded list of APIs.
+    pub fn from_slice(input: &'a [u8]) -> Result<Self, ()> {
+        let result = nom::combinator::all_consuming(nom::combinator::complete(
+            core_version_apis::<nom::error::Error<&[u8]>>,
+        ))(input);
+
+        match result {
+            Ok((_, me)) => Ok(me),
+            Err(_) => Err(()),
+        }
+    }
+
     /// Returns `true` if this iterator contains the API with the given name and its version is in
     /// the provided range.
     ///
@@ -302,18 +314,7 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
                 nom::number::complete::le_u32,
                 nom::number::complete::le_u32,
                 nom::number::complete::le_u32,
-                nom::combinator::map(
-                    nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-                        nom::combinator::recognize(nom::multi::fold_many_m_n(
-                            num_elems,
-                            num_elems,
-                            core_version_api,
-                            || {},
-                            |(), _| (),
-                        ))
-                    }),
-                    |inner| CoreVersionApisRefIter { inner },
-                ),
+                core_version_apis,
                 nom::branch::alt((
                     nom::combinator::map(nom::number::complete::le_u32, Some),
                     nom::combinator::map(nom::combinator::eof, |_| None),
@@ -349,6 +350,23 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
         Err(nom::Err::Error(_) | nom::Err::Failure(_)) => Err(()),
         Err(_) => unreachable!(),
     }
+}
+
+fn core_version_apis<'a, E: nom::error::ParseError<&'a [u8]>>(
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], CoreVersionApisRefIter, E> {
+    nom::combinator::map(
+        nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
+            nom::combinator::recognize(nom::multi::fold_many_m_n(
+                num_elems,
+                num_elems,
+                core_version_api,
+                || {},
+                |(), _| (),
+            ))
+        }),
+        |inner| CoreVersionApisRefIter { inner },
+    )(bytes)
 }
 
 fn core_version_api<'a, E: nom::error::ParseError<&'a [u8]>>(
