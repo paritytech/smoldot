@@ -24,51 +24,51 @@
 
 use super::super::CoreVersion;
 
-/// Tries to find the custom section containing the runtime specification and checks its validity.
-pub fn find_embedded_runtime_spec(
+/// Tries to find the custom section containing the runtime version and checks its validity.
+pub fn find_embedded_runtime_version(
     binary_wasm_module: &[u8],
-) -> Result<Option<CoreVersion>, FindEmbeddedRuntimeSpecError> {
-    let section_content = match find_encoded_embedded_runtime_spec(binary_wasm_module) {
+) -> Result<Option<CoreVersion>, FindEmbeddedRuntimeVersionError> {
+    let section_content = match find_encoded_embedded_runtime_version(binary_wasm_module) {
         Ok(Some(c)) => c,
         Ok(None) => return Ok(None),
-        Err(err) => return Err(FindEmbeddedRuntimeSpecError::FindSection(err)),
+        Err(err) => return Err(FindEmbeddedRuntimeVersionError::FindSection(err)),
     };
 
     match super::super::decode(section_content) {
         Ok(_) => Ok(Some(CoreVersion(section_content.to_vec()))),
-        Err(()) => Err(FindEmbeddedRuntimeSpecError::Decode),
+        Err(()) => Err(FindEmbeddedRuntimeVersionError::Decode),
     }
 }
 
-/// Error returned by [`find_encoded_embedded_runtime_spec`].
+/// Error returned by [`find_encoded_embedded_runtime_version`].
 #[derive(Debug, derive_more::Display, Clone)]
-pub enum FindEmbeddedRuntimeSpecError {
+pub enum FindEmbeddedRuntimeVersionError {
     /// Error while finding the custom section.
     #[display(fmt = "{}", _0)]
-    FindSection(FindEncodedEmbeddedRuntimeSpecError),
-    /// Error while decoding the runtime specification.
+    FindSection(FindEncodedEmbeddedRuntimeVersionError),
+    /// Error while decoding the runtime version.
     Decode,
 }
 
-/// Tries to find the custom section containing the runtime specification.
+/// Tries to find the custom section containing the runtime version.
 ///
 /// This function does not attempt to decode the content of the custom section.
-pub fn find_encoded_embedded_runtime_spec(
+pub fn find_encoded_embedded_runtime_version(
     binary_wasm_module: &[u8],
-) -> Result<Option<&[u8]>, FindEncodedEmbeddedRuntimeSpecError> {
+) -> Result<Option<&[u8]>, FindEncodedEmbeddedRuntimeVersionError> {
     // A Wasm binary file contains two magic numbers followed with a list of sections.
     match nom::combinator::all_consuming(nom::combinator::complete(wasm_module_with_custom(
         b"runtime_version",
     )))(binary_wasm_module)
     {
         Ok((_, content)) => Ok(content),
-        Err(_) => Err(FindEncodedEmbeddedRuntimeSpecError::FailedToParse),
+        Err(_) => Err(FindEncodedEmbeddedRuntimeVersionError::FailedToParse),
     }
 }
 
-/// Error returned by [`find_encoded_embedded_runtime_spec`].
+/// Error returned by [`find_encoded_embedded_runtime_version`].
 #[derive(Debug, derive_more::Display, Clone)]
-pub enum FindEncodedEmbeddedRuntimeSpecError {
+pub enum FindEncodedEmbeddedRuntimeVersionError {
     /// Failed to parse Wasm binary.
     FailedToParse,
 }
