@@ -18,7 +18,7 @@
 //! Runtime call to obtain the transactions validity status.
 
 use crate::{
-    executor::{self, host, runtime_host, storage_diff},
+    executor::{host, runtime_host, storage_diff},
     header, util,
 };
 
