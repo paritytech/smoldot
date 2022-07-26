@@ -80,6 +80,7 @@ pub enum InvalidHeapPagesError {
 /// the output.
 ///
 /// All host functions are forbidden.
+// TODO: this function is probably not needed
 pub fn core_version(
     vm_proto: host::HostVmPrototype,
 ) -> (Result<CoreVersion, CoreVersionError>, host::HostVmPrototype) {
