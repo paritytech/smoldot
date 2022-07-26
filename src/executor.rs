@@ -242,10 +242,18 @@ pub struct CoreVersionApisRefIter<'a> {
 
 impl<'a> CoreVersionApisRefIter<'a> {
     /// Decodes a SCALE-encoded list of APIs.
-    pub fn from_slice(input: &'a [u8]) -> Result<Self, ()> {
-        let result = nom::combinator::all_consuming(nom::combinator::complete(
-            core_version_apis::<nom::error::Error<&[u8]>>,
-        ))(input);
+    ///
+    /// The input slice isn't expected to contain the number of APIs.
+    pub fn from_slice_no_length(input: &'a [u8]) -> Result<Self, ()> {
+        let result: Result<_, nom::Err<nom::error::Error<&[u8]>>> =
+            nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
+                nom::combinator::recognize(nom::multi::fold_many0(
+                    core_version_api,
+                    || {},
+                    |(), _| (),
+                )),
+                |inner| CoreVersionApisRefIter { inner },
+            )))(input);
 
         match result {
             Ok((_, me)) => Ok(me),
