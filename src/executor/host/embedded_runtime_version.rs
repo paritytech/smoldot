@@ -50,7 +50,7 @@ pub fn find_embedded_runtime_version(
     )))
 }
 
-/// Error returned by [`find_encoded_embedded_runtime_version`].
+/// Error returned by [`find_embedded_runtime_version`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum FindEmbeddedRuntimeVersionError {
     /// Error while finding the custom section.
@@ -90,7 +90,7 @@ pub fn find_encoded_embedded_runtime_version_apis(
     Ok((runtime_version, runtime_apis))
 }
 
-/// Error returned by [`find_encoded_embedded_runtime_version`].
+/// Error returned by [`find_encoded_embedded_runtime_version_apis`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum FindEncodedEmbeddedRuntimeVersionApisError {
     /// Failed to parse Wasm binary.
