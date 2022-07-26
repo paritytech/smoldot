@@ -1071,10 +1071,13 @@ async fn run_background<TPlat: Platform>(
                 let runtime = Arc::new(Runtime {
                     runtime_code: finalized_block_runtime.storage_code,
                     heap_pages: finalized_block_runtime.storage_heap_pages,
-                    runtime: SuccessfulRuntime::from_virtual_machine(
-                        finalized_block_runtime.virtual_machine,
-                    )
-                    .await,
+                    runtime: Ok(SuccessfulRuntime {
+                        runtime_spec: finalized_block_runtime
+                            .virtual_machine
+                            .runtime_version()
+                            .clone(),
+                        virtual_machine: Mutex::new(Some(finalized_block_runtime.virtual_machine)),
+                    }),
                 });
 
                 match &runtime.runtime {
@@ -1931,7 +1934,12 @@ impl SuccessfulRuntime {
             exec_hint,
             allow_unresolved_imports: false,
         }) {
-            Ok(vm) => return Self::from_virtual_machine(vm).await,
+            Ok(vm) => {
+                return Ok(SuccessfulRuntime {
+                    runtime_spec: vm.runtime_version().clone(),
+                    virtual_machine: Mutex::new(Some(vm)),
+                })
+            }
             Err(executor::host::NewErr::VirtualMachine(
                 executor::vm::NewErr::UnresolvedFunctionImport {
                     function,
@@ -1954,7 +1962,7 @@ impl SuccessfulRuntime {
                         );
 
                         Ok(SuccessfulRuntime {
-                            runtime_spec: vm.runtime_version().into(),
+                            runtime_spec: vm.runtime_version().clone(),
                             virtual_machine: Mutex::new(Some(vm)),
                         })
                     }
