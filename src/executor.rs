@@ -215,7 +215,7 @@ impl<'a> CoreVersionRef<'a> {
         out.extend(self.spec_version.to_le_bytes());
         out.extend(self.impl_version.to_le_bytes());
 
-        out.extend(crate::util::encode_scale_compact_usize(self.apis.clone().len()).as_ref());
+        out.extend(crate::util::encode_scale_compact_usize(self.apis.clone().count()).as_ref());
         for api in self.apis.clone() {
             out.extend(api.name_hash);
             out.extend(api.version.to_le_bytes());
@@ -304,8 +304,6 @@ impl<'a> Iterator for CoreVersionApisRefIter<'a> {
         }
     }
 }
-
-impl<'a> ExactSizeIterator for CoreVersionApisRefIter<'a> {}
 
 impl<'a> PartialEq for CoreVersionApisRefIter<'a> {
     fn eq(&self, other: &Self) -> bool {
