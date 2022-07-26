@@ -918,9 +918,6 @@ pub enum RuntimeError {
     /// Error while compiling the runtime.
     #[display(fmt = "{}", _0)]
     Build(executor::host::NewErr),
-    /// Error when determining the runtime specification.
-    #[display(fmt = "Error determining runtime version: {}", _0)]
-    CoreVersion(executor::CoreVersionError),
 }
 
 struct Guarded<TPlat: Platform> {
