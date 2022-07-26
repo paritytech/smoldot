@@ -22,12 +22,12 @@
 
 // TODO: there is a small quirk in that the `apis` field is always empty when the runtime spec is in a custom version; deal with this by either removing all references to the `apis` field, or thoroughly documenting that quirk
 
-use super::super::CoreVersionRef;
+use super::super::CoreVersion;
 
-/// Tries to find the custom section containing the runtime specification and decodes it.
+/// Tries to find the custom section containing the runtime specification and checks its validity.
 pub fn find_embedded_runtime_spec(
     binary_wasm_module: &[u8],
-) -> Result<Option<CoreVersionRef>, FindEmbeddedRuntimeSpecError> {
+) -> Result<Option<CoreVersion>, FindEmbeddedRuntimeSpecError> {
     let section_content = match find_encoded_embedded_runtime_spec(binary_wasm_module) {
         Ok(Some(c)) => c,
         Ok(None) => return Ok(None),
@@ -35,7 +35,7 @@ pub fn find_embedded_runtime_spec(
     };
 
     match super::super::decode(section_content) {
-        Ok(spec) => Ok(Some(spec)),
+        Ok(_) => Ok(Some(CoreVersion(section_content.to_vec()))),
         Err(()) => Err(FindEmbeddedRuntimeSpecError::Decode),
     }
 }
