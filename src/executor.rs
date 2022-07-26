@@ -198,6 +198,13 @@ pub struct CoreVersionRef<'a> {
     pub state_version: Option<u8>,
 }
 
+impl<'a> CoreVersionRef<'a> {
+    /// Returns the SCALE encoding of this data structure.
+    pub fn scale_encoding_vec(&self) -> Vec<u8> {
+        todo!()
+    }
+}
+
 /// Iterator to a list of APIs. See [`CoreVersionRef::apis`].
 #[derive(Clone)]
 pub struct CoreVersionApisRefIter<'a> {
