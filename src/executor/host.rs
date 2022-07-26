@@ -420,10 +420,6 @@ impl HostVmPrototype {
         function_to_call: &str,
         data: impl Iterator<Item = impl AsRef<[u8]>> + Clone,
     ) -> Result<ReadyToRun, (StartErr, Self)> {
-        // This debug assertion is unrelated to running the VM, but we perform it in order to
-        // potentially detect internal issues ahead of time.
-        debug_assert!(self.runtime_version.is_some());
-
         let mut data_len_u32: u32 = 0;
         for data in data.clone() {
             let len = match u32::try_from(data.as_ref().len()) {
