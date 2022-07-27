@@ -76,54 +76,6 @@ pub enum InvalidHeapPagesError {
 
 // TODO: consider moving all the core-version-related code in host
 
-/// Runs the `Core_version` function using the given virtual machine prototype, and returns
-/// the output.
-///
-/// All host functions are forbidden.
-// TODO: this function is probably not needed
-pub fn core_version(
-    vm_proto: host::HostVmPrototype,
-) -> (Result<CoreVersion, CoreVersionError>, host::HostVmPrototype) {
-    let mut vm: host::HostVm = match vm_proto.run_no_param("Core_version") {
-        Ok(vm) => vm.into(),
-        Err((err, prototype)) => return (Err(CoreVersionError::Start(err)), prototype),
-    };
-
-    loop {
-        match vm {
-            host::HostVm::ReadyToRun(r) => vm = r.run(),
-            host::HostVm::Finished(finished) => {
-                if decode(finished.value().as_ref()).is_err() {
-                    return (Err(CoreVersionError::Decode), finished.into_prototype());
-                }
-
-                let version = finished.value().as_ref().to_vec();
-                return (Ok(CoreVersion(version)), finished.into_prototype());
-            }
-
-            // Emitted log lines are ignored.
-            host::HostVm::GetMaxLogLevel(resume) => {
-                vm = resume.resume(0); // Off
-            }
-            host::HostVm::LogEmit(log) => vm = log.resume(),
-
-            host::HostVm::Error { prototype, error } => {
-                return (Err(CoreVersionError::Run(error)), prototype)
-            }
-
-            // Since there are potential ambiguities we don't allow any storage access
-            // or anything similar. The last thing we want is to have an infinite
-            // recursion of runtime calls.
-            other => {
-                return (
-                    Err(CoreVersionError::ForbiddenHostFunction),
-                    other.into_prototype(),
-                )
-            }
-        }
-    }
-}
-
 /// Error while executing [`core_version`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum CoreVersionError {
