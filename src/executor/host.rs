@@ -365,11 +365,14 @@ impl HostVmPrototype {
                 match vm {
                     HostVm::ReadyToRun(r) => vm = r.run(),
                     HostVm::Finished(finished) => {
-                        if runtime_version::decode(finished.value().as_ref()).is_err() {
-                            return Err(NewErr::CoreVersion(CoreVersionError::Decode));
-                        }
+                        let version =
+                            match CoreVersion::from_slice(finished.value().as_ref().to_vec()) {
+                                Ok(v) => v,
+                                Err(_) => {
+                                    return Err(NewErr::CoreVersion(CoreVersionError::Decode))
+                                }
+                            };
 
-                        let version = CoreVersion(finished.value().as_ref().to_vec());
                         host_vm_prototype = finished.into_prototype();
                         host_vm_prototype.runtime_version = Some(version);
                         break;

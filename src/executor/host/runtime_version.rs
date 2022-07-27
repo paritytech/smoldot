@@ -126,6 +126,14 @@ pub enum CoreVersionError {
 pub struct CoreVersion(Vec<u8>);
 
 impl CoreVersion {
+    pub fn from_slice(input: Vec<u8>) -> Result<Self, Vec<u8>> {
+        if decode(&input).is_err() {
+            return Err(input);
+        }
+
+        Ok(CoreVersion(input))
+    }
+
     pub fn decode(&self) -> CoreVersionRef {
         decode(&self.0).unwrap()
     }
