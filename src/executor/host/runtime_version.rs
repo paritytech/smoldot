@@ -100,7 +100,7 @@ pub enum FindEncodedEmbeddedRuntimeVersionApisError {
     FailedToParse,
 }
 
-/// Error while executing [`core_version`].
+/// Error while executing `Core_version`.
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum CoreVersionError {
     /// Error while decoding the output.
