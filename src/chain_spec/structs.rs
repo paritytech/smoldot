@@ -41,7 +41,7 @@ pub(super) struct ClientSpec {
     ///
     /// The given runtime code will be used to substitute the on-chain runtime code starting with
     /// the given block number until the `spec_version`
-    /// ([`crate::executor::CoreVersionRef::spec_version`]) on chain changes.
+    /// ([`crate::executor::host::CoreVersionRef::spec_version`]) on chain changes.
     #[serde(default)]
     // TODO: make use of this
     pub(super) code_substitutes: HashMap<u64, HexString, fnv::FnvBuildHasher>,
