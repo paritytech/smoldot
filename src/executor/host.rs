@@ -201,7 +201,7 @@ use tiny_keccak::Hasher as _;
 
 pub mod runtime_version;
 
-pub use runtime_version::{CoreVersion, CoreVersionRef, CoreVersionError};
+pub use runtime_version::{CoreVersion, CoreVersionError, CoreVersionRef};
 pub use vm::HeapPages;
 pub use zstd::Error as ModuleFormatError;
 
