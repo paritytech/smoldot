@@ -56,13 +56,16 @@
 //!
 //! ## Runtime version
 //!
-//! Wasm files can contain so-called custom sections. A runtime can contain a custom section whose
-//! name is `"runtime_version"`, in which case it must contain a so-called runtime version.
+//! Wasm files can contain so-called custom sections. A runtime can contain two custom sections
+//! whose names are `"runtime_version"` and `"runtime_apis"`, in which case they must contain a
+//! so-called runtime version.
 //!
 //! The runtime version contains important field that identifies a runtime.
 //!
-//! If no `"runtime_version"` custom section can be found, the `Core_version` entry point is used
-//! to obtain the runtime version.
+//! If no `"runtime_version"` and `"runtime_apis"` custom sections can be found, the
+//! `Core_version` entry point is used as a fallback in order to obtain the runtime version. This
+//! fallback mechanism is maintained for backwards compatibility purposes, but is considered
+//! deprecated.
 //!
 //! ## Memory allocations
 //!
