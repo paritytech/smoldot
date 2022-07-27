@@ -35,6 +35,8 @@ pub mod runtime_host;
 pub mod storage_diff;
 pub mod vm;
 
+pub use host::{CoreVersion, CoreVersionError};
+
 /// Default number of heap pages if the storage doesn't specify otherwise.
 ///
 /// # Context
