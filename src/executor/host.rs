@@ -191,7 +191,7 @@
 //! }
 //! ```
 
-use super::{allocator, vm, CoreVersion, CoreVersionError};
+use super::{allocator, vm};
 use crate::{trie, util};
 
 use alloc::{borrow::ToOwned as _, format, string::String, vec, vec::Vec};
@@ -201,6 +201,7 @@ use tiny_keccak::Hasher as _;
 
 pub mod embedded_runtime_version;
 
+pub use embedded_runtime_version::{CoreVersion, CoreVersionError};
 pub use vm::HeapPages;
 pub use zstd::Error as ModuleFormatError;
 
@@ -364,7 +365,7 @@ impl HostVmPrototype {
                 match vm {
                     HostVm::ReadyToRun(r) => vm = r.run(),
                     HostVm::Finished(finished) => {
-                        if super::decode(finished.value().as_ref()).is_err() {
+                        if embedded_runtime_version::decode(finished.value().as_ref()).is_err() {
                             return Err(NewErr::CoreVersion(CoreVersionError::Decode));
                         }
 
