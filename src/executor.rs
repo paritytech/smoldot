@@ -201,8 +201,15 @@ pub struct CoreVersionRef<'a> {
 impl<'a> CoreVersionRef<'a> {
     /// Returns the SCALE encoding of this data structure.
     pub fn scale_encoding_vec(&self) -> Vec<u8> {
+        // See https://spec.polkadot.network/#defn-rt-core-version
+
+        let num_apis = self.apis.clone().count();
+
+        // Reserve enough capacity for the various calls to `extend` below.
+        // This is only a reasonable estimate, as we assume 2 bytes for the SCALE-compact-encoded
+        // lengths. In the case of very very very long names, the capacity might be too low.
         let mut out = Vec::<u8>::with_capacity(
-            1 + self.spec_name.len() + 1 + self.impl_name.len() + 4 + 4 + 4 + 32 + 4 + 1,
+            2 + self.spec_name.len() + 2 + self.impl_name.len() + 4 + 4 + 4 + num_apis * 12 + 4 + 1,
         );
 
         out.extend(crate::util::encode_scale_compact_usize(self.spec_name.len()).as_ref());
@@ -215,7 +222,7 @@ impl<'a> CoreVersionRef<'a> {
         out.extend(self.spec_version.to_le_bytes());
         out.extend(self.impl_version.to_le_bytes());
 
-        out.extend(crate::util::encode_scale_compact_usize(self.apis.clone().count()).as_ref());
+        out.extend(crate::util::encode_scale_compact_usize(num_apis).as_ref());
         for api in self.apis.clone() {
             out.extend(api.name_hash);
             out.extend(api.version.to_le_bytes());
@@ -348,6 +355,7 @@ pub struct CoreVersionApi {
 }
 
 fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
+    // See https://spec.polkadot.network/#defn-rt-core-version
     let result: nom::IResult<_, _> =
         nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
             nom::sequence::tuple((
