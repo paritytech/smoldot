@@ -198,6 +198,49 @@ pub struct CoreVersionRef<'a> {
     pub state_version: Option<u8>,
 }
 
+impl<'a> CoreVersionRef<'a> {
+    /// Returns the SCALE encoding of this data structure.
+    pub fn scale_encoding_vec(&self) -> Vec<u8> {
+        // See https://spec.polkadot.network/#defn-rt-core-version
+
+        let num_apis = self.apis.clone().count();
+
+        // Reserve enough capacity for the various calls to `extend` below.
+        // This is only a reasonable estimate, as we assume 2 bytes for the SCALE-compact-encoded
+        // lengths. In the case of very very very long names, the capacity might be too low.
+        let mut out = Vec::<u8>::with_capacity(
+            2 + self.spec_name.len() + 2 + self.impl_name.len() + 4 + 4 + 4 + num_apis * 12 + 4 + 1,
+        );
+
+        out.extend(crate::util::encode_scale_compact_usize(self.spec_name.len()).as_ref());
+        out.extend(self.spec_name.as_bytes());
+
+        out.extend(crate::util::encode_scale_compact_usize(self.impl_name.len()).as_ref());
+        out.extend(self.impl_name.as_bytes());
+
+        out.extend(self.authoring_version.to_le_bytes());
+        out.extend(self.spec_version.to_le_bytes());
+        out.extend(self.impl_version.to_le_bytes());
+
+        out.extend(crate::util::encode_scale_compact_usize(num_apis).as_ref());
+        for api in self.apis.clone() {
+            out.extend(api.name_hash);
+            out.extend(api.version.to_le_bytes());
+        }
+
+        if let Some(transaction_version) = self.transaction_version {
+            out.extend(transaction_version.to_le_bytes());
+        }
+
+        // TODO: it's not supposed to be allowed to have a CoreVersionRef with a state_version but no transaction_version; the CoreVersionRef struct lets you do that because it was initially designed only for decoding
+        if let Some(state_version) = self.state_version {
+            out.extend(state_version.to_le_bytes());
+        }
+
+        out
+    }
+}
+
 /// Iterator to a list of APIs. See [`CoreVersionRef::apis`].
 #[derive(Clone)]
 pub struct CoreVersionApisRefIter<'a> {
@@ -205,6 +248,26 @@ pub struct CoreVersionApisRefIter<'a> {
 }
 
 impl<'a> CoreVersionApisRefIter<'a> {
+    /// Decodes a SCALE-encoded list of APIs.
+    ///
+    /// The input slice isn't expected to contain the number of APIs.
+    pub fn from_slice_no_length(input: &'a [u8]) -> Result<Self, ()> {
+        let result: Result<_, nom::Err<nom::error::Error<&[u8]>>> =
+            nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
+                nom::combinator::recognize(nom::multi::fold_many0(
+                    core_version_api,
+                    || {},
+                    |(), _| (),
+                )),
+                |inner| CoreVersionApisRefIter { inner },
+            )))(input);
+
+        match result {
+            Ok((_, me)) => Ok(me),
+            Err(_) => Err(()),
+        }
+    }
+
     /// Returns `true` if this iterator contains the API with the given name and its version is in
     /// the provided range.
     ///
@@ -249,8 +312,6 @@ impl<'a> Iterator for CoreVersionApisRefIter<'a> {
     }
 }
 
-impl<'a> ExactSizeIterator for CoreVersionApisRefIter<'a> {}
-
 impl<'a> PartialEq for CoreVersionApisRefIter<'a> {
     fn eq(&self, other: &Self) -> bool {
         let mut a = self.clone();
@@ -294,6 +355,7 @@ pub struct CoreVersionApi {
 }
 
 fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
+    // See https://spec.polkadot.network/#defn-rt-core-version
     let result: nom::IResult<_, _> =
         nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
             nom::sequence::tuple((
@@ -302,18 +364,7 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
                 nom::number::complete::le_u32,
                 nom::number::complete::le_u32,
                 nom::number::complete::le_u32,
-                nom::combinator::map(
-                    nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
-                        nom::combinator::recognize(nom::multi::fold_many_m_n(
-                            num_elems,
-                            num_elems,
-                            core_version_api,
-                            || {},
-                            |(), _| (),
-                        ))
-                    }),
-                    |inner| CoreVersionApisRefIter { inner },
-                ),
+                core_version_apis,
                 nom::branch::alt((
                     nom::combinator::map(nom::number::complete::le_u32, Some),
                     nom::combinator::map(nom::combinator::eof, |_| None),
@@ -349,6 +400,23 @@ fn decode(scale_encoded: &[u8]) -> Result<CoreVersionRef, ()> {
         Err(nom::Err::Error(_) | nom::Err::Failure(_)) => Err(()),
         Err(_) => unreachable!(),
     }
+}
+
+fn core_version_apis<'a, E: nom::error::ParseError<&'a [u8]>>(
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], CoreVersionApisRefIter, E> {
+    nom::combinator::map(
+        nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
+            nom::combinator::recognize(nom::multi::fold_many_m_n(
+                num_elems,
+                num_elems,
+                core_version_api,
+                || {},
+                |(), _| (),
+            ))
+        }),
+        |inner| CoreVersionApisRefIter { inner },
+    )(bytes)
 }
 
 fn core_version_api<'a, E: nom::error::ParseError<&'a [u8]>>(
