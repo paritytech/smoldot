@@ -416,6 +416,16 @@ where
         self.chains.len()
     }
 
+    /// Returns the value passed as [`ChainConfig::block_number_bytes`] for the given chain.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `chain_index` is out of range.
+    ///
+    pub fn block_number_bytes(&self, chain_index: usize) -> usize {
+        self.chains[chain_index].chain_config.block_number_bytes
+    }
+
     /// Returns the Noise key originally passed as [`Config::noise_key`].
     pub fn noise_key(&self) -> &connection::NoiseKey {
         self.inner.noise_key()
@@ -1304,7 +1314,7 @@ where
                     request_id,
                     response,
                 } => match self.out_requests_types.remove(&request_id).unwrap() {
-                    (OutRequestTy::Blocks { checked }, _) => {
+                    (OutRequestTy::Blocks { checked }, chain_index) => {
                         let mut response =
                             response
                                 .map_err(BlocksRequestError::Request)
@@ -1314,7 +1324,11 @@ where
                                 });
 
                         if let (Some(config), &mut Ok(ref mut blocks)) = (checked, &mut response) {
-                            if let Err(err) = check_blocks_response(config, blocks) {
+                            if let Err(err) = check_blocks_response(
+                                self.chains[chain_index].chain_config.block_number_bytes,
+                                config,
+                                blocks,
+                            ) {
                                 response = Err(err);
                             }
                         }
@@ -1592,8 +1606,13 @@ where
                         continue;
                     }
 
+                    let block_number_bytes =
+                        self.chains[chain_index].chain_config.block_number_bytes;
+
                     // Check the format of the block announce.
-                    if let Err(err) = protocol::decode_block_announce(&notification) {
+                    if let Err(err) =
+                        protocol::decode_block_announce(&notification, block_number_bytes)
+                    {
                         break Some(Event::ProtocolError {
                             error: ProtocolError::BadBlockAnnounce(err),
                             peer_id,
@@ -1603,7 +1622,10 @@ where
                     break Some(Event::BlockAnnounce {
                         chain_index,
                         peer_id,
-                        announce: EncodedBlockAnnounce(notification),
+                        announce: EncodedBlockAnnounce {
+                            message: notification,
+                            block_number_bytes,
+                        },
                     });
                 }
 
@@ -2416,12 +2438,15 @@ impl fmt::Debug for EncodedBlockAnnounceHandshake {
 
 /// Undecoded but valid block announce.
 #[derive(Clone)]
-pub struct EncodedBlockAnnounce(Vec<u8>);
+pub struct EncodedBlockAnnounce {
+    message: Vec<u8>,
+    block_number_bytes: usize,
+}
 
 impl EncodedBlockAnnounce {
     /// Returns the decoded version of the announcement.
     pub fn decode(&self) -> protocol::BlockAnnounceRef {
-        protocol::decode_block_announce(&self.0).unwrap()
+        protocol::decode_block_announce(&self.message, self.block_number_bytes).unwrap()
     }
 }
 
@@ -2616,6 +2641,7 @@ pub enum ProtocolError {
 }
 
 fn check_blocks_response(
+    block_number_bytes: usize,
     config: protocol::BlocksRequestConfig,
     result: &mut [protocol::BlockData],
 ) -> Result<(), BlocksRequestError> {
@@ -2639,7 +2665,7 @@ fn check_blocks_response(
         if block
             .header
             .as_ref()
-            .map_or(false, |h| header::decode(h).is_err())
+            .map_or(false, |h| header::decode(h, block_number_bytes).is_err())
         {
             return Err(BlocksRequestError::Entry {
                 index: block_index,
@@ -2673,7 +2699,7 @@ fn check_blocks_response(
         }
 
         if let (Some(header), Some(body)) = (&block.header, &block.body) {
-            let decoded_header = header::decode(header).unwrap();
+            let decoded_header = header::decode(header, block_number_bytes).unwrap();
             let expected = header::extrinsics_root(&body[..]);
             if expected != *decoded_header.extrinsics_root {
                 return Err(BlocksRequestError::Entry {
@@ -2692,7 +2718,7 @@ fn check_blocks_response(
             return Err(BlocksRequestError::InvalidStart);
         }
         protocol::BlocksRequestConfigStart::Number(n)
-            if header::decode(result[0].header.as_ref().unwrap())
+            if header::decode(result[0].header.as_ref().unwrap(), block_number_bytes)
                 .unwrap()
                 .number
                 != n =>

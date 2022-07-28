@@ -313,6 +313,11 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         }
     }
 
+    /// Returns the value that was initially passed in [`Config::block_number_bytes`].
+    pub fn block_number_bytes(&self) -> usize {
+        self.chain.block_number_bytes()
+    }
+
     /// Builds a [`chain_information::ChainInformationRef`] struct corresponding to the current
     /// latest finalized block. Can later be used to reconstruct a chain.
     pub fn as_chain_information(&self) -> chain_information::ValidChainInformationRef {
@@ -826,7 +831,9 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     /// Returns the height of the block about to be verified.
     pub fn height(&self) -> u64 {
         // TODO: unwrap?
-        header::decode(self.scale_encoded_header()).unwrap().number
+        header::decode(self.scale_encoded_header(), self.chain.block_number_bytes())
+            .unwrap()
+            .number
     }
 
     /// Returns the hash of the block about to be verified.

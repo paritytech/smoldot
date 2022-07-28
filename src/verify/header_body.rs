@@ -59,6 +59,9 @@ pub struct Config<'a, TBody> {
     /// the other fields.
     pub block_header: header::HeaderRef<'a>,
 
+    /// Number of bytes used to encode the block number in the header.
+    pub block_number_bytes: usize,
+
     /// Body of the block to verify.
     pub block_body: TBody,
 
@@ -241,6 +244,7 @@ pub fn verify(
 
             let result = aura::verify_header(aura::VerifyConfig {
                 header: config.block_header.clone(),
+                block_number_bytes: config.block_number_bytes,
                 parent_block_header: config.parent_block_header,
                 now_from_unix_epoch: config.now_from_unix_epoch,
                 current_authorities: current_authorities.clone(),
@@ -273,6 +277,7 @@ pub fn verify(
 
             let result = babe::verify_header(babe::VerifyConfig {
                 header: config.block_header.clone(),
+                block_number_bytes: config.block_number_bytes,
                 parent_block_header: config.parent_block_header,
                 parent_block_next_epoch: parent_block_next_epoch.clone(),
                 parent_block_epoch: parent_block_epoch.clone(),
@@ -313,7 +318,7 @@ pub fn verify(
 
         let encoded_body_len = util::encode_scale_compact_usize(config.block_body.len());
         unsealed_header
-            .scale_encoding()
+            .scale_encoding(config.block_number_bytes)
             .map(|b| either::Right(either::Left(b)))
             .chain(iter::once(either::Right(either::Right(encoded_body_len))))
             .chain(config.block_body.map(either::Left))

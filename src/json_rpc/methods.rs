@@ -838,8 +838,11 @@ impl Header {
     /// Creates a [`Header`] from a SCALE-encoded header.
     ///
     /// Returns an error if the encoding is incorrect.
-    pub fn from_scale_encoded_header(header: &[u8]) -> Result<Header, header::Error> {
-        let header = header::decode(header)?;
+    pub fn from_scale_encoded_header(
+        header: &[u8],
+        block_number_bytes: usize,
+    ) -> Result<Header, header::Error> {
+        let header = header::decode(header, block_number_bytes)?;
         Ok(Header {
             parent_hash: HashHexString(*header.parent_hash),
             extrinsics_root: HashHexString(*header.extrinsics_root),

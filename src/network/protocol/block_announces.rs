@@ -92,16 +92,21 @@ pub fn encode_block_announce(
 }
 
 /// Decodes a block announcement.
-pub fn decode_block_announce(bytes: &[u8]) -> Result<BlockAnnounceRef, DecodeBlockAnnounceError> {
+pub fn decode_block_announce(
+    bytes: &[u8],
+    block_number_bytes: usize,
+) -> Result<BlockAnnounceRef, DecodeBlockAnnounceError> {
     let result: Result<_, nom::error::Error<_>> =
         nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
             nom::sequence::tuple((
-                nom::combinator::recognize(|enc_hdr| match header::decode_partial(enc_hdr) {
-                    Ok((hdr, rest)) => Ok((rest, hdr)),
-                    Err(_) => Err(nom::Err::Failure(nom::error::make_error(
-                        enc_hdr,
-                        nom::error::ErrorKind::Verify,
-                    ))),
+                nom::combinator::recognize(|enc_hdr| {
+                    match header::decode_partial(enc_hdr, block_number_bytes) {
+                        Ok((hdr, rest)) => Ok((rest, hdr)),
+                        Err(_) => Err(nom::Err::Failure(nom::error::make_error(
+                            enc_hdr,
+                            nom::error::ErrorKind::Verify,
+                        ))),
+                    }
                 }),
                 nom::branch::alt((
                     nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| false),

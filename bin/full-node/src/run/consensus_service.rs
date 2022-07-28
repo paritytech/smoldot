@@ -126,39 +126,44 @@ impl ConsensusService {
             finalized_chain_information,
         ): (_, _, _, _, BTreeMap<Vec<u8>, Vec<u8>>, _) = config
             .database
-            .with_database(|database| {
-                let finalized_block_hash = database.finalized_block_hash().unwrap();
-                let finalized_block_number = header::decode(
-                    &database
-                        .block_scale_encoded_header(&finalized_block_hash)
-                        .unwrap()
-                        .unwrap(),
-                )
-                .unwrap()
-                .number;
-                let best_block_hash = database.best_block_hash().unwrap();
-                let best_block_number = header::decode(
-                    &database
-                        .block_scale_encoded_header(&best_block_hash)
-                        .unwrap()
-                        .unwrap(),
-                )
-                .unwrap()
-                .number;
-                let finalized_block_storage = database
-                    .finalized_block_storage_top_trie(&finalized_block_hash)
-                    .unwrap();
-                let finalized_chain_information = database
-                    .to_chain_information(&finalized_block_hash)
-                    .unwrap();
-                (
-                    finalized_block_hash,
-                    finalized_block_number,
-                    best_block_hash,
-                    best_block_number,
-                    finalized_block_storage,
-                    finalized_chain_information,
-                )
+            .with_database({
+                let block_number_bytes = config.block_number_bytes;
+                move |database| {
+                    let finalized_block_hash = database.finalized_block_hash().unwrap();
+                    let finalized_block_number = header::decode(
+                        &database
+                            .block_scale_encoded_header(&finalized_block_hash)
+                            .unwrap()
+                            .unwrap(),
+                        block_number_bytes,
+                    )
+                    .unwrap()
+                    .number;
+                    let best_block_hash = database.best_block_hash().unwrap();
+                    let best_block_number = header::decode(
+                        &database
+                            .block_scale_encoded_header(&best_block_hash)
+                            .unwrap()
+                            .unwrap(),
+                        block_number_bytes,
+                    )
+                    .unwrap()
+                    .number;
+                    let finalized_block_storage = database
+                        .finalized_block_storage_top_trie(&finalized_block_hash)
+                        .unwrap();
+                    let finalized_chain_information = database
+                        .to_chain_information(&finalized_block_hash)
+                        .unwrap();
+                    (
+                        finalized_block_hash,
+                        finalized_block_number,
+                        best_block_hash,
+                        best_block_number,
+                        finalized_block_storage,
+                        finalized_chain_information,
+                    )
+                }
             })
             .await;
 
@@ -489,11 +494,11 @@ impl SyncBackground {
                         {
                             let _jaeger_span = self
                                 .jaeger_service
-                                .block_announce_process_span(&header.hash());
+                                .block_announce_process_span(&header.hash(self.sync.block_number_bytes()));
 
                             let id = *self.peers_source_id_map.get(&peer_id).unwrap();
                             // TODO: log the outcome
-                            match self.sync.block_announce(id, header.scale_encoding_vec(), is_best) {
+                            match self.sync.block_announce(id, header.scale_encoding_vec(self.sync.block_number_bytes()), is_best) {
                                 all::BlockAnnounceOutcome::HeaderVerify => {},
                                 all::BlockAnnounceOutcome::TooOld { .. } => {},
                                 all::BlockAnnounceOutcome::AlreadyInChain => {},
@@ -599,6 +604,7 @@ impl SyncBackground {
                 let parent_runtime = best_block_storage_access.runtime().clone(); // TODO: overhead here with cloning, but solving it requires very tricky API changes in syncing code
 
                 authoring_start.start(author::build::AuthoringStartConfig {
+                    block_number_bytes: self.sync.block_number_bytes(),
                     parent_hash: &self.sync.best_block_hash(),
                     parent_number: self.sync.best_block_number(),
                     now_from_unix_epoch: SystemTime::now()
@@ -1133,7 +1139,8 @@ impl SyncBackground {
 
                             if let Some(last_finalized) = finalized_blocks.last() {
                                 let mut lock = self.sync_state.lock().await;
-                                lock.finalized_block_hash = last_finalized.header.hash();
+                                lock.finalized_block_hash =
+                                    last_finalized.header.hash(self.sync.block_number_bytes());
                                 lock.finalized_block_number = last_finalized.header.number;
                             }
 
@@ -1157,9 +1164,13 @@ impl SyncBackground {
                                 }
                             }
 
-                            let new_finalized_hash =
-                                finalized_blocks.last().map(|lf| lf.header.hash()).unwrap();
-                            database_blocks(&self.database, finalized_blocks).await;
+                            let new_finalized_hash = finalized_blocks
+                                .last()
+                                .map(|lf| lf.header.hash(self.sync.block_number_bytes()))
+                                .unwrap();
+                            let block_number_bytes = self.sync.block_number_bytes();
+                            database_blocks(&self.database, finalized_blocks, block_number_bytes)
+                                .await;
                             database_set_finalized(&self.database, new_finalized_hash).await;
                             continue;
                         }
@@ -1228,16 +1239,23 @@ impl SyncBackground {
 }
 
 /// Writes blocks to the database
-async fn database_blocks(database: &database_thread::DatabaseThread, blocks: Vec<all::Block<()>>) {
+async fn database_blocks(
+    database: &database_thread::DatabaseThread,
+    blocks: Vec<all::Block<()>>,
+    block_number_bytes: usize,
+) {
     database
-        .with_database_detached(|database| {
+        .with_database_detached(move |database| {
             for block in blocks {
                 // TODO: overhead for building the SCALE encoding of the header
                 let result = database.insert(
-                    &block.header.scale_encoding().fold(Vec::new(), |mut a, b| {
-                        a.extend_from_slice(b.as_ref());
-                        a
-                    }),
+                    &block.header.scale_encoding(block_number_bytes).fold(
+                        Vec::new(),
+                        |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        },
+                    ),
                     true, // TODO: is_new_best?
                     block.full.as_ref().unwrap().body.iter(),
                     block

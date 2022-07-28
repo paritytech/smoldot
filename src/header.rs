@@ -121,8 +121,8 @@ pub fn extrinsics_root(transactions: &[impl AsRef<[u8]>]) -> [u8; 32] {
 }
 
 /// Attempt to decode the given SCALE-encoded header.
-pub fn decode(scale_encoded: &[u8]) -> Result<HeaderRef, Error> {
-    let (header, remainder) = decode_partial(scale_encoded)?;
+pub fn decode(scale_encoded: &[u8], block_number_bytes: usize) -> Result<HeaderRef, Error> {
+    let (header, remainder) = decode_partial(scale_encoded, block_number_bytes)?;
     if !remainder.is_empty() {
         return Err(Error::TooLong);
     }
@@ -134,7 +134,11 @@ pub fn decode(scale_encoded: &[u8]) -> Result<HeaderRef, Error> {
 ///
 /// Contrary to [`decode`], doesn't return an error if the slice is too long but returns the
 /// remainder.
-pub fn decode_partial(mut scale_encoded: &[u8]) -> Result<(HeaderRef, &[u8]), Error> {
+// TODO: use block_number_bytes
+pub fn decode_partial(
+    mut scale_encoded: &[u8],
+    block_number_bytes: usize,
+) -> Result<(HeaderRef, &[u8]), Error> {
     if scale_encoded.len() < 32 + 1 {
         return Err(Error::TooShort);
     }
@@ -239,6 +243,7 @@ impl<'a> HeaderRef<'a> {
     /// encoding of the header.
     pub fn scale_encoding(
         &self,
+        block_number_bytes: usize, // TODO: unused
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
         iter::once(either::Left(either::Left(&self.parent_hash[..])))
             .chain(iter::once(either::Left(either::Right(
@@ -252,17 +257,18 @@ impl<'a> HeaderRef<'a> {
     }
 
     /// Equivalent to [`HeaderRef::scale_encoding`] but returns the data in a `Vec`.
-    pub fn scale_encoding_vec(&self) -> Vec<u8> {
+    pub fn scale_encoding_vec(&self, block_number_bytes: usize) -> Vec<u8> {
         // TODO: Vec::with_capacity?
-        self.scale_encoding().fold(Vec::new(), |mut a, b| {
-            a.extend_from_slice(b.as_ref());
-            a
-        })
+        self.scale_encoding(block_number_bytes)
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            })
     }
 
     /// Builds the hash of the header.
-    pub fn hash(&self) -> [u8; 32] {
-        hash_from_scale_encoded_header_vectored(self.scale_encoding())
+    pub fn hash(&self, block_number_bytes: usize) -> [u8; 32] {
+        hash_from_scale_encoded_header_vectored(self.scale_encoding(block_number_bytes))
     }
 }
 
@@ -303,18 +309,19 @@ impl Header {
     /// encoding of the header.
     pub fn scale_encoding(
         &'_ self,
+        block_number_bytes: usize,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_ {
-        HeaderRef::from(self).scale_encoding()
+        HeaderRef::from(self).scale_encoding(block_number_bytes)
     }
 
     /// Equivalent to [`Header::scale_encoding`] but returns the data in a `Vec`.
-    pub fn scale_encoding_vec(&self) -> Vec<u8> {
-        HeaderRef::from(self).scale_encoding_vec()
+    pub fn scale_encoding_vec(&self, block_number_bytes: usize) -> Vec<u8> {
+        HeaderRef::from(self).scale_encoding_vec(block_number_bytes)
     }
 
     /// Builds the hash of the header.
-    pub fn hash(&self) -> [u8; 32] {
-        HeaderRef::from(self).hash()
+    pub fn hash(&self, block_number_bytes: usize) -> [u8; 32] {
+        HeaderRef::from(self).hash(block_number_bytes)
     }
 }
 

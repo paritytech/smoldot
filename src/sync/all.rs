@@ -183,6 +183,16 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         }
     }
 
+    /// Returns the value that was initially passed in [`Config::block_number_bytes`].
+    pub fn block_number_bytes(&self) -> usize {
+        match &self.inner {
+            AllSyncInner::AllForks(sync) => sync.block_number_bytes(),
+            AllSyncInner::GrandpaWarpSync { inner: sync } => sync.block_number_bytes(),
+            AllSyncInner::Optimistic { inner } => inner.block_number_bytes(),
+            AllSyncInner::Poisoned => unreachable!(),
+        }
+    }
+
     /// Builds a [`chain_information::ChainInformationRef`] struct corresponding to the current
     /// latest finalized block. Can later be used to reconstruct a chain.
     pub fn as_chain_information(&self) -> chain_information::ValidChainInformationRef {
@@ -240,7 +250,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         match &self.inner {
             AllSyncInner::AllForks(sync) => sync.best_block_hash(),
             AllSyncInner::Optimistic { inner } => inner.best_block_hash(),
-            AllSyncInner::GrandpaWarpSync { .. } => self.best_block_header().hash(),
+            AllSyncInner::GrandpaWarpSync { inner, .. } => {
+                self.best_block_header().hash(inner.block_number_bytes())
+            }
             AllSyncInner::Poisoned => unreachable!(),
         }
     }
@@ -825,7 +837,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         get.warp_sync_source().1.outer_source_id,
                         &get.warp_sync_source().1.user_data,
                         RequestDetail::StorageGet {
-                            block_hash: get.warp_sync_header().hash(),
+                            block_hash: get.warp_sync_header().hash(inner.block_number_bytes()),
                             state_trie_root: *get.warp_sync_header().state_root,
                             keys: vec![get.key_as_vec()],
                         },
@@ -834,7 +846,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         rq.warp_sync_source().1.outer_source_id,
                         &rq.warp_sync_source().1.user_data,
                         RequestDetail::StorageGet {
-                            block_hash: rq.warp_sync_header().hash(),
+                            block_hash: rq.warp_sync_header().hash(inner.block_number_bytes()),
                             state_trie_root: *rq.warp_sync_header().state_root,
                             keys: vec![b":code".to_vec(), b":heappages".to_vec()],
                         },
@@ -1084,7 +1096,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 }
             }
             (AllSyncInner::Optimistic { inner }, &SourceMapping::Optimistic(source_id)) => {
-                match header::decode(&announced_scale_encoded_header) {
+                match header::decode(&announced_scale_encoded_header, inner.block_number_bytes()) {
                     Ok(header) => {
                         if is_best {
                             inner.raise_source_best_block(source_id, header.number);
@@ -1102,7 +1114,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 AllSyncInner::GrandpaWarpSync { inner: sync },
                 &SourceMapping::GrandpaWarpSync(source_id),
             ) => {
-                match header::decode(&announced_scale_encoded_header) {
+                let block_number_bytes = sync.block_number_bytes();
+                match header::decode(&announced_scale_encoded_header, block_number_bytes) {
                     Err(err) => BlockAnnounceOutcome::InvalidHeader(err),
                     Ok(header) => {
                         // If GrandPa warp syncing is in progress, the best block of the source is stored
@@ -1111,7 +1124,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         if is_best {
                             let mut user_data = &mut sync[source_id];
                             user_data.best_block_number = header.number;
-                            user_data.best_block_hash = header.hash();
+                            user_data.best_block_hash = header.hash(block_number_bytes);
                         }
 
                         BlockAnnounceOutcome::Discarded

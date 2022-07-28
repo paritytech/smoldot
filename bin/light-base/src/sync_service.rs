@@ -105,6 +105,8 @@ pub struct SyncService<TPlat: Platform> {
     network_service: Arc<network_service::NetworkService<TPlat>>,
     /// See [`Config::network_service`].
     network_chain_index: usize,
+    /// See [`Config::block_number_bytes`].
+    block_number_bytes: usize,
 }
 
 impl<TPlat: Platform> SyncService<TPlat> {
@@ -119,6 +121,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                 Box::pin(parachain::start_parachain(
                     log_target,
                     config.chain_information,
+                    config.block_number_bytes,
                     config_parachain.relay_chain_sync.clone(),
                     config_parachain.relay_chain_block_number_bytes,
                     config_parachain.parachain_id,
@@ -146,7 +149,13 @@ impl<TPlat: Platform> SyncService<TPlat> {
             to_background: Mutex::new(to_background),
             network_service: config.network_service.0,
             network_chain_index: config.network_service.1,
+            block_number_bytes: config.block_number_bytes,
         }
+    }
+
+    /// Returns the value initially passed as [`Config::block_number_bytes`̀].
+    pub fn block_number_bytes(&self) -> usize {
+        self.block_number_bytes
     }
 
     /// Returns the state of the finalized block of the chain, after passing it through

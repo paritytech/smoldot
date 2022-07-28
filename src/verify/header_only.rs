@@ -36,6 +36,9 @@ pub struct Config<'a> {
     /// the other fields.
     pub block_header: header::HeaderRef<'a>,
 
+    /// Number of bytes used to encode the block number in the header.
+    pub block_number_bytes: usize,
+
     /// Configuration items related to the consensus engine.
     pub consensus: ConfigConsensus<'a>,
 
@@ -141,7 +144,9 @@ pub fn verify(config: Config) -> Result<Success, Error> {
     // unnecessary and introduces an overhead.
     // However this check is performed anyway, as the consequences of a failure here could be
     // potentially quite high.
-    if config.parent_block_header.hash() != *config.block_header.parent_hash {
+    if config.parent_block_header.hash(config.block_number_bytes)
+        != *config.block_header.parent_hash
+    {
         return Err(Error::BadParentHash);
     }
 
@@ -188,6 +193,7 @@ pub fn verify(config: Config) -> Result<Success, Error> {
 
             let result = aura::verify_header(aura::VerifyConfig {
                 header: config.block_header.clone(),
+                block_number_bytes: config.block_number_bytes,
                 parent_block_header: config.parent_block_header,
                 now_from_unix_epoch,
                 current_authorities,
@@ -213,6 +219,7 @@ pub fn verify(config: Config) -> Result<Success, Error> {
 
             let result = babe::verify_header(babe::VerifyConfig {
                 header: config.block_header.clone(),
+                block_number_bytes: config.block_number_bytes,
                 parent_block_header: config.parent_block_header,
                 parent_block_epoch,
                 parent_block_next_epoch,

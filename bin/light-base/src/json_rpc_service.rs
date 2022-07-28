@@ -1184,7 +1184,7 @@ impl<TPlat: Platform> Background<TPlat> {
             match cache_lock
                 .recent_pinned_blocks
                 .get(hash)
-                .map(|h| header::decode(h))
+                .map(|h| header::decode(h, self.sync_service.block_number_bytes()))
             {
                 Some(Ok(header)) => return Ok((*header.state_root, header.number)),
                 Some(Err(_)) => return Err(()),
@@ -1207,6 +1207,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             // The sync service knows which peers are potentially aware of
                             // this block.
                             let result = sync_service
+                                .clone()
                                 .block_query_unknown_number(
                                     hash,
                                     protocol::BlocksRequestFields {
@@ -1228,7 +1229,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                     header::hash_from_scale_encoded_header(&header),
                                     hash
                                 );
-                                let decoded = header::decode(&header).unwrap();
+                                let decoded =
+                                    header::decode(&header, sync_service.block_number_bytes())
+                                        .unwrap();
                                 Ok((*decoded.state_root, decoded.number))
                             } else {
                                 Err(())

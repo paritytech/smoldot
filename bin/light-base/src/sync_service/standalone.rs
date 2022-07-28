@@ -342,7 +342,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                     target: &task.log_target,
                     "GrandPa warp sync finished to #{} ({})",
                     finalized_header.number,
-                    HashDisplay(&finalized_header.hash())
+                    HashDisplay(&finalized_header.hash(task.sync.block_number_bytes()))
                 );
 
                 task.warp_sync_taking_long_time_warning =
@@ -650,9 +650,12 @@ impl<TPlat: Platform> Task<TPlat> {
                             let header = self
                                 .sync
                                 .non_finalized_blocks_unordered()
-                                .find(|h| h.hash() == verified_hash)
+                                .find(|h| h.hash(self.sync.block_number_bytes()) == verified_hash)
                                 .unwrap();
-                            (*header.parent_hash, header.scale_encoding_vec())
+                            (
+                                *header.parent_hash,
+                                header.scale_encoding_vec(self.sync.block_number_bytes()),
+                            )
                         };
 
                         // Announce the newly-verified block to all the light client sources that
@@ -798,7 +801,10 @@ impl<TPlat: Platform> Task<TPlat> {
                             self.known_finalized_runtime = None;
                         }
                         self.dispatch_all_subscribers(Notification::Finalized {
-                            hash: self.sync.finalized_block_header().hash(),
+                            hash: self
+                                .sync
+                                .finalized_block_header()
+                                .hash(self.sync.block_number_bytes()),
                             best_block_hash: self.sync.best_block_hash(),
                         });
                     }
@@ -874,7 +880,8 @@ impl<TPlat: Platform> Task<TPlat> {
                     self.sync
                         .non_finalized_blocks_ancestry_order()
                         .map(|h| {
-                            let scale_encoding = h.scale_encoding_vec();
+                            let scale_encoding =
+                                h.scale_encoding_vec(self.sync.block_number_bytes());
                             BlockNotification {
                                 is_new_best: header::hash_from_scale_encoded_header(
                                     &scale_encoding,
@@ -890,7 +897,7 @@ impl<TPlat: Platform> Task<TPlat> {
                     finalized_block_scale_encoded_header: self
                         .sync
                         .finalized_block_header()
-                        .scale_encoding_vec(),
+                        .scale_encoding_vec(self.sync.block_number_bytes()),
                     finalized_block_runtime: if runtime_interest {
                         self.known_finalized_runtime.take()
                     } else {
@@ -988,7 +995,10 @@ impl<TPlat: Platform> Task<TPlat> {
                 let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
                 let decoded = announce.decode();
 
-                match header::decode(&decoded.scale_encoded_header) {
+                match header::decode(
+                    &decoded.scale_encoded_header,
+                    self.sync.block_number_bytes(),
+                ) {
                     Ok(decoded_header) => {
                         log::debug!(
                             target: &self.log_target,
@@ -1101,7 +1111,10 @@ impl<TPlat: Platform> Task<TPlat> {
                         self.known_finalized_runtime = None; // TODO: only do if commit message has been processed and if there was no RuntimeUpdated log item in the finalized blocks
                         self.network_up_to_date_best = false; // TODO: done in case finality changes the best block; make this clearer in the sync layer
                         self.dispatch_all_subscribers(Notification::Finalized {
-                            hash: self.sync.finalized_block_header().hash(),
+                            hash: self
+                                .sync
+                                .finalized_block_header()
+                                .hash(self.sync.block_number_bytes()),
                             best_block_hash: self.sync.best_block_hash(),
                         });
                     }

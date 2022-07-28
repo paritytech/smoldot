@@ -42,19 +42,26 @@ mod defs;
 /// This is a shortcut for [`encode_chain_storage`] with no `finalized_storage`.
 pub fn encode_chain<'a>(
     information: impl Into<chain_information::ValidChainInformationRef<'a>>,
+    block_number_bytes: usize,
 ) -> String {
-    encode_chain_storage(information, None::<iter::Empty<(Vec<u8>, Vec<u8>)>>)
+    encode_chain_storage(
+        information,
+        block_number_bytes,
+        None::<iter::Empty<(Vec<u8>, Vec<u8>)>>,
+    )
 }
 
 /// Serializes the given chain information and finalized block storage as a string.
 pub fn encode_chain_storage<'a>(
     information: impl Into<chain_information::ValidChainInformationRef<'a>>,
+    block_number_bytes: usize,
     finalized_storage: Option<impl Iterator<Item = (impl AsRef<[u8]>, impl AsRef<[u8]>)>>,
 ) -> String {
     let information = information.into();
 
     let decoded = defs::SerializedChainInformation::V1(defs::SerializedChainInformationV1::new(
         information.as_ref(),
+        block_number_bytes,
         finalized_storage,
     ));
 
@@ -66,6 +73,7 @@ pub fn encode_chain_storage<'a>(
 /// This is the invert operation of [`encode_chain_storage`].
 pub fn decode_chain(
     encoded: &str,
+    block_number_bytes: usize,
 ) -> Result<
     (
         chain_information::ValidChainInformation,
@@ -77,7 +85,7 @@ pub fn decode_chain(
         serde_json::from_str(encoded).map_err(|e| CorruptedError(CorruptedErrorInner::Serde(e)))?;
 
     let (chain_info, storage) = encoded
-        .decode()
+        .decode(block_number_bytes)
         .map_err(|err| CorruptedError(CorruptedErrorInner::Deserialize(err)))?;
 
     let chain_info = chain_information::ValidChainInformation::try_from(chain_info)

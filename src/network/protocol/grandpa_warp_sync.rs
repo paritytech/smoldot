@@ -107,10 +107,12 @@ fn decode_fragment<'a>(
 ) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], GrandpaWarpSyncResponseFragment> {
     nom::combinator::map(
         nom::sequence::tuple((
-            nom::combinator::recognize(|s| {
-                header::decode_partial(s).map(|(a, b)| (b, a)).map_err(|_| {
-                    nom::Err::Failure(nom::error::make_error(s, nom::error::ErrorKind::Verify))
-                })
+            nom::combinator::recognize(move |s| {
+                header::decode_partial(s, block_number_bytes)
+                    .map(|(a, b)| (b, a))
+                    .map_err(|_| {
+                        nom::Err::Failure(nom::error::make_error(s, nom::error::ErrorKind::Verify))
+                    })
             }),
             nom::combinator::recognize(move |s| {
                 finality::justification::decode::decode_partial_grandpa(s, block_number_bytes)

@@ -332,6 +332,22 @@ impl<TSrc> WarpSync<TSrc> {
 }
 
 impl<TSrc> InProgressWarpSync<TSrc> {
+    /// Returns the value that was initially passed in [`Config::block_number_bytes`].
+    pub fn block_number_bytes(&self) -> usize {
+        match self {
+            Self::StorageGet(storage_get) => storage_get.state.block_number_bytes,
+            Self::NextKey(next_key) => next_key.state.block_number_bytes,
+            Self::Verifier(verifier) => verifier.state.block_number_bytes,
+            Self::WarpSyncRequest(warp_sync_request) => warp_sync_request.state.block_number_bytes,
+            Self::VirtualMachineParamsGet(virtual_machine_params_get) => {
+                virtual_machine_params_get.state.block_number_bytes
+            }
+            Self::WaitingForSources(waiting_for_sources) => {
+                waiting_for_sources.state.block_number_bytes
+            }
+        }
+    }
+
     /// Returns the chain information that is considered verified.
     pub fn as_chain_information(&self) -> ValidChainInformationRef {
         match self {
@@ -718,7 +734,10 @@ impl<TSrc> Verifier<TSrc> {
             }) => {
                 // As the verification of the fragment has succeeded, we are sure that the header
                 // is valid and can decode it.
-                let header: Header = header::decode(&scale_encoded_header).unwrap().into();
+                let header: Header =
+                    header::decode(&scale_encoded_header, self.state.block_number_bytes)
+                        .unwrap()
+                        .into();
 
                 if self.final_set_of_fragments {
                     (
@@ -825,13 +844,13 @@ impl<TSrc> GrandpaWarpSyncRequest<TSrc> {
     /// The hash of the header to warp sync from.
     pub fn start_block_hash(&self) -> [u8; 32] {
         match self.previous_verifier_values.as_ref() {
-            Some((header, _)) => header.hash(),
+            Some((header, _)) => header.hash(self.state.block_number_bytes),
             None => self
                 .state
                 .start_chain_information
                 .as_ref()
                 .finalized_block_header
-                .hash(),
+                .hash(self.state.block_number_bytes),
         }
     }
 

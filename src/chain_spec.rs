@@ -73,7 +73,8 @@ impl ChainSpec {
 
         // Make sure that the light sync state can be successfully decoded.
         if let Some(light_sync_state) = &client_spec.light_sync_state {
-            light_sync_state.decode()?;
+            // TODO: this "4" constant is repeated
+            light_sync_state.decode(client_spec.block_number_bytes.unwrap_or(4).into())?;
         }
 
         Ok(ChainSpec { client_spec })
@@ -353,7 +354,7 @@ impl ChainSpec {
             .as_ref()
             .map(|state| LightSyncState {
                 // We made sure at initialization that the decoding succeeds.
-                inner: state.decode().unwrap(),
+                inner: state.decode(self.block_number_bytes().into()).unwrap(),
             })
     }
 }

@@ -210,9 +210,13 @@ CREATE TABLE IF NOT EXISTS aura_finalized_authorities(
     Ok(if !is_empty {
         DatabaseOpen::Open(SqliteFullDatabase {
             database: parking_lot::Mutex::new(database),
+            block_number_bytes: config.block_number_bytes, // TODO: consider storing this value in the DB and check it when opening
         })
     } else {
-        DatabaseOpen::Empty(DatabaseEmpty { database })
+        DatabaseOpen::Empty(DatabaseEmpty {
+            database,
+            block_number_bytes: config.block_number_bytes,
+        })
     })
 }
 
@@ -221,6 +225,9 @@ CREATE TABLE IF NOT EXISTS aura_finalized_authorities(
 pub struct Config<'a> {
     /// Type of database.
     pub ty: ConfigTy<'a>,
+
+    /// Number of bytes used to encode the block number.
+    pub block_number_bytes: usize,
 }
 
 /// Type of database.
@@ -249,6 +256,9 @@ pub enum DatabaseOpen {
 pub struct DatabaseEmpty {
     /// See the similar field in [`SqliteFullDatabase`].
     database: sqlite::Connection,
+
+    /// See the similar field in [`SqliteFullDatabase`].
+    block_number_bytes: usize,
 }
 
 impl DatabaseEmpty {
@@ -265,11 +275,13 @@ impl DatabaseEmpty {
     ) -> Result<SqliteFullDatabase, AccessError> {
         let chain_information = chain_information.into();
 
-        let finalized_block_hash = chain_information.finalized_block_header.hash();
+        let finalized_block_hash = chain_information
+            .finalized_block_header
+            .hash(self.block_number_bytes);
 
         let scale_encoded_finalized_block_header = chain_information
             .finalized_block_header
-            .scale_encoding()
+            .scale_encoding(self.block_number_bytes)
             .fold(Vec::new(), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
                 a
@@ -436,6 +448,7 @@ impl DatabaseEmpty {
 
         Ok(SqliteFullDatabase {
             database: parking_lot::Mutex::new(self.database),
+            block_number_bytes: self.block_number_bytes,
         })
     }
 }

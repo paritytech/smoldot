@@ -525,7 +525,11 @@ async fn background_task<TPlat: Platform>(
                     })
                     .map(|(hash, block)| {
                         // TODO: unwrap?! should only insert valid blocks in the worker
-                        let decoded = header::decode(&block.scale_encoded_header).unwrap();
+                        let decoded = header::decode(
+                            &block.scale_encoded_header,
+                            worker.sync_service.block_number_bytes(),
+                        )
+                        .unwrap();
                         (*hash, decoded.number)
                     });
                 let (block_hash, block_number) = match block_hash_number {
@@ -1091,10 +1095,13 @@ async fn validate_transaction<TPlat: Platform>(
         "TxValidations <= Start(tx={}, block={}, block_height={})",
         HashDisplay(&blake2_hash(scale_encoded_transaction.as_ref())),
         HashDisplay(runtime_lock.block_hash()),
-        header::decode(block_scale_encoded_header)
-            .ok()
-            .map(|h| format!("#{}", h.number))
-            .unwrap_or_else(|| "unknown".to_owned())
+        header::decode(
+            block_scale_encoded_header,
+            relay_chain_sync.block_number_bytes()
+        )
+        .ok()
+        .map(|h| format!("#{}", h.number))
+        .unwrap_or_else(|| "unknown".to_owned())
     );
 
     let block_hash = *runtime_lock.block_hash();
@@ -1118,6 +1125,7 @@ async fn validate_transaction<TPlat: Platform>(
     let mut validation_in_progress = validate::validate_transaction(validate::Config {
         runtime,
         scale_encoded_header: block_scale_encoded_header,
+        block_number_bytes: relay_chain_sync.block_number_bytes(),
         scale_encoded_transaction: iter::once(scale_encoded_transaction),
         source,
     });

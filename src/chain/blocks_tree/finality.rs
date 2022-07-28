@@ -561,7 +561,7 @@ impl<T> NonFinalizedTreeInner<T> {
             &mut self.finalized_block_header,
             &mut new_finalized_block.header,
         );
-        self.finalized_block_hash = self.finalized_block_header.hash();
+        self.finalized_block_hash = self.finalized_block_header.hash(self.block_number_bytes);
 
         debug_assert_eq!(self.blocks.len(), self.blocks_by_hash.len());
         SetFinalizedBlockIter {

@@ -33,14 +33,20 @@ pub(super) struct LightSyncState {
 }
 
 impl LightSyncState {
-    pub(super) fn decode(&self) -> Result<DecodedLightSyncState, ParseError> {
+    pub(super) fn decode(
+        &self,
+        block_number_bytes: usize,
+    ) -> Result<DecodedLightSyncState, ParseError> {
         let mut grandpa_authority_set_slice = &self.grandpa_authority_set.0[..];
         let mut babe_epoch_changes_slice = &self.babe_epoch_changes.0[..];
 
         let decoded = DecodedLightSyncState {
-            finalized_block_header: crate::header::decode(&self.finalized_block_header.0[..])
-                .map_err(|_| ParseError(ParseErrorInner::Other))?
-                .into(),
+            finalized_block_header: crate::header::decode(
+                &self.finalized_block_header.0[..],
+                block_number_bytes,
+            )
+            .map_err(|_| ParseError(ParseErrorInner::Other))?
+            .into(),
             // We use `decode` in order to remain compatible in case new fields are added in
             // Substrate to these data structures.
             // This really should be solved by having a proper format for checkpoints, but
