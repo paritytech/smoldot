@@ -75,7 +75,7 @@ pub struct KBuckets<K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
     /// Key of the "local" node, that holds the buckets.
     local_key: (K, Key),
     /// List of buckets, ordered by increasing distance. In other words, the first elements of
-    /// this field are the ones that are the closests to [`KBuckets::local_key`].
+    /// this field are the ones that are the closest to [`KBuckets::local_key`].
     buckets: Vec<Bucket<K, V, TNow, ENTRIES_PER_BUCKET>>,
     /// Duration after which the last entry of each bucket will expired if it is disconnected.
     pending_timeout: Duration,
@@ -160,12 +160,10 @@ where
     pub fn closest_entries(&self, target: &K) -> impl Iterator<Item = (&K, &V)> {
         // TODO: this is extremely unoptimized
         let target_hashed = Key::new(target.as_ref());
-        let mut list = self.iter().collect::<Vec<_>>();
+        let mut list = self.iter_ordered().collect::<Vec<_>>();
         list.sort_by_key(|(key, _)| {
             let key_hashed = Key::new(key.as_ref());
-            distance_log2(&key_hashed, &target_hashed)
-                .map(|d| u16::from(d) + 1)
-                .unwrap_or(0)
+            distance_log2(&key_hashed, &target_hashed).map_or(0, |d| u16::from(d) + 1)
         });
         list.into_iter()
     }
@@ -173,14 +171,20 @@ where
 
 impl<K, V, TNow, const ENTRIES_PER_BUCKET: usize> KBuckets<K, V, TNow, ENTRIES_PER_BUCKET> {
     /// Iterates over all the peers in the k-buckets.
-    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+    ///
+    /// The buckets are iterated one by one from closest to furthest away, and within each bucket
+    /// elements are ordered by descending time since connectivity.
+    pub fn iter_ordered(&self) -> impl Iterator<Item = (&K, &V)> {
         self.buckets
             .iter()
             .flat_map(|b| b.entries.iter().map(|(k, v)| (k, v)))
     }
 
     /// Iterates over all the peers in the k-buckets.
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+    ///
+    /// The buckets are iterated one by one from closest to furthest away, and within each bucket
+    /// elements are ordered by descending time since connectivity.
+    pub fn iter_mut_ordered(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
         self.buckets
             .iter_mut()
             .flat_map(|b| b.entries.iter_mut().map(|(k, v)| (&*k, v)))
@@ -194,7 +198,7 @@ where
     V: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_list().entries(self.iter()).finish()
+        f.debug_list().entries(self.iter_ordered()).finish()
     }
 }
 
@@ -210,7 +214,7 @@ where
     K: Clone + PartialEq + AsRef<[u8]>,
     TNow: Clone + Add<Duration, Output = TNow> + Ord,
 {
-    /// If `self` is [`Entry::Occupied`], returns the inner [`OccupiedEntry ]. Otherwise returns
+    /// If `self` is [`Entry::Occupied`], returns the inner [`OccupiedEntry`]. Otherwise returns
     /// `None`.
     pub fn into_occupied(self) -> Option<OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>> {
         match self {
@@ -224,13 +228,25 @@ where
         value: V,
         now: &TNow,
         state: PeerState,
-    ) -> Result<OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>, ()> {
+    ) -> Result<OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>, OrInsertError> {
         match self {
-            Entry::LocalKey => Err(()),
-            Entry::Vacant(v) => v.insert(value, now, state),
+            Entry::LocalKey => Err(OrInsertError::LocalKey),
+            Entry::Vacant(v) => match v.insert(value, now, state) {
+                Ok((entry, _)) => Ok(entry),
+                Err(InsertError::Full) => Err(OrInsertError::Full),
+            },
             Entry::Occupied(e) => Ok(e),
         }
     }
+}
+
+/// Error that can happen in [`Entry::or_insert`].
+#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display)]
+pub enum OrInsertError {
+    /// K-bucket is full.
+    Full,
+    /// Can't insert the local key into the k-buckets.
+    LocalKey,
 }
 
 pub struct VacantEntry<'a, K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
@@ -246,18 +262,30 @@ where
     TNow: Clone + Add<Duration, Output = TNow> + Ord,
 {
     /// Inserts the entry in the vacant slot. Returns an error if the k-buckets are full.
+    ///
+    /// On success, optionally returns the entry that had to be removed in order to make space
+    /// for the newly-inserted element. This removed entry was always in a disconnected state.
     pub fn insert(
         self,
         value: V,
         now: &TNow,
         state: PeerState,
-    ) -> Result<OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>, ()> {
+    ) -> Result<
+        (
+            OccupiedEntry<'a, K, V, TNow, ENTRIES_PER_BUCKET>,
+            Option<(K, V)>,
+        ),
+        InsertError,
+    > {
         let bucket = &mut self.inner.buckets[usize::from(self.distance)];
 
-        match state {
+        let previous_entry = match state {
             PeerState::Connected if bucket.num_connected_entries < ENTRIES_PER_BUCKET => {
+                let mut previous_entry = None;
+
                 if bucket.entries.is_full() {
-                    let _ = bucket.entries.pop(); // TODO: return element?
+                    previous_entry = bucket.entries.pop();
+                    debug_assert!(previous_entry.is_some());
                     bucket.pending_entry = Some(now.clone() + self.inner.pending_timeout);
                 }
 
@@ -269,25 +297,28 @@ where
                 if bucket.num_connected_entries == ENTRIES_PER_BUCKET {
                     bucket.pending_entry = None;
                 }
+
+                previous_entry
             }
             PeerState::Connected => {
                 debug_assert!(bucket.entries.is_full());
                 debug_assert_eq!(bucket.num_connected_entries, ENTRIES_PER_BUCKET);
                 debug_assert!(bucket.pending_entry.is_none());
-                return Err(());
+                return Err(InsertError::Full);
             }
             PeerState::Disconnected if bucket.entries.is_full() => {
                 if bucket.num_connected_entries == ENTRIES_PER_BUCKET {
-                    return Err(());
+                    return Err(InsertError::Full);
                 }
 
                 if *bucket.pending_entry.as_ref().unwrap() > *now {
-                    return Err(());
+                    return Err(InsertError::Full);
                 }
 
-                let _ = bucket.entries.pop(); // TODO: return element?
+                let previous_entry = bucket.entries.pop();
                 bucket.entries.push((self.key.clone(), value));
                 bucket.pending_entry = Some(now.clone() + self.inner.pending_timeout);
+                previous_entry
             }
             PeerState::Disconnected => {
                 debug_assert!(!bucket.entries.is_full());
@@ -297,15 +328,27 @@ where
                 if bucket.entries.is_full() {
                     bucket.pending_entry = Some(now.clone() + self.inner.pending_timeout);
                 }
+
+                None
             }
         };
 
-        Ok(OccupiedEntry {
-            inner: self.inner,
-            key: self.key,
-            distance: self.distance,
-        })
+        Ok((
+            OccupiedEntry {
+                inner: self.inner,
+                key: self.key,
+                distance: self.distance,
+            },
+            previous_entry,
+        ))
     }
+}
+
+/// Error that can happen in [`VacantEntry::insert`].
+#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display)]
+pub enum InsertError {
+    /// K-bucket is full.
+    Full,
 }
 
 pub struct OccupiedEntry<'a, K, V, TNow, const ENTRIES_PER_BUCKET: usize> {
@@ -430,7 +473,7 @@ impl Key {
     }
 }
 
-/// Returns the log2 distance between two keys. Returns `None` if the distance is zero.
+/// Returns the `log2` distance between two keys. Returns `None` if the distance is zero.
 fn distance_log2(a: &Key, b: &Key) -> Option<u8> {
     for n in 0..32 {
         let a = a.digest[n];

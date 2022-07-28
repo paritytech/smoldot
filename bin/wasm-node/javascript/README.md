@@ -11,13 +11,13 @@ the full nodes of the network.
 ## Example
 
 ```
-import * as smoldot from 'smoldot';
+import * as smoldot from '@substrate/smoldot-light';
 
 // Load a string chain specification.
 const chainSpec = fs.readFileSync('./westend.json', 'utf8');
 
 // A single client can be used to initialize multiple chains.
-const client = await smoldot.start();
+const client = smoldot.start();
 
 const chain = await client.addChain({
   chainSpec,
@@ -55,6 +55,8 @@ After having obtained a chain, use `sendJsonRpc` to send a JSON-RPC request towa
 The function accepts as parameter a string request. See
 [the specification of the JSON-RPC protocol](https://www.jsonrpc.org/specification),
 and [the list of requests that smoldot is capable of serving](https://polkadot.js.org/docs/substrate/rpc/).
+Smoldot also has experimental support for an extra (still experimental at the time of writing of
+this comment) set of JSON-RPC functions [found here](https://github.com/paritytech/json-rpc-interface-spec/).
 
 If the request is well formatted, the client will send a response using the `jsonRpcCallback`
 callback that was passed to `addChain`. This callback takes as parameter the string JSON-RPC
@@ -67,25 +69,7 @@ If no `jsonRpcCallback` was passed to `addChain`, then this chain won't be capab
 any JSON-RPC request at all. This can be used to save resources.
 
 If the chain specification passed to `addChain` is a parachain, then the list of potential relay
-chains must be passed as parameter to `addChain` as well. For security reasons, it is important
-to not establish a parachain-relay-chain link between two chains that weren't created by the same
-user.
-
-# About the worker
-
-The code in this package uses a web worker (in browsers) or a worker thread (on NodeJS). The
-line of JavaScript that creates the worker is of the following form:
-
-``` js
-new Worker(new URL('./worker.js', import.meta.url));
-```
-
-This format is compatible [with Webpack 5](https://webpack.js.org/guides/web-workers/), meaning
-that Webpack will be able to resolve the imports in `worker.js` and adjust this little snippet.
-
-This format also works in NodeJS without any issue.
-
-However, at the time of writing of this comment, this format doesn't work with Parcel (both 1 and
-2) due to various bugs.
-
-As a general warning, be aware of the fact that this line might cause issues if you use a bundler.
+chains must be passed as parameter to `addChain` as well. In situations where the chain
+specifications passed to `addChain` are not trusted, it is important for security reasons to not
+establish a parachain-relay-chain link between two chains that aren't part of the same "trust
+sandbox".

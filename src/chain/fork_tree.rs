@@ -98,17 +98,18 @@ impl<T> ForkTree<T> {
 
     /// Reserves additional capacity for at least `additional` new blocks without allocating.
     pub fn reserve(&mut self, additional: usize) {
-        self.nodes.reserve(additional)
+        self.nodes.reserve(additional);
     }
 
     /// Removes all elements in the tree, leaving it empty.
     pub fn clear(&mut self) {
         self.nodes.clear();
+        self.first_root = None;
     }
 
     /// Shrink the capacity of the tree as much as possible.
     pub fn shrink_to_fit(&mut self) {
-        self.nodes.shrink_to_fit()
+        self.nodes.shrink_to_fit();
     }
 
     /// Returns true if there isn't any element in the tree.

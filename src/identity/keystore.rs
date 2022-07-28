@@ -62,7 +62,7 @@ impl KeyNamespace {
     }*/
 }
 
-/// Collection of keypairs.
+/// Collection of key pairs.
 ///
 /// This module doesn't give you access to the content of private keys, only to signing
 /// capabilities.
@@ -87,7 +87,7 @@ impl Keystore {
         }
     }
 
-    /// Inserts an sr25519 private key in the keystore.
+    /// Inserts an Sr25519 private key in the keystore.
     ///
     /// Returns the corresponding public key.
     ///
@@ -96,8 +96,8 @@ impl Keystore {
     ///
     /// # Panic
     ///
-    /// Panics if the key isn't a valid sr25519 private key. This function is meant to be used
-    /// with hardcoded values which are known to be correct. Please do not call it with any
+    /// Panics if the key isn't a valid Sr25519 private key. This function is meant to be used
+    /// with hard coded values which are known to be correct. Please do not call it with any
     /// sort of user input.
     ///
     pub fn insert_sr25519_memory(
@@ -119,7 +119,7 @@ impl Keystore {
         public_key
     }
 
-    /// Generates a new ed25519 key and inserts it in the keystore.
+    /// Generates a new Ed25519 key and inserts it in the keystore.
     ///
     /// Returns the corresponding public key.
     // TODO: add a `save: bool` parameter that saves the key to the file system
@@ -149,7 +149,7 @@ impl Keystore {
         guarded.keys.keys().cloned().collect::<Vec<_>>().into_iter()
     }
 
-    /// Generates a new sr25519 key and inserts it in the keystore.
+    /// Generates a new Sr25519 key and inserts it in the keystore.
     ///
     /// Returns the corresponding public key.
     // TODO: add a `save: bool` parameter that saves the key to the file system
@@ -253,6 +253,7 @@ pub enum SignError {
 
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum SignVrfError {
+    #[display(fmt = "{}", _0)]
     Sign(SignError),
     WrongKeyAlgorithm,
 }

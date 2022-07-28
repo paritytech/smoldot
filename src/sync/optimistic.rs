@@ -47,7 +47,7 @@
 
 use crate::{
     chain::{blocks_tree, chain_information},
-    executor::host,
+    executor::{host, storage_diff},
     header,
     trie::calculate_root,
 };
@@ -55,7 +55,7 @@ use crate::{
 use alloc::{
     borrow::ToOwned as _,
     boxed::Box,
-    collections::BTreeMap,
+    collections::BTreeSet,
     vec::{self, Vec},
 };
 use core::{
@@ -64,7 +64,7 @@ use core::{
     ops,
     time::Duration,
 };
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 
 mod verification_queue;
 
@@ -73,6 +73,10 @@ mod verification_queue;
 pub struct Config {
     /// Information about the latest finalized block and its ancestors.
     pub chain_information: chain_information::ValidChainInformation,
+
+    /// Number of bytes used when encoding/decoding the block number. Influences how various data
+    /// structures should be parsed.
+    pub block_number_bytes: usize,
 
     /// Pre-allocated capacity for the number of block sources.
     pub sources_capacity: usize,
@@ -110,6 +114,18 @@ pub struct ConfigFull {
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct RequestId(u64);
 
+impl RequestId {
+    /// Returns a value that compares inferior or equal to any other [`RequestId`].
+    pub fn min_value() -> Self {
+        Self(u64::min_value())
+    }
+
+    /// Returns a value that compares superior or equal to any other [`RequestId`].
+    pub fn max_value() -> Self {
+        Self(u64::max_value())
+    }
+}
+
 /// Identifier for a source in the [`OptimisticSync`].
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct SourceId(u64);
@@ -141,7 +157,7 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     /// Changes in the storage of the best block compared to the finalized block.
     /// The `BTreeMap`'s keys are storage keys, and its values are new values or `None` if the
     /// value has been erased from the storage.
-    best_to_finalized_storage_diff: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    best_to_finalized_storage_diff: storage_diff::StorageDiff,
 
     /// Compiled runtime code of the best block. `None` if it is the same as
     /// [`OptimisticSyncInner::finalized_runtime`].
@@ -158,7 +174,7 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     sources: HashMap<SourceId, Source<TSrc>, fnv::FnvBuildHasher>,
 
     /// Next [`SourceId`] to allocate.
-    /// SourceIds are unique so that the source in the [`verification_queue::VerificationQueue`]
+    /// `SourceIds` are unique so that the source in the [`verification_queue::VerificationQueue`]
     /// doesn't accidentally collide with a new source.
     next_source_id: SourceId,
 
@@ -174,6 +190,9 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
 
     /// Requests that have been started but whose answers are no longer desired.
     obsolete_requests: HashMap<RequestId, (SourceId, TRq), fnv::FnvBuildHasher>,
+
+    /// Same as [`OptimisticSyncInner::obsolete_requests`], but ordered differently.
+    obsolete_requests_by_source: BTreeSet<(SourceId, RequestId)>,
 }
 
 impl<TRq, TSrc, TBl> OptimisticSyncInner<TRq, TSrc, TBl> {
@@ -188,6 +207,14 @@ impl<TRq, TSrc, TBl> OptimisticSyncInner<TRq, TSrc, TBl> {
                 .obsolete_requests
                 .insert(request_id, (source, user_data));
             debug_assert!(_was_in.is_none());
+            let _was_inserted = self
+                .obsolete_requests_by_source
+                .insert((source, request_id));
+            debug_assert!(_was_inserted);
+            debug_assert_eq!(
+                self.obsolete_requests.len(),
+                self.obsolete_requests_by_source.len()
+            );
         }
     }
 
@@ -209,7 +236,7 @@ struct Source<TSrc> {
 
     /// If `true`, this source is banned and shouldn't use be used to request blocks.
     /// Note that the ban is lifted if the source is removed. This ban isn't meant to be a line of
-    /// defense against malicious peers but rather an optimisation.
+    /// defense against malicious peers but rather an optimization.
     banned: bool,
 
     /// Number of requests that use this source.
@@ -237,10 +264,10 @@ pub struct BlockFull {
     pub body: Vec<Vec<u8>>,
 
     /// Changes to the storage made by this block compared to its parent.
-    pub storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    pub storage_top_trie_changes: storage_diff::StorageDiff,
 
-    /// List of changes to the offchain storage that this block performs.
-    pub offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+    /// List of changes to the off-chain storage that this block performs.
+    pub offchain_storage_changes: storage_diff::StorageDiff,
 }
 
 impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
@@ -248,7 +275,14 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     pub fn new(config: Config) -> Self {
         let blocks_tree_config = blocks_tree::Config {
             chain_information: config.chain_information,
+            block_number_bytes: config.block_number_bytes,
             blocks_capacity: config.blocks_capacity,
+            // Considering that we rely on justifications to sync, there is no drawback in
+            // accepting blocks with unrecognized consensus engines. While this could lead to
+            // accepting blocks that wouldn't otherwise be accepted, it is already the case that
+            // a malicious node could send non-finalized blocks. Accepting blocks with an
+            // unrecognized consensus engine doesn't add any additional risk.
+            allow_unknown_consensus_engines: true,
         };
 
         let chain = blocks_tree::NonFinalizedTree::new(blocks_tree_config.clone());
@@ -259,7 +293,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             inner: Box::new(OptimisticSyncInner {
                 finalized_chain_information: blocks_tree_config,
                 finalized_runtime: config.full.map(|f| f.finalized_runtime),
-                best_to_finalized_storage_diff: BTreeMap::new(),
+                best_to_finalized_storage_diff: storage_diff::StorageDiff::empty(),
                 best_runtime: None,
                 top_trie_root_calculation_cache: None,
                 sources: HashMap::with_capacity_and_hasher(
@@ -274,8 +308,14 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                 download_ahead_blocks: config.download_ahead_blocks,
                 next_request_id: RequestId(0),
                 obsolete_requests: HashMap::with_capacity_and_hasher(0, Default::default()),
+                obsolete_requests_by_source: BTreeSet::new(),
             }),
         }
+    }
+
+    /// Returns the value that was initially passed in [`Config::block_number_bytes`].
+    pub fn block_number_bytes(&self) -> usize {
+        self.chain.block_number_bytes()
     }
 
     /// Builds a [`chain_information::ChainInformationRef`] struct corresponding to the current
@@ -440,12 +480,33 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         &'_ mut self,
         source_id: SourceId,
     ) -> (TSrc, impl Iterator<Item = (RequestId, TRq)> + '_) {
-        // TODO: doesn't take obsolete requests into account /!\
+        let obsolete_requests_to_remove = self
+            .inner
+            .obsolete_requests_by_source
+            .range((source_id, RequestId::min_value())..=(source_id, RequestId::max_value()))
+            .map(|(_, id)| *id)
+            .collect::<Vec<_>>();
+        let mut obsolete_requests = Vec::with_capacity(obsolete_requests_to_remove.len());
+        for rq_id in obsolete_requests_to_remove {
+            let (_, user_data) = self.inner.obsolete_requests.remove(&rq_id).unwrap();
+            obsolete_requests.push((rq_id, user_data));
+            let _was_in = self
+                .inner
+                .obsolete_requests_by_source
+                .remove(&(source_id, rq_id));
+            debug_assert!(_was_in);
+        }
+
+        debug_assert_eq!(
+            self.inner.obsolete_requests.len(),
+            self.inner.obsolete_requests_by_source.len()
+        );
+
         let src_user_data = self.inner.sources.remove(&source_id).unwrap().user_data;
         let drain = RequestsDrain {
             iter: self.inner.verification_queue.drain_source(source_id),
         };
-        (src_user_data, drain)
+        (src_user_data, drain.chain(obsolete_requests))
     }
 
     /// Returns the list of sources in this state machine.
@@ -462,9 +523,8 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     pub fn source_num_ongoing_requests(&self, source_id: SourceId) -> usize {
         let num_obsolete = self
             .inner
-            .obsolete_requests
-            .values()
-            .filter(|(id, _)| *id == source_id)
+            .obsolete_requests_by_source
+            .range((source_id, RequestId::min_value())..=(source_id, RequestId::max_value()))
             .count();
         let num_regular = self
             .inner
@@ -505,7 +565,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     /// Updates the [`OptimisticSync`] with the fact that a request has been started.
     ///
     /// Returns the identifier for the request that must later be passed back to
-    /// [`OptimisticSync::finish_request`].
+    /// [`OptimisticSync::finish_request_success`] or [`OptimisticSync::finish_request_failed`].
     ///
     /// # Panic
     ///
@@ -532,13 +592,22 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                 self.inner
                     .obsolete_requests
                     .insert(request_id, (detail.source_id, user_data));
+                let _was_inserted = self
+                    .inner
+                    .obsolete_requests_by_source
+                    .insert((detail.source_id, request_id));
+                debug_assert!(_was_inserted);
+                debug_assert_eq!(
+                    self.inner.obsolete_requests.len(),
+                    self.inner.obsolete_requests_by_source.len()
+                );
             }
         }
 
         request_id
     }
 
-    /// Update the [`OptimisticSync`] with the outcome of a request.
+    /// Update the [`OptimisticSync`] with the successful outcome of a request.
     ///
     /// Returns the user data that was associated to that request.
     ///
@@ -553,13 +622,22 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     ///
     /// Panics if the [`RequestId`] is invalid.
     ///
-    pub fn finish_request(
+    pub fn finish_request_success(
         &mut self,
         request_id: RequestId,
-        outcome: Result<impl Iterator<Item = RequestSuccessBlock<TBl>>, RequestFail>,
-    ) -> (TRq, FinishRequestOutcome<TSrc>) {
+        blocks: impl Iterator<Item = RequestSuccessBlock<TBl>>,
+    ) -> (TRq, FinishRequestOutcome) {
         if let Some((source_id, user_data)) = self.inner.obsolete_requests.remove(&request_id) {
             self.inner.obsolete_requests.shrink_to_fit();
+            let _was_in = self
+                .inner
+                .obsolete_requests_by_source
+                .remove(&(source_id, request_id));
+            debug_assert!(_was_in);
+            debug_assert_eq!(
+                self.inner.obsolete_requests.len(),
+                self.inner.obsolete_requests_by_source.len()
+            );
             self.inner
                 .sources
                 .get_mut(&source_id)
@@ -568,12 +646,10 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             return (user_data, FinishRequestOutcome::Obsolete);
         }
 
-        let outcome_is_err = outcome.is_err();
-
         let ((_, user_data), source_id) = self
             .inner
             .verification_queue
-            .finish_request(|(rq, _)| *rq == request_id, outcome.map_err(|_| ()));
+            .finish_request(|(rq, _)| *rq == request_id, Ok(blocks));
 
         self.inner
             .sources
@@ -581,27 +657,58 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
             .unwrap()
             .num_ongoing_requests -= 1;
 
-        if outcome_is_err {
-            self.inner.sources.get_mut(&source_id).unwrap().banned = true;
+        (user_data, FinishRequestOutcome::Queued)
+    }
 
-            // If all sources are banned, unban them.
-            if self.inner.sources.iter().all(|(_, s)| s.banned) {
-                for src in self.inner.sources.values_mut() {
-                    src.banned = false;
-                }
+    /// Update the [`OptimisticSync`] with the information that the given request has failed.
+    ///
+    /// Returns the user data that was associated to that request.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    ///
+    pub fn finish_request_failed(&mut self, request_id: RequestId) -> TRq {
+        if let Some((source_id, user_data)) = self.inner.obsolete_requests.remove(&request_id) {
+            self.inner.obsolete_requests.shrink_to_fit();
+            let _was_in = self
+                .inner
+                .obsolete_requests_by_source
+                .remove(&(source_id, request_id));
+            debug_assert!(_was_in);
+            debug_assert_eq!(
+                self.inner.obsolete_requests.len(),
+                self.inner.obsolete_requests_by_source.len()
+            );
+            self.inner
+                .sources
+                .get_mut(&source_id)
+                .unwrap()
+                .num_ongoing_requests -= 1;
+            return user_data;
+        }
+
+        let ((_, user_data), source_id) = self.inner.verification_queue.finish_request(
+            |(rq, _)| *rq == request_id,
+            Result::<iter::Empty<_>, _>::Err(()),
+        );
+
+        self.inner
+            .sources
+            .get_mut(&source_id)
+            .unwrap()
+            .num_ongoing_requests -= 1;
+
+        self.inner.sources.get_mut(&source_id).unwrap().banned = true;
+
+        // If all sources are banned, unban them.
+        if self.inner.sources.iter().all(|(_, s)| s.banned) {
+            for src in self.inner.sources.values_mut() {
+                src.banned = false;
             }
         }
 
-        (
-            user_data,
-            if !outcome_is_err {
-                FinishRequestOutcome::Queued
-            } else {
-                FinishRequestOutcome::SourcePunished(
-                    &mut self.inner.sources.get_mut(&source_id).unwrap().user_data,
-                )
-            },
-        )
+        user_data
     }
 
     /// Process the next block in the queue of verification.
@@ -687,7 +794,7 @@ impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
             .inner
             .best_runtime
             .as_ref()
-            .unwrap_or(self.inner.inner.finalized_runtime.as_ref().unwrap())
+            .unwrap_or_else(|| self.inner.inner.finalized_runtime.as_ref().unwrap())
     }
 
     /// Returns the storage value at the given key. `None` if this key doesn't have any value.
@@ -699,48 +806,18 @@ impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
         self.inner
             .inner
             .best_to_finalized_storage_diff
-            .get(key)
-            .map(|opt| opt.as_ref().map(|v| &v[..]))
-            .unwrap_or_else(or_finalized)
+            .storage_get(key, or_finalized)
     }
 
     pub fn prefix_keys_ordered<'k: 'a>(
         &'k self, // TODO: unclear lifetime
         prefix: &'k [u8],
-        in_finalized_ordered: impl Iterator<Item = &'k [u8]> + 'k,
-    ) -> impl Iterator<Item = &'k [u8]> + 'k {
-        let mut in_finalized_filtered = in_finalized_ordered
-            .filter(|k| {
-                !self
-                    .inner
-                    .inner
-                    .best_to_finalized_storage_diff
-                    .contains_key(*k)
-            })
-            .peekable();
-
-        let mut diff_inserted = self
-            .inner
+        in_finalized_ordered: impl Iterator<Item = impl AsRef<[u8]> + 'k> + 'k,
+    ) -> impl Iterator<Item = impl AsRef<[u8]> + 'k> + 'k {
+        self.inner
             .inner
             .best_to_finalized_storage_diff
-            .range(prefix.to_owned()..)
-            .take_while(|(k, _)| k.starts_with(prefix))
-            .filter(|(_, v)| v.is_some())
-            .map(|(k, _)| &k[..])
-            .peekable();
-
-        iter::from_fn(
-            move || match (in_finalized_filtered.peek(), diff_inserted.peek()) {
-                (Some(_), None) => in_finalized_filtered.next(),
-                (Some(a), Some(b)) if a < b => in_finalized_filtered.next(),
-                (Some(a), Some(b)) => {
-                    debug_assert_ne!(a, b);
-                    diff_inserted.next()
-                }
-                (None, Some(_)) => diff_inserted.next(),
-                (None, None) => None,
-            },
-        )
+            .storage_prefix_keys_ordered(prefix, in_finalized_ordered)
     }
 }
 
@@ -754,12 +831,14 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     /// Returns the height of the block about to be verified.
     pub fn height(&self) -> u64 {
         // TODO: unwrap?
-        header::decode(self.header()).unwrap().number
+        header::decode(self.scale_encoded_header(), self.chain.block_number_bytes())
+            .unwrap()
+            .number
     }
 
     /// Returns the hash of the block about to be verified.
     pub fn hash(&self) -> [u8; 32] {
-        header::hash_from_scale_encoded_header(self.header())
+        header::hash_from_scale_encoded_header(self.scale_encoded_header())
     }
 
     /// Returns true if [`Config::full`] was `Some` at initialization.
@@ -768,7 +847,7 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
     }
 
     /// Returns the SCALE-encoded header of the block about to be verified.
-    fn header(&self) -> &[u8] {
+    pub fn scale_encoded_header(&self) -> &[u8] {
         &self
             .inner
             .verification_queue
@@ -832,10 +911,12 @@ impl<TRq, TSrc, TBl> BlockVerify<TRq, TSrc, TBl> {
                     });
                     None
                 }
-                Ok(blocks_tree::HeaderVerifySuccess::Duplicate)
-                | Ok(blocks_tree::HeaderVerifySuccess::Insert {
-                    is_new_best: false, ..
-                }) => Some(ResetCause::NonCanonical),
+                Ok(
+                    blocks_tree::HeaderVerifySuccess::Duplicate
+                    | blocks_tree::HeaderVerifySuccess::Insert {
+                        is_new_best: false, ..
+                    },
+                ) => Some(ResetCause::NonCanonical),
                 Err(err) => Some(ResetCause::HeaderError(err)),
             };
 
@@ -980,8 +1061,10 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
 
                     debug_assert_eq!(
                         new_runtime.is_some(),
-                        storage_top_trie_changes.contains_key(&b":code"[..])
-                            || storage_top_trie_changes.contains_key(&b":heappages"[..])
+                        storage_top_trie_changes.diff_get(&b":code"[..]).is_some()
+                            || storage_top_trie_changes
+                                .diff_get(&b":heappages"[..])
+                                .is_some()
                     );
 
                     // Before the verification, we extracted the runtime either from
@@ -1005,12 +1088,10 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
 
                     shared.inner.top_trie_root_calculation_cache =
                         Some(top_trie_root_calculation_cache);
-                    for (key, value) in &storage_top_trie_changes {
-                        shared
-                            .inner
-                            .best_to_finalized_storage_diff
-                            .insert(key.clone(), value.clone());
-                    }
+                    shared
+                        .inner
+                        .best_to_finalized_storage_diff
+                        .merge(&storage_top_trie_changes);
 
                     let chain = {
                         let header = insert.header().into();
@@ -1050,7 +1131,7 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                     if let Some(value) = shared
                         .inner
                         .best_to_finalized_storage_diff
-                        .get(&req.key_as_vec())
+                        .diff_get(&req.key_as_vec())
                     {
                         inner = Inner::Step2(
                             req.inject_value(value.as_ref().map(|v| iter::once(&v[..]))),
@@ -1129,10 +1210,12 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
                         reason: ResetCause::InvalidHeader(error),
                     };
                 }
-                Inner::Step1(blocks_tree::BodyVerifyStep1::Duplicate(old_chain))
-                | Inner::Step1(blocks_tree::BodyVerifyStep1::BadParent {
-                    chain: old_chain, ..
-                }) => {
+                Inner::Step1(
+                    blocks_tree::BodyVerifyStep1::Duplicate(old_chain)
+                    | blocks_tree::BodyVerifyStep1::BadParent {
+                        chain: old_chain, ..
+                    },
+                ) => {
                     if let Some(source) = shared.inner.sources.get_mut(&shared.source_id) {
                         source.banned = true;
                     }
@@ -1360,28 +1443,15 @@ impl<TRq, TSrc, TBl> StoragePrefixKeys<TRq, TSrc, TBl> {
         self,
         keys: impl Iterator<Item = impl AsRef<[u8]>>,
     ) -> BlockVerification<TRq, TSrc, TBl> {
-        let mut keys = keys
-            .map(|k| k.as_ref().to_owned())
-            .collect::<HashSet<_, fnv::FnvBuildHasher>>();
-
-        {
-            let prefix = self.inner.prefix();
-            for (k, v) in self
-                .shared
-                .inner
-                .best_to_finalized_storage_diff
-                .range(prefix.as_ref().to_owned()..)
-                .take_while(|(k, _)| k.starts_with(prefix.as_ref()))
-            {
-                if v.is_some() {
-                    keys.insert(k.clone());
-                } else {
-                    keys.remove(k);
-                }
-            }
-        }
-
-        let inner = self.inner.inject_keys_ordered(keys.iter());
+        // We need to turn the prefix into a Vec, as otherwise the iterator would borrow
+        // self.inner.
+        let owned_prefix = self.inner.prefix().as_ref().to_owned();
+        let list_after_diff = self
+            .shared
+            .inner
+            .best_to_finalized_storage_diff
+            .storage_prefix_keys_ordered(&owned_prefix, keys);
+        let inner = self.inner.inject_keys_ordered(list_after_diff);
         BlockVerification::from(Inner::Step2(inner), self.shared)
     }
 }
@@ -1420,68 +1490,35 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
         // `best_to_finalized_storage_diff` needs to be taken into account in order to provide
         // the next key in the best block instead.
 
-        let inner_key = self.inner.key();
-        let requested_key = if let Some(key_overwrite) = &self.key_overwrite {
-            key_overwrite
-        } else {
-            inner_key.as_ref()
+        let search = {
+            let inner_key = self.inner.key();
+            self.shared
+                .inner
+                .best_to_finalized_storage_diff
+                .storage_next_key(
+                    if let Some(key_overwrite) = &self.key_overwrite {
+                        key_overwrite
+                    } else {
+                        inner_key.as_ref()
+                    },
+                    key,
+                )
         };
 
-        if let Some(key) = key {
-            assert!(key > requested_key);
-        }
-
-        let in_diff = self
-            .shared
-            .inner
-            .best_to_finalized_storage_diff
-            .range(requested_key.to_vec()..) // TODO: don't use to_vec()
-            .map(|(k, v)| (k, v.is_some()))
-            .find(|(k, _)| &***k > requested_key);
-
-        let outcome = match (key, in_diff) {
-            (Some(a), Some((b, true))) if a <= &b[..] => Some(a),
-            (Some(a), Some((b, false))) if a < &b[..] => Some(a),
-            (Some(a), Some((b, false))) => {
-                debug_assert!(a >= &b[..]);
-                debug_assert_ne!(&b[..], requested_key);
-
-                // The next key according to the finalized block storage has been erased since
-                // then. It is necessary to ask the user again, this time for the key after the
-                // one that has been erased.
-                // This `clone()` is necessary, as `b` borrows from
-                // `self.shared.best_to_finalized_storage_diff`.
-                let key_overwrite = Some(b.clone());
-                drop(inner_key); // Solves borrowing errors.
-                return BlockVerification::FinalizedStorageNextKey(StorageNextKey {
+        match search {
+            storage_diff::StorageNextKey::Found(k) => {
+                let inner = self.inner.inject_key(k);
+                BlockVerification::from(Inner::Step2(inner), self.shared)
+            }
+            storage_diff::StorageNextKey::NextOf(next) => {
+                let key_overwrite = Some(next.to_owned());
+                BlockVerification::FinalizedStorageNextKey(StorageNextKey {
                     inner: self.inner,
                     shared: self.shared,
                     key_overwrite,
-                });
+                })
             }
-            (Some(a), Some((b, true))) => {
-                debug_assert!(a >= &b[..]);
-                Some(&b[..])
-            }
-
-            (Some(a), None) => Some(a),
-            (None, Some((b, true))) => Some(&b[..]),
-            (None, Some((b, false))) => {
-                debug_assert!(&b[..] > requested_key);
-                self.shared
-                    .inner
-                    .best_to_finalized_storage_diff
-                    .range(b.clone()..) // TODO: don't clone?
-                    .filter(|(_, value)| value.is_some())
-                    .map(|(k, _)| &k[..])
-                    .next()
-            }
-            (None, None) => None,
-        };
-
-        drop(inner_key); // Solves borrowing errors.
-        let inner = self.inner.inject_key(outcome);
-        BlockVerification::from(Inner::Step2(inner), self.shared)
+        }
     }
 }
 
@@ -1498,16 +1535,9 @@ pub struct RequestDetail {
     pub num_blocks: NonZeroU32,
 }
 
-pub enum FinishRequestOutcome<'a, TSrc> {
+pub enum FinishRequestOutcome {
     Obsolete,
     Queued,
-    SourcePunished(&'a mut TSrc),
-}
-
-/// Reason why a request has failed.
-pub enum RequestFail {
-    /// Requested blocks aren't available from this source.
-    BlocksUnavailable,
 }
 
 /// Iterator that drains requests after a source has been removed.
@@ -1545,10 +1575,13 @@ impl<'a, TRq, TBl> Drop for RequestsDrain<'a, TRq, TBl> {
 #[derive(Debug, derive_more::Display)]
 pub enum ResetCause {
     /// Error while decoding a header.
+    #[display(fmt = "Failed to decode header: {}", _0)]
     InvalidHeader(header::Error),
     /// Error while verifying a header.
+    #[display(fmt = "{}", _0)]
     HeaderError(blocks_tree::HeaderVerifyError),
     /// Error while verifying a header and body.
+    #[display(fmt = "{}", _0)]
     HeaderBodyError(blocks_tree::BodyVerifyError),
     /// Received block isn't a child of the current best block.
     NonCanonical,

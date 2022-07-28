@@ -125,7 +125,7 @@ pub struct Pool<TTx> {
     /// is "not validated".
     not_validated: HashSet<TransactionId, fnv::FnvBuildHasher>,
 
-    /// Transaction ids (i.e. indices within [`Pool::transactions`]) indexed by the blake2 hash
+    /// Transaction ids (i.e. indices within [`Pool::transactions`]) indexed by the BLAKE2 hash
     /// of the bytes of the transaction.
     by_hash: BTreeSet<([u8; 32], TransactionId)>,
 
@@ -159,12 +159,12 @@ impl<TTx> Pool<TTx> {
         self.transactions.len()
     }
 
-    /// Inserts a new unvalidated transaction in the pool.
+    /// Inserts a new unverified transaction in the pool.
     pub fn add_unvalidated(&mut self, scale_encoded: Vec<u8>, user_data: TTx) -> TransactionId {
         self.add_unvalidated_inner(scale_encoded, None, user_data)
     }
 
-    /// Inserts a new unvalidated transaction in the pool.
+    /// Inserts a new unverified transaction in the pool.
     fn add_unvalidated_inner(
         &mut self,
         scale_encoded: impl AsRef<[u8]> + Into<Vec<u8>>,
@@ -388,7 +388,7 @@ impl<TTx> Pool<TTx> {
 
     /// Pop a certain number of blocks from the list of blocks.
     ///
-    /// Transations that were included in these blocks remain in the transactions pool.
+    /// Transactions that were included in these blocks remain in the transactions pool.
     ///
     /// Returns the list of transactions that were in blocks that have been retracted, with the
     /// height of the block at which they were.
@@ -638,7 +638,7 @@ struct Transaction<TTx> {
     user_data: TTx,
 }
 
-/// Utility. Calculates the blake2 hash of the given bytes.
+/// Utility. Calculates the BLAKE2 hash of the given bytes.
 fn blake2_hash(bytes: &[u8]) -> [u8; 32] {
     <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], bytes).as_bytes()).unwrap()
 }

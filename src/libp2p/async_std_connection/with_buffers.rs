@@ -92,7 +92,7 @@ impl<T> WithBuffers<T> {
     /// Returns a buffer containing data read from the socket, and a buffer containing data
     /// destined to be written to the socket.
     ///
-    /// If an error happend on the socket earlier, it is returned instead.
+    /// If an error happened on the socket earlier, it is returned instead.
     ///
     /// The read buffer is an `Option` containing `None` if the reading side of the socket has
     /// been closed. The write buffer is an `Option` containing `None` if the writing side of the
@@ -256,7 +256,7 @@ where
                 Poll::Pending => Poll::Pending,
             }
         })
-        .await
+        .await;
     }
 }
 
@@ -367,7 +367,7 @@ where
                     match write_result {
                         Poll::Ready(Ok(0)) => {
                             // It is not legal for `poll_write` to return 0 bytes written.
-                            unreachable!()
+                            unreachable!();
                         }
                         Poll::Ready(Ok(n)) => {
                             pending = false;
@@ -419,7 +419,7 @@ where
                 Poll::Pending
             }
         })
-        .await
+        .await;
     }
 }
 

@@ -195,7 +195,7 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         /// number of queued pings.
         outgoing_payload: VecDeque<u8>,
         /// FIFO queue of pings waiting to be answered. For each ping, when the ping will time
-        /// out, or `None` if the timeout has already occured.
+        /// out, or `None` if the timeout has already occurred.
         queued_pings: smallvec::SmallVec<[Option<TNow>; 1]>,
     },
     /// Failed to negotiate a protocol for an outgoing ping substream.
@@ -211,7 +211,7 @@ enum SubstreamInner<TNow, TRqUd, TNotifUd> {
         /// Contains even the data that is still queued in `outgoing_payload`.
         expected_payload: VecDeque<u8>,
         /// FIFO queue of pings waiting to be answered. For each ping, when the ping will time
-        /// out, or `None` if the timeout has already occured.
+        /// out, or `None` if the timeout has already occurred.
         queued_pings: smallvec::SmallVec<[Option<TNow>; 1]>,
     },
 }
@@ -220,7 +220,7 @@ impl<TNow, TRqUd, TNotifUd> Substream<TNow, TRqUd, TNotifUd>
 where
     TNow: Clone + Ord,
 {
-    /// Initializes an new ingoing substream.
+    /// Initializes an new `ingoing` substream.
     ///
     /// After the remote has requested a protocol, an [`Event::InboundNegotiated`] event will be
     /// generated, after which [`Substream::set_inbound_ty`] must be called in order to indicate
@@ -228,14 +228,14 @@ where
     /// A [`Event::InboundError`] can also be generated, either before or after the
     /// [`Event::InboundNegotiated`], but always before any [`Event::NotificationsInOpen`].
     ///
-    /// If [̀ InboundTy::Notifications`] is passed, then a [`Event::NotificationsInOpen`] will be
+    /// If [`InboundTy::Notifications`] is passed, then a [`Event::NotificationsInOpen`] will be
     /// generated (unless an error happens, in which case [`Event::InboundError`]).
     /// In response, the API user must call either [`Substream::accept_in_notifications_substream`]
     /// or [`Substream::reject_in_notifications_substream`]. Before one of these two methods is
     /// called, it is possible for an [`Event::NotificationsInOpenCancel`] to be generated, in
-    /// which case the inbound request is cancelled and the substream closed.
+    /// which case the inbound request is canceled and the substream closed.
     /// After [`Substream::accept_in_notifications_substream`] is called, zero or more
-    /// [`Event::NotificationIn`] will be generated, until a [`Event::NotificationInClose`] which
+    /// [`Event::NotificationIn`] will be generated, until a [`Event::NotificationsInClose`] which
     /// indicates the end of the substream.
     ///
     /// If [`InboundTy::Request`] is passed, then a [`Event::RequestIn`] will be generated, after
@@ -256,7 +256,7 @@ where
 
     /// Initializes an outgoing notifications substream.
     ///
-    /// After the remote has sent back a handshake or after an error occured, an
+    /// After the remote has sent back a handshake or after an error occurred, an
     /// [`Event::NotificationsOutResult`] event will be generated locally.
     ///
     /// If this event contains an `Ok`, then [`Substream::write_notification_unbounded`],
@@ -290,7 +290,7 @@ where
 
     /// Initializes an outgoing request substream.
     ///
-    /// After the remote has sent back a response or after an error occured, an [`Event::Response`]
+    /// After the remote has sent back a response or after an error occurred, an [`Event::Response`]
     /// event will be generated locally. The `user_data` parameter will be passed back.
     ///
     /// If the `request` is `None`, then nothing at all will be written out, not even a length
@@ -852,7 +852,7 @@ where
                 } else {
                     (
                         Some(SubstreamInner::NotificationsInRefused),
-                        Some(Event::NotificationsInOpenCancel { protocol_index }),
+                        Some(Event::NotificationsInOpenCancel),
                     )
                 }
             }
@@ -884,10 +884,7 @@ where
                         read_write.close_write();
                         return (
                             Some(SubstreamInner::NotificationsInClosed),
-                            Some(Event::NotificationsInClose {
-                                protocol_index,
-                                outcome: Ok(()),
-                            }),
+                            Some(Event::NotificationsInClose { outcome: Ok(()) }),
                         );
                     }
                 };
@@ -929,7 +926,6 @@ where
                     Err(error) => (
                         Some(SubstreamInner::NotificationsInClosed),
                         Some(Event::NotificationsInClose {
-                            protocol_index,
                             outcome: Err(NotificationsInClosedErr::ProtocolError(error)),
                         }),
                     ),
@@ -961,7 +957,7 @@ where
                     let available = payload_in.remaining_capacity();
                     payload_in.extend(read_write.incoming_bytes_iter().take(available));
                     if payload_in.is_full() {
-                        payload_out.extend(payload_in.iter().cloned());
+                        payload_out.extend(payload_in.iter().copied());
                         payload_in.clear();
                     }
                     read_write.write_from_vec_deque(&mut payload_out);
@@ -1119,15 +1115,10 @@ where
                 response: Err(RequestError::SubstreamReset),
             }),
             SubstreamInner::NotificationsInHandshake { .. } => None,
-            SubstreamInner::NotificationsInWait { protocol_index, .. } => {
-                Some(Event::NotificationsInOpenCancel { protocol_index })
-            }
-            SubstreamInner::NotificationsIn { protocol_index, .. } => {
-                Some(Event::NotificationsInClose {
-                    protocol_index,
-                    outcome: Err(NotificationsInClosedErr::SubstreamReset),
-                })
-            }
+            SubstreamInner::NotificationsInWait { .. } => Some(Event::NotificationsInOpenCancel),
+            SubstreamInner::NotificationsIn { .. } => Some(Event::NotificationsInClose {
+                outcome: Err(NotificationsInClosedErr::SubstreamReset),
+            }),
             SubstreamInner::NotificationsInRefused => None,
             SubstreamInner::NotificationsInClosed => None,
             SubstreamInner::NotificationsOutNegotiating { user_data, .. }
@@ -1218,7 +1209,7 @@ where
             SubstreamInner::NotificationsOut { notifications, .. } => {
                 // TODO: expensive copying?
                 notifications.extend(leb128::encode_usize(notification.len()));
-                notifications.extend(notification.into_iter())
+                notifications.extend(notification.into_iter());
             }
             _ => panic!(),
         }
@@ -1482,10 +1473,7 @@ pub enum Event<TRqUd, TNotifUd> {
     /// This can only happen after [`Event::NotificationsInOpen`].
     /// [`Substream::accept_in_notifications_substream`] or
     /// [`Substream::reject_in_notifications_substream`] should not be called on this substream.
-    NotificationsInOpenCancel {
-        /// Index of the notifications protocol concerned by the substream.
-        protocol_index: usize,
-    },
+    NotificationsInOpenCancel,
     /// Remote has sent a notification on an inbound notifications substream. Can only happen
     /// after the substream has been accepted.
     // TODO: give a way to back-pressure notifications
@@ -1500,8 +1488,6 @@ pub enum Event<TRqUd, TNotifUd> {
     NotificationsInClose {
         /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
         outcome: Result<(), NotificationsInClosedErr>,
-        /// Index of the notifications protocol concerned by the substream.
-        protocol_index: usize,
     },
 
     /// Remote has accepted or refused a substream opened with [`Substream::notifications_out`].
@@ -1550,8 +1536,10 @@ pub enum InboundTy {
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum InboundError {
     /// Error during protocol negotiation.
+    #[display(fmt = "Protocol negotiation error: {}", _0)]
     NegotiationError(multistream_select::Error),
     /// Error while receiving an inbound request.
+    #[display(fmt = "Error receiving inbound request: {}", _0)]
     RequestInLebError(leb128::FramedError),
     /// Unexpected end of file while receiving an inbound request.
     RequestInExpectedEof,
@@ -1586,13 +1574,30 @@ pub enum RequestError {
     /// Remote has decided to close the substream. This most likely indicates that the remote
     /// is unwilling the respond to the request.
     SubstreamClosed,
-    /// Remote has decided to RST the substream. This most likely indicates that the remote has
+    /// Remote has decided to `RST` the substream. This most likely indicates that the remote has
     /// detected a protocol error.
     SubstreamReset,
     /// Error during protocol negotiation.
+    #[display(fmt = "Protocol negotiation error: {}", _0)]
     NegotiationError(multistream_select::Error),
     /// Error while receiving the response.
+    #[display(fmt = "Error while receiving response: {}", _0)]
     ResponseLebError(leb128::FramedError),
+}
+
+impl RequestError {
+    /// Returns `true` if the error is caused by a faulty behavior by the remote. Returns `false`
+    /// if the error can happen in normal situations.
+    pub fn is_protocol_error(&self) -> bool {
+        match self {
+            RequestError::Timeout => false, // Remote is likely overloaded.
+            RequestError::ProtocolNotAvailable => true,
+            RequestError::SubstreamClosed => false,
+            RequestError::SubstreamReset => true,
+            RequestError::NegotiationError(_) => true,
+            RequestError::ResponseLebError(_) => true,
+        }
+    }
 }
 
 /// Error potentially returned by [`Substream::respond_in_request`].
@@ -1612,10 +1617,12 @@ pub enum NotificationsOutErr {
     /// Remote has indicated that it doesn't support the requested protocol.
     ProtocolNotAvailable,
     /// Error during the multistream-select handshake.
+    #[display(fmt = "Protocol negotiation error: {}", _0)]
     NegotiationError(multistream_select::Error),
     /// Substream has been reset during the negotiation.
     SubstreamReset,
     /// Error while receiving the remote's handshake.
+    #[display(fmt = "Error while receiving remote handshake: {}", _0)]
     HandshakeRecvError(leb128::FramedError),
 }
 
@@ -1623,6 +1630,7 @@ pub enum NotificationsOutErr {
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum NotificationsInClosedErr {
     /// Error in the protocol.
+    #[display(fmt = "Error while receiving notification: {}", _0)]
     ProtocolError(leb128::FramedError),
     /// Substream has been reset.
     SubstreamReset,

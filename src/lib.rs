@@ -44,7 +44,7 @@
 //!
 //! - A parent block, referred to by its hash.
 //! - An ordered list of **extrinsics**, representing a state change about the storage. An
-//! extrinsic can be either a **transaction** or an **intrisic**.
+//! extrinsic can be either a **transaction** or an **intrinsic**.
 //! - A list of **digest log items**, which include information necessary to verify the
 //! authenticity of the block, such as a cryptographic signature of the block made by its author.
 //!
@@ -96,14 +96,14 @@
 //! extrinsics of the block.
 //! - The list of digest log items.
 //!
-//! The hash of a block consists in the blake2 hash of its header.
+//! The hash of a block consists in the `blake2` hash of its header.
 //!
 //! See the [`header`] module for more information.
 //!
 //! ## Runtime
 //!
 //! The state of the storage of each block is mostly opaque from the client's perspective. There
-//! exists, however, a few hardcoded keys, the most important one being
+//! exists, however, a few hard coded keys, the most important one being
 //! `[0x3a, 0x63, 0x6f, 0x64, 0x65]` (which is the ASCII encoding of the string `:code`). The
 //! value associated with this key must always be a [WebAssembly](https://webassembly.org/) binary
 //! code called the **runtime**.
@@ -214,52 +214,6 @@ pub mod trie;
 pub mod verify;
 
 mod util;
-
-/// Builds the header of the genesis block, from the values in storage.
-///
-/// # Example
-///
-/// ```no_run
-/// # let chain_spec_json: &[u8] = b"";
-/// let chain_spec = smoldot::chain_spec::ChainSpec::from_json_bytes(chain_spec_json)
-///     .unwrap();
-/// let genesis_block_header =
-///     smoldot::calculate_genesis_block_header(&chain_spec);
-/// println!("{:?}", genesis_block_header);
-/// ```
-pub fn calculate_genesis_block_header(chain_spec: &chain_spec::ChainSpec) -> header::Header {
-    let state_root = match chain_spec.genesis_storage() {
-        chain_spec::GenesisStorage::TrieRootHash(hash) => *hash,
-        chain_spec::GenesisStorage::Items(genesis_storage) => {
-            let mut calculation = trie::calculate_root::root_merkle_value(None);
-
-            loop {
-                match calculation {
-                    trie::calculate_root::RootMerkleValueCalculation::Finished { hash, .. } => {
-                        break hash
-                    }
-                    trie::calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
-                        calculation =
-                            keys.inject(genesis_storage.iter().map(|(k, _)| k.iter().cloned()));
-                    }
-                    trie::calculate_root::RootMerkleValueCalculation::StorageValue(val) => {
-                        let key: alloc::vec::Vec<u8> = val.key().collect();
-                        let value = genesis_storage.value(&key[..]);
-                        calculation = val.inject(value);
-                    }
-                }
-            }
-        }
-    };
-
-    header::Header {
-        parent_hash: [0; 32],
-        number: 0,
-        state_root,
-        extrinsics_root: trie::empty_trie_merkle_value(),
-        digest: header::DigestRef::empty().into(),
-    }
-}
 
 /// Removes the length prefix at the beginning of `metadata`. Returns an error if there is no
 /// valid length prefix.

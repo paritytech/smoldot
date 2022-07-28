@@ -59,7 +59,7 @@
 //! the result reported with [`LightPool::set_validation_result`].
 //!
 
-use super::validate::{TransactionValidityError, ValidTransaction};
+use super::validate::ValidTransaction;
 use crate::chain::fork_tree;
 
 use alloc::{
@@ -92,9 +92,9 @@ pub struct Config {
 pub struct TransactionId(usize);
 
 /// Data structure containing transactions. See the module-level documentation for more info.
-pub struct LightPool<TTx, TBl> {
+pub struct LightPool<TTx, TBl, TErr> {
     /// Actual list of transactions.
-    transactions: slab::Slab<Transaction<TTx>>,
+    transactions: slab::Slab<Transaction<TTx, TErr>>,
 
     /// Holds tuples of `(block_hash, transaction_id)`. When an entry is present in this set, it
     /// means that this transaction has been found in the body of this block. The value contains
@@ -116,17 +116,12 @@ pub struct LightPool<TTx, TBl> {
     /// this validation.
     ///
     /// Blocks are guaranteed to be found in [`LightPool::blocks_tree`].
-    transaction_validations:
-        BTreeMap<(TransactionId, [u8; 32]), Result<ValidTransaction, TransactionValidityError>>,
+    transaction_validations: BTreeMap<(TransactionId, [u8; 32]), Result<Validation, TErr>>,
 
     /// Symmetry of [`LightPool::transaction_validations`].
     transactions_by_validation: BTreeSet<([u8; 32], TransactionId)>,
 
-    /// List of transactions (represented as indices within [`LightPool::transactions`]) whose
-    /// status is "not validated".
-    not_validated: hashbrown::HashSet<TransactionId, fnv::FnvBuildHasher>,
-
-    /// Transaction ids (i.e. indices within [`LightPool::transactions`]) indexed by the blake2
+    /// Transaction ids (i.e. indices within [`LightPool::transactions`]) indexed by the BLAKE2
     /// hash of the bytes of the transaction.
     by_hash: BTreeSet<([u8; 32], TransactionId)>,
 
@@ -150,9 +145,17 @@ pub struct LightPool<TTx, TBl> {
     /// Hash of the block that serves as root of all the blocks in [`LightPool::blocks_tree`].
     /// Always a finalized block.
     blocks_tree_root_hash: [u8; 32],
+
+    /// Height of the block that serves as root of all the blocks in [`LightPool::blocks_tree`]
+    /// minus height of the block that was passed as [`Config::finalized_block_hash`].
+    /// Always a finalized block.
+    blocks_tree_root_relative_height: u64,
 }
 
-impl<TTx, TBl> LightPool<TTx, TBl> {
+impl<TTx, TBl, TErr> LightPool<TTx, TBl, TErr>
+where
+    TErr: Clone,
+{
     /// Initializes a new transactions pool.
     pub fn new(config: Config) -> Self {
         LightPool {
@@ -161,10 +164,6 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             included_transactions: BTreeSet::new(),
             transaction_validations: BTreeMap::new(),
             transactions_by_validation: BTreeSet::new(),
-            not_validated: hashbrown::HashSet::with_capacity_and_hasher(
-                config.transactions_capacity,
-                Default::default(),
-            ),
             by_hash: BTreeSet::new(),
             blocks_tree: fork_tree::ForkTree::with_capacity(config.blocks_capacity),
             blocks_by_id: hashbrown::HashMap::with_capacity_and_hasher(
@@ -174,6 +173,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             best_block_index: None,
             finalized_block_index: None,
             blocks_tree_root_hash: config.finalized_block_hash,
+            blocks_tree_root_relative_height: 0,
         }
     }
 
@@ -182,7 +182,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         self.transactions.len()
     }
 
-    /// Inserts a new unvalidated transaction in the pool.
+    /// Inserts a new unverified transaction in the pool.
     ///
     /// Must be passed as parameter the SCALE-encoded transaction.
     pub fn add_unvalidated(&mut self, scale_encoded: Vec<u8>, user_data: TTx) -> TransactionId {
@@ -191,12 +191,11 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         let tx_id = TransactionId(self.transactions.insert(Transaction {
             scale_encoded,
             user_data,
+            finalized_chain_validation: None,
+            best_chain_validation: None,
         }));
 
         let _was_inserted = self.by_hash.insert((hash, tx_id));
-        debug_assert!(_was_inserted);
-
-        let _was_inserted = self.not_validated.insert(tx_id);
         debug_assert!(_was_inserted);
 
         tx_id
@@ -209,7 +208,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Panics if the identifier is invalid.
     ///
     #[track_caller]
-    pub fn remove_transaction(&mut self, id: TransactionId) -> TTx {
+    pub fn remove_transaction(&mut self, id: TransactionId) -> (Vec<u8>, TTx) {
         let tx = self.transactions.remove(id.0); // Panics if `id` is invalid.
 
         let blocks_included = self
@@ -223,11 +222,6 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
             .range((id, [0; 32])..=(id, [0xff; 32]))
             .map(|((_, block), _)| *block)
             .collect::<Vec<_>>();
-
-        if blocks_validated.is_empty() {
-            let _was_removed = self.not_validated.remove(&id);
-            debug_assert!(_was_removed);
-        }
 
         for block_hash in blocks_included {
             let _removed = self.included_transactions.remove(&(id, block_hash));
@@ -246,7 +240,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         let _removed = self.by_hash.remove(&(blake2_hash(&tx.scale_encoded), id));
         debug_assert!(_removed);
 
-        tx.user_data
+        (tx.scale_encoded, tx.user_data)
     }
 
     /// Returns a list of transactions whose state is "not validated", and their user data.
@@ -254,11 +248,25 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// These transactions should always be validated against the current best block.
     pub fn unvalidated_transactions(
         &'_ self,
-    ) -> impl ExactSizeIterator<Item = (TransactionId, &'_ TTx)> + '_ {
-        self.not_validated.iter().copied().map(move |tx_id| {
-            let tx = self.transactions.get(tx_id.0).unwrap();
-            (tx_id, &tx.user_data)
-        })
+    ) -> impl Iterator<Item = (TransactionId, &'_ TTx)> + '_ {
+        let best_block_relative_height = match self.best_block_index {
+            Some(idx) => self.blocks_tree.get(idx).unwrap().relative_block_height,
+            None => self.blocks_tree_root_relative_height,
+        };
+
+        // Note that this iterates over all transactions every time, which seems unoptimal, but
+        // is also way easier to implement and probably doesn't cost too much in practice.
+        self.transactions
+            .iter()
+            .filter(move |(_, tx)| match &tx.best_chain_validation {
+                None => true,
+                Some(Ok(v)) => v.longevity_relative_block_height < best_block_relative_height,
+                Some(Err(_)) => false,
+            })
+            .map(move |(tx_id, _)| {
+                let tx = self.transactions.get(tx_id).unwrap();
+                (TransactionId(tx_id), &tx.user_data)
+            })
     }
 
     /// Returns the list of all transactions within the pool.
@@ -337,25 +345,72 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         outcome
     }
 
-    /// Returns `true` if the given transaction has been validated in the past against an ancestor
-    /// of the best block and is still within its longevity period.
+    /// Returns `true` if the given transaction has been successfully validated in the past against
+    /// an ancestor of the best block and is still within its longevity period.
     ///
-    /// Returns `false` if the block has been included in an ancestor of the best block.
+    /// Returns `false` either if the given transaction hasn't been validated, or if its validation
+    /// resulted in an error.
+    ///
+    /// > **Note**: This function might return `true` or `false` independently of whether or not
+    /// >           the transaction has already been included in the best chain. You might want
+    /// >           to call [`LightPool::is_included_best_chain`] as well.
     ///
     /// # Panic
     ///
     /// Panics if the transaction with the given id is invalid.
     ///
     pub fn is_valid_against_best_block(&self, id: TransactionId) -> bool {
-        if self.is_included_best_chain(id) {
-            return false;
-        }
+        let best_block_relative_height = match self.best_block_index {
+            Some(idx) => self.blocks_tree.get(idx).unwrap().relative_block_height,
+            None => self.blocks_tree_root_relative_height,
+        };
 
-        // TODO: wrong implementation /!\
-        self.transaction_validations
-            .range((id, [0; 32])..=(id, [0xff; 32]))
-            .count()
-            != 0
+        match &self.transactions[id.0].best_chain_validation {
+            None => false,
+            Some(Ok(v)) => v.longevity_relative_block_height >= best_block_relative_height,
+            Some(Err(_)) => false,
+        }
+    }
+
+    /// Returns a list of transactions which have been validated against an ancestor of the current
+    /// best block but have encountered an error during their validation (i.e.
+    /// [`LightPool::set_validation_result`] was called with `Err`).
+    ///
+    /// > **Note**: Contrary to [`LightPool::invalid_transactions_finalized_block`], it is
+    /// >           possible for the transaction to become valid again in the future if a reorg
+    /// >           happens and removes the block the transaction was validated against.
+    pub fn invalid_transactions_best_block(
+        &'_ self,
+    ) -> impl Iterator<Item = (TransactionId, &'_ TTx, &'_ TErr)> + '_ {
+        // Note that this iterates over all transactions every time, which seems unoptimal, but
+        // is also way easier to implement and probably doesn't cost too much in practice.
+        self.transactions
+            .iter()
+            .filter_map(move |(tx_id, tx)| match &tx.best_chain_validation {
+                Some(Err(err)) => Some((TransactionId(tx_id), &tx.user_data, err)),
+                _ => None,
+            })
+    }
+
+    /// Returns a list of transactions which have been validated against an ancestor of the current
+    /// finalized block but have encountered an error during their validation (i.e.
+    /// [`LightPool::set_validation_result`] was called with `Err`).
+    ///
+    /// > **Note**: Once a transaction is considered as invalid, it can be assumed that this
+    /// >           transaction will be invalid if verified against any of the descendants of the
+    /// >           block it was verified against. In other words, it can assumed that transactions
+    /// >           returned here will never be valid.
+    pub fn invalid_transactions_finalized_block(
+        &'_ self,
+    ) -> impl Iterator<Item = (TransactionId, &'_ TTx, &'_ TErr)> + '_ {
+        // Note that this iterates over all transactions every time, which seems unoptimal, but
+        // is also way easier to implement and probably doesn't cost too much in practice.
+        self.transactions.iter().filter_map(move |(tx_id, tx)| {
+            match &tx.finalized_chain_validation {
+                Some((_, Err(err))) => Some((TransactionId(tx_id), &tx.user_data, err)),
+                _ => None,
+            }
+        })
     }
 
     /// Sets the outcome of validating the transaction with the given identifier.
@@ -366,36 +421,77 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// # Panic
     ///
     /// Panics if the transaction with the given id is invalid.
-    /// Panics if no block with that hash has been inserted before.
+    /// Panics if no block with that hash has been inserted before, or the block has been pruned.
     ///
-    // TODO: is it correct to pass a `Result`, instead of just a `ValidTransaction`?
-    // TODO: can the block be the finalized block? (i.e. tree_root_hash)
     pub fn set_validation_result(
         &mut self,
         id: TransactionId,
         block_hash_validated_against: &[u8; 32],
-        result: Result<ValidTransaction, TransactionValidityError>,
+        result: Result<ValidTransaction, TErr>,
     ) {
         // Make sure that the block exists.
-        let _block_index = *self.blocks_by_id.get(block_hash_validated_against).unwrap();
+        let block_index = if *block_hash_validated_against == self.blocks_tree_root_hash {
+            None
+        } else {
+            Some(*self.blocks_by_id.get(block_hash_validated_against).unwrap())
+        };
 
-        // This will replace an existing entry.
+        // Height of `block_index`, minus the height of the finalized block passed in the
+        // original `Config`.
+        let block_relative_height = match block_index {
+            Some(block_index) => {
+                self.blocks_tree
+                    .get(block_index)
+                    .unwrap()
+                    .relative_block_height
+            }
+            None => self.blocks_tree_root_relative_height,
+        };
+
+        // Make sure that the transaction exists.
+        assert!(self.transactions.contains(id.0));
+
+        // Determine if block the transaction was validated against is best and/or finalized.
+        let block_is_in_best_chain = match (self.best_block_index, block_index) {
+            (None, None) => true,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (Some(b), Some(i)) => self.blocks_tree.is_ancestor(i, b),
+        };
+        let block_is_finalized = match (self.finalized_block_index, block_index) {
+            (None, None) => true,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (Some(b), Some(i)) => self.blocks_tree.is_ancestor(i, b),
+        };
+        debug_assert!(block_is_in_best_chain || !block_is_finalized);
+
+        // Convert the validation result into something more concise and useful for this data
+        // structure.
+        let result = match result {
+            Err(err) => Err(err),
+            Ok(v) => Ok(Validation {
+                longevity_relative_block_height: block_relative_height
+                    .saturating_add(v.longevity.get()),
+                propagate: v.propagate,
+            }),
+        };
+
+        // Update the transaction's validation status.
+        if block_is_finalized {
+            self.transactions[id.0].finalized_chain_validation =
+                Some((block_relative_height, result.clone()));
+        }
+
+        if block_is_in_best_chain {
+            // TODO: no /!\ there could be another block with a validation that is even higher
+            self.transactions[id.0].best_chain_validation = Some(result.clone());
+        }
+
         self.transaction_validations
             .insert((id, *block_hash_validated_against), result);
-        let inserted = self
-            .transactions_by_validation
+        self.transactions_by_validation
             .insert((*block_hash_validated_against, id));
-
-        if inserted {
-            let _removed = self.not_validated.remove(&id);
-            debug_assert_eq!(
-                _removed,
-                self.transaction_validations
-                    .range((id, [0; 32])..=(id, [0xff; 32]))
-                    .count()
-                    == 1
-            );
-        }
     }
 
     /// Adds a block to the collection of blocks.
@@ -410,13 +506,18 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Panics if the parent block cannot be found in the collection.
     ///
     pub fn add_block(&mut self, hash: [u8; 32], parent_hash: &[u8; 32], user_data: TBl) {
-        let parent_index_in_tree = if *parent_hash == self.blocks_tree_root_hash {
-            None
-        } else {
-            // The transactions service tracks all new blocks.
-            // The parent of each new best block must therefore already be in the tree.
-            Some(*self.blocks_by_id.get(parent_hash).unwrap())
-        };
+        let (parent_index_in_tree, parent_relative_height) =
+            if *parent_hash == self.blocks_tree_root_hash {
+                (None, self.blocks_tree_root_relative_height)
+            } else {
+                // The transactions service tracks all new blocks.
+                // The parent of each new best block must therefore already be in the tree.
+                let idx = *self.blocks_by_id.get(parent_hash).unwrap();
+                (
+                    Some(idx),
+                    self.blocks_tree.get(idx).unwrap().relative_block_height,
+                )
+            };
 
         let entry = match self.blocks_by_id.entry(hash) {
             hashbrown::hash_map::Entry::Occupied(_) => return,
@@ -432,6 +533,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 } else {
                     BodyState::Needed
                 },
+                relative_block_height: parent_relative_height + 1,
                 user_data,
             },
         );
@@ -487,22 +589,48 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
         let mut retracted_transactions = Vec::new();
         for to_retract_index in old_best_to_common_ancestor {
             let retracted = self.blocks_tree.get(to_retract_index).unwrap();
+
             for ((_, tx_id), index) in self.transactions_by_inclusion.range(
                 (retracted.hash, TransactionId(usize::min_value()))
                     ..=(retracted.hash, TransactionId(usize::max_value())),
             ) {
                 retracted_transactions.push((*tx_id, retracted.hash, *index));
             }
+
+            for (_, tx_id) in self.transactions_by_validation.range(
+                (retracted.hash, TransactionId(usize::min_value()))
+                    ..=(retracted.hash, TransactionId(usize::max_value())),
+            ) {
+                self.transactions[tx_id.0].best_chain_validation = self.transactions[tx_id.0]
+                    .finalized_chain_validation
+                    .as_ref()
+                    .map(|(_, v)| v.clone());
+
+                // TODO: check if any block between finalized and to_retract_index has a validation
+            }
         }
 
         let mut included_transactions = Vec::new();
         for to_include_index in common_ancestor_to_new_best {
             let included = self.blocks_tree.get(to_include_index).unwrap();
+
             for ((_, tx_id), index) in self.transactions_by_inclusion.range(
                 (included.hash, TransactionId(usize::min_value()))
                     ..=(included.hash, TransactionId(usize::max_value())),
             ) {
                 included_transactions.push((*tx_id, included.hash, *index));
+            }
+
+            for (_, tx_id) in self.transactions_by_validation.range(
+                (included.hash, TransactionId(usize::min_value()))
+                    ..=(included.hash, TransactionId(usize::max_value())),
+            ) {
+                let validation = self
+                    .transaction_validations
+                    .get(&(*tx_id, included.hash))
+                    .unwrap()
+                    .clone();
+                self.transactions[tx_id.0].best_chain_validation = Some(validation);
             }
         }
 
@@ -610,7 +738,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                         continue 'tx_in_pool;
                     }
 
-                    // If the transaction is found in a children, un-include it. from the child.
+                    // If the transaction is found in a children, un-include it from the child.
                     if self
                         .blocks_tree
                         .is_ancestor(block_index, existing_included_block_idx)
@@ -686,98 +814,135 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     /// Panics if no block with the given hash has been inserted before.
     /// Panics if the current best block isn't a descendant of or equal to the new finalized
     /// block.
+    /// Panics if the current finalized block isn't an ancestor of or equal to the new finalized
+    /// block.
     ///
     pub fn set_finalized_block(
         &mut self,
         new_finalized_block_hash: &[u8; 32],
     ) -> impl Iterator<Item = ([u8; 32], TBl)> {
-        self.finalized_block_index = if *new_finalized_block_hash == self.blocks_tree_root_hash {
-            None
+        let new_finalized_block_index = if *new_finalized_block_hash == self.blocks_tree_root_hash {
+            assert!(self.finalized_block_index.is_none());
+            return Vec::new().into_iter();
         } else {
             let index = *self.blocks_by_id.get(new_finalized_block_hash).unwrap();
+            // TODO: check ancestry of previously finalized too
             assert!(self
                 .blocks_tree
                 .is_ancestor(index, self.best_block_index.unwrap()));
-            Some(index)
+            index
         };
 
-        // TODO: don't allocate a Vec here
-        let mut out = Vec::new();
-
-        if let Some(new_finalized_block_index) = self.finalized_block_index {
-            for pruned_block in self.blocks_tree.prune_uncles(new_finalized_block_index) {
-                debug_assert!(!pruned_block.is_prune_target_ancestor);
-
-                let _expected_index = self.blocks_by_id.remove(&pruned_block.user_data.hash);
-                debug_assert_eq!(_expected_index, Some(pruned_block.index));
-
-                let included_txs = self
-                    .transactions_by_inclusion
-                    .range(
-                        (
-                            pruned_block.user_data.hash,
-                            TransactionId(usize::min_value()),
-                        )
-                            ..=(
-                                pruned_block.user_data.hash,
-                                TransactionId(usize::max_value()),
-                            ),
-                    )
-                    .map(|((_, tx), _)| *tx)
-                    .collect::<Vec<_>>();
-
-                for tx_id in included_txs {
-                    let _was_removed = self
-                        .transactions_by_inclusion
-                        .remove(&(pruned_block.user_data.hash, tx_id));
-                    debug_assert!(_was_removed.is_some());
-                    let _was_removed = self
-                        .included_transactions
-                        .remove(&(tx_id, pruned_block.user_data.hash));
-                    debug_assert!(_was_removed);
+        // Update `finalized_chain_validation` in transactions.
+        {
+            let old_finalized_to_new_finalized = match self.finalized_block_index {
+                Some(old_fin_index) => {
+                    let (_ascend, descend) = self
+                        .blocks_tree
+                        .ascend_and_descend(old_fin_index, new_finalized_block_index);
+                    debug_assert_eq!(_ascend.count(), 0);
+                    either::Left(descend)
                 }
+                None => {
+                    let iter = self
+                        .blocks_tree
+                        .root_to_node_path(new_finalized_block_index);
+                    either::Right(iter)
+                }
+            };
+
+            for block_index in old_finalized_to_new_finalized {
+                let block = self.blocks_tree.get(block_index).unwrap();
 
                 let validated_txs = self
                     .transactions_by_validation
                     .range(
-                        (
-                            pruned_block.user_data.hash,
-                            TransactionId(usize::min_value()),
-                        )
-                            ..=(
-                                pruned_block.user_data.hash,
-                                TransactionId(usize::max_value()),
-                            ),
+                        (block.hash, TransactionId(usize::min_value()))
+                            ..=(block.hash, TransactionId(usize::max_value())),
                     )
                     .map(|(_, tx)| *tx)
                     .collect::<Vec<_>>();
 
                 for tx_id in validated_txs {
-                    let _was_removed = self
-                        .transactions_by_validation
-                        .remove(&(pruned_block.user_data.hash, tx_id));
-                    debug_assert!(_was_removed);
-                    let _was_removed = self
+                    let validation = self
                         .transaction_validations
-                        .remove(&(tx_id, pruned_block.user_data.hash));
-                    debug_assert!(_was_removed.is_some());
-
-                    if self
-                        .transaction_validations
-                        .range((tx_id, [0; 32])..=(tx_id, [0xff; 32]))
-                        .next()
-                        .is_none()
-                    {
-                        let _was_inserted = self.not_validated.insert(tx_id);
-                        debug_assert!(_was_inserted);
-                    }
+                        .get(&(tx_id, block.hash))
+                        .unwrap()
+                        .clone();
+                    self.transactions[tx_id.0].finalized_chain_validation =
+                        Some((block.relative_block_height, validation));
                 }
-
-                out.push((
-                    pruned_block.user_data.hash,
-                    pruned_block.user_data.user_data,
-                ));
             }
+        }
+
+        // Now update `self` because we don't need the old value anymore.
+        self.finalized_block_index = Some(new_finalized_block_index);
+
+        // TODO: don't allocate a Vec here
+        let mut out = Vec::new();
+
+        for pruned_block in self.blocks_tree.prune_uncles(new_finalized_block_index) {
+            debug_assert!(!pruned_block.is_prune_target_ancestor);
+
+            let _expected_index = self.blocks_by_id.remove(&pruned_block.user_data.hash);
+            debug_assert_eq!(_expected_index, Some(pruned_block.index));
+
+            let included_txs = self
+                .transactions_by_inclusion
+                .range(
+                    (
+                        pruned_block.user_data.hash,
+                        TransactionId(usize::min_value()),
+                    )
+                        ..=(
+                            pruned_block.user_data.hash,
+                            TransactionId(usize::max_value()),
+                        ),
+                )
+                .map(|((_, tx), _)| *tx)
+                .collect::<Vec<_>>();
+
+            for tx_id in included_txs {
+                let _was_removed = self
+                    .transactions_by_inclusion
+                    .remove(&(pruned_block.user_data.hash, tx_id));
+                debug_assert!(_was_removed.is_some());
+                let _was_removed = self
+                    .included_transactions
+                    .remove(&(tx_id, pruned_block.user_data.hash));
+                debug_assert!(_was_removed);
+            }
+
+            let validated_txs = self
+                .transactions_by_validation
+                .range(
+                    (
+                        pruned_block.user_data.hash,
+                        TransactionId(usize::min_value()),
+                    )
+                        ..=(
+                            pruned_block.user_data.hash,
+                            TransactionId(usize::max_value()),
+                        ),
+                )
+                .map(|(_, tx)| *tx)
+                .collect::<Vec<_>>();
+
+            for tx_id in validated_txs {
+                let _was_removed = self
+                    .transactions_by_validation
+                    .remove(&(pruned_block.user_data.hash, tx_id));
+                debug_assert!(_was_removed);
+                let _was_removed = self
+                    .transaction_validations
+                    .remove(&(tx_id, pruned_block.user_data.hash));
+                debug_assert!(_was_removed.is_some());
+            }
+
+            out.push((
+                pruned_block.user_data.hash,
+                pruned_block.user_data.user_data,
+            ));
         }
 
         out.into_iter()
@@ -849,7 +1014,6 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                 // Completely remove this transaction from the pool, similar to what
                 // `remove_transaction` does.
                 let tx = self.transactions.remove(tx_id.0);
-                included_transactions.push((*tx_id, *index_in_block, tx.user_data));
 
                 let blocks_included = self
                     .included_transactions
@@ -862,11 +1026,6 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                     .range((*tx_id, [0; 32])..=(*tx_id, [0xff; 32]))
                     .map(|((_, block), _)| *block)
                     .collect::<Vec<_>>();
-
-                if blocks_validated.is_empty() {
-                    let _was_removed = self.not_validated.remove(tx_id);
-                    debug_assert!(_was_removed);
-                }
 
                 for block_hash in blocks_included {
                     let _removed = self.included_transactions.remove(&(*tx_id, block_hash));
@@ -888,6 +1047,13 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                     .by_hash
                     .remove(&(blake2_hash(&tx.scale_encoded), *tx_id));
                 debug_assert!(_removed);
+
+                included_transactions.push(RemovedTransaction {
+                    id: *tx_id,
+                    index_in_block: *index_in_block,
+                    scale_encoding: tx.scale_encoded,
+                    user_data: tx.user_data,
+                });
             }
 
             // Purge the state from any validation information about that block.
@@ -909,16 +1075,6 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
                     .transaction_validations
                     .remove(&(tx_id, pruned.user_data.hash));
                 debug_assert!(_was_removed.is_some());
-
-                if self
-                    .transaction_validations
-                    .range((tx_id, [0; 32])..=(tx_id, [0xff; 32]))
-                    .next()
-                    .is_none()
-                {
-                    let _was_inserted = self.not_validated.insert(tx_id);
-                    debug_assert!(_was_inserted);
-                }
             }
 
             return_value.push(PruneBodyFinalized {
@@ -951,7 +1107,7 @@ impl<TTx, TBl> LightPool<TTx, TBl> {
     }
 }
 
-impl<TTx: fmt::Debug, TBl> fmt::Debug for LightPool<TTx, TBl> {
+impl<TTx: fmt::Debug, TBl, TErr> fmt::Debug for LightPool<TTx, TBl, TErr> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_list()
             .entries(
@@ -972,10 +1128,25 @@ pub struct PruneBodyFinalized<TTx, TBl> {
     pub user_data: TBl,
 
     /// List of transactions that were included in this block, alongside with their index within
-    /// that block. These transactions have been removed from the pool.
-    ///
-    /// The user data (`TTx`) is stored in an `Option`.
-    pub included_transactions: Vec<(TransactionId, usize, TTx)>,
+    /// that block, SCALE encoding, and user data. These transactions have been removed from the
+    /// pool.
+    pub included_transactions: Vec<RemovedTransaction<TTx>>,
+}
+
+/// See [`PruneBodyFinalized`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedTransaction<TTx> {
+    /// Id of this transaction in the state machine.
+    pub id: TransactionId,
+
+    /// Index of the transaction within the finalized block.
+    pub index_in_block: usize,
+
+    /// SCALE-encoded transaction.
+    pub scale_encoding: Vec<u8>,
+
+    /// Opaque user data that was insert alongside with the transaction.
+    pub user_data: TTx,
 }
 
 /// See [`LightPool::set_best_block`].
@@ -999,15 +1170,36 @@ pub struct SetBestBlock {
 }
 
 /// Entry in [`LightPool::transactions`].
-struct Transaction<TTx> {
+struct Transaction<TTx, TErr> {
     /// Bytes corresponding to the SCALE-encoded transaction.
     scale_encoded: Vec<u8>,
 
     /// User data chosen by the user.
     user_data: TTx,
+
+    /// Relative block height and status of the transaction validation against the highest
+    /// finalized block.
+    finalized_chain_validation: Option<(u64, Result<Validation, TErr>)>,
+
+    /// Cache of the validation status of the transaction against the highest block of the best
+    /// chain that has one.
+    best_chain_validation: Option<Result<Validation, TErr>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Validation {
+    longevity_relative_block_height: u64,
+    propagate: bool,
 }
 
 struct Block<TBl> {
+    /// Height of this block minus height of the block that was passed as
+    /// [`Config::finalized_block_hash`].
+    ///
+    /// All the heights manipulated by the [`LightPool`] are relative to the height of the block
+    /// passed as [`Config::finalized_block_hash`], making it possible to compare and subtract
+    /// them.
+    relative_block_height: u64,
     hash: [u8; 32],
     body: BodyState,
     user_data: TBl,
@@ -1019,7 +1211,7 @@ enum BodyState {
     Known,
 }
 
-/// Utility. Calculates the blake2 hash of the given bytes.
+/// Utility. Calculates the BLAKE2 hash of the given bytes.
 fn blake2_hash(bytes: &[u8]) -> [u8; 32] {
     <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], bytes).as_bytes()).unwrap()
 }

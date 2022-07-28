@@ -36,25 +36,27 @@ pub(super) struct ClientSpec {
     #[serde(default)]
     pub(super) chain_type: ChainType,
 
-    /// Each key is a block hash. Values are a hex-encoded runtime code (normally found in the
-    /// `:code` storage key). The descendants of the block with the given hash that share the same
-    /// [`crate::executor::CoreVersionRef::spec_version`] as the Wasm runtime code in the value
-    /// should instead use that Wasm runtime code. In other words, the substitution stops when
-    /// the `spec_version` is modified.
-    /// The block with that hash uses its unmodified runtime code. Only its children can be
-    /// affected.
+    /// Mapping from a block number to a hex-encoded wasm runtime code (normally found in the
+    /// `:code` storage key).
     ///
-    /// This can be used in order to substitute faulty runtimes with functioning ones.
-    ///
-    /// See also <https://github.com/paritytech/substrate/pull/8898>.
+    /// The given runtime code will be used to substitute the on-chain runtime code starting with
+    /// the given block number until the `spec_version`
+    /// ([`crate::executor::host::CoreVersionRef::spec_version`]) on chain changes.
     #[serde(default)]
     // TODO: make use of this
-    pub(super) code_substitutes: HashMap<NumberAsString, HexString, fnv::FnvBuildHasher>,
+    pub(super) code_substitutes: HashMap<u64, HexString, fnv::FnvBuildHasher>,
     pub(super) boot_nodes: Vec<String>,
     pub(super) telemetry_endpoints: Option<Vec<(String, u8)>>,
     pub(super) protocol_id: Option<String>,
     #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
     pub(super) fork_id: Option<String>,
+    /// The `blockNumberBytes` field is (at the time of writing of this comment) a custom addition
+    /// to the format of smoldot chain specs compared to Substrate. It is necessary because,
+    /// contrary to Substrate, smoldot has no way to know the size of the block number field of
+    /// various data structures. If the field is missing, a value of 4 is assumed.
+    // TODO: revisit this field in the future to maybe bring compatibility with Substrate
+    #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
+    pub(super) block_number_bytes: Option<u8>,
     pub(super) properties: Option<Box<serde_json::value::RawValue>>,
     // TODO: make use of this
     pub(super) fork_blocks: Option<Vec<(u64, HashHexString)>>,
@@ -73,7 +75,14 @@ pub(super) struct ClientSpec {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ChainSpecParachain {
+    // Note that in Substrate/Cumulus this field is only named `relay_chain` and `relayChain` is
+    // not accepted (as of 2022-06-09). This seems to be an oversight, as there are only two
+    // fields that use snake_case while the rest uses camelCase. For this reason, smoldot
+    // supports both.
+    #[serde(alias = "relayChain")]
     pub(super) relay_chain: String,
+    // Same remark concerning the name as `relay_chain`
+    #[serde(alias = "paraId")]
     pub(super) para_id: u32,
 }
 
@@ -132,47 +141,14 @@ impl<'a> serde::Deserialize<'a> for HexString {
     {
         let string = String::deserialize(deserializer)?;
 
-        if !string.starts_with("0x") {
-            return Err(serde::de::Error::custom(
-                "hexadecimal string doesn't start with 0x",
-            ));
+        if let Some(hex) = string.strip_prefix("0x") {
+            let bytes = hex::decode(&hex).map_err(serde::de::Error::custom)?;
+            return Ok(HexString(bytes));
         }
 
-        let bytes = hex::decode(&string[2..]).map_err(serde::de::Error::custom)?;
-        Ok(HexString(bytes))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(super) struct NumberAsString(pub(super) u64);
-
-impl serde::Serialize for NumberAsString {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.0.serialize(serializer)
-    }
-}
-
-impl<'a> serde::Deserialize<'a> for NumberAsString {
-    fn deserialize<D>(deserializer: D) -> Result<NumberAsString, D::Error>
-    where
-        D: serde::Deserializer<'a>,
-    {
-        let string = String::deserialize(deserializer)?;
-
-        if string.starts_with("0x") {
-            // TODO: the hexadecimal format support is just a complete hack during a transition period for https://github.com/paritytech/substrate/pull/10600 ; must be removed before we actually make use of the code substitutes
-            let _bytes = hex::decode(&string[2..]).map_err(serde::de::Error::custom)?;
-            Ok(NumberAsString(0))
-        } else if let Ok(num) = string.parse() {
-            Ok(NumberAsString(num))
-        } else {
-            return Err(serde::de::Error::custom(
-                "block number is neither hexadecimal nor decimal",
-            ));
-        }
+        Err(serde::de::Error::custom(
+            "hexadecimal string doesn't start with 0x",
+        ))
     }
 }
 

@@ -22,6 +22,7 @@ use crate::{
     executor::host,
     header,
     trie::calculate_root,
+    verify::inherents,
 };
 
 use alloc::vec::Vec;
@@ -49,7 +50,7 @@ pub enum ConfigConsensus<'a, TLocAuth> {
         /// an authorities list change digest item.
         current_authorities: header::AuraAuthoritiesIter<'a>,
 
-        /// Iterator to the list of sr25519 public keys available locally.
+        /// Iterator to the list of Sr25519 public keys available locally.
         ///
         /// Must implement `Iterator<Item = &[u8; 32]>`.
         local_authorities: TLocAuth,
@@ -85,10 +86,10 @@ impl Builder {
                 slot_duration,
             } => {
                 let consensus = match aura::next_slot_claim(aura::Config {
-                    current_authorities,
-                    local_authorities,
                     now_from_unix_epoch,
                     slot_duration,
+                    current_authorities,
+                    local_authorities,
                 }) {
                     Some(c) => c,
                     None => return Builder::Idle,
@@ -213,6 +214,7 @@ impl AuthoringStart {
     /// Start producing the block.
     pub fn start(self, config: AuthoringStartConfig) -> BuilderAuthoring {
         let inner_block_build = runtime::build_block(runtime::Config {
+            block_number_bytes: config.block_number_bytes,
             parent_hash: config.parent_hash,
             parent_number: config.parent_number,
             parent_runtime: config.parent_runtime,
@@ -227,19 +229,15 @@ impl AuthoringStart {
             },
         });
 
-        let inherent_data = runtime::InherentData {
+        let inherent_data = inherents::InherentData {
             timestamp: u64::try_from(config.now_from_unix_epoch.as_millis())
                 .unwrap_or(u64::max_value()),
-            consensus: match self.consensus {
-                WaitSlotConsensus::Aura(slot) => runtime::InherentDataConsensus::Aura {
-                    slot_number: slot.slot_number,
-                },
-            },
         };
 
         (Shared {
             inherent_data: Some(inherent_data),
             slot_claim: self.consensus,
+            block_number_bytes: config.block_number_bytes,
         })
         .with_runtime_inner(inner_block_build)
     }
@@ -247,6 +245,9 @@ impl AuthoringStart {
 
 /// Configuration to pass when the actual block authoring is started.
 pub struct AuthoringStartConfig<'a> {
+    /// Number of bytes used to encode block numbers in the header.
+    pub block_number_bytes: usize,
+
     /// Hash of the parent of the block to generate.
     ///
     /// Used to populate the header of the new block.
@@ -392,24 +393,29 @@ impl Seal {
         }
     }
 
-    /// Injects the sr25519 signature of the hash of the SCALE-encoded header from the given
+    /// Injects the Sr25519 signature of the hash of the SCALE-encoded header from the given
     /// authority.
     ///
     /// The method then returns the finished block.
     pub fn inject_sr25519_signature(mut self, signature: [u8; 64]) -> runtime::Success {
         // TODO: optimize?
-        let mut header: header::Header = header::decode(&self.block.scale_encoded_header)
-            .unwrap()
-            .into();
+        let mut header: header::Header = header::decode(
+            &self.block.scale_encoded_header,
+            self.shared.block_number_bytes,
+        )
+        .unwrap()
+        .into();
 
         // `push_aura_seal` error if there is already an Aura seal, indicating that the runtime
         // code is misbehaving. This condition is already verified when the `Seal` is created.
         header.digest.push_aura_seal(signature).unwrap();
 
-        self.block.scale_encoded_header = header.scale_encoding().fold(Vec::new(), |mut a, b| {
-            a.extend_from_slice(b.as_ref());
-            a
-        });
+        self.block.scale_encoded_header = header
+            .scale_encoding(self.shared.block_number_bytes)
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            });
 
         self.block
     }
@@ -431,7 +437,10 @@ pub enum Error {
 struct Shared {
     /// Inherent data waiting to be injected. Will be extracted from its `Option` when the inner
     /// block builder requests it.
-    inherent_data: Option<runtime::InherentData>,
+    inherent_data: Option<inherents::InherentData>,
+
+    /// Number of bytes used to encode the block number in the header.
+    block_number_bytes: usize,
 
     /// Slot that has been claimed.
     slot_claim: WaitSlotConsensus,
@@ -445,7 +454,10 @@ impl Shared {
                     // After the runtime has produced a block, the last step is to seal it.
 
                     // Verify the correctness of the header. If not, the runtime is misbehaving.
-                    let decoded_header = match header::decode(&block.scale_encoded_header) {
+                    let decoded_header = match header::decode(
+                        &block.scale_encoded_header,
+                        self.block_number_bytes,
+                    ) {
                         Ok(h) => h,
                         Err(_) => break BuilderAuthoring::Error(Error::InvalidHeaderGenerated),
                     };

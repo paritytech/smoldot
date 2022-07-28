@@ -46,7 +46,7 @@
 //!
 //! The first epoch (epoch number 0) starts at `slot_number(block #1)` and ends at
 //! `slot_number(block #1) + slots_per_epoch`. The second epoch (epoch #1) starts at slot
-//! `end_of_epoch_1 + 1`. All epochs end at `start_of_new_epoch + slots_per_epoch`. Block #0
+//! `end_of_epoch_0 + 1`. All epochs end at `start_of_new_epoch + slots_per_epoch`. Block #0
 //! doesn't belong to any epoch.
 //!
 //! The header of first block produced after a transition to a new epoch (including block #1) must
@@ -61,7 +61,7 @@
 //!
 //! In order to produce a block, one must generate, using a
 //! [VRF (Verifiable Random Function)](https://en.wikipedia.org/wiki/Verifiable_random_function),
-//! and based on the slot number, genesis hash, and aformentioned "randomness value",
+//! and based on the slot number, genesis hash, and aforementioned "randomness value",
 //! a number whose value is lower than a certain threshold.
 //!
 //! The number that has been generated must be included in the header of the authored block,
@@ -69,7 +69,7 @@
 //! public keys allowed to generate blocks in that epoch. The weight associated to that public key
 //! determines the allowed threshold.
 //!
-//! The "randomess value" of an epoch `N` is calculated by combining the generated numbers of all
+//! The "randomness value" of an epoch `N` is calculated by combining the generated numbers of all
 //! the blocks of the epoch `N - 2`.
 //!
 //! ## Secondary slots
@@ -118,7 +118,7 @@
 //! determined by performing runtime calls.
 //!
 //! Any time verifying a block produces a `Some` in [`VerifySuccess::epoch_transition_target`],
-//! which is guarateed to be the case when verifying block number 1, an epoch transition occurs.
+//! which is guaranteed to be the case when verifying block number 1, an epoch transition occurs.
 //! When verifying a child of such block, the value formerly passed as
 //! [`VerifyConfig::parent_block_next_epoch`] must now be passed as
 //! [`VerifyConfig::parent_block_epoch`], and the value in
@@ -138,6 +138,9 @@ use num_traits::{cast::ToPrimitive as _, identities::One as _};
 pub struct VerifyConfig<'a> {
     /// Header of the block to verify.
     pub header: header::HeaderRef<'a>,
+
+    /// Number of bytes used to encode the block number in the header.
+    pub block_number_bytes: usize,
 
     /// Header of the parent of the block to verify.
     ///
@@ -204,6 +207,7 @@ pub enum VerifyError {
     MissingEpochChangeLog,
     /// The header contains an epoch change that would put the Babe configuration in an
     /// non-sensical state.
+    #[display(fmt = "Invalid Babe epoch change found in header: {}", _0)]
     InvalidBabeParametersChange(chain_information::BabeValidityError),
     /// Authority index stored within block is out of range.
     InvalidAuthorityIndex,
@@ -390,7 +394,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
         let mut unsealed_header = config.header;
         let _popped = unsealed_header.digest.pop_seal();
         debug_assert!(matches!(_popped, Some(header::Seal::Babe(_))));
-        unsealed_header.hash()
+        unsealed_header.hash(config.block_number_bytes)
     };
 
     // Fetch the authority that has supposedly signed the block.
@@ -488,7 +492,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
 ///
 /// The value of `c` can be found in the current Babe configuration.
 ///
-/// `authorities_weights` must be the list of all weights of all autorities.
+/// `authorities_weights` must be the list of all weights of all authorities.
 /// `authority_weight` must be the weight of the authority whose threshold to calculate.
 ///
 /// # Panic

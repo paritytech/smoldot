@@ -18,7 +18,7 @@
 //! General-purpose WebAssembly virtual machine.
 //!
 //! Contains code related to running a WebAssembly virtual machine. Contrary to
-//! (`HostVm`)[super::host::HostVm], this module isn't aware of any of the host
+//! (`HostVm`)[`super::host::HostVm`], this module isn't aware of any of the host
 //! functions available to Substrate runtimes. It only contains the code required to run a virtual
 //! machine, with some adjustments explained below.
 //!
@@ -69,7 +69,7 @@
 //! - Or by importing a memory object in its `(import)` section.
 //!
 //! The virtual machine in this module supports both variants. However, no more than one memory
-//! object can be exported or imported.
+//! object can be exported or imported, and it is illegal to not use any memory.
 //!
 //! The first variant used to be the default model when compiling to WebAssembly, but the second
 //! variant (importing memory objects) is preferred nowadays.
@@ -77,6 +77,8 @@
 mod interpreter;
 #[cfg(all(target_arch = "x86_64", feature = "std"))]
 mod jit;
+
+mod tests;
 
 use alloc::{string::String, vec::Vec};
 use core::fmt;
@@ -100,7 +102,7 @@ enum ModuleInner {
 
 impl Module {
     /// Compiles the given Wasm code.
-    pub fn new(module: impl AsRef<[u8]>, exec_hint: ExecHint) -> Result<Self, NewErr> {
+    pub fn new(module: impl AsRef<[u8]>, exec_hint: ExecHint) -> Result<Self, ModuleError> {
         Ok(Module {
             inner: match exec_hint {
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
@@ -109,9 +111,12 @@ impl Module {
                 ExecHint::CompileAheadOfTime => {
                     ModuleInner::Interpreter(interpreter::Module::new(module)?)
                 }
-                ExecHint::Oneshot | ExecHint::Untrusted => {
+                ExecHint::Oneshot | ExecHint::Untrusted | ExecHint::ForceWasmi => {
                     ModuleInner::Interpreter(interpreter::Module::new(module)?)
                 }
+
+                #[cfg(all(target_arch = "x86_64", feature = "std"))]
+                ExecHint::ForceWasmtime => ModuleInner::Jit(jit::Module::new(module)?),
             },
         })
     }
@@ -192,7 +197,7 @@ impl VirtualMachinePrototype {
             inner: match self.inner {
                 #[cfg(all(target_arch = "x86_64", feature = "std"))]
                 VirtualMachinePrototypeInner::Jit(inner) => {
-                    match inner.start(function_name, params) {
+                    match inner.start(min_memory_pages, function_name, params) {
                         Ok(vm) => VirtualMachineInner::Jit(vm),
                         Err((err, proto)) => {
                             self.inner = VirtualMachinePrototypeInner::Jit(proto);
@@ -342,11 +347,37 @@ pub enum ExecHint {
     Oneshot,
     /// The WebAssembly code running through this VM is untrusted.
     Untrusted,
+
+    /// Forces using the `wasmi` backend.
+    ///
+    /// This variant is useful for testing purposes.
+    ForceWasmi,
+    /// Forces using the `wasmtime` backend.
+    ///
+    /// This variant is useful for testing purposes.
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "x86_64", feature = "std"))))]
+    ForceWasmtime,
+}
+
+impl ExecHint {
+    /// Returns `ForceWasmtime` if it is available on the current platform, and `None` otherwise.
+    pub fn force_wasmtime_if_available() -> Option<ExecHint> {
+        #[cfg(all(target_arch = "x86_64", feature = "std"))]
+        fn value() -> Option<ExecHint> {
+            Some(ExecHint::ForceWasmtime)
+        }
+        #[cfg(not(all(target_arch = "x86_64", feature = "std")))]
+        fn value() -> Option<ExecHint> {
+            None
+        }
+        value()
+    }
 }
 
 /// Number of heap pages available to the Wasm code.
 ///
-/// Each page is 64kiB.
+/// Each page is `64kiB`.
 #[derive(
     Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, derive_more::Add, derive_more::Sub,
 )]
@@ -405,7 +436,7 @@ impl<'a> From<&'a Signature> for wasmi::Signature {
         wasmi::Signature::new(
             sig.params
                 .iter()
-                .cloned()
+                .copied()
                 .map(wasmi::ValueType::from)
                 .collect::<Vec<_>>(),
             sig.ret_ty.map(wasmi::ValueType::from),
@@ -427,7 +458,7 @@ impl<'a> TryFrom<&'a wasmi::Signature> for Signature {
             params: sig
                 .params()
                 .iter()
-                .cloned()
+                .copied()
                 .map(ValueType::try_from)
                 .collect::<Result<_, _>>()?,
             ret_ty: sig.return_type().map(ValueType::try_from).transpose()?,
@@ -639,10 +670,21 @@ pub enum NewErr {
         /// Name of module associated with the unresolved function.
         module_name: String,
     },
+    /// Smoldot doesn't support wasm runtime that have a start function. It is unclear whether
+    /// this is allowed in the Substrate/Polkadot specification.
+    #[display(fmt = "Start function not supported")]
+    // TODO: figure this out
+    StartFunctionNotSupported,
     /// If a "memory" symbol is provided, it must be a memory.
     #[display(fmt = "If a \"memory\" symbol is provided, it must be a memory.")]
     MemoryIsntMemory,
-    /// If a "__indirect_function_table" symbol is provided, it must be a table.
+    /// Wasm module imports a memory that isn't named "memory".
+    MemoryNotNamedMemory,
+    /// Wasm module doesn't contain any memory.
+    NoMemory,
+    /// Wasm module both imports and exports a memory.
+    TwoMemories,
+    /// If a `__indirect_function_table` symbol is provided, it must be a table.
     #[display(fmt = "If a \"__indirect_function_table\" symbol is provided, it must be a table.")]
     IndirectTableIsntTable,
     /// Failed to allocate memory for the virtual machine.
@@ -707,17 +749,4 @@ pub enum GlobalValueErr {
     NotFound,
     /// Requested symbol isn't a `u32`.
     Invalid,
-}
-
-#[cfg(test)]
-mod tests {
-    // TODO:
-
-    #[test]
-    fn is_send() {
-        // Makes sure that the virtual machine types implement `Send`.
-        fn test<T: Send>() {}
-        test::<super::VirtualMachine>();
-        test::<super::VirtualMachinePrototype>();
-    }
 }

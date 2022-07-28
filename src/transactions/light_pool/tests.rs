@@ -17,11 +17,14 @@
 
 #![cfg(test)]
 
+use core::num::NonZeroU64;
+
+use super::super::validate;
 use super::{Config, LightPool};
 
 #[test]
 fn regular_path() {
-    let mut pool = LightPool::new(Config {
+    let mut pool = LightPool::<_, _, ()>::new(Config {
         blocks_capacity: 16,
         finalized_block_hash: [0; 32],
         transactions_capacity: 16,
@@ -49,12 +52,20 @@ fn regular_path() {
     let mut iter = pool.prune_finalized_with_body();
     let pruned = iter.next().unwrap();
     assert_eq!(pruned.block_hash, [1; 32]);
-    assert_eq!(pruned.included_transactions, vec![(tx_id, 0, ())]);
+    assert_eq!(
+        pruned.included_transactions,
+        vec![super::RemovedTransaction {
+            id: tx_id,
+            index_in_block: 0,
+            scale_encoding: vec![0],
+            user_data: ()
+        }]
+    );
 }
 
 #[test]
 fn included_after_set_best() {
-    let mut pool = LightPool::new(Config {
+    let mut pool = LightPool::<_, _, ()>::new(Config {
         blocks_capacity: 16,
         finalized_block_hash: [0; 32],
         transactions_capacity: 16,
@@ -80,7 +91,7 @@ fn included_after_set_best() {
 
 #[test]
 fn transaction_retracted_after_reorg() {
-    let mut pool = LightPool::new(Config {
+    let mut pool = LightPool::<_, _, ()>::new(Config {
         blocks_capacity: 16,
         finalized_block_hash: [0; 32],
         transactions_capacity: 16,
@@ -127,6 +138,183 @@ fn transaction_retracted_after_reorg() {
         vec![(tx_id, [1; 32], 0)]
     );
     assert!(set_best_block.retracted_transactions.is_empty());
+}
+
+#[test]
+fn longevity_works_non_finalized() {
+    let mut pool = LightPool::<_, _, ()>::new(Config {
+        blocks_capacity: 16,
+        finalized_block_hash: [0; 32],
+        transactions_capacity: 16,
+    });
+
+    let tx_id = pool.add_unvalidated(vec![0], ());
+
+    // Add one base block.
+    pool.add_block([1; 32], &[0; 32], ());
+    let _ = pool.set_best_block(&[1; 32]);
+    assert!(!pool.is_valid_against_best_block(tx_id));
+    assert_eq!(
+        pool.unvalidated_transactions()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        vec![tx_id]
+    );
+
+    // Validate transaction against that block.
+    pool.set_validation_result(
+        tx_id,
+        &[1; 32],
+        Ok(validate::ValidTransaction {
+            longevity: NonZeroU64::new(2).unwrap(),
+            priority: 1,
+            propagate: true,
+            provides: Vec::new(),
+            requires: Vec::new(),
+        }),
+    );
+    assert!(pool.is_valid_against_best_block(tx_id));
+    assert_eq!(pool.unvalidated_transactions().count(), 0);
+
+    // Add more blocks on top of the best chain.
+    pool.add_block([2; 32], &[1; 32], ());
+    let _ = pool.set_best_block(&[2; 32]);
+    pool.add_block([3; 32], &[2; 32], ());
+    let _ = pool.set_best_block(&[3; 32]);
+
+    // The transaction is still valid.
+    assert!(pool.is_valid_against_best_block(tx_id));
+    assert_eq!(pool.unvalidated_transactions().count(), 0);
+
+    // One more block.
+    pool.add_block([4; 32], &[3; 32], ());
+    let _ = pool.set_best_block(&[4; 32]);
+
+    // Transaction is no longer valid because its longevity has expired.
+    assert!(!pool.is_valid_against_best_block(tx_id));
+    assert_eq!(
+        pool.unvalidated_transactions()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        vec![tx_id]
+    );
+}
+
+#[test]
+fn longevity_works_finalized() {
+    let mut pool = LightPool::<_, _, ()>::new(Config {
+        blocks_capacity: 16,
+        finalized_block_hash: [0; 32],
+        transactions_capacity: 16,
+    });
+
+    let tx_id = pool.add_unvalidated(vec![0], ());
+
+    // Add one base block.
+    pool.add_block([1; 32], &[0; 32], ());
+    let _ = pool.set_best_block(&[1; 32]);
+    assert!(!pool.is_valid_against_best_block(tx_id));
+    assert_eq!(
+        pool.unvalidated_transactions()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        vec![tx_id]
+    );
+
+    // Validate transaction against that block.
+    pool.set_validation_result(
+        tx_id,
+        &[1; 32],
+        Ok(validate::ValidTransaction {
+            longevity: NonZeroU64::new(2).unwrap(),
+            priority: 1,
+            propagate: true,
+            provides: Vec::new(),
+            requires: Vec::new(),
+        }),
+    );
+    assert!(pool.is_valid_against_best_block(tx_id));
+    assert_eq!(pool.unvalidated_transactions().count(), 0);
+
+    // Add more blocks on top of the best chain.
+    pool.add_block([2; 32], &[1; 32], ());
+    let _ = pool.set_best_block(&[2; 32]);
+    pool.add_block([3; 32], &[2; 32], ());
+    let _ = pool.set_best_block(&[3; 32]);
+
+    // Finalize the latest block added.
+    let _ = pool.set_finalized_block(&[3; 32]);
+    let _ = pool.prune_finalized_with_body();
+
+    // The transaction is still valid.
+    assert!(pool.is_valid_against_best_block(tx_id));
+    assert_eq!(pool.unvalidated_transactions().count(), 0);
+
+    // One more block.
+    pool.add_block([4; 32], &[3; 32], ());
+    let _ = pool.set_best_block(&[4; 32]);
+
+    // Transaction is no longer valid because its longevity has expired.
+    assert!(!pool.is_valid_against_best_block(tx_id));
+    assert_eq!(
+        pool.unvalidated_transactions()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        vec![tx_id]
+    );
+}
+
+#[test]
+fn longevity_works_finalized_base() {
+    let mut pool = LightPool::<_, _, ()>::new(Config {
+        blocks_capacity: 16,
+        finalized_block_hash: [0; 32],
+        transactions_capacity: 16,
+    });
+
+    let tx_id = pool.add_unvalidated(vec![0], ());
+
+    // Validate transaction against that block.
+    pool.set_validation_result(
+        tx_id,
+        &[0; 32],
+        Ok(validate::ValidTransaction {
+            longevity: NonZeroU64::new(2).unwrap(),
+            priority: 1,
+            propagate: true,
+            provides: Vec::new(),
+            requires: Vec::new(),
+        }),
+    );
+    assert!(pool.is_valid_against_best_block(tx_id));
+    assert_eq!(pool.unvalidated_transactions().count(), 0);
+
+    // Add more blocks on top of the best chain.
+    pool.add_block([1; 32], &[0; 32], ());
+    let _ = pool.set_best_block(&[1; 32]);
+    pool.add_block([2; 32], &[1; 32], ());
+    let _ = pool.set_best_block(&[2; 32]);
+
+    // Finalize the latest block added.
+    let _ = pool.set_finalized_block(&[2; 32]);
+    let _ = pool.prune_finalized_with_body();
+
+    // The transaction is still valid.
+    assert!(pool.is_valid_against_best_block(tx_id));
+    assert_eq!(pool.unvalidated_transactions().count(), 0);
+
+    // One more block.
+    pool.add_block([3; 32], &[2; 32], ());
+    let _ = pool.set_best_block(&[3; 32]);
+
+    // Transaction is no longer valid because its longevity has expired.
+    assert!(!pool.is_valid_against_best_block(tx_id));
+    assert_eq!(
+        pool.unvalidated_transactions()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>(),
+        vec![tx_id]
+    );
 }
 
 // TODO: more tests

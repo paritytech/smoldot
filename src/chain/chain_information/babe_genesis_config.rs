@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    executor::{self, host, vm},
+    executor::{host, vm},
     header,
 };
 
@@ -34,25 +34,6 @@ pub struct BabeGenesisConfiguration {
 }
 
 impl BabeGenesisConfiguration {
-    /// Retrieves the configuration from the storage of the genesis block.
-    ///
-    /// Must be passed a closure that returns the storage value corresponding to the given key in
-    /// the genesis block storage.
-    pub fn from_genesis_storage(
-        mut genesis_storage_access: impl FnMut(&[u8]) -> Option<Vec<u8>>,
-    ) -> Result<Self, FromGenesisStorageError> {
-        let wasm_code =
-            genesis_storage_access(b":code").ok_or(FromGenesisStorageError::RuntimeNotFound)?;
-        let heap_pages =
-            executor::storage_heap_pages_to_value(genesis_storage_access(b":heappages").as_deref())
-                .map_err(FromGenesisStorageError::HeapPagesDecode)?;
-        let vm = host::HostVmPrototype::new(&wasm_code, heap_pages, vm::ExecHint::Oneshot, false)
-            .map_err(FromGenesisStorageError::VmInitialization)?;
-        let (cfg, _) = Self::from_virtual_machine_prototype(vm, genesis_storage_access)
-            .map_err(FromGenesisStorageError::VmError)?;
-        Ok(cfg)
-    }
-
     /// Retrieves the configuration from the given virtual machine prototype.
     ///
     /// Must be passed a closure that returns the storage value corresponding to the given key in
@@ -62,25 +43,35 @@ impl BabeGenesisConfiguration {
     pub fn from_virtual_machine_prototype(
         vm: host::HostVmPrototype,
         mut genesis_storage_access: impl FnMut(&[u8]) -> Option<Vec<u8>>,
-    ) -> Result<(Self, host::HostVmPrototype), FromVmPrototypeError> {
-        let mut vm: host::HostVm = vm
-            .run_no_param("BabeApi_configuration")
-            .map_err(|(err, proto)| FromVmPrototypeError::VmStart(err, proto))?
-            .into();
+    ) -> (Result<Self, FromVmPrototypeError>, host::HostVmPrototype) {
+        let mut vm: host::HostVm = match vm.run_no_param("BabeApi_configuration") {
+            Ok(vm) => vm.into(),
+            Err((err, proto)) => return (Err(FromVmPrototypeError::VmStart(err)), proto),
+        };
 
         loop {
             match vm {
                 host::HostVm::ReadyToRun(r) => vm = r.run(),
                 host::HostVm::Finished(finished) => {
-                    let output = finished.value();
-                    let cfg =
-                        nom::combinator::all_consuming(decode_genesis_config)(output.as_ref())
-                            .map(|(_, parse_result)| parse_result)
-                            .map_err(|_| FromVmPrototypeError::OutputDecode)?;
-                    drop(output);
-                    break Ok((cfg, finished.into_prototype()));
+                    let cfg = {
+                        let output = finished.value();
+                        let val = match nom::combinator::all_consuming(decode_genesis_config)(
+                            output.as_ref(),
+                        ) {
+                            Ok((_, parse_result)) => Ok(parse_result),
+                            Err(_) => Err(FromVmPrototypeError::OutputDecode),
+                        };
+                        // Note: this is a bit convoluted, but I have no idea how to satisfy the
+                        // borrow checker other than by doing so.
+                        drop(output);
+                        val
+                    };
+
+                    break (cfg, finished.into_prototype());
                 }
-                host::HostVm::Error { .. } => break Err(FromVmPrototypeError::Trapped),
+                host::HostVm::Error { prototype, .. } => {
+                    break (Err(FromVmPrototypeError::Trapped), prototype)
+                }
 
                 host::HostVm::ExternalStorageGet(req) => {
                     let value = genesis_storage_access(req.key().as_ref());
@@ -92,31 +83,11 @@ impl BabeGenesisConfiguration {
                 }
                 host::HostVm::LogEmit(req) => vm = req.resume(),
 
-                _ => break Err(FromVmPrototypeError::HostFunctionNotAllowed),
+                other => {
+                    let prototype = other.into_prototype();
+                    break (Err(FromVmPrototypeError::HostFunctionNotAllowed), prototype);
+                }
             }
-        }
-    }
-}
-
-/// Error when retrieving the BABE configuration.
-#[derive(Debug, derive_more::Display)]
-pub enum FromGenesisStorageError {
-    /// Runtime couldn't be found in the genesis storage.
-    RuntimeNotFound,
-    /// Failed to decode heap pages from the genesis storage.
-    HeapPagesDecode(executor::InvalidHeapPagesError),
-    /// Error when initializing the virtual machine.
-    VmInitialization(host::NewErr),
-    /// Error while executing the runtime.
-    VmError(FromVmPrototypeError),
-}
-
-impl FromGenesisStorageError {
-    /// Returns `true` if this error is about an invalid function.
-    pub fn is_function_not_found(&self) -> bool {
-        match self {
-            FromGenesisStorageError::VmError(err) => err.is_function_not_found(),
-            _ => false,
         }
     }
 }
@@ -126,7 +97,7 @@ impl FromGenesisStorageError {
 pub enum FromVmPrototypeError {
     /// Error when starting the virtual machine.
     #[display(fmt = "{}", _0)]
-    VmStart(host::StartErr, host::HostVmPrototype),
+    VmStart(host::StartErr),
     /// Crash while running the virtual machine.
     Trapped,
     /// Virtual machine tried to call a host function that isn't valid in this context.
@@ -140,13 +111,9 @@ impl FromVmPrototypeError {
     pub fn is_function_not_found(&self) -> bool {
         matches!(
             self,
-            FromVmPrototypeError::VmStart(
-                host::StartErr::VirtualMachine(vm::StartErr::FunctionNotFound,),
-                _
-            ) | FromVmPrototypeError::VmStart(
-                host::StartErr::VirtualMachine(vm::StartErr::NotAFunction,),
-                _
-            )
+            FromVmPrototypeError::VmStart(host::StartErr::VirtualMachine(
+                vm::StartErr::FunctionNotFound | vm::StartErr::NotAFunction
+            ))
         )
     }
 }

@@ -17,6 +17,7 @@
 
 #![cfg(test)]
 
+use crate::verify::inherents;
 use core::iter;
 
 #[test]
@@ -27,27 +28,13 @@ fn block_building_works() {
     .unwrap();
     let genesis_storage = chain_specs.genesis_storage().into_genesis_items().unwrap();
 
-    let parent_runtime = {
-        let code = genesis_storage
-            .iter()
-            .filter(|(k, _)| k == b":code")
-            .next()
-            .unwrap()
-            .1;
-        crate::executor::host::HostVmPrototype::new(
-            code,
-            crate::executor::DEFAULT_HEAP_PAGES,
-            crate::executor::vm::ExecHint::Oneshot,
-            false,
-        )
-        .unwrap()
-    };
-
-    let parent_hash = crate::calculate_genesis_block_header(&chain_specs).hash();
+    let (chain_info, genesis_runtime) = chain_specs.as_chain_information().unwrap();
+    let genesis_hash = chain_info.finalized_block_header.hash(4);
 
     let mut builder = super::build_block(super::Config {
-        parent_runtime,
-        parent_hash: &parent_hash,
+        block_number_bytes: 4,
+        parent_runtime: genesis_runtime,
+        parent_hash: &genesis_hash,
         parent_number: 0,
         block_body_capacity: 0,
         consensus_digest_log_item: super::ConfigPreRuntime::Aura(crate::header::AuraPreDigest {
@@ -59,19 +46,16 @@ fn block_building_works() {
     loop {
         match builder {
             super::BlockBuild::Finished(Ok(success)) => {
-                let decoded = crate::header::decode(&success.scale_encoded_header).unwrap();
+                let decoded = crate::header::decode(&success.scale_encoded_header, 4).unwrap();
                 assert_eq!(decoded.number, 1);
-                assert_eq!(*decoded.parent_hash, parent_hash);
+                assert_eq!(*decoded.parent_hash, genesis_hash);
                 break;
             }
             super::BlockBuild::Finished(Err(err)) => panic!("{}", err),
             super::BlockBuild::ApplyExtrinsic(ext) => builder = ext.finish(),
             super::BlockBuild::ApplyExtrinsicResult { .. } => unreachable!(),
             super::BlockBuild::InherentExtrinsics(ext) => {
-                builder = ext.inject_inherents(super::InherentData {
-                    timestamp: 1234,
-                    consensus: super::InherentDataConsensus::Aura { slot_number: 1234 },
-                });
+                builder = ext.inject_inherents(inherents::InherentData { timestamp: 1234 });
             }
             super::BlockBuild::StorageGet(get) => {
                 let key = get.key_as_vec();
@@ -88,7 +72,7 @@ fn block_building_works() {
                     .iter()
                     .filter(move |(k, _)| k.starts_with(&p))
                     .map(|(k, _)| k);
-                builder = prefix.inject_keys_ordered(list)
+                builder = prefix.inject_keys_ordered(list);
             }
         }
     }

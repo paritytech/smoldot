@@ -62,39 +62,45 @@ use crate::{
     },
     executor::{
         self,
-        host::{HostVmPrototype, NewErr},
+        host::{self, HostVmPrototype, NewErr},
         vm::ExecHint,
     },
     finality::grandpa::warp_sync,
     header::{self, Header, HeaderRef},
-    network::protocol::GrandpaWarpSyncResponse,
 };
 
 use alloc::vec::Vec;
 use core::ops;
 
-pub use warp_sync::Error as FragmentError;
+pub use warp_sync::{Error as FragmentError, WarpSyncFragment};
 
 /// Problem encountered during a call to [`warp_sync()`].
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
     #[display(fmt = "Missing :code")]
     MissingCode,
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "Invalid heap pages value: {}", _0)]
     InvalidHeapPages(executor::InvalidHeapPagesError),
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "Error during Babe epoch information: {}", _0)]
     BabeFetchEpoch(babe_fetch_epoch::Error),
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "Error initializing downloaded runtime: {}", _0)]
     NewRuntime(NewErr),
     /// Parameters produced by the runtime are incoherent.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "Parameters produced by the runtime are incoherent: {}", _0)]
     InvalidChain(chain_information::ValidityError),
+    /// Chain uses an unrecognized consensus mechanism.
+    UnknownConsensus,
 }
 
 /// The configuration for [`warp_sync()`].
 pub struct Config {
     /// The chain information of the starting point of the warp syncing.
     pub start_chain_information: ValidChainInformation,
+
+    /// Number of bytes used when encoding/decoding the block number. Influences how various data
+    /// structures should be parsed.
+    pub block_number_bytes: usize,
+
     /// The initial capacity of the list of sources.
     pub sources_capacity: usize,
 }
@@ -118,6 +124,7 @@ pub fn warp_sync<TSrc>(
     Ok(InProgressWarpSync::WaitingForSources(WaitingForSources {
         state: PreVerificationState {
             start_chain_information: config.start_chain_information,
+            block_number_bytes: config.block_number_bytes,
         },
         sources: slab::Slab::with_capacity(config.sources_capacity),
         previous_verifier_values: None,
@@ -235,6 +242,7 @@ impl<TSrc> WarpSync<TSrc> {
                                             PreVerificationState {
                                                 start_chain_information: state
                                                     .start_chain_information,
+                                                block_number_bytes: state.block_number_bytes,
                                             },
                                             None,
                                         ),
@@ -285,6 +293,7 @@ impl<TSrc> WarpSync<TSrc> {
                             state.sources,
                             PreVerificationState {
                                 start_chain_information: state.start_chain_information,
+                                block_number_bytes: state.block_number_bytes,
                             },
                             None,
                         )),
@@ -323,6 +332,22 @@ impl<TSrc> WarpSync<TSrc> {
 }
 
 impl<TSrc> InProgressWarpSync<TSrc> {
+    /// Returns the value that was initially passed in [`Config::block_number_bytes`].
+    pub fn block_number_bytes(&self) -> usize {
+        match self {
+            Self::StorageGet(storage_get) => storage_get.state.block_number_bytes,
+            Self::NextKey(next_key) => next_key.state.block_number_bytes,
+            Self::Verifier(verifier) => verifier.state.block_number_bytes,
+            Self::WarpSyncRequest(warp_sync_request) => warp_sync_request.state.block_number_bytes,
+            Self::VirtualMachineParamsGet(virtual_machine_params_get) => {
+                virtual_machine_params_get.state.block_number_bytes
+            }
+            Self::WaitingForSources(waiting_for_sources) => {
+                waiting_for_sources.state.block_number_bytes
+            }
+        }
+    }
+
     /// Returns the chain information that is considered verified.
     pub fn as_chain_information(&self) -> ValidChainInformationRef {
         match self {
@@ -551,6 +576,7 @@ impl<TSrc> StorageGet<TSrc> {
             self.state.sources,
             PreVerificationState {
                 start_chain_information: self.state.start_chain_information,
+                block_number_bytes: self.state.block_number_bytes,
             },
             None,
         )
@@ -694,6 +720,7 @@ impl<TSrc> Verifier<TSrc> {
                             .as_ref()
                             .finality
                             .into(),
+                        block_number_bytes: self.state.block_number_bytes,
                         start_chain_information: self.state.start_chain_information,
                         sources: self.sources,
                         warp_sync_source_id: self.warp_sync_source_id,
@@ -707,7 +734,10 @@ impl<TSrc> Verifier<TSrc> {
             }) => {
                 // As the verification of the fragment has succeeded, we are sure that the header
                 // is valid and can decode it.
-                let header: Header = header::decode(&scale_encoded_header).unwrap().into();
+                let header: Header =
+                    header::decode(&scale_encoded_header, self.state.block_number_bytes)
+                        .unwrap()
+                        .into();
 
                 if self.final_set_of_fragments {
                     (
@@ -716,6 +746,7 @@ impl<TSrc> Verifier<TSrc> {
                                 header,
                                 chain_information_finality,
                                 start_chain_information: self.state.start_chain_information,
+                                block_number_bytes: self.state.block_number_bytes,
                                 sources: self.sources,
                                 warp_sync_source_id: self.warp_sync_source_id,
                             },
@@ -748,12 +779,14 @@ impl<TSrc> Verifier<TSrc> {
 
 struct PreVerificationState {
     start_chain_information: ValidChainInformation,
+    block_number_bytes: usize,
 }
 
 struct PostVerificationState<TSrc> {
     header: Header,
     chain_information_finality: ChainInformationFinality,
     start_chain_information: ValidChainInformation,
+    block_number_bytes: usize,
     sources: slab::Slab<Source<TSrc>>,
     warp_sync_source_id: SourceId,
 }
@@ -771,6 +804,7 @@ impl<TSrc> PostVerificationState<TSrc> {
                         self.sources,
                         PreVerificationState {
                             start_chain_information: self.start_chain_information,
+                            block_number_bytes: self.block_number_bytes,
                         },
                         None,
                     ),
@@ -810,13 +844,13 @@ impl<TSrc> GrandpaWarpSyncRequest<TSrc> {
     /// The hash of the header to warp sync from.
     pub fn start_block_hash(&self) -> [u8; 32] {
         match self.previous_verifier_values.as_ref() {
-            Some((header, _)) => header.hash(),
+            Some((header, _)) => header.hash(self.state.block_number_bytes),
             None => self
                 .state
                 .start_chain_information
                 .as_ref()
                 .finalized_block_header
-                .hash(),
+                .hash(self.state.block_number_bytes),
         }
     }
 
@@ -851,47 +885,50 @@ impl<TSrc> GrandpaWarpSyncRequest<TSrc> {
         }
     }
 
-    /// Submit a GrandPa warp sync response if the request succeeded or `None` if it did not.
-    pub fn handle_response(
+    /// Submit a GrandPa warp sync successful response.
+    pub fn handle_response_ok(
         mut self,
-        response: Option<GrandpaWarpSyncResponse>,
+        fragments: Vec<WarpSyncFragment>,
+        final_set_of_fragments: bool,
     ) -> InProgressWarpSync<TSrc> {
         debug_assert!(self.sources.contains(self.source_id.0));
-
         self.sources[self.source_id.0].already_tried = true;
 
-        match response {
-            Some(response) => {
-                let final_set_of_fragments = response.is_finished;
-
-                let verifier = match &self.previous_verifier_values {
-                    Some((_, chain_information_finality)) => warp_sync::Verifier::new(
-                        chain_information_finality.into(),
-                        response.fragments,
-                        final_set_of_fragments,
-                    ),
-                    None => warp_sync::Verifier::new(
-                        self.state.start_chain_information.as_ref().finality,
-                        response.fragments,
-                        final_set_of_fragments,
-                    ),
-                };
-
-                InProgressWarpSync::Verifier(Verifier {
-                    final_set_of_fragments,
-                    verifier,
-                    state: self.state,
-                    sources: self.sources,
-                    warp_sync_source_id: self.source_id,
-                    previous_verifier_values: self.previous_verifier_values,
-                })
-            }
-            None => InProgressWarpSync::warp_sync_request_from_next_source(
-                self.sources,
-                self.state,
-                self.previous_verifier_values,
+        let verifier = match &self.previous_verifier_values {
+            Some((_, chain_information_finality)) => warp_sync::Verifier::new(
+                chain_information_finality.into(),
+                self.state.block_number_bytes,
+                fragments,
+                final_set_of_fragments,
             ),
-        }
+            None => warp_sync::Verifier::new(
+                self.state.start_chain_information.as_ref().finality,
+                self.state.block_number_bytes,
+                fragments,
+                final_set_of_fragments,
+            ),
+        };
+
+        InProgressWarpSync::Verifier(Verifier {
+            final_set_of_fragments,
+            verifier,
+            state: self.state,
+            sources: self.sources,
+            warp_sync_source_id: self.source_id,
+            previous_verifier_values: self.previous_verifier_values,
+        })
+    }
+
+    /// Submit a GrandPa warp sync request failure.
+    pub fn handle_response_err(mut self) -> InProgressWarpSync<TSrc> {
+        debug_assert!(self.sources.contains(self.source_id.0));
+        self.sources[self.source_id.0].already_tried = true;
+
+        InProgressWarpSync::warp_sync_request_from_next_source(
+            self.sources,
+            self.state,
+            self.previous_verifier_values,
+        )
     }
 }
 
@@ -933,12 +970,13 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
             self.state.sources,
             PreVerificationState {
                 start_chain_information: self.state.start_chain_information,
+                block_number_bytes: self.state.block_number_bytes,
             },
             None,
         )
     }
 
-    /// Set the code and heappages from storage using the keys `:code` and `:heappages`
+    /// Set the code and heap pages from storage using the keys `:code` and `:heappages`
     /// respectively. Also allows setting an execution hint for the virtual machine.
     pub fn set_virtual_machine_params(
         self,
@@ -955,6 +993,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                         self.state.sources,
                         PreVerificationState {
                             start_chain_information: self.state.start_chain_information,
+                            block_number_bytes: self.state.block_number_bytes,
                         },
                         None,
                     )),
@@ -973,6 +1012,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                                 self.state.sources,
                                 PreVerificationState {
                                     start_chain_information: self.state.start_chain_information,
+                                    block_number_bytes: self.state.block_number_bytes,
                                 },
                                 None,
                             ),
@@ -982,13 +1022,30 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
                 }
             };
 
-        match HostVmPrototype::new(
-            &code,
-            decoded_heap_pages,
+        let runtime = match HostVmPrototype::new(host::Config {
+            module: &code,
+            heap_pages: decoded_heap_pages,
             exec_hint,
             allow_unresolved_imports,
-        ) {
-            Ok(runtime) => {
+        }) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                return (
+                    WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
+                        self.state.sources,
+                        PreVerificationState {
+                            start_chain_information: self.state.start_chain_information,
+                            block_number_bytes: self.state.block_number_bytes,
+                        },
+                        None,
+                    )),
+                    Some(Error::NewRuntime(error)),
+                )
+            }
+        };
+
+        match self.state.start_chain_information.as_ref().consensus {
+            ChainInformationConsensusRef::Babe { .. } => {
                 let babe_current_epoch_query =
                     babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
                         runtime,
@@ -1007,16 +1064,20 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
 
                 (warp_sync, error)
             }
-            Err(error) => (
-                WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
-                    self.state.sources,
-                    PreVerificationState {
-                        start_chain_information: self.state.start_chain_information,
-                    },
-                    None,
-                )),
-                Some(Error::NewRuntime(error)),
-            ),
+            ChainInformationConsensusRef::Aura { .. } |  // TODO: https://github.com/paritytech/smoldot/issues/933
+            ChainInformationConsensusRef::Unknown => {
+                (
+                    WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
+                        self.state.sources,
+                        PreVerificationState {
+                            start_chain_information: self.state.start_chain_information,
+                            block_number_bytes: self.state.block_number_bytes,
+                        },
+                        None,
+                    )),
+                    Some(Error::UnknownConsensus),
+                )
+            }
         }
     }
 }

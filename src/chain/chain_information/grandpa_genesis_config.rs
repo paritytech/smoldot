@@ -16,11 +16,11 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-    executor::{self, host, vm},
+    executor::{host, vm},
     header,
 };
 
-use alloc::{borrow::ToOwned as _, vec::Vec};
+use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
 /// Grandpa configuration of a chain, as extracted from the genesis block.
@@ -28,9 +28,9 @@ use core::num::NonZeroU64;
 /// The way a chain configures Grandpa is either:
 ///
 /// - Stored at the predefined `:grandpa_authorities` key of the storage.
-/// - Retreived by calling the `GrandpaApi_grandpa_authorities` function of the runtime.
+/// - Retrieved by calling the `GrandpaApi_grandpa_authorities` function of the runtime.
 ///
-/// The latter method is soft-deprecated in favour of the former. Both methods are still
+/// The latter method is soft-deprecated in favor of the former. Both methods are still
 /// supported.
 ///
 /// > **Note**: Pragmatically speaking, Polkadot, Westend, and any newer chain use the former
@@ -43,54 +43,50 @@ pub struct GrandpaGenesisConfiguration {
 }
 
 impl GrandpaGenesisConfiguration {
-    /// Retrieves the configuration from the storage of the genesis block.
+    /// Retrieves the configuration from the given virtual machine prototype.
     ///
     /// Must be passed a closure that returns the storage value corresponding to the given key in
     /// the genesis block storage.
-    pub fn from_genesis_storage(
-        mut genesis_storage_access: impl FnMut(&[u8]) -> Option<Vec<u8>>,
-    ) -> Result<Self, FromGenesisStorageError> {
-        let encoded_list = if let Some(mut list) = genesis_storage_access(b":grandpa_authorities") {
-            // When in the storage, the encoded list of authorities starts with a version number.
-            if list.first() != Some(&1) {
-                return Err(FromGenesisStorageError::UnknownEncodingVersionNumber);
-            }
-            list.remove(0);
-            list
-        } else {
-            let wasm_code =
-                genesis_storage_access(b":code").ok_or(FromGenesisStorageError::RuntimeNotFound)?;
-            let heap_pages = executor::storage_heap_pages_to_value(
-                genesis_storage_access(b":heappages").as_deref(),
-            )
-            .map_err(FromGenesisStorageError::HeapPagesDecode)?;
-            let vm =
-                host::HostVmPrototype::new(&wasm_code, heap_pages, vm::ExecHint::Oneshot, false)
-                    .map_err(FromGenesisStorageError::VmInitialization)?;
-            Self::from_virtual_machine_prototype(vm, genesis_storage_access)
-                .map_err(FromGenesisStorageError::VmError)?
-        };
-
-        decode_config(&encoded_list).map_err(|()| FromGenesisStorageError::OutputDecode)
-    }
-
-    fn from_virtual_machine_prototype(
+    ///
+    /// Returns back the same virtual machine prototype as was passed as parameter.
+    pub fn from_virtual_machine_prototype(
         vm: host::HostVmPrototype,
         mut genesis_storage_access: impl FnMut(&[u8]) -> Option<Vec<u8>>,
-    ) -> Result<Vec<u8>, FromVmPrototypeError> {
-        // TODO: DRY with the babe config; put a helper in the executor module
-        let mut vm: host::HostVm = vm
-            .run_no_param("GrandpaApi_grandpa_authorities")
-            .map_err(|(err, proto)| FromVmPrototypeError::VmStart(err, proto))?
-            .into();
+    ) -> (Result<Self, FromVmPrototypeError>, host::HostVmPrototype) {
+        if let Some(mut encoded) = genesis_storage_access(b":grandpa_authorities") {
+            // When in the storage, the encoded list of authorities starts with a version number.
+            if encoded.first() != Some(&1) {
+                return (Err(FromVmPrototypeError::UnknownEncodingVersionNumber), vm);
+            }
+            encoded.remove(0);
 
-        Ok(loop {
+            let list = match decode_config(&encoded) {
+                Ok(l) => Ok(l),
+                Err(_) => Err(FromVmPrototypeError::OutputDecode),
+            };
+
+            return (list, vm);
+        }
+
+        let mut vm: host::HostVm = match vm.run_no_param("GrandpaApi_grandpa_authorities") {
+            Ok(vm) => vm.into(),
+            Err((err, proto)) => return (Err(FromVmPrototypeError::VmStart(err)), proto),
+        };
+
+        loop {
             match vm {
                 host::HostVm::ReadyToRun(r) => vm = r.run(),
-                host::HostVm::Finished(data) => {
-                    break data.value().as_ref().to_owned();
+                host::HostVm::Finished(finished) => {
+                    let list = match decode_config(finished.value().as_ref()) {
+                        Ok(l) => Ok(l),
+                        Err(_) => Err(FromVmPrototypeError::OutputDecode),
+                    };
+
+                    break (list, finished.into_prototype());
                 }
-                host::HostVm::Error { .. } => return Err(FromVmPrototypeError::Trapped),
+                host::HostVm::Error { prototype, .. } => {
+                    return (Err(FromVmPrototypeError::Trapped), prototype)
+                }
 
                 host::HostVm::ExternalStorageGet(rq) => {
                     let value = genesis_storage_access(rq.key().as_ref());
@@ -102,35 +98,14 @@ impl GrandpaGenesisConfiguration {
                 }
                 host::HostVm::LogEmit(rq) => vm = rq.resume(),
 
-                _ => return Err(FromVmPrototypeError::HostFunctionNotAllowed),
+                other => {
+                    let vm_prototype = other.into_prototype();
+                    return (
+                        Err(FromVmPrototypeError::HostFunctionNotAllowed),
+                        vm_prototype,
+                    );
+                }
             }
-        })
-    }
-}
-
-/// Error when retrieving the Grandpa configuration.
-#[derive(Debug, derive_more::Display)]
-pub enum FromGenesisStorageError {
-    /// Runtime couldn't be found in the genesis storage.
-    RuntimeNotFound,
-    /// Failed to decode heap pages from the genesis storage.
-    HeapPagesDecode(executor::InvalidHeapPagesError),
-    /// Version number of the encoded authorities list isn't recognized.
-    UnknownEncodingVersionNumber,
-    /// Error while decoding the SCALE-encoded list.
-    OutputDecode,
-    /// Error when initializing the virtual machine.
-    VmInitialization(host::NewErr),
-    /// Error while executing the runtime.
-    VmError(FromVmPrototypeError),
-}
-
-impl FromGenesisStorageError {
-    /// Returns `true` if this error is about an invalid function.
-    pub fn is_function_not_found(&self) -> bool {
-        match self {
-            FromGenesisStorageError::VmError(err) => err.is_function_not_found(),
-            _ => false,
         }
     }
 }
@@ -140,11 +115,15 @@ impl FromGenesisStorageError {
 pub enum FromVmPrototypeError {
     /// Error when initializing the virtual machine.
     #[display(fmt = "{}", _0)]
-    VmStart(host::StartErr, host::HostVmPrototype),
+    VmStart(host::StartErr),
     /// Crash while running the virtual machine.
     Trapped,
     /// Virtual machine tried to call a host function that isn't valid in this context.
     HostFunctionNotAllowed,
+    /// Version number of the encoded authorities list isn't recognized.
+    UnknownEncodingVersionNumber,
+    /// Error while decoding the SCALE-encoded list.
+    OutputDecode,
 }
 
 impl FromVmPrototypeError {
@@ -152,21 +131,16 @@ impl FromVmPrototypeError {
     pub fn is_function_not_found(&self) -> bool {
         matches!(
             self,
-            FromVmPrototypeError::VmStart(
-                host::StartErr::VirtualMachine(vm::StartErr::FunctionNotFound,),
-                _
-            ) | FromVmPrototypeError::VmStart(
-                host::StartErr::VirtualMachine(vm::StartErr::NotAFunction,),
-                _
-            )
+            FromVmPrototypeError::VmStart(host::StartErr::VirtualMachine(
+                vm::StartErr::FunctionNotFound | vm::StartErr::NotAFunction
+            ))
         )
     }
 }
 
 fn decode_config(scale_encoded: &[u8]) -> Result<GrandpaGenesisConfiguration, ()> {
-    let result: nom::IResult<_, _> = nom::combinator::all_consuming(nom::combinator::flat_map(
-        crate::util::nom_scale_compact_usize,
-        |num_elems| {
+    let result: nom::IResult<_, _> = nom::combinator::all_consuming(nom::combinator::complete(
+        nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
             nom::multi::fold_many_m_n(
                 num_elems,
                 num_elems,
@@ -185,12 +159,12 @@ fn decode_config(scale_encoded: &[u8]) -> Result<GrandpaGenesisConfiguration, ()
                     acc
                 },
             )
-        },
+        }),
     ))(scale_encoded);
 
     match result {
         Ok((_, out)) => Ok(out),
-        Err(nom::Err::Error(_)) | Err(nom::Err::Failure(_)) => Err(()),
+        Err(nom::Err::Error(_) | nom::Err::Failure(_)) => Err(()),
         Err(_) => unreachable!(),
     }
 }

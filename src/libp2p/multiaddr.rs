@@ -31,12 +31,12 @@ pub struct Multiaddr {
 }
 
 impl Multiaddr {
-    /// Creates a new empty multiaddr.
-    pub fn new() -> Self {
+    /// Creates a new empty `Multiaddr`.
+    pub fn empty() -> Self {
         Multiaddr { bytes: Vec::new() }
     }
 
-    /// Pushes a protocol at the end of this multiaddr.
+    /// Pushes a protocol at the end of this `Multiaddr`.
     pub fn push(&mut self, protocol: ProtocolRef) {
         for slice in protocol.as_bytes() {
             self.bytes.extend(slice.as_ref());
@@ -45,10 +45,10 @@ impl Multiaddr {
 
     /// Shrinks the memory used by the underlying container to its size.
     pub fn shrink_to_fit(&mut self) {
-        self.bytes.shrink_to_fit()
+        self.bytes.shrink_to_fit();
     }
 
-    /// Returns the serialized version of this multiaddr.
+    /// Returns the serialized version of this `Multiaddr`.
     pub fn to_vec(&self) -> Vec<u8> {
         self.bytes.clone()
     }
@@ -64,7 +64,7 @@ impl Multiaddr {
     ///
     /// # Panic
     ///
-    /// Panics if the multiaddr is empty.
+    /// Panics if the `Multiaddr` is empty.
     ///
     pub fn pop(&mut self) {
         let remain = {
@@ -156,12 +156,7 @@ impl TryFrom<Vec<u8>> for Multiaddr {
 
 impl fmt::Debug for Multiaddr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_list()
-            .entries(&mut nom::combinator::iterator(
-                &self.bytes[..],
-                protocol::<nom::error::Error<&[u8]>>,
-            ))
-            .finish()
+        fmt::Display::fmt(&self, f)
     }
 }
 
@@ -175,9 +170,11 @@ impl fmt::Display for Multiaddr {
     }
 }
 
+// TODO: more doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone, PartialEq, Eq)]
 pub struct FromVecError {}
 
+// TODO: more doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum ParseError {
     /// A multiaddress must always start with `/`.
@@ -189,6 +186,7 @@ pub enum ParseError {
     NotBase58,
     InvalidDomainName,
     InvalidMultihash(multihash::FromBytesError),
+    InvalidMemoryPayload,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +205,13 @@ pub enum ProtocolRef<'a> {
     Ws,
     // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
     Wss,
+    // TODO: unclear what the payload is; see https://github.com/multiformats/multiaddr/issues/127
+    Memory(u64),
+    // TODO: these protocols are inventions for prototyping, see https://github.com/libp2p/specs/pull/412
+    ExperimentalWebRtc,
+    // TODO: these protocols are inventions for prototyping, see https://github.com/libp2p/specs/pull/412
+    /// Contains the SHA-256 hash of the TLS certificate.
+    ExperimentalCertHash([u8; 32]),
 }
 
 impl<'a> ProtocolRef<'a> {
@@ -266,6 +271,22 @@ impl<'a> ProtocolRef<'a> {
             }
             "ws" => Ok(ProtocolRef::Ws),
             "wss" => Ok(ProtocolRef::Wss),
+            "memory" => {
+                let payload = iter.next().ok_or(ParseError::UnexpectedEof)?;
+                Ok(ProtocolRef::Memory(
+                    payload
+                        .parse()
+                        .map_err(|_| ParseError::InvalidMemoryPayload)?,
+                ))
+            }
+            "experimental-webrtc" => Ok(ProtocolRef::ExperimentalWebRtc),
+            "experimental-certhash" => {
+                let string_hash = iter.next().ok_or(ParseError::UnexpectedEof)?;
+                let parsed = hex::decode(string_hash).map_err(|_| ParseError::InvalidDomainName)?; // TODO: wrong error; proper errors should be added to ParseError when it's no longer experimental
+                let correct_len =
+                    <[u8; 32]>::try_from(&parsed[..]).map_err(|_| ParseError::InvalidDomainName)?; // TODO: wrong error
+                Ok(ProtocolRef::ExperimentalCertHash(correct_len))
+            }
             _ => Err(ParseError::UnrecognizedProtocol),
         }
     }
@@ -287,29 +308,17 @@ impl<'a> ProtocolRef<'a> {
             ProtocolRef::Udp(_) => 273,
             ProtocolRef::Ws => 477,
             ProtocolRef::Wss => 478,
+            ProtocolRef::Memory(_) => 777,
+            ProtocolRef::ExperimentalWebRtc => 991234, // TODO: these numbers are complete invention
+            ProtocolRef::ExperimentalCertHash(_) => 991235, // TODO: these numbers are complete invention
         };
 
         // TODO: optimize by not allocating a Vec
         let extra = match self {
-            ProtocolRef::Dns(addr) => {
-                let mut out = Vec::with_capacity(addr.as_ref().len() + 4);
-                out.extend(crate::util::leb128::encode_usize(addr.as_ref().len()));
-                out.extend_from_slice(addr.as_ref());
-                out
-            }
-            ProtocolRef::Dns4(addr) => {
-                let mut out = Vec::with_capacity(addr.as_ref().len() + 4);
-                out.extend(crate::util::leb128::encode_usize(addr.as_ref().len()));
-                out.extend_from_slice(addr.as_ref());
-                out
-            }
-            ProtocolRef::Dns6(addr) => {
-                let mut out = Vec::with_capacity(addr.as_ref().len() + 4);
-                out.extend(crate::util::leb128::encode_usize(addr.as_ref().len()));
-                out.extend_from_slice(addr.as_ref());
-                out
-            }
-            ProtocolRef::DnsAddr(addr) => {
+            ProtocolRef::Dns(addr)
+            | ProtocolRef::Dns4(addr)
+            | ProtocolRef::Dns6(addr)
+            | ProtocolRef::DnsAddr(addr) => {
                 let mut out = Vec::with_capacity(addr.as_ref().len() + 4);
                 out.extend(crate::util::leb128::encode_usize(addr.as_ref().len()));
                 out.extend_from_slice(addr.as_ref());
@@ -324,14 +333,16 @@ impl<'a> ProtocolRef<'a> {
                 out.extend_from_slice(multihash);
                 out
             }
-            ProtocolRef::Tcp(port) => port.to_be_bytes().to_vec(),
-            ProtocolRef::Udp(port) => port.to_be_bytes().to_vec(),
+            ProtocolRef::Tcp(port) | ProtocolRef::Udp(port) => port.to_be_bytes().to_vec(),
+            ProtocolRef::Memory(payload) => payload.to_be_bytes().to_vec(),
+            ProtocolRef::ExperimentalCertHash(hash) => hash.to_vec(),
             _ => Vec::new(),
         };
 
-        let mut out = crate::util::leb128::encode_usize(code).collect::<Vec<_>>();
-        out.extend(extra);
-        iter::once(out.into_iter())
+        // Combine `code` and `extra`.
+        crate::util::leb128::encode_usize(code)
+            .map(|b| either::Left([b]))
+            .chain(iter::once(either::Right(extra)))
     }
 }
 
@@ -356,6 +367,11 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
             ProtocolRef::Udp(port) => write!(f, "/udp/{}", port),
             ProtocolRef::Ws => write!(f, "/ws"),
             ProtocolRef::Wss => write!(f, "/wss"),
+            ProtocolRef::Memory(payload) => write!(f, "/memory/{}", payload),
+            ProtocolRef::ExperimentalWebRtc => write!(f, "/experimental-webrtc"),
+            ProtocolRef::ExperimentalCertHash(hash) => {
+                write!(f, "/experimental-certhash/{}", hex::encode(hash))
+            }
         }
     }
 }
@@ -429,11 +445,7 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             4 => nom::combinator::map(nom::bytes::complete::take(4_u32), |ip: &'a [u8]| {
                 ProtocolRef::Ip4(ip.try_into().unwrap())
             })(bytes),
-            6 => {
-                nom::combinator::map(nom::number::complete::be_u16, |port| ProtocolRef::Tcp(port))(
-                    bytes,
-                )
-            }
+            6 => nom::combinator::map(nom::number::complete::be_u16, ProtocolRef::Tcp)(bytes),
             41 => nom::combinator::map(nom::bytes::complete::take(16_u32), |ip: &'a [u8]| {
                 ProtocolRef::Ip6(ip.try_into().unwrap())
             })(bytes),
@@ -481,11 +493,7 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
                 ),
                 ProtocolRef::DnsAddr,
             )(bytes),
-            273 => {
-                nom::combinator::map(nom::number::complete::be_u16, |port| ProtocolRef::Udp(port))(
-                    bytes,
-                )
-            }
+            273 => nom::combinator::map(nom::number::complete::be_u16, ProtocolRef::Udp)(bytes),
             421 => nom::combinator::map(
                 nom::combinator::verify(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
@@ -497,6 +505,14 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             460 => Ok((bytes, ProtocolRef::Quic)),
             477 => Ok((bytes, ProtocolRef::Ws)),
             478 => Ok((bytes, ProtocolRef::Wss)),
+            // TODO: unclear what the /memory payload is, see https://github.com/multiformats/multiaddr/issues/127
+            777 => nom::combinator::map(nom::number::complete::be_u64, ProtocolRef::Memory)(bytes),
+            991234 => Ok((bytes, ProtocolRef::ExperimentalWebRtc)), // TODO: these numbers are complete invention
+            991235 => {
+                nom::combinator::map(nom::bytes::complete::take(32_u32), |hash: &'a [u8]| {
+                    ProtocolRef::ExperimentalCertHash(<[u8; 32]>::try_from(hash).unwrap())
+                })(bytes)
+            } // TODO: these numbers are complete invention
             _ => Err(nom::Err::Error(nom::error::make_error(
                 bytes,
                 nom::error::ErrorKind::Tag,
@@ -539,6 +555,7 @@ mod tests {
         check_valid("/dns4/example.com./tcp/55");
         check_valid("/dns6//tcp/55");
         check_valid("/dnsaddr/./tcp/55");
+        check_valid("/memory/1234567890");
 
         check_invalid("/");
         check_invalid("ip4/1.2.3.4");

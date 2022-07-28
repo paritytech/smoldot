@@ -26,7 +26,7 @@ use alloc::{string::String, vec::Vec};
 pub const DEFAULT_SEED_PHRASE: &str =
     "bottom drive obey lake curtain smoke basket hold race lonely fit walk";
 
-/// Decodes a human-readable private key (a.k.a. a seed phrase) using the sr25519 curve.
+/// Decodes a human-readable private key (a.k.a. a seed phrase) using the Sr25519 curve.
 pub fn decode_sr25519_private_key(phrase: &str) -> Result<[u8; 64], ParsePrivateKeyError> {
     let parsed = parse_private_key(phrase)?;
 
@@ -52,7 +52,7 @@ pub fn decode_sr25519_private_key(phrase: &str) -> Result<[u8; 64], ParsePrivate
     Ok(secret_key.to_bytes())
 }
 
-/// Decodes a human-readable private key (a.k.a. a seed phrase) using the ed25519 curve.
+/// Decodes a human-readable private key (a.k.a. a seed phrase) using the Ed25519 curve.
 pub fn decode_ed25519_private_key(phrase: &str) -> Result<[u8; 32], ParsePrivateKeyError> {
     let parsed = parse_private_key(phrase)?;
 
@@ -215,7 +215,7 @@ pub fn bip39_to_seed(phrase: &str, password: &str) -> Result<[u8; 32], Bip39ToSe
 
     // These rules are part of the seed phrase format "specification" and have been copy-pasted
     // from the Substrate code base.
-    if entropy_len < 16 || entropy_len > 32 || entropy_len % 4 != 0 {
+    if !(16..=32).contains(&entropy_len) || entropy_len % 4 != 0 {
         return Err(Bip39ToSeedError::BadWordsCount);
     }
 

@@ -42,7 +42,7 @@ pub struct Module {
 
 impl Module {
     /// See [`super::Module::new`].
-    pub fn new(module_bytes: impl AsRef<[u8]>) -> Result<Self, NewErr> {
+    pub fn new(module_bytes: impl AsRef<[u8]>) -> Result<Self, ModuleError> {
         let mut config = wasmtime::Config::new();
         config.cranelift_nan_canonicalization(true);
         config.cranelift_opt_level(wasmtime::OptLevel::Speed);
@@ -53,11 +53,10 @@ impl Module {
         // environment variables whatsoever. Whether to use `Enable` or `Disable` below isn't
         // very important, so long as it is not `Environment`.
         config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
-        let engine = wasmtime::Engine::new(&config)
-            .map_err(|err| NewErr::ModuleError(ModuleError(err.to_string())))?;
+        let engine = wasmtime::Engine::new(&config).map_err(|err| ModuleError(err.to_string()))?;
 
         let inner = wasmtime::Module::from_binary(&engine, module_bytes.as_ref())
-            .map_err(|err| NewErr::ModuleError(ModuleError(err.to_string())))?;
+            .map_err(|err| ModuleError(err.to_string()))?;
 
         Ok(Module { inner })
     }
@@ -67,15 +66,14 @@ impl Module {
 pub struct JitPrototype {
     store: wasmtime::Store<()>,
 
-    /// Instanciated Wasm VM.
+    /// Instantiated Wasm VM.
     instance: wasmtime::Instance,
 
     /// Shared between the "outside" and the external functions. See [`Shared`].
     shared: Arc<Mutex<Shared>>,
 
-    /// Reference to the memory used by the module, if any.
-    // TODO: shouldn't be an Option? just return error if no memory?
-    memory: Option<wasmtime::Memory>,
+    /// Reference to the memory used by the module.
+    memory: wasmtime::Memory,
 
     /// Reference to the table of indirect functions, in case we need to access it.
     /// `None` if the module doesn't export such table.
@@ -91,7 +89,7 @@ impl JitPrototype {
         let mut store = wasmtime::Store::new(module.inner.engine(), ());
 
         let mut imported_memory = None;
-        let shared = Arc::new(Mutex::new(Shared::Poisoned));
+        let shared = Arc::new(Mutex::new(Shared::ExecutingStart));
 
         // Building the list of symbols that the Wasm VM is able to use.
         let imports = {
@@ -99,28 +97,21 @@ impl JitPrototype {
             for import in module.inner.imports() {
                 match import.ty() {
                     wasmtime::ExternType::Func(f) => {
-                        let name = match import.name() {
-                            Some(name) => name,
-                            None => {
-                                return Err(NewErr::ModuleError(ModuleError(format!(
-                                    "unresolved unnamed import in module `{}`",
-                                    import.module()
-                                ))))
-                            }
+                        let function_index = if let Ok(ty) = TryFrom::try_from(&f) {
+                            symbols(import.module(), import.name(), &ty).ok()
+                        } else {
+                            None
                         };
 
-                        let function_index =
-                            match symbols(import.module(), name, &TryFrom::try_from(&f).unwrap())
-                                .ok()
-                            {
-                                Some(idx) => idx,
-                                None => {
-                                    return Err(NewErr::UnresolvedFunctionImport {
-                                        module_name: import.module().to_owned(),
-                                        function: name.to_owned(),
-                                    })
-                                }
-                            };
+                        let function_index = match function_index {
+                            Some(idx) => idx,
+                            None => {
+                                return Err(NewErr::UnresolvedFunctionImport {
+                                    module_name: import.module().to_owned(),
+                                    function: import.name().to_owned(),
+                                })
+                            }
+                        };
 
                         let shared = shared.clone();
 
@@ -142,6 +133,9 @@ impl JitPrototype {
                                         Shared::OutsideFunctionCall { memory } => {
                                             *shared_lock = Shared::EnteredFunctionCall {
                                                 function_index,
+                                                // Because the function signature has been
+                                                // validated at initialization, we can safely
+                                                // convert all the parameter types.
                                                 parameters: params
                                                     .iter()
                                                     .map(TryFrom::try_from)
@@ -151,6 +145,12 @@ impl JitPrototype {
                                                 memory_pointer: memory.data_ptr(&caller) as usize,
                                                 memory_size: memory.data_size(&mut caller),
                                             };
+                                        }
+                                        Shared::ExecutingStart => {
+                                            // TODO: somehow turn this into a `NewErr::StartFunctionNotSupported`?
+                                            return Box::new(future::ready(Err(
+                                                wasmtime::Trap::new("start function forbidden"),
+                                            )));
                                         }
                                         _ => unreachable!(),
                                     }
@@ -198,9 +198,7 @@ impl JitPrototype {
                                                 assert!(ret_val.is_empty());
                                             }
 
-                                            *shared_lock = Shared::OutsideFunctionCall {
-                                                memory: memory.clone(),
-                                            };
+                                            *shared_lock = Shared::OutsideFunctionCall { memory };
                                             Poll::Ready(Ok(()))
                                         }
                                         Shared::AbortRequired => {
@@ -212,38 +210,47 @@ impl JitPrototype {
                             },
                         )));
                     }
-                    wasmtime::ExternType::Global(_)
-                    | wasmtime::ExternType::Table(_)
-                    | wasmtime::ExternType::Instance(_)
-                    | wasmtime::ExternType::Module(_) => {
+                    wasmtime::ExternType::Global(_) | wasmtime::ExternType::Table(_) => {
                         return Err(NewErr::ModuleError(ModuleError(
-                            "global/table/instance/module imports not supported".to_string(),
+                            "global/table imports not supported".to_string(),
                         )));
                     }
                     wasmtime::ExternType::Memory(m) => {
-                        // TODO: check name and all?
-                        // TODO: proper error instead of asserting?
-                        assert!(imported_memory.is_none());
+                        if import.module() != "env" || import.name() != "memory" {
+                            return Err(NewErr::MemoryNotNamedMemory);
+                        }
+
+                        // Considering that the memory can only be "env":"memory", and that each
+                        // import has a unique name, this block can't be reached more than once.
+                        debug_assert!(imported_memory.is_none());
                         imported_memory = Some(
                             wasmtime::Memory::new(&mut store, m)
                                 .map_err(|_| NewErr::CouldntAllocateMemory)?,
                         );
-                        imports.push(wasmtime::Extern::Memory(
-                            imported_memory.as_ref().unwrap().clone(),
-                        ));
+                        imports.push(wasmtime::Extern::Memory(*imported_memory.as_ref().unwrap()));
                     }
                 };
             }
             imports
         };
 
-        // Note: we assume that `new_async` is instantaneous, which it seems to be. It's actually
-        // unclear why this function is async at all, as all it is supposed to do in synchronous.
-        // Future versions of `wasmtime` might break this assumption.
+        // Calling `wasmtime::Instance::new` executes the `start` function of the module, if any.
+        // If this `start` function calls into one of the imports, then the import will detect
+        // that the shared state is `ExecutingStart` and return an error.
+        // This function call is asynchronous because the `start` function might be asynchronous.
+        // In principle, `now_or_never()` can be unwrapped because the only way for `start` to
+        // not be immediately finished is if it enters an import, which immediately returns an
+        // error. However we return an error anyway, just in case.
+        // If the `start` function doesn't call any import, then it will go undetected and no
+        // error will be returned.
+        // TODO: detect `start` anyway, for consistency with other backends
         let instance = wasmtime::Instance::new_async(&mut store, &module.inner, &imports)
             .now_or_never()
-            .unwrap()
-            .unwrap(); // TODO: don't unwrap
+            .ok_or(NewErr::StartFunctionNotSupported)?
+            .map_err(|err| NewErr::ModuleError(ModuleError(err.to_string())))?;
+
+        // Now that we are passed the `start` stage, update the state of execution.
+        *shared.lock() = Shared::Poisoned;
 
         let exported_memory = if let Some(mem) = instance.get_export(&mut store, "memory") {
             if let Some(mem) = mem.into_memory() {
@@ -256,10 +263,10 @@ impl JitPrototype {
         };
 
         let memory = match (exported_memory, imported_memory) {
-            (Some(_), Some(_)) => todo!(),
-            (Some(m), None) => Some(m),
-            (None, Some(m)) => Some(m),
-            (None, None) => None,
+            (Some(_), Some(_)) => return Err(NewErr::TwoMemories),
+            (Some(m), None) => m,
+            (None, Some(m)) => m,
+            (None, None) => return Err(NewErr::NoMemory),
         };
 
         let indirect_table =
@@ -295,24 +302,28 @@ impl JitPrototype {
 
     /// See [`super::VirtualMachinePrototype::memory_max_pages`].
     pub fn memory_max_pages(&self) -> Option<HeapPages> {
-        if let Some(memory) = &self.memory {
-            let num = memory.ty(&self.store).maximum()?;
-            match u32::try_from(num) {
-                Ok(n) => Some(HeapPages::new(n)),
-                // If `num` doesn't fit in a `u32`, we return `None` to mean "infinite".
-                Err(_) => None,
-            }
-        } else {
-            None
+        let num = self.memory.ty(&self.store).maximum()?;
+        match u32::try_from(num) {
+            Ok(n) => Some(HeapPages::new(n)),
+            // If `num` doesn't fit in a `u32`, we return `None` to mean "infinite".
+            Err(_) => None,
         }
     }
 
     /// See [`super::VirtualMachinePrototype::start`].
     pub fn start(
         mut self,
+        min_memory_pages: HeapPages,
         function_name: &str,
         params: &[WasmValue],
     ) -> Result<Jit, (StartErr, Self)> {
+        let min_memory_pages = u64::from(min_memory_pages.0);
+        if let Some(to_grow) = min_memory_pages.checked_sub(self.memory.size(&self.store)) {
+            if self.memory.grow(&mut self.store, to_grow).is_err() {
+                return Err((StartErr::RequiredMemoryTooLarge, self));
+            }
+        }
+
         let function_to_call = match self.instance.get_export(&mut self.store, function_name) {
             Some(export) => match export.into_func() {
                 Some(f) => f,
@@ -382,6 +393,7 @@ impl fmt::Debug for JitPrototype {
 ///
 enum Shared {
     Poisoned,
+    ExecutingStart,
     OutsideFunctionCall {
         memory: wasmtime::Memory,
     },
@@ -410,11 +422,11 @@ enum Shared {
         /// is grown, which can happen between function calls.
         memory_size: usize,
 
-        /// Waker that `wasmtime` has passed to the future that is waiting for `return_value`.
+        /// `Waker` that `wasmtime` has passed to the future that is waiting for `return_value`.
         /// This value is most likely not very useful, because [`Jit::run`] always polls the outer
         /// future whenever the inner future is known to be ready.
         /// However, it would be completely legal for `wasmtime` to not poll the inner future if the
-        /// waker that it has passed (the one stored here) wasn't waken up.
+        /// `waker` that it has passed (the one stored here) wasn't waken up.
         /// This field therefore exists in order to future-proof against this possible optimization
         /// that `wasmtime` might perform in the future.
         in_interrupted_waker: Option<Waker>,
@@ -435,14 +447,14 @@ enum Shared {
 pub struct Jit {
     inner: JitInner,
 
-    /// Instanciated Wasm VM.
+    /// Instantiated Wasm VM.
     instance: wasmtime::Instance,
 
     /// Shared between the "outside" and the external functions. See [`Shared`].
     shared: Arc<Mutex<Shared>>,
 
     /// See [`JitPrototype::memory`].
-    memory: Option<wasmtime::Memory>,
+    memory: wasmtime::Memory,
 
     /// See [`JitPrototype::indirect_table`].
     indirect_table: Option<wasmtime::Table>,
@@ -482,7 +494,7 @@ impl Jit {
                     } => {
                         *shared_lock = Shared::Return {
                             return_value: value,
-                            memory: self.memory.as_ref().unwrap().clone(), // TODO: unwrap()?!
+                            memory: self.memory,
                         };
 
                         if let Some(waker) = in_interrupted_waker {
@@ -508,7 +520,7 @@ impl Jit {
                 // TODO: check that value is None
 
                 *self.shared.try_lock().unwrap() = Shared::OutsideFunctionCall {
-                    memory: self.memory.as_ref().unwrap().clone(), // TODO: unwrap()?!
+                    memory: self.memory,
                 };
 
                 // Check whether the function to call has a return value.
@@ -612,7 +624,7 @@ impl Jit {
     pub fn memory_size(&self) -> HeapPages {
         match &self.inner {
             JitInner::NotStarted { store, .. } | JitInner::Done(store) => {
-                let heap_pages = self.memory.as_ref().unwrap().size(store);
+                let heap_pages = self.memory.size(store);
                 HeapPages::new(u32::try_from(heap_pages).unwrap())
             }
             JitInner::Executing(_) => {
@@ -638,10 +650,7 @@ impl Jit {
         size: u32,
     ) -> Result<impl AsRef<[u8]> + '_, OutOfBoundsError> {
         let memory_slice = match &self.inner {
-            JitInner::NotStarted { store, .. } | JitInner::Done(store) => {
-                let memory = self.memory.as_ref().unwrap();
-                memory.data(store)
-            }
+            JitInner::NotStarted { store, .. } | JitInner::Done(store) => self.memory.data(store),
             JitInner::Executing(_) => {
                 let (memory_pointer, memory_size) = match *self.shared.try_lock().unwrap() {
                     Shared::WithinFunctionCall {
@@ -673,8 +682,7 @@ impl Jit {
     pub fn write_memory(&mut self, offset: u32, value: &[u8]) -> Result<(), OutOfBoundsError> {
         let memory_slice = match &mut self.inner {
             JitInner::NotStarted { store, .. } | JitInner::Done(store) => {
-                let memory = self.memory.as_ref().unwrap();
-                memory.data_mut(store)
+                self.memory.data_mut(store)
             }
             JitInner::Executing(_) => {
                 let (memory_pointer, memory_size) = match *self.shared.try_lock().unwrap() {
@@ -710,16 +718,11 @@ impl Jit {
         // TODO: must check whether additional is within bounds
         let additional = u64::from(u32::from(additional));
 
-        let memory = match self.memory.as_ref() {
-            Some(m) => m.clone(),
-            None => return Err(OutOfBoundsError),
-        };
-
         match &mut self.inner {
             JitInner::NotStarted { store, .. } | JitInner::Done(store) => {
                 // This is the simple case: we still have access to the `store` and can perform
                 // the growth synchronously.
-                memory.grow(store, additional).unwrap();
+                self.memory.grow(store, additional).unwrap();
             }
             JitInner::Poisoned => unreachable!(),
             JitInner::Executing(function_call) => {
@@ -736,7 +739,10 @@ impl Jit {
                             waker.wake();
                         }
 
-                        *shared_lock = Shared::MemoryGrowRequired { memory, additional }
+                        *shared_lock = Shared::MemoryGrowRequired {
+                            memory: self.memory,
+                            additional,
+                        }
                     }
                     _ => unreachable!(),
                 }
@@ -783,7 +789,7 @@ impl Jit {
                             waker.wake();
                         }
 
-                        *shared_lock = Shared::AbortRequired
+                        *shared_lock = Shared::AbortRequired;
                     }
                     _ => unreachable!(),
                 }

@@ -78,7 +78,13 @@ use smoldot::{
     network::protocol,
     transactions::{light_pool, validate},
 };
-use std::{cmp, iter, marker::PhantomData, num::NonZeroU32, sync::Arc, time::Duration};
+use std::{
+    cmp, iter,
+    marker::PhantomData,
+    num::{NonZeroU32, NonZeroUsize},
+    sync::Arc,
+    time::Duration,
+};
 
 /// Configuration for a [`TransactionsService`].
 pub struct Config<TPlat: Platform> {
@@ -168,7 +174,6 @@ impl<TPlat: Platform> TransactionsService<TPlat> {
     /// If this exact same transaction has already been submitted before, the transaction isn't
     /// added a second time. Instead, a second channel is created pointing to the already-existing
     /// transaction.
-    #[must_use = "Use `submit_transaction` instead if you don't need the return value"]
     pub async fn submit_and_watch_transaction(
         &self,
         transaction_bytes: Vec<u8>,
@@ -257,12 +262,20 @@ pub enum DropReason {
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum ValidateTransactionError {
     /// Error during the network request.
+    #[display(fmt = "{}", _0)]
     Call(runtime_service::RuntimeCallError),
     /// Error during the validation runtime call.
+    #[display(fmt = "{}", _0)]
     Validation(validate::Error),
     /// Tried to access the next key of a storage key. This isn't possible through a call request
     /// at the moment.
     NextKeyForbidden,
+}
+
+#[derive(Debug, Clone)]
+enum InvalidOrError {
+    Invalid(validate::TransactionValidityError),
+    ValidateError(ValidateTransactionError),
 }
 
 /// Message sent from the foreground service to the background.
@@ -313,7 +326,14 @@ async fn background_task<TPlat: Platform>(
         // after a Grandpa warp sync) or because the transactions service was too busy to process
         // the new blocks.
 
-        let mut subscribe_all = worker.runtime_service.subscribe_all(32, 32).await;
+        // The buffer size should be large enough so that, if the CPU is busy, it doesn't
+        // become full before the execution of the transactions service resumes.
+        // The maximum number of pinned block is ignored, as this maximum is a way to avoid
+        // malicious behaviors. This code is by definition not considered malicious.
+        let mut subscribe_all = worker
+            .runtime_service
+            .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
+            .await;
         let initial_finalized_block_hash = header::hash_from_scale_encoded_header(
             &subscribe_all.finalized_block_scale_encoded_header,
         );
@@ -350,7 +370,7 @@ async fn background_task<TPlat: Platform>(
                 },
             );
             if block.is_new_best {
-                worker.set_best_block(&hash);
+                worker.set_best_block(&log_target, &hash);
             }
         }
 
@@ -430,8 +450,8 @@ async fn background_task<TPlat: Platform>(
                             scale_encoded_transaction,
                             validate::TransactionSource::External,
                         )
-                        .await?;
-                        Ok((block_hash, result))
+                        .await;
+                        (block_hash, result)
                     }
                 };
 
@@ -448,6 +468,38 @@ async fn background_task<TPlat: Platform>(
                     .unwrap();
                 debug_assert!(tx.validation_in_progress.is_none());
                 tx.validation_in_progress = Some(result_rx);
+            }
+
+            // Remove transactions that have been determined to be invalid.
+            loop {
+                // Note that we really would like to use a `while let` loop, but the Rust borrow
+                // checker doesn't permit it.
+                let (tx_id, _, error) = match worker
+                    .pending_transactions
+                    .invalid_transactions_finalized_block()
+                    .next()
+                {
+                    Some(v) => v,
+                    None => break,
+                };
+
+                // Clone the error because we need to unborrow `worker.pending_transactions`.
+                let error = error.clone();
+
+                let (tx_body, mut transaction) =
+                    worker.pending_transactions.remove_transaction(tx_id);
+
+                log::debug!(
+                    target: &log_target,
+                    "Discarded(tx_hash={}, error={:?})",
+                    HashDisplay(&blake2_hash(&tx_body)),
+                    error,
+                );
+
+                transaction.update_status(TransactionStatus::Dropped(match error {
+                    InvalidOrError::Invalid(err) => DropReason::Invalid(err),
+                    InvalidOrError::ValidateError(err) => DropReason::ValidateError(err),
+                }));
             }
 
             // Start block bodies downloads that need to be started.
@@ -473,7 +525,11 @@ async fn background_task<TPlat: Platform>(
                     })
                     .map(|(hash, block)| {
                         // TODO: unwrap?! should only insert valid blocks in the worker
-                        let decoded = header::decode(&block.scale_encoded_header).unwrap();
+                        let decoded = header::decode(
+                            &block.scale_encoded_header,
+                            worker.sync_service.block_number_bytes(),
+                        )
+                        .unwrap();
                         (*hash, decoded.number)
                     });
                 let (block_hash, block_number) = match block_hash_number {
@@ -522,14 +578,26 @@ async fn background_task<TPlat: Platform>(
                     .unpin_block(&block.block_hash)
                     .await;
 
+                log::debug!(
+                    target: &log_target,
+                    "Finalized(block={}, body-transactions={{{}}})",
+                    HashDisplay(&block.block_hash),
+                    block
+                        .included_transactions
+                        .iter()
+                        .map(|tx| HashDisplay(&blake2_hash(&tx.scale_encoding)).to_string())
+                        .join(", ")
+                );
+
                 debug_assert!(!block.user_data.downloading);
-                for (_, body_index, mut tx) in block.included_transactions {
+                for mut tx in block.included_transactions {
                     // We assume that there's no more than 2<<32 transactions per block.
-                    let body_index = u32::try_from(body_index).unwrap();
-                    tx.update_status(TransactionStatus::Dropped(DropReason::Finalized {
-                        block_hash: block.block_hash,
-                        index: body_index,
-                    }));
+                    let body_index = u32::try_from(tx.index_in_block).unwrap();
+                    tx.user_data
+                        .update_status(TransactionStatus::Dropped(DropReason::Finalized {
+                            block_hash: block.block_hash,
+                            index: body_index,
+                        }));
                     // `tx` is no longer in the pool.
                 }
             }
@@ -549,11 +617,11 @@ async fn background_task<TPlat: Platform>(
                                 },
                             );
                             if new_block.is_new_best {
-                                worker.set_best_block(&hash);
+                                worker.set_best_block(&log_target, &hash);
                             }
                         },
                         Some(runtime_service::Notification::Finalized { hash, best_block_hash, .. }) => {
-                            worker.set_best_block(&best_block_hash);
+                            worker.set_best_block(&log_target, &best_block_hash);
                             for pruned in worker
                                 .pending_transactions
                                 .set_finalized_block(&hash)
@@ -565,6 +633,9 @@ async fn background_task<TPlat: Platform>(
                                 // Note that we could in principle interrupt any on-going
                                 // download of that block, but it is not worth the effort.
                             }
+                        },
+                        Some(runtime_service::Notification::BestBlockChanged { hash }) => {
+                            worker.set_best_block(&log_target, &hash);
                         },
                         None => continue 'channels_rebuild
                     }
@@ -589,19 +660,21 @@ async fn background_task<TPlat: Platform>(
                         block.failed_downloads = block.failed_downloads.saturating_add(1);
                     }
 
-                    log::debug!(
-                        target: &log_target,
-                        "BlockDownloads => {}(block={})",
-                        if block_body.is_ok() { "Success" } else { "Failed" },
-                        HashDisplay(&block_hash)
-                    );
-
                     if let Ok(block_body) = block_body {
                         let block_body_size = block_body.len();
                         let included_transactions = worker
                             .pending_transactions
                             .set_block_body(&block_hash, block_body.into_iter())
                             .collect::<Vec<_>>();
+
+                        log::debug!(
+                            target: &log_target,
+                            "BlockDownloads => Success(block={}, included-transactions={{{}}})",
+                            HashDisplay(&block_hash),
+                            included_transactions.iter()
+                                .map(|(id, _)| HashDisplay(&blake2_hash(worker.pending_transactions.scale_encoding(*id).unwrap())).to_string())
+                                .join(", ")
+                        );
 
                         for (tx_id, body_index) in included_transactions {
                             debug_assert!(body_index < block_body_size);
@@ -610,6 +683,13 @@ async fn background_task<TPlat: Platform>(
                             let body_index = u32::try_from(body_index).unwrap();
                             tx.update_status(TransactionStatus::IncludedBlockUpdate { block_hash: Some((block_hash, body_index)) });
                         }
+
+                    } else {
+                        log::debug!(
+                            target: &log_target,
+                            "BlockDownloads => Failed(block={})",
+                            HashDisplay(&block_hash)
+                        );
                     }
                 },
 
@@ -624,10 +704,13 @@ async fn background_task<TPlat: Platform>(
                         continue;
                     }
 
-                    // Don't gossip the transaction if it hasn't been validated.
+                    // Don't gossip the transaction if it hasn't been validated or is already
+                    // included.
                     // TODO: if best block changes, we would need to reset all the re-announce period of all transactions, awkward!
                     // TODO: also, if this is false, then the transaction might never be re-announced ever again
-                    if !worker.pending_transactions.is_valid_against_best_block(maybe_reannounce_tx_id) {
+                    if worker.pending_transactions.is_included_best_chain(maybe_reannounce_tx_id) ||
+                        !worker.pending_transactions.is_valid_against_best_block(maybe_reannounce_tx_id)
+                    {
                         continue;
                     }
 
@@ -677,7 +760,7 @@ async fn background_task<TPlat: Platform>(
 
                     // Try extract the validation result of this transaction, or `continue` if it
                     // is a false positive.
-                    let validation_result = match worker.pending_transactions.transaction_user_data_mut(maybe_validated_tx_id) {
+                    let (block_hash, validation_result) = match worker.pending_transactions.transaction_user_data_mut(maybe_validated_tx_id) {
                         None => continue,  // Normal. `maybe_validated_tx_id` is just a hint.
                         Some(tx) => match tx.validation_in_progress.as_mut().and_then(|f| f.now_or_never()) {
                             None => continue,  // Normal. `maybe_validated_tx_id` is just a hint.
@@ -690,28 +773,30 @@ async fn background_task<TPlat: Platform>(
 
                     let tx_hash = blake2_hash(worker.pending_transactions.scale_encoding(maybe_validated_tx_id).unwrap());
 
-                    match validation_result {
-                        Ok((block_hash, Ok(result))) => {
-                            // The validation is made using the runtime service, while the state
-                            // of the chain is tracked using the sync service. As such, it is
-                            // possible for the validation to have been performed against a block
-                            // that has already been finalized and removed from the pool.
-                            if !worker.pending_transactions.has_block(&block_hash) {
-                                log::debug!(
-                                    target: &log_target,
-                                    "TxValidations => ObsoleteBlock(tx={}, block={})",
-                                    HashDisplay(&tx_hash),
-                                    HashDisplay(&block_hash)
-                                );
-                                continue;
-                            }
+                    // The validation is made using the runtime service, while the state
+                    // of the chain is tracked using the sync service. As such, it is
+                    // possible for the validation to have been performed against a block
+                    // that has already been finalized and removed from the pool.
+                    if !worker.pending_transactions.has_block(&block_hash) {
+                        log::debug!(
+                            target: &log_target,
+                            "TxValidations => ObsoleteBlock(tx={}, block={})",
+                            HashDisplay(&tx_hash),
+                            HashDisplay(&block_hash)
+                        );
+                        continue;
+                    }
 
+                    match &validation_result {
+                        Ok(result) => {
                             log::debug!(
                                 target: &log_target,
-                                "TxValidations => Success(tx={}, block={}, result={:?})",
+                                "TxValidations => Success(tx={}, block={}, priority={}, longevity={}, propagate={:?})",
                                 HashDisplay(&tx_hash),
                                 HashDisplay(&block_hash),
-                                result // TODO: better show results
+                                result.priority,
+                                result.longevity,
+                                result.propagate,
                             );
 
                             log::info!(
@@ -720,39 +805,34 @@ async fn background_task<TPlat: Platform>(
                                 HashDisplay(&tx_hash)
                             );
 
-                            worker.pending_transactions
-                                .set_validation_result(maybe_validated_tx_id, &block_hash, Ok(result));
-
                             // Schedule this transaction for announcement.
                             worker.next_reannounce.push(async move {
                                 maybe_validated_tx_id
                             }.boxed());
                         }
-                        Ok((_, Err(error))) => {
+                        Err(InvalidOrError::Invalid(error)) => {
                             log::debug!(
                                 target: &log_target,
-                                "TxValidations => Invalid(tx={}, error={:?})",
+                                "TxValidations => Invalid(tx={}, block={}, error={:?})",
                                 HashDisplay(&tx_hash),
+                                HashDisplay(&block_hash),
                                 error,
                             );
 
                             log::warn!(
                                 target: &log_target,
-                                "Discarding invalid transaction {}: {:?}",
+                                "Transaction {} invalid against block {}: {}",
                                 HashDisplay(&tx_hash),
+                                HashDisplay(&block_hash),
                                 error,
                             );
-
-                            // The validation itself has completed, but the runtime indicated
-                            // that the transaction was invalid. Drop the transaction.
-                            let mut tx = worker.pending_transactions.remove_transaction(maybe_validated_tx_id);
-                            tx.update_status(TransactionStatus::Dropped(DropReason::Invalid(error)));
                         }
-                        Err(error) => {
+                        Err(InvalidOrError::ValidateError(error)) => {
                             log::debug!(
                                 target: &log_target,
-                                "TxValidations => Error(tx={}, error={:?})",
+                                "TxValidations => Error(tx={}, block={}, error={:?})",
                                 HashDisplay(&tx_hash),
+                                HashDisplay(&block_hash),
                                 error,
                             );
 
@@ -762,14 +842,14 @@ async fn background_task<TPlat: Platform>(
                                 HashDisplay(&tx_hash),
                                 error
                             );
-
-                            // Transaction couldn't be validated because of an error while
-                            // executing the runtime. This most likely indicates a compatibility
-                            // problem between smoldot and the runtime code. Drop the transaction.
-                            let mut tx = worker.pending_transactions.remove_transaction(maybe_validated_tx_id);
-                            tx.update_status(TransactionStatus::Dropped(DropReason::ValidateError(error)));
                         }
                     }
+
+                    // No matter whether the validation is successful, we store the result in
+                    // the transactions pool. This will later be picked up by the code that removes
+                    // invalid transactions from the pool.
+                    worker.pending_transactions
+                        .set_validation_result(maybe_validated_tx_id, &block_hash, validation_result);
                 },
 
                 message = from_foreground.next().fuse() => {
@@ -856,7 +936,7 @@ struct Worker<TPlat: Platform> {
     ///
     /// All the blocks within this data structure are also pinned within the runtime service. They
     /// must be unpinned when they leave the data structure.
-    pending_transactions: light_pool::LightPool<PendingTransaction<TPlat>, Block>,
+    pending_transactions: light_pool::LightPool<PendingTransaction<TPlat>, Block, InvalidOrError>,
 
     /// See [`Config::max_pending_transactions`].
     max_pending_transactions: usize,
@@ -891,7 +971,7 @@ struct Worker<TPlat: Platform> {
 impl<TPlat: Platform> Worker<TPlat> {
     /// Update the best block. Must have been previously inserted with
     /// [`light_pool::LightPool::add_block`].
-    fn set_best_block(&mut self, new_best_block_hash: &[u8; 32]) {
+    fn set_best_block(&mut self, log_target: &str, new_best_block_hash: &[u8; 32]) {
         let updates = self
             .pending_transactions
             .set_best_block(new_best_block_hash);
@@ -901,6 +981,18 @@ impl<TPlat: Platform> Worker<TPlat> {
         // the old and new best chain.
         // In that situation we need to first signal `Retracted`, then only `InBlock`.
         // Consequently, process `retracted_transactions` first.
+
+        log::debug!(
+            target: log_target,
+            "BestChainUpdate(new-best-block={}, included-transactions={{{}}}, retracted-transactions={{{}}})",
+            HashDisplay(new_best_block_hash),
+            updates.included_transactions.iter()
+                .map(|(id, _, _)| HashDisplay(&blake2_hash(self.pending_transactions.scale_encoding(*id).unwrap())).to_string())
+                .join(", "),
+            updates.retracted_transactions.iter()
+                .map(|(id, _, _)| HashDisplay(&blake2_hash(self.pending_transactions.scale_encoding(*id).unwrap())).to_string())
+                .join(", ")
+        );
 
         for (tx_id, _, _) in updates.retracted_transactions {
             let tx = self
@@ -954,15 +1046,7 @@ struct PendingTransaction<TPlat: Platform> {
 
     /// If `Some`, will receive the result of the validation of the transaction.
     validation_in_progress: Option<
-        future::RemoteHandle<
-            Result<
-                (
-                    [u8; 32],
-                    Result<validate::ValidTransaction, validate::TransactionValidityError>,
-                ),
-                ValidateTransactionError,
-            >,
-        >,
+        future::RemoteHandle<([u8; 32], Result<validate::ValidTransaction, InvalidOrError>)>,
     >,
 }
 
@@ -1001,22 +1085,23 @@ async fn validate_transaction<TPlat: Platform>(
     block_scale_encoded_header: &[u8],
     scale_encoded_transaction: impl AsRef<[u8]> + Clone,
     source: validate::TransactionSource,
-) -> Result<
-    Result<validate::ValidTransaction, validate::TransactionValidityError>,
-    ValidateTransactionError,
-> {
+) -> Result<validate::ValidTransaction, InvalidOrError> {
     let runtime_lock = relay_chain_sync
         .pinned_block_runtime_lock(relay_chain_sync_subscription_id, &block_hash)
         .await;
 
     log::debug!(
         target: log_target,
-        "TxValidations <= Start(tx={}, block={}, block_height={:?})",
+        "TxValidations <= Start(tx={}, block={}, block_height={})",
         HashDisplay(&blake2_hash(scale_encoded_transaction.as_ref())),
         HashDisplay(runtime_lock.block_hash()),
-        header::decode(block_scale_encoded_header)
-            .ok()
-            .map(|h| h.number) // TODO: show this better than with the `Debug` trait
+        header::decode(
+            block_scale_encoded_header,
+            relay_chain_sync.block_number_bytes()
+        )
+        .ok()
+        .map(|h| format!("#{}", h.number))
+        .unwrap_or_else(|| "unknown".to_owned())
     );
 
     let block_hash = *runtime_lock.block_hash();
@@ -1034,11 +1119,13 @@ async fn validate_transaction<TPlat: Platform>(
             NonZeroU32::new(1).unwrap(),
         )
         .await
-        .map_err(ValidateTransactionError::Call)?;
+        .map_err(ValidateTransactionError::Call)
+        .map_err(InvalidOrError::ValidateError)?;
 
     let mut validation_in_progress = validate::validate_transaction(validate::Config {
         runtime,
         scale_encoded_header: block_scale_encoded_header,
+        block_number_bytes: relay_chain_sync.block_number_bytes(),
         scale_encoded_transaction: iter::once(scale_encoded_transaction),
         source,
     });
@@ -1046,25 +1133,36 @@ async fn validate_transaction<TPlat: Platform>(
     loop {
         match validation_in_progress {
             validate::Query::Finished {
-                result: Ok(success),
+                result: Ok(Ok(success)),
                 virtual_machine,
             } => {
                 runtime_call_lock.unlock(virtual_machine);
                 break Ok(success);
             }
             validate::Query::Finished {
+                result: Ok(Err(invalid)),
+                virtual_machine,
+            } => {
+                runtime_call_lock.unlock(virtual_machine);
+                break Err(InvalidOrError::Invalid(invalid));
+            }
+            validate::Query::Finished {
                 result: Err(error),
                 virtual_machine,
             } => {
                 runtime_call_lock.unlock(virtual_machine);
-                break Err(ValidateTransactionError::Validation(error));
+                break Err(InvalidOrError::ValidateError(
+                    ValidateTransactionError::Validation(error),
+                ));
             }
             validate::Query::StorageGet(get) => {
                 let storage_value = match runtime_call_lock.storage_entry(&get.key_as_vec()) {
                     Ok(v) => v,
                     Err(err) => {
                         runtime_call_lock.unlock(validate::Query::StorageGet(get).into_prototype());
-                        return Err(ValidateTransactionError::Call(err));
+                        return Err(InvalidOrError::ValidateError(
+                            ValidateTransactionError::Call(err),
+                        ));
                     }
                 };
                 validation_in_progress = get.inject_value(storage_value.map(iter::once));
@@ -1072,7 +1170,9 @@ async fn validate_transaction<TPlat: Platform>(
             validate::Query::NextKey(nk) => {
                 // TODO:
                 runtime_call_lock.unlock(validate::Query::NextKey(nk).into_prototype());
-                break Err(ValidateTransactionError::NextKeyForbidden);
+                break Err(InvalidOrError::ValidateError(
+                    ValidateTransactionError::NextKeyForbidden,
+                ));
             }
             validate::Query::PrefixKeys(prefix) => {
                 // TODO: lots of allocations because I couldn't figure how to make this annoying borrow checker happy
@@ -1085,7 +1185,9 @@ async fn validate_transaction<TPlat: Platform>(
                     Err(err) => {
                         runtime_call_lock
                             .unlock(validate::Query::PrefixKeys(prefix).into_prototype());
-                        return Err(ValidateTransactionError::Call(err));
+                        return Err(InvalidOrError::ValidateError(
+                            ValidateTransactionError::Call(err),
+                        ));
                     }
                 }
             }
@@ -1093,7 +1195,7 @@ async fn validate_transaction<TPlat: Platform>(
     }
 }
 
-/// Utility. Calculates the blake2 hash of the given bytes.
+/// Utility. Calculates the BLAKE2 hash of the given bytes.
 fn blake2_hash(bytes: &[u8]) -> [u8; 32] {
     <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], bytes).as_bytes()).unwrap()
 }

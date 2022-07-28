@@ -17,7 +17,6 @@
 
 use alloc::collections::VecDeque;
 use core::{cmp, mem};
-use futures::future::{self, BoxFuture, Future, FutureExt as _};
 
 // TODO: documentation
 
@@ -48,9 +47,6 @@ pub struct ReadWrite<'a, TNow> {
 
     /// If `Some`, the socket must be waken up after the given `TNow` is reached.
     pub wake_up_after: Option<TNow>,
-
-    /// If `Some`, the socket must be waken up after the given future is ready.
-    pub wake_up_future: Option<BoxFuture<'static, ()>>,
 }
 
 impl<'a, TNow> ReadWrite<'a, TNow> {
@@ -90,7 +86,7 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
             let out_buf_0_len = outgoing_buffer.0.len();
             advance_buf(&mut outgoing_buffer.0, cmp::min(num, out_buf_0_len));
             advance_buf(&mut outgoing_buffer.1, num.saturating_sub(out_buf_0_len));
-            if outgoing_buffer.0.is_empty() {
+            if outgoing_buffer.0.is_empty() && !outgoing_buffer.1.is_empty() {
                 mem::swap::<&mut [u8]>(&mut outgoing_buffer.0, &mut outgoing_buffer.1);
             }
         } else {
@@ -107,10 +103,7 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
 
     /// Returns the size of the data available in the incoming buffer.
     pub fn incoming_buffer_available(&self) -> usize {
-        self.incoming_buffer
-            .as_ref()
-            .map(|buf| buf.len())
-            .unwrap_or(0)
+        self.incoming_buffer.as_ref().map_or(0, |buf| buf.len())
     }
 
     /// Shortcut to [`ReadWrite::advance_read`], passing as parameter the value of
@@ -150,8 +143,7 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
     pub fn outgoing_buffer_available(&self) -> usize {
         self.outgoing_buffer
             .as_ref()
-            .map(|(a, b)| a.len() + b.len())
-            .unwrap_or(0)
+            .map_or(0, |(a, b)| a.len() + b.len())
     }
 
     /// Copies the content of `data` to [`ReadWrite::outgoing_buffer`] and increases
@@ -215,44 +207,6 @@ impl<'a, TNow> ReadWrite<'a, TNow> {
             ref mut t @ None => *t = Some(after.clone()),
         }
     }
-
-    /// Sets [`ReadWrite::wake_up_future`] to `select(wake_up_future, when)`.
-    pub fn wake_up_when(&mut self, when: impl Future<Output = ()> + Send + 'static) {
-        let current = match self.wake_up_future.take() {
-            Some(f) => f,
-            None => {
-                self.wake_up_future = Some(when.boxed());
-                return;
-            }
-        };
-
-        self.wake_up_future = Some(
-            async move {
-                futures::pin_mut!(when);
-                future::select(current, when).await;
-            }
-            .boxed(),
-        );
-    }
-
-    /// Same as [`ReadWrite::wake_up_when`], but accepts a boxed future as parameter. This is
-    /// slightly faster if your future is already boxed.
-    pub fn wake_up_when_boxed(&mut self, when: future::BoxFuture<'static, ()>) {
-        let current = match self.wake_up_future.take() {
-            Some(f) => f,
-            None => {
-                self.wake_up_future = Some(when);
-                return;
-            }
-        };
-
-        self.wake_up_future = Some(
-            async move {
-                future::select(current, when).await;
-            }
-            .boxed(),
-        );
-    }
 }
 
 fn advance_buf(buf: &mut &mut [u8], n: usize) {
@@ -307,7 +261,6 @@ mod tests {
             read_bytes: 2,
             written_bytes: 0,
             wake_up_after: None,
-            wake_up_future: None,
         };
 
         let mut iter = rw.incoming_bytes_iter();
@@ -341,7 +294,6 @@ mod tests {
             read_bytes: 5,
             written_bytes: 0,
             wake_up_after: None,
-            wake_up_future: None,
         };
 
         rw.advance_read(1);
@@ -365,7 +317,6 @@ mod tests {
             read_bytes: 0,
             written_bytes: 5,
             wake_up_after: None,
-            wake_up_future: None,
         };
 
         rw.advance_write(1);
@@ -390,7 +341,6 @@ mod tests {
             read_bytes: 0,
             written_bytes: 5,
             wake_up_after: None,
-            wake_up_future: None,
         };
 
         rw.advance_write(4);
@@ -412,7 +362,6 @@ mod tests {
             read_bytes: 0,
             written_bytes: 5,
             wake_up_after: None,
-            wake_up_future: None,
         };
 
         rw.write_from_vec_deque(&mut input);
@@ -437,7 +386,6 @@ mod tests {
             read_bytes: 0,
             written_bytes: 5,
             wake_up_after: None,
-            wake_up_future: None,
         };
 
         rw.write_from_vec_deque(&mut input);

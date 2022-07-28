@@ -46,13 +46,26 @@
 //! zstandard-compressed and must also export a global symbol named `__heap_base`.
 //! More details below.
 //!
-//! ## Zstandard compression
+//! ## `Zstandard` compression
 //!
 //! The runtime code passed as parameter to [`HostVmPrototype::new`] can be compressed using the
-//! [zstd](https://en.wikipedia.org/wiki/Zstandard) algorithm.
+//! [`zstd`](https://en.wikipedia.org/wiki/Zstandard) algorithm.
 //!
 //! If the code starts with the magic bytes `[82, 188, 83, 118, 70, 219, 142, 5]`, then it is
 //! assumed that the rest of the data is a zstandard-compressed WebAssembly module.
+//!
+//! ## Runtime version
+//!
+//! Wasm files can contain so-called custom sections. A runtime can contain two custom sections
+//! whose names are `"runtime_version"` and `"runtime_apis"`, in which case they must contain a
+//! so-called runtime version.
+//!
+//! The runtime version contains important field that identifies a runtime.
+//!
+//! If no `"runtime_version"` and `"runtime_apis"` custom sections can be found, the
+//! `Core_version` entry point is used as a fallback in order to obtain the runtime version. This
+//! fallback mechanism is maintained for backwards compatibility purposes, but is considered
+//! deprecated.
 //!
 //! ## Memory allocations
 //!
@@ -63,7 +76,7 @@
 //! WebAssembly code is normally intended to perform its own heap-management logic internally, and
 //! use the `memory.grow` instruction if more memory is needed.
 //!
-//! In order to minimize the size of the runtime binary, and in order to accomodate for the API of
+//! In order to minimize the size of the runtime binary, and in order to accommodate for the API of
 //! the host functions that return a buffer of variable length, the Substrate/Polkadot runtimes,
 //! however, do not perform their heap management internally. Instead, they use the
 //! `ext_allocator_malloc_version_1` and `ext_allocator_free_version_1` host functions for this
@@ -88,7 +101,7 @@
 //! parameters into the Wasm virtual machine's memory, then pass a pointer and length of this
 //! buffer as the parameters of the entry point.
 //!
-//! The function returns a 64bits number. The 32 less significant bits represent a pointer to the
+//! The function returns a 64 bits number. The 32 less significant bits represent a pointer to the
 //! Wasm virtual machine's memory, and the 32 most significant bits a length. This pointer and
 //! length designate a buffer containing the actual return value.
 //!
@@ -130,18 +143,18 @@
 //! ## Example
 //!
 //! ```
-//! use smoldot::executor::host::{HeapPages, HostVm, HostVmPrototype};
+//! use smoldot::executor::host::{Config, HeapPages, HostVm, HostVmPrototype};
 //!
 //! # let wasm_binary_code: &[u8] = return;
 //!
 //! // Start executing a function on the runtime.
 //! let mut vm: HostVm = {
-//!     let prototype = HostVmPrototype::new(
-//!         &wasm_binary_code,
-//!         HeapPages::from(2048),
-//!         smoldot::executor::vm::ExecHint::Oneshot,
-//!         false
-//!     ).unwrap();
+//!     let prototype = HostVmPrototype::new(Config {
+//!         module: &wasm_binary_code,
+//!         heap_pages: HeapPages::from(2048),
+//!         exec_hint: smoldot::executor::vm::ExecHint::Oneshot,
+//!         allow_unresolved_imports: false
+//!     }).unwrap();
 //!     prototype.run_no_param("Core_version").unwrap().into()
 //! };
 //!
@@ -186,10 +199,35 @@ use core::{fmt, hash::Hasher as _, iter, str};
 use sha2::Digest as _;
 use tiny_keccak::Hasher as _;
 
+pub mod runtime_version;
+
+pub use runtime_version::{CoreVersion, CoreVersionError, CoreVersionRef};
 pub use vm::HeapPages;
 pub use zstd::Error as ModuleFormatError;
 
 mod zstd;
+
+/// Configuration for [`HostVmPrototype::new`].
+pub struct Config<TModule> {
+    /// Bytes of the WebAssembly module.
+    ///
+    /// The module can be either directly Wasm bytecode, or zstandard-compressed.
+    pub module: TModule,
+
+    /// Number of pages of heap available to the virtual machine.
+    ///
+    /// See the module-level documentation for an explanation.
+    pub heap_pages: HeapPages,
+
+    /// Hint used by the implementation to decide which kind of virtual machine to use.
+    pub exec_hint: vm::ExecHint,
+
+    /// If `true`, no [`vm::NewErr::UnresolvedFunctionImport`] error will be returned if the
+    /// module trying to import functions that aren't recognized by the implementation. Instead,
+    /// a [`Error::UnresolvedFunctionCalled`] error will be generated if the module tries to call
+    /// an unresolved function.
+    pub allow_unresolved_imports: bool,
+}
 
 /// Prototype for an [`HostVm`].
 ///
@@ -201,6 +239,11 @@ pub struct HostVmPrototype {
     ///
     /// > **Note**: Cloning this object is cheap.
     module: vm::Module,
+
+    /// Runtime version of this runtime.
+    ///
+    /// Always `Some`, except at initialization.
+    runtime_version: Option<CoreVersion>,
 
     /// Inner virtual machine prototype.
     vm_proto: vm::VirtualMachinePrototype,
@@ -229,28 +272,27 @@ pub struct HostVmPrototype {
 
 impl HostVmPrototype {
     /// Creates a new [`HostVmPrototype`]. Parses and potentially JITs the module.
-    ///
-    /// See the module-level documentation for an explanation of the value of `heap_pages`.
-    ///
-    /// The module can be either directly Wasm bytecode, or zstandard-compressed.eans exactly
-    // TODO: have a proper Config struct
-    pub fn new(
-        module: impl AsRef<[u8]>,
-        heap_pages: HeapPages,
-        exec_hint: vm::ExecHint,
-        allow_unresolved_imports: bool,
-    ) -> Result<Self, NewErr> {
+    pub fn new(config: Config<impl AsRef<[u8]>>) -> Result<Self, NewErr> {
         // TODO: configurable maximum allowed size? a uniform value is important for consensus
-        let module = zstd::zstd_decode_if_necessary(module.as_ref(), 50 * 1024 * 1024)
+        let module = zstd::zstd_decode_if_necessary(config.module.as_ref(), 50 * 1024 * 1024)
             .map_err(NewErr::BadFormat)?;
-        let module = vm::Module::new(module, exec_hint)?;
-        Self::from_module(module, heap_pages, allow_unresolved_imports)
+        let runtime_version = runtime_version::find_embedded_runtime_version(&module)
+            .ok()
+            .flatten(); // TODO: return error instead of using `ok()`? unclear
+        let module = vm::Module::new(module, config.exec_hint).map_err(vm::NewErr::ModuleError)?;
+        Self::from_module(
+            module,
+            config.heap_pages,
+            config.allow_unresolved_imports,
+            runtime_version,
+        )
     }
 
     fn from_module(
         module: vm::Module,
         heap_pages: HeapPages,
         allow_unresolved_imports: bool,
+        runtime_version: Option<CoreVersion>,
     ) -> Result<Self, NewErr> {
         // Initialize the virtual machine.
         // Each symbol requested by the Wasm runtime will be put in `registered_functions`. Later,
@@ -301,15 +343,61 @@ impl HostVmPrototype {
             return Err(NewErr::MemoryMaxSizeTooLow);
         }
 
-        Ok(HostVmPrototype {
+        let mut host_vm_prototype = HostVmPrototype {
             module,
+            runtime_version,
             vm_proto,
             heap_base,
             registered_functions,
             heap_pages,
             allow_unresolved_imports,
             memory_total_pages,
-        })
+        };
+
+        // Call `Core_version` if no runtime version is known yet.
+        if host_vm_prototype.runtime_version.is_none() {
+            let mut vm: HostVm = match host_vm_prototype.run_no_param("Core_version") {
+                Ok(vm) => vm.into(),
+                Err((err, _)) => return Err(NewErr::CoreVersion(CoreVersionError::Start(err))),
+            };
+
+            loop {
+                match vm {
+                    HostVm::ReadyToRun(r) => vm = r.run(),
+                    HostVm::Finished(finished) => {
+                        let version =
+                            match CoreVersion::from_slice(finished.value().as_ref().to_vec()) {
+                                Ok(v) => v,
+                                Err(_) => {
+                                    return Err(NewErr::CoreVersion(CoreVersionError::Decode))
+                                }
+                            };
+
+                        host_vm_prototype = finished.into_prototype();
+                        host_vm_prototype.runtime_version = Some(version);
+                        break;
+                    }
+
+                    // Emitted log lines are ignored.
+                    HostVm::GetMaxLogLevel(resume) => {
+                        vm = resume.resume(0); // Off
+                    }
+                    HostVm::LogEmit(log) => vm = log.resume(),
+
+                    HostVm::Error { error, .. } => {
+                        return Err(NewErr::CoreVersion(CoreVersionError::Run(error)))
+                    }
+
+                    // Getting the runtime version is a very core operation, and very few
+                    // external calls are allowed.
+                    _ => return Err(NewErr::CoreVersion(CoreVersionError::ForbiddenHostFunction)),
+                }
+            }
+        }
+
+        // Success!
+        debug_assert!(host_vm_prototype.runtime_version.is_some());
+        Ok(host_vm_prototype)
     }
 
     /// Returns the number of heap pages that were passed to [`HostVmPrototype::new`].
@@ -317,12 +405,17 @@ impl HostVmPrototype {
         self.heap_pages
     }
 
+    /// Returns the runtime version found in the module.
+    pub fn runtime_version(&self) -> &CoreVersion {
+        self.runtime_version.as_ref().unwrap()
+    }
+
     /// Starts the VM, calling the function passed as parameter.
     pub fn run(self, function_to_call: &str, data: &[u8]) -> Result<ReadyToRun, (StartErr, Self)> {
         self.run_vectored(function_to_call, iter::once(data))
     }
 
-    /// Same as [`HostVmPrototype::run`], except that the function desn't need any parameter.
+    /// Same as [`HostVmPrototype::run`], except that the function doesn't need any parameter.
     pub fn run_no_param(self, function_to_call: &str) -> Result<ReadyToRun, (StartErr, Self)> {
         self.run_vectored(function_to_call, iter::empty::<Vec<u8>>())
     }
@@ -349,7 +442,7 @@ impl HostVmPrototype {
         // Now create the actual virtual machine. We pass as parameter `heap_base` as the location
         // of the input data.
         let mut vm = match self.vm_proto.start(
-            vm::HeapPages::new(1 + self.heap_base / (64 * 1024)), // TODO: `1 + ` is a hack for the start value; solve with https://github.com/paritytech/smoldot/issues/132
+            vm::HeapPages::new(1 + (data_len_u32 + self.heap_base) / (64 * 1024)), // TODO: `data_len_u32 + ` is a hack for the start value; solve with https://github.com/paritytech/smoldot/issues/132
             function_to_call,
             &[
                 vm::WasmValue::I32(i32::from_ne_bytes(self.heap_base.to_ne_bytes())),
@@ -381,6 +474,7 @@ impl HostVmPrototype {
             resume_value: None,
             inner: Inner {
                 module: self.module,
+                runtime_version: self.runtime_version,
                 vm,
                 heap_base: self.heap_base,
                 heap_pages: self.heap_pages,
@@ -403,6 +497,7 @@ impl Clone for HostVmPrototype {
             self.module.clone(),
             self.heap_pages,
             self.allow_unresolved_imports,
+            self.runtime_version.clone(),
         )
         .unwrap()
     }
@@ -449,7 +544,7 @@ pub enum HostVm {
     /// Need to provide the storage key that follows a specific one.
     #[from]
     ExternalStorageNextKey(ExternalStorageNextKey),
-    /// Must the set value of an offchain storage entry.
+    /// Must the set value of an off-chain storage entry.
     #[from]
     ExternalOffchainStorageSet(ExternalOffchainStorageSet),
     /// Need to call `Core_version` on the given Wasm code and return the raw output (i.e.
@@ -474,7 +569,6 @@ pub enum HostVm {
         /// Object used to resume execution.
         resume: EndStorageTransaction,
         /// If true, changes must be rolled back.
-        #[must_use]
         rollback: bool,
     },
     /// Need to provide the maximum log level.
@@ -552,7 +646,7 @@ impl ReadyToRun {
                 // consecutive I32s representing the length and size of the SCALE-encoded
                 // return value.
                 let value_size = u32::try_from(ret >> 32).unwrap();
-                let value_ptr = u32::try_from(ret & 0xffffffff).unwrap();
+                let value_ptr = u32::try_from(ret & 0xffff_ffff).unwrap();
 
                 if value_size.saturating_add(value_ptr)
                     <= u32::from(self.inner.vm.memory_size()) * 64 * 1024
@@ -562,18 +656,17 @@ impl ReadyToRun {
                         value_ptr,
                         value_size,
                     });
-                } else {
-                    let error = Error::ReturnedPtrOutOfRange {
-                        pointer: value_ptr,
-                        size: value_size,
-                        memory_size: u32::from(self.inner.vm.memory_size()) * 64 * 1024,
-                    };
-
-                    return HostVm::Error {
-                        prototype: self.inner.into_prototype(),
-                        error,
-                    };
                 }
+                let error = Error::ReturnedPtrOutOfRange {
+                    pointer: value_ptr,
+                    size: value_size,
+                    memory_size: u32::from(self.inner.vm.memory_size()) * 64 * 1024,
+                };
+
+                return HostVm::Error {
+                    prototype: self.inner.into_prototype(),
+                    error,
+                };
             }
 
             Ok(vm::ExecOutcome::Finished {
@@ -776,12 +869,17 @@ impl ReadyToRun {
             }};
         }
 
-        // TODO: implement properly and use an enum instead;  cc https://github.com/paritytech/smoldot/issues/1967
         macro_rules! expect_state_version {
             ($num:expr) => {{
                 match &params[$num] {
-                    vm::WasmValue::I32(0) => 0,
-                    vm::WasmValue::I32(1) => 1,
+                    vm::WasmValue::I32(0) => trie::TrieEntryVersion::V0,
+                    vm::WasmValue::I32(1) => trie::TrieEntryVersion::V1,
+                    vm::WasmValue::I32(_) => {
+                        return HostVm::Error {
+                            error: Error::ParamDecodeError,
+                            prototype: self.inner.into_prototype(),
+                        }
+                    }
                     v => {
                         return HostVm::Error {
                             error: Error::WrongParamTy {
@@ -921,9 +1019,10 @@ impl ReadyToRun {
             HostFunction::ext_storage_root_version_2 => {
                 let state_version = expect_state_version!(0);
                 match state_version {
-                    0 => HostVm::ExternalStorageRoot(ExternalStorageRoot { inner: self.inner }),
-                    1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
-                    _ => unreachable!(),
+                    trie::TrieEntryVersion::V0 => {
+                        HostVm::ExternalStorageRoot(ExternalStorageRoot { inner: self.inner })
+                    }
+                    trie::TrieEntryVersion::V1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
                 }
             }
             HostFunction::ext_storage_changes_root_version_1 => {
@@ -1044,8 +1143,8 @@ impl ReadyToRun {
                     if let Ok(public_key) = public_key {
                         let signature =
                             ed25519_zebra::Signature::from(expect_pointer_constant_size!(0, 64));
-                        let message = expect_pointer_size!(1).as_ref().to_owned(); // TODO: to_owned() :-/
-                        public_key.verify(&signature, &message).is_ok()
+                        let message = expect_pointer_size!(1);
+                        public_key.verify(&signature, message.as_ref()).is_ok()
                     } else {
                         false
                     }
@@ -1067,11 +1166,15 @@ impl ReadyToRun {
                         schnorrkel::PublicKey::from_bytes(&expect_pointer_constant_size!(2, 32))
                             .unwrap();
 
-                    let message = expect_pointer_size!(1).as_ref().to_owned(); // TODO: to_owned() :-/
                     let signature = expect_pointer_constant_size!(0, 64);
+                    let message = expect_pointer_size!(1);
 
                     signing_public_key
-                        .verify_simple_preaudit_deprecated(b"substrate", &message, &signature)
+                        .verify_simple_preaudit_deprecated(
+                            b"substrate",
+                            message.as_ref(),
+                            &signature,
+                        )
                         .is_ok()
                 };
 
@@ -1102,8 +1205,117 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_crypto_ecdsa_generate_version_1 => host_fn_not_implemented!(),
-            HostFunction::ext_crypto_ecdsa_sign_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_crypto_ecdsa_sign_version_1 => {
+                // NOTE: safe to unwrap here because we supply the nn to blake2b fn
+                let data = <[u8; 32]>::try_from(
+                    blake2_rfc::blake2b::blake2b(32, &[], expect_pointer_size!(0).as_ref())
+                        .as_bytes(),
+                )
+                .unwrap();
+                let message = libsecp256k1::Message::parse(&data);
+
+                if let Ok(sc) =
+                    libsecp256k1::SecretKey::parse(&expect_pointer_constant_size!(1, 32))
+                {
+                    let (sig, ri) = libsecp256k1::sign(&message, &sc);
+
+                    // NOTE: the function returns 2 slices: signature (64 bytes) and recovery ID (1 byte; AS A SLICE)
+                    self.inner.alloc_write_and_return_pointer(
+                        host_fn.name(),
+                        [&sig.serialize()[..], &[ri.serialize()]].into_iter(),
+                    )
+                } else {
+                    HostVm::Error {
+                        error: Error::ParamDecodeError,
+                        prototype: self.inner.into_prototype(),
+                    }
+                }
+            }
             HostFunction::ext_crypto_ecdsa_public_keys_version_1 => host_fn_not_implemented!(),
+            HostFunction::ext_crypto_ecdsa_verify_version_1 => {
+                let success = {
+                    // NOTE: safe to unwrap here because we supply the nn to blake2b fn
+                    let data = <[u8; 32]>::try_from(
+                        blake2_rfc::blake2b::blake2b(32, &[], expect_pointer_size!(0).as_ref())
+                            .as_bytes(),
+                    )
+                    .unwrap();
+                    let message = libsecp256k1::Message::parse(&data);
+
+                    // signature (64 bytes) + recovery ID (1 byte)
+                    let sig_bytes = expect_pointer_constant_size!(0, 65);
+                    if let Ok(sig) = libsecp256k1::Signature::parse_standard_slice(&sig_bytes[..64])
+                    {
+                        if let Ok(ri) = libsecp256k1::RecoveryId::parse(sig_bytes[64]) {
+                            if let Ok(actual) = libsecp256k1::recover(&message, &sig, &ri) {
+                                expect_pointer_constant_size!(2, 33)[..]
+                                    == actual.serialize_compressed()[..]
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+
+                HostVm::ReadyToRun(ReadyToRun {
+                    resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+                    inner: self.inner,
+                })
+            }
+            HostFunction::ext_crypto_ecdsa_sign_prehashed_version_1 => {
+                let message = libsecp256k1::Message::parse(&expect_pointer_constant_size!(0, 32));
+
+                if let Ok(sc) =
+                    libsecp256k1::SecretKey::parse(&expect_pointer_constant_size!(1, 32))
+                {
+                    let (sig, ri) = libsecp256k1::sign(&message, &sc);
+
+                    // NOTE: the function returns 2 slices: signature (64 bytes) and recovery ID (1 byte; AS A SLICE)
+                    self.inner.alloc_write_and_return_pointer(
+                        host_fn.name(),
+                        [&sig.serialize()[..], &[ri.serialize()]].into_iter(),
+                    )
+                } else {
+                    HostVm::Error {
+                        error: Error::ParamDecodeError,
+                        prototype: self.inner.into_prototype(),
+                    }
+                }
+            }
+            HostFunction::ext_crypto_ecdsa_verify_prehashed_version_1 => {
+                let success = {
+                    let message =
+                        libsecp256k1::Message::parse(&expect_pointer_constant_size!(0, 32));
+
+                    // signature (64 bytes) + recovery ID (1 byte)
+                    let sig_bytes = expect_pointer_constant_size!(0, 65);
+                    if let Ok(sig) = libsecp256k1::Signature::parse_standard_slice(&sig_bytes[..64])
+                    {
+                        if let Ok(ri) = libsecp256k1::RecoveryId::parse(sig_bytes[64]) {
+                            if let Ok(actual) = libsecp256k1::recover(&message, &sig, &ri) {
+                                expect_pointer_constant_size!(2, 33)[..]
+                                    == actual.serialize_compressed()[..]
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+
+                HostVm::ReadyToRun(ReadyToRun {
+                    resume_value: Some(vm::WasmValue::I32(if success { 1 } else { 0 })),
+                    inner: self.inner,
+                })
+            }
+
             HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1
             | HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2 => {
                 let sig = expect_pointer_constant_size!(0, 65);
@@ -1209,9 +1421,19 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_crypto_finish_batch_verify_version_1 => {
+                // This function is a dummy implementation. After `ext_crypto_start_batch_verify`
+                // has been called, the runtime is supposed to call
+                // `ext_crypto_ed25519_batch_verify`, `ext_crypto_sr25519_batch_verify`, or
+                // `ext_crypto_ecdsa_batch_verify`, then retrieve the result using
+                // `ext_crypto_finish_batch_verify`. However, none of the three
+                // `<algo>_batch_verify` functions is supported by smoldot at the moment.
+                // Thus, if the runtime calls `ext_crypto_finish_batch_verify`, then it
+                // necessarily means that the batch is empty, and thus we always return success.
+                // At the moment, batch signatures verification isn't enabled on any production
+                // chain.
+                // Once support for any of the `<algo>_batch_verify` function is added, this
+                // implementation should of course change.
                 HostVm::ReadyToRun(ReadyToRun {
-                    // TODO: wrong! this is a dummy implementation meaning that all
-                    // signature verifications are always successful
                     resume_value: Some(vm::WasmValue::I32(1)),
                     inner: self.inner,
                 })
@@ -1361,13 +1583,12 @@ impl ReadyToRun {
             HostFunction::ext_sandbox_get_global_val_version_1 => host_fn_not_implemented!(),
             HostFunction::ext_trie_blake2_256_root_version_1
             | HostFunction::ext_trie_blake2_256_root_version_2 => {
-                if matches!(host_fn, HostFunction::ext_trie_blake2_256_root_version_2) {
-                    match expect_state_version!(1) {
-                        0 => {}
-                        1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
-                        _ => unreachable!(),
-                    }
-                }
+                let state_version =
+                    if matches!(host_fn, HostFunction::ext_trie_blake2_256_root_version_2) {
+                        expect_state_version!(1)
+                    } else {
+                        trie::TrieEntryVersion::V0
+                    };
 
                 let result = {
                     let input = expect_pointer_size!(0);
@@ -1394,7 +1615,7 @@ impl ReadyToRun {
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {
-                        Ok(elements) => Ok(trie::trie_root(&elements[..])),
+                        Ok(elements) => Ok(trie::trie_root(state_version, &elements[..])),
                         Err(_) => Err(()),
                     }
                 };
@@ -1411,16 +1632,14 @@ impl ReadyToRun {
             }
             HostFunction::ext_trie_blake2_256_ordered_root_version_1
             | HostFunction::ext_trie_blake2_256_ordered_root_version_2 => {
-                if matches!(
+                let state_version = if matches!(
                     host_fn,
                     HostFunction::ext_trie_blake2_256_ordered_root_version_2
                 ) {
-                    match expect_state_version!(1) {
-                        0 => {}
-                        1 => host_fn_not_implemented!(), // TODO: https://github.com/paritytech/smoldot/issues/1967
-                        _ => unreachable!(),
-                    }
-                }
+                    expect_state_version!(1)
+                } else {
+                    trie::TrieEntryVersion::V0
+                };
 
                 let result = {
                     let input = expect_pointer_size!(0);
@@ -1441,7 +1660,7 @@ impl ReadyToRun {
                         .map(|(_, parse_result)| parse_result);
 
                     match parsing_result {
-                        Ok(elements) => Ok(trie::ordered_root(&elements[..])),
+                        Ok(elements) => Ok(trie::ordered_root(state_version, &elements[..])),
                         Err(_) => Err(()),
                     }
                 };
@@ -1870,7 +2089,7 @@ impl fmt::Debug for ExternalStorageSet {
 ///
 /// This change consists in taking an existing value and assuming that it is a SCALE-encoded
 /// container. This can be done as decoding a SCALE-compact-encoded number at the start of
-/// the existing encoded value. One most then increment that number and puting `value` at the
+/// the existing encoded value. One most then increments that number and puts `value` at the
 /// end of the encoded value.
 ///
 /// It is not necessary to decode `value` as is assumed that is already encoded in the same
@@ -1955,7 +2174,7 @@ impl ExternalStorageClearPrefix {
 
     /// Resumes execution after having cleared the values.
     ///
-    /// Must be passed how many keys have been cleared, and whether some keys remaing to be
+    /// Must be passed how many keys have been cleared, and whether some keys remaining to be
     /// cleared.
     pub fn resume(self, num_cleared: u32, some_keys_remain: bool) -> HostVm {
         if self.is_v2 {
@@ -2101,7 +2320,7 @@ impl fmt::Debug for CallRuntimeVersion {
     }
 }
 
-/// Must set the value of the offchain storage.
+/// Must set the value of the off-chain storage.
 pub struct ExternalOffchainStorageSet {
     inner: Inner,
 
@@ -2151,7 +2370,7 @@ impl fmt::Debug for ExternalOffchainStorageSet {
 
 /// Report about a log entry being emitted.
 ///
-/// Use the implementation of [`fmt::Display`] to obtain the log entry. For exmaple, you can
+/// Use the implementation of [`fmt::Display`] to obtain the log entry. For example, you can
 /// call [`alloc::string::ToString::to_string`] to turn it into a `String`.
 pub struct LogEmit {
     inner: Inner,
@@ -2241,6 +2460,9 @@ struct Inner {
     /// See [`HostVmPrototype::module`].
     module: vm::Module,
 
+    /// See [`HostVmPrototype::runtime_version`].
+    runtime_version: Option<CoreVersion>,
+
     /// Inner lower-level virtual machine.
     vm: vm::VirtualMachine,
 
@@ -2270,15 +2492,15 @@ struct Inner {
 
 impl Inner {
     /// Uses the memory allocator to allocate some memory for the given data, writes the data in
-    /// memory, and returns an [`HostVm`] ready for the Wasm host_fn return.
+    /// memory, and returns an [`HostVm`] ready for the Wasm `host_fn` return.
     ///
-    /// The data is passed as a list of chunks. These chunks will be laid out lineraly in memory.
+    /// The data is passed as a list of chunks. These chunks will be laid out linearly in memory.
     ///
     /// The function name passed as parameter is used for error-reporting reasons.
     ///
     /// # Panic
     ///
-    /// Must only be called while the Wasm is handling an host_fn.
+    /// Must only be called while the Wasm is handling an `host_fn`.
     ///
     fn alloc_write_and_return_pointer_size(
         mut self,
@@ -2319,15 +2541,15 @@ impl Inner {
     }
 
     /// Uses the memory allocator to allocate some memory for the given data, writes the data in
-    /// memory, and returns an [`HostVm`] ready for the Wasm host_fn return.
+    /// memory, and returns an [`HostVm`] ready for the Wasm `host_fn` return.
     ///
-    /// The data is passed as a list of chunks. These chunks will be laid out lineraly in memory.
+    /// The data is passed as a list of chunks. These chunks will be laid out linearly in memory.
     ///
     /// The function name passed as parameter is used for error-reporting reasons.
     ///
     /// # Panic
     ///
-    /// Must only be called while the Wasm is handling an host_fn.
+    /// Must only be called while the Wasm is handling an `host_fn`.
     ///
     fn alloc_write_and_return_pointer(
         mut self,
@@ -2371,7 +2593,7 @@ impl Inner {
     ///
     /// # Panic
     ///
-    /// Must only be called while the Wasm is handling an host_fn.
+    /// Must only be called while the Wasm is handling an `host_fn`.
     ///
     fn alloc(&mut self, function_name: &'static str, size: u32) -> Result<u32, Error> {
         // Use the allocator to decide where the value will be written.
@@ -2424,6 +2646,7 @@ impl Inner {
     fn into_prototype(self) -> HostVmPrototype {
         HostVmPrototype {
             module: self.module,
+            runtime_version: self.runtime_version,
             vm_proto: self.vm.into_prototype(),
             heap_base: self.heap_base,
             registered_functions: self.registered_functions,
@@ -2438,11 +2661,14 @@ impl Inner {
 #[derive(Debug, derive_more::From, derive_more::Display, Clone)]
 pub enum NewErr {
     /// Error while initializing the virtual machine.
-    #[display(fmt = "Error while initializing the virtual machine: {}", _0)]
+    #[display(fmt = "{}", _0)]
     VirtualMachine(vm::NewErr),
     /// Error in the format of the runtime code.
     #[display(fmt = "{}", _0)]
     BadFormat(ModuleFormatError),
+    /// Error while calling `Core_version` to determine the runtime version.
+    #[display(fmt = "Error while calling Core_version: {}", _0)]
+    CoreVersion(CoreVersionError),
     /// Couldn't find the `__heap_base` symbol in the Wasm code.
     HeapBaseNotFound,
     /// Maximum size of the Wasm memory found in the module is too low to provide the requested
@@ -2454,7 +2680,7 @@ pub enum NewErr {
 #[derive(Debug, Clone, derive_more::From, derive_more::Display)]
 pub enum StartErr {
     /// Error while starting the virtual machine.
-    #[display(fmt = "Error while starting the virtual machine: {}", _0)]
+    #[display(fmt = "{}", _0)]
     VirtualMachine(vm::StartErr),
     /// The size of the input data is too large.
     DataSizeOverflow,
@@ -2482,7 +2708,7 @@ pub enum Error {
         /// Size of the virtual memory.
         memory_size: u32,
     },
-    /// An host_fn wants to returns a certain value, but the Wasm code expects a different one.
+    /// An `host_fn` wants to returns a certain value, but the Wasm code expects a different one.
     // TODO: indicate function and actual/expected types
     ReturnValueTypeMismatch,
     /// Called a function that is unknown to the host.
@@ -2514,7 +2740,7 @@ pub enum Error {
     ParamDecodeError,
     /// The type of one of the parameters is wrong.
     #[display(
-        fmt = "Type mismatch in parameter #{}: {}, expected = {:?}, actual = {:?}",
+        fmt = "Type mismatch in parameter of index {}: {}, expected = {:?}, actual = {:?}",
         param_num,
         function,
         expected,
@@ -2533,7 +2759,7 @@ pub enum Error {
     /// One parameter is expected to point to a buffer, but the pointer is out
     /// of range of the memory of the Wasm VM.
     #[display(
-        fmt = "Bad pointer for parameter #{} of {}: 0x{:x}, len = 0x{:x}",
+        fmt = "Bad pointer for parameter of index {} of {}: 0x{:x}, len = 0x{:x}",
         param_num,
         function,
         pointer,
@@ -2555,7 +2781,7 @@ pub enum Error {
     /// One parameter is expected to point to a UTF-8 string, but the buffer
     /// isn't valid UTF-8.
     #[display(
-        fmt = "UTF-8 error for parameter #{} of {}: {}",
+        fmt = "UTF-8 error for parameter of index {} of {}: {}",
         param_num,
         function,
         error
@@ -2598,7 +2824,7 @@ pub enum Error {
         pointer
     )]
     FreeError {
-        /// Pointer that was expected to be free'd.
+        /// Pointer that was expected to be freed.
         pointer: u32,
     },
     /// The host function isn't implemented.
@@ -2691,6 +2917,9 @@ externalities! {
     ext_crypto_ecdsa_generate_version_1,
     ext_crypto_ecdsa_sign_version_1,
     ext_crypto_ecdsa_public_keys_version_1,
+    ext_crypto_ecdsa_verify_version_1,
+    ext_crypto_ecdsa_sign_prehashed_version_1,
+    ext_crypto_ecdsa_verify_prehashed_version_1,
     ext_crypto_secp256k1_ecdsa_recover_version_1,
     ext_crypto_secp256k1_ecdsa_recover_version_2,
     ext_crypto_secp256k1_ecdsa_recover_compressed_version_1,
@@ -2796,8 +3025,11 @@ impl HostFunction {
             HostFunction::ext_crypto_sr25519_verify_version_1 => 3,
             HostFunction::ext_crypto_sr25519_verify_version_2 => 3,
             HostFunction::ext_crypto_ecdsa_generate_version_1 => todo!(),
-            HostFunction::ext_crypto_ecdsa_sign_version_1 => todo!(),
+            HostFunction::ext_crypto_ecdsa_sign_version_1 => 2,
             HostFunction::ext_crypto_ecdsa_public_keys_version_1 => todo!(),
+            HostFunction::ext_crypto_ecdsa_verify_version_1 => 3,
+            HostFunction::ext_crypto_ecdsa_sign_prehashed_version_1 => 2,
+            HostFunction::ext_crypto_ecdsa_verify_prehashed_version_1 => 3,
             HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_1 => 2,
             HostFunction::ext_crypto_secp256k1_ecdsa_recover_version_2 => 2,
             HostFunction::ext_crypto_secp256k1_ecdsa_recover_compressed_version_1 => 2,

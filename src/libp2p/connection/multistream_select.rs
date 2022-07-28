@@ -169,7 +169,7 @@ where
         // legitimately requests a protocol that the listener doesn't support. In order to prevent
         // confusion, a minimum length is applied to the protocol name length. Any protocol name
         // smaller than this will never trigger a protocol error, even if it isn't supported.
-        const MIN_PROTO_LEN_NO_ERR: usize = 48;
+        const MIN_PROTO_LEN_NO_ERR: usize = 512;
         let max_frame_len = cmp::max(
             cmp::max(max_proto_name_len, MIN_PROTO_LEN_NO_ERR),
             HANDSHAKE.len(),
@@ -240,7 +240,7 @@ where
                             }
                         }
                         (true, Config::Listener { .. }) => {
-                            self.state = InProgressState::HandshakeExpected
+                            self.state = InProgressState::HandshakeExpected;
                         }
                     };
                 }
@@ -314,13 +314,12 @@ where
 
                     if done {
                         return Ok(Negotiation::Success(protocol));
-                    } else {
-                        self.state = InProgressState::SendProtocolOk {
-                            num_bytes_written,
-                            protocol,
-                        };
-                        break;
                     }
+                    self.state = InProgressState::SendProtocolOk {
+                        num_bytes_written,
+                        protocol,
+                    };
+                    break;
                 }
 
                 (
@@ -507,14 +506,14 @@ where
 
                 // Invalid states.
                 (InProgressState::SendProtocolRequest { .. }, Some(Config::Listener { .. })) => {
-                    unreachable!()
+                    unreachable!();
                 }
                 (InProgressState::SendLsResponse { .. }, Some(Config::Dialer { .. })) => {
-                    unreachable!()
+                    unreachable!();
                 }
                 (InProgressState::CommandExpected, Some(Config::Dialer { .. })) => unreachable!(),
                 (InProgressState::ProtocolRequestAnswerExpected, Some(Config::Listener { .. })) => {
-                    unreachable!()
+                    unreachable!();
                 }
                 (_, None) => unreachable!(),
             };
@@ -534,11 +533,12 @@ impl<I, P> fmt::Debug for InProgress<I, P> {
 /// Error that can happen during the negotiation.
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum Error {
-    /// Reading side of the connection is closed. The handshake can't proceeed further.
+    /// Reading side of the connection is closed. The handshake can't proceed further.
     ReadClosed,
-    /// Writing side of the connection is closed. The handshake can't proceeed further.
+    /// Writing side of the connection is closed. The handshake can't proceed further.
     WriteClosed,
     /// Error while decoding a frame length, or frame size limit reached.
+    #[display(fmt = "LEB128 frame error: {}", _0)]
     Frame(leb128::FramedError),
     /// Unknown handshake or unknown multistream-select protocol version.
     BadHandshake,
@@ -600,7 +600,7 @@ where
                     Some(either::Right(either::Left(protocol)))
                 }
                 (MessageOut::LsResponse(_), _) => Some(either::Left(&b"\n"[..])),
-                (MessageOut::ProtocolOk(_), 0) | (MessageOut::ProtocolRequest(_), 0) => {
+                (MessageOut::ProtocolOk(_) | MessageOut::ProtocolRequest(_), 0) => {
                     let proto = match mem::replace(&mut self, MessageOut::Ls) {
                         MessageOut::ProtocolOk(p) | MessageOut::ProtocolRequest(p) => p,
                         _ => unreachable!(),
@@ -609,7 +609,7 @@ where
                     n = 499;
                     Some(either::Right(either::Left(proto)))
                 }
-                (MessageOut::ProtocolOk(_), _) | (MessageOut::ProtocolRequest(_), _) => {
+                (MessageOut::ProtocolOk(_) | MessageOut::ProtocolRequest(_), _) => {
                     unreachable!()
                 }
                 (MessageOut::ProtocolNa, 0) => Some(either::Left(&b"na\n"[..])),
@@ -744,7 +744,6 @@ mod tests {
                                 read_bytes: 0,
                                 written_bytes: 0,
                                 wake_up_after: None,
-                                wake_up_future: None,
                             };
                             negotiation1 = nego.read_write(&mut read_write).unwrap();
                             let (read_bytes, written_bytes) =
@@ -761,7 +760,6 @@ mod tests {
                                 read_bytes: 0,
                                 written_bytes: 0,
                                 wake_up_after: None,
-                                wake_up_future: None,
                             };
                             negotiation1 = nego.read_write(&mut read_write).unwrap();
                             for _ in 0..read_write.read_bytes {
@@ -784,7 +782,6 @@ mod tests {
                                 read_bytes: 0,
                                 written_bytes: 0,
                                 wake_up_after: None,
-                                wake_up_future: None,
                             };
                             negotiation2 = nego.read_write(&mut read_write).unwrap();
                             let (read_bytes, written_bytes) =
@@ -801,7 +798,6 @@ mod tests {
                                 read_bytes: 0,
                                 written_bytes: 0,
                                 wake_up_after: None,
-                                wake_up_future: None,
                             };
                             negotiation2 = nego.read_write(&mut read_write).unwrap();
                             for _ in 0..read_write.read_bytes {

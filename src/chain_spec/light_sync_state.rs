@@ -19,7 +19,7 @@ use super::{ParseError, ParseErrorInner};
 use crate::header::BabeNextConfig;
 
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
-use parity_scale_codec::{Decode, DecodeAll as _, Encode};
+use parity_scale_codec::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,17 +33,27 @@ pub(super) struct LightSyncState {
 }
 
 impl LightSyncState {
-    pub(super) fn decode(&self) -> Result<DecodedLightSyncState, ParseError> {
-        let grandpa_authority_set_slice = &self.grandpa_authority_set.0[..];
-        let babe_epoch_changes_slice = &self.babe_epoch_changes.0[..];
+    pub(super) fn decode(
+        &self,
+        block_number_bytes: usize,
+    ) -> Result<DecodedLightSyncState, ParseError> {
+        let mut grandpa_authority_set_slice = &self.grandpa_authority_set.0[..];
+        let mut babe_epoch_changes_slice = &self.babe_epoch_changes.0[..];
 
         let decoded = DecodedLightSyncState {
-            finalized_block_header: crate::header::decode(&self.finalized_block_header.0[..])
-                .map_err(|_| ParseError(ParseErrorInner::Other))?
-                .into(),
-            grandpa_authority_set: AuthoritySet::decode_all(grandpa_authority_set_slice)
+            finalized_block_header: crate::header::decode(
+                &self.finalized_block_header.0[..],
+                block_number_bytes,
+            )
+            .map_err(|_| ParseError(ParseErrorInner::Other))?
+            .into(),
+            // We use `decode` in order to remain compatible in case new fields are added in
+            // Substrate to these data structures.
+            // This really should be solved by having a proper format for checkpoints, but
+            // there isn't.
+            grandpa_authority_set: AuthoritySet::decode(&mut grandpa_authority_set_slice)
                 .map_err(|_| ParseError(ParseErrorInner::Other))?,
-            babe_epoch_changes: EpochChanges::decode_all(babe_epoch_changes_slice)
+            babe_epoch_changes: EpochChanges::decode(&mut babe_epoch_changes_slice)
                 .map_err(|_| ParseError(ParseErrorInner::Other))?,
         };
 
@@ -62,6 +72,17 @@ pub(super) struct DecodedLightSyncState {
 pub(super) struct EpochChanges {
     inner: ForkTree<PersistedEpochHeader>,
     pub(super) epochs: BTreeMap<([u8; 32], u32), PersistedEpoch>,
+    // TODO: Substrate has added the field below to the checkpoints format ; it is commented out
+    //       right now in order to maintain compatibility with checkpoints that were generated
+    //       a long time ago
+    // gap: Option<GapEpochs>,
+}
+
+#[allow(unused)]
+#[derive(Debug, Decode, Encode)]
+pub(super) struct GapEpochs {
+    current: ([u8; 32], u32, PersistedEpoch),
+    next: Option<([u8; 32], u32, BabeEpoch)>,
 }
 
 #[derive(Debug, Decode, Encode)]

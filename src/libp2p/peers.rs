@@ -39,10 +39,10 @@
 //! does *not* invalidate its [`DesiredInNotificationId`].
 //! - A list of requests for outbound substreams emitted by the local node, identified by a
 //! [`DesiredOutNotificationId`]. Must be responded using [`Peers::open_out_notification`].
-//! - A list of requests that have been received, identified by a [`RequestId`]. The API user
-//! must answer by calling [`Peers::respond`]. Requests can automatically become obsolete if the
-//! remote decides to withdraw their request or the connection closes. A request becoming obsolete
-//! does *not* invalidate its [`RequestId`].
+//! - A list of requests that have been received, identified by a [`InRequestId`]. The API user
+//! must answer by calling [`Peers::respond_in_request`]. Requests can automatically become
+//! obsolete if the remote decides to withdraw their request or the connection closes. A request
+//! becoming obsolete does *not* invalidate its [`InRequestId`].
 //!
 
 use crate::libp2p::{self, collection, PeerId};
@@ -54,18 +54,18 @@ use alloc::{
     vec::Vec,
 };
 use core::{
-    num::{NonZeroU32, NonZeroUsize},
-    ops::{Add, Sub},
-    task::Poll,
+    hash::Hash,
+    num::NonZeroU32,
+    ops::{self, Add, Sub},
     time::Duration,
 };
-use futures::{lock::Mutex, prelude::*}; // TODO: no_std-ize
 use rand::{Rng as _, SeedableRng as _};
 
 pub use collection::{
-    ConfigRequestResponse, ConfigRequestResponseIn, ConnectionError, ConnectionReadyFuture,
-    InboundError, NotificationProtocolConfig, NotificationsInClosedErr, NotificationsOutErr,
-    ReadWrite,
+    ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionToCoordinator,
+    CoordinatorToConnection, InboundError, MultiStreamConnectionTask, NotificationProtocolConfig,
+    NotificationsInClosedErr, NotificationsOutErr, ReadWrite, RequestError,
+    SingleStreamConnectionTask, SubstreamId,
 };
 
 /// Configuration for a [`Peers`].
@@ -94,29 +94,113 @@ pub struct Config {
     /// This is a Noise static key, according to the Noise specification.
     /// Signed using the actual libp2p key.
     pub noise_key: libp2p::connection::NoiseKey,
-
-    /// Number of events that can be buffered internally before connections are back-pressured.
-    ///
-    /// A good default value is 64.
-    ///
-    /// # Context
-    ///
-    /// The [`Peers`] maintains an internal buffer of the events returned by
-    /// [`Peers::next_event`]. When [`Peers::read_write`] is called, an event might get pushed
-    /// to this buffer. If this buffer is full, back-pressure will be applied to the connections
-    /// in order to prevent new events from being pushed.
-    ///
-    /// This value is important if [`Peers::next_event`] is called at a slower than the calls to
-    /// [`Peers::read_write`] generate events.
-    pub pending_api_events_buffer_size: NonZeroUsize,
 }
 
-pub use collection::ConnectionId;
-
 pub struct Peers<TConn, TNow> {
-    inner: collection::Network<usize, TNow>,
+    /// Underlying state machine that manages connections.
+    inner: collection::Network<Connection<TConn>, TNow>,
 
-    guarded: Mutex<Guarded<TConn>>,
+    /// List of all peer identities known to the state machine.
+    peers: slab::Slab<Peer>,
+
+    /// For each known peer, the corresponding index within [`Peers::peers`].
+    ///
+    /// We split the list of peers in two in order to avoid doing extensive hash map lookups when
+    /// it's not necessary.
+    peer_indices: hashbrown::HashMap<PeerId, usize, SipHasherBuild>,
+
+    /// List of all established connections, as a tuple of `(peer_index, connection_id)`.
+    /// `peer_index` is the index in [`Peers::peers`]. Includes all connections even if they are
+    /// still handshaking or shutting down.
+    ///
+    /// Note that incoming handshaking connections are never in this list, as their expected
+    /// peer id isn't known before the end of the handshake.
+    connections_by_peer: BTreeSet<(usize, collection::ConnectionId)>,
+
+    /// Keys are combinations of `(peer_index, notifications_protocol_index)`. Contains all the
+    /// inbound notification substreams that are either pending or accepted. Used in order to
+    /// prevent a peer from opening multiple inbound substreams.
+    peers_notifications_in: BTreeSet<(usize, usize)>,
+
+    /// For each inner notification protocol substream, the connection id and the
+    /// `notifications_protocol_index`.
+    ///
+    /// This applies to both inbound and outbound notification substreams.
+    // TODO: this could be a user data in `collection`
+    inner_notification_substreams: hashbrown::HashMap<
+        collection::SubstreamId,
+        (collection::ConnectionId, usize),
+        fnv::FnvBuildHasher,
+    >,
+
+    /// Keys are combinations of `(peer_index, notifications_protocol_index)`. Values are the
+    /// state of the corresponding outbound notifications substream.
+    peers_notifications_out: BTreeMap<(usize, usize), NotificationsOutState>,
+
+    /// Each [`DesiredInNotificationId`] points to this slab. Contains the connection and
+    /// substream id to accept or refuse. Items are always initially set to `Some`, but they can
+    /// be set to `None` if the remote cancels its request.
+    desired_in_notifications: slab::Slab<Option<(collection::SubstreamId, usize, usize)>>,
+
+    /// Each [`DesiredOutNotificationId`] points to this slab.
+    // TODO: doc
+    desired_out_notifications: slab::Slab<Option<(usize, collection::ConnectionId, usize)>>,
+
+    /// When a [`DesiredOutNotificationId`] is allocated, the parameters of the desired out
+    /// notification are added to this FIFO queue.
+    /// This list is later processed in the [`Peers::next_unfulfilled_desired_outbound_substream`]
+    /// function.
+    // TODO: explain why it can't grow unbounded
+    pending_desired_out_notifs: VecDeque<(DesiredOutNotificationId, usize, usize)>,
+
+    /// List of so-called "fake outgoing requests" for which an event about their failure should
+    /// be reported as soon as possible.
+    fake_out_requests_to_report: VecDeque<u64>,
+
+    /// Identifier to assign to the next fake outgoing requests. Increased one by one.
+    next_fake_out_request_id: u64,
+}
+
+/// See [`Peers::peers_notifications_out`].
+///
+/// Note that the state where `desired` is `true` and `open` is `Closed` means that the remote
+/// has refused or has closed the substream.
+struct NotificationsOutState {
+    desired: bool,
+    open: NotificationsOutOpenState,
+}
+
+enum NotificationsOutOpenState {
+    Closed,
+    ApiHandshakeWait(DesiredOutNotificationId),
+    Opening(collection::SubstreamId),
+    Open(collection::SubstreamId),
+}
+
+/// See [`Peers::peers`]
+struct Peer {
+    peer_id: PeerId,
+    desired: bool,
+}
+
+struct Connection<TConn> {
+    /// Index in [`Peers::peers`] of the peer this connection is connected to.
+    ///
+    /// - If the handshake is finished, contains the actual peer.
+    /// - If the handshake is in progress and the connection is outbound, contains the *expected*
+    /// peer, which might not be the same as the actual.
+    /// - If the handshake is in progress and the connection is inbound, contains `None`.
+    peer_index: Option<usize>,
+
+    /// List of so-called fake outgoing requests that [`Peers::start_request`] has created
+    /// regarding this connection. Always empty unless the connection is currently shutting down.
+    /// The API user thinks that the connection is currently executing this request, but in
+    /// reality it is not. When the connection finishes its shutdown, these fake requests are
+    /// pushed to [`Peers::fake_out_requests_to_report`] in order to be reported as having failed.
+    fake_out_requests: Vec<u64>,
+
+    /// Opaque data decided by the API user.
+    user_data: TConn,
 }
 
 impl<TConn, TNow> Peers<TConn, TNow>
@@ -137,24 +221,24 @@ where
                 ping_protocol: config.ping_protocol,
                 handshake_timeout: config.handshake_timeout,
                 randomness_seed: randomness.sample(rand::distributions::Standard),
-                pending_api_events_buffer_size: config.pending_api_events_buffer_size,
             }),
-            guarded: Mutex::new(Guarded {
-                pending_desired_out_notifs: VecDeque::with_capacity(0), // TODO: capacity?
-                pending_inner_event: None,
-                connections: slab::Slab::with_capacity(config.connections_capacity),
-                connections_by_peer: BTreeMap::new(),
-                peer_indices: hashbrown::HashMap::with_capacity_and_hasher(
-                    config.peers_capacity,
-                    SipHasherBuild::new(randomness.sample(rand::distributions::Standard)),
-                ),
-                peers: slab::Slab::with_capacity(config.peers_capacity),
-                peers_notifications_out: BTreeMap::new(),
-                peers_notifications_in: BTreeSet::new(),
-                requests_in: slab::Slab::new(), // TODO: capacity?
-                desired_in_notifications: slab::Slab::new(), // TODO: capacity?
-                desired_out_notifications: slab::Slab::new(), // TODO: capacity?
-            }),
+            connections_by_peer: BTreeSet::new(),
+            peer_indices: hashbrown::HashMap::with_capacity_and_hasher(
+                config.peers_capacity,
+                SipHasherBuild::new(randomness.sample(rand::distributions::Standard)),
+            ),
+            peers: slab::Slab::with_capacity(config.peers_capacity),
+            inner_notification_substreams: hashbrown::HashMap::with_capacity_and_hasher(
+                0,
+                Default::default(),
+            ), // TODO: capacity?
+            peers_notifications_out: BTreeMap::new(),
+            peers_notifications_in: BTreeSet::new(),
+            pending_desired_out_notifs: VecDeque::new(), // TODO: capacity?
+            desired_in_notifications: slab::Slab::new(), // TODO: capacity?
+            desired_out_notifications: slab::Slab::new(), // TODO: capacity?
+            fake_out_requests_to_report: VecDeque::with_capacity(8),
+            next_fake_out_request_id: 0,
         }
     }
 
@@ -174,604 +258,599 @@ where
         self.inner.request_response_protocols()
     }
 
-    /// Returns the Noise key originalled passed as [`Config::noise_key`].
+    /// Returns the Noise key originally passed as [`Config::noise_key`].
     pub fn noise_key(&self) -> &libp2p::connection::NoiseKey {
         self.inner.noise_key()
     }
 
+    /// Pulls a message that must be sent to a connection.
+    ///
+    /// The message must be passed to [`SingleStreamConnectionTask::inject_coordinator_message`]
+    /// or [`MultiStreamConnectionTask::inject_coordinator_message`] in the appropriate connection.
+    ///
+    /// This function guarantees that the [`ConnectionId`] always refers to a connection that
+    /// is still alive, in the sense that [`SingleStreamConnectionTask::inject_coordinator_message`]
+    /// or [`MultiStreamConnectionTask::inject_coordinator_message`] has never returned `None`.
+    pub fn pull_message_to_connection(
+        &mut self,
+    ) -> Option<(ConnectionId, CoordinatorToConnection<TNow>)> {
+        self.inner.pull_message_to_connection()
+    }
+
+    /// Injects into the state machine a message generated by
+    /// [`SingleStreamConnectionTask::pull_message_to_coordinator`] or
+    /// [`MultiStreamConnectionTask::pull_message_to_coordinator`].
+    ///
+    /// This message is queued and is later processed in [`Peers::next_event`]. This means that
+    /// it is [`Peers::next_event`] and not [`Peers::inject_connection_message`] that updates
+    /// the internals of the state machine according to the content of the message. For example,
+    /// if a [`SingleStreamConnectionTask`] sends a message to the coordinator indicating that a
+    /// notifications substream has been closed, the coordinator will still believe that it is
+    /// open until [`Peers::next_event`] processes this message and at the same time returns a
+    /// corresponding [`Event`]. Processing messages directly in
+    /// [`Peers::inject_connection_message`] would introduce "race conditions" where the API user
+    /// can't be sure in which state a connection or a substream is.
+    pub fn inject_connection_message(
+        &mut self,
+        connection_id: ConnectionId,
+        message: ConnectionToCoordinator,
+    ) {
+        self.inner.inject_connection_message(connection_id, message)
+    }
+
     /// Returns the next event produced by the service.
-    ///
-    /// This function should be called at a high enough rate that [`Peers::read_write`] can
-    /// continue pushing events to the internal buffer of events. Failure to call this function
-    /// often enough will lead to connections being back-pressured.
-    /// See also [`Config::pending_api_events_buffer_size`].
-    ///
-    /// It is technically possible to call this function multiple times simultaneously, in which
-    /// case the events will be distributed amongst the multiple calls in an unspecified way.
-    /// Keep in mind that some [`Event`]s have logic attached to the order in which they are
-    /// produced, and calling this function multiple times is therefore discouraged.
-    pub async fn next_event(&self) -> Event<TConn> {
+    pub fn next_event(&mut self) -> Option<Event<TConn>> {
         loop {
-            // The objective of the block of code below is to retrieve the next event that
-            // happened on the underlying libp2p state machine by calling
-            // `self.inner.next_event()`.
-            //
-            // After an event has been grabbed from `self.inner`, some modifications will need to
-            // be performed in `self.guarded`. Since it can take a lot of time to retrieve an
-            // event, and since other methods of `ChainNetwork` need to lock `self.guarded`, it
-            // is undesirable to keep `self.guarded` locked while waiting for the
-            // `self.inner.next_event()` future to finish.
-            //
-            // A naive solution would be to grab an event from `self.inner` then lock
-            // `self.guarded` immediately after. Unfortunately, the user can technically call
-            // `next_event` multiple times simultaneously. If that is done, we want to avoid a
-            // situation where task A retrieves an event, then task B retrieves an event, then
-            // task B locks `self.guarded` before task A could. Some kind of locking must be
-            // performed to prevent this.
-            //
-            // Additionally, `guarded` contains some fields, such as `pending_desired_out_notifs`,
-            // that need to be processed ahead of events. Because processing these fields requires
-            // using `await`, this processing can be interrupted by the user, and as such no event
-            // should be grabbed in that situation.
-            //
-            // For all these reasons, the logic of the code below is as follows:
-            //
-            // - First, asynchronously lock `self.guarded`.
-            // - After `self.guarded` is locked, if some of its fields require ahead-of-events
-            // processing, keep the lock and process this.
-            // - Otherwise, and while `self.guarded` is still locked, try to immediately grab an
-            // event with `self.inner.next_event()` and store it in `pending_inner_event`.
-            // - If no such event is immediately available, register the task waker and release
-            // the lock. Once the waker is invoked (meaning that an event should be available),
-            // go back to step 1 (locking `self.guarded`).
-            // - If an event is available, keep the lock and process it.
-            //
-            let mut guarded = {
-                let next_event_future = self.inner.next_event();
-                futures::pin_mut!(next_event_future);
-
-                let mut lock_acq_future = self.guarded.lock();
-                future::poll_fn(move |cx| {
-                    let mut lock = match lock_acq_future.poll_unpin(cx) {
-                        Poll::Ready(l) => l,
-                        Poll::Pending => return Poll::Pending,
-                    };
-
-                    if !lock.pending_desired_out_notifs.is_empty() {
-                        return Poll::Ready(lock);
-                    }
-                    if lock.pending_inner_event.is_some() {
-                        return Poll::Ready(lock);
-                    }
-
-                    match next_event_future.poll_unpin(cx) {
-                        Poll::Ready(event) => {
-                            lock.pending_inner_event = Some(event);
-                            Poll::Ready(lock)
-                        }
-                        Poll::Pending => {
-                            lock_acq_future = self.guarded.lock();
-                            Poll::Pending
-                        }
-                    }
-                })
-                .await
-            };
-            let guarded = &mut *guarded; // Avoid borrow checker issues.
-
-            // Some ahead-of-events processing might need to be performed.
-            if let Some((id, peer_id, notifications_protocol_index)) =
-                guarded.pending_desired_out_notifs.pop_front()
-            {
-                return Event::DesiredOutNotification {
-                    id,
-                    peer_id,
-                    notifications_protocol_index,
+            if let Some(fake_out_request_to_report) = self.fake_out_requests_to_report.pop_front() {
+                if self.fake_out_requests_to_report.is_empty() {
+                    self.fake_out_requests_to_report.shrink_to(8)
                 };
+                return Some(Event::Response {
+                    request_id: OutRequestId(OutRequestIdInner::Fake(fake_out_request_to_report)),
+                    response: Err(RequestError::ConnectionShutdown),
+                });
             }
 
-            // An event has been grabbed and is ready to be processed. `self.guarded` is still
-            // locked from before the event has been grabbed.
-            // In order to avoid futures cancellation issues, the state within `guarded` shouldn't
-            // be altered before any `await` points.
-            debug_assert!(guarded.pending_desired_out_notifs.is_empty());
-            debug_assert!(guarded.pending_inner_event.is_some());
+            let event = match self.inner.next_event() {
+                Some(ev) => ev,
+                None => return None,
+            };
 
-            match guarded.pending_inner_event.as_ref().unwrap() {
-                collection::Event::HandshakeFinished { .. } => {
-                    if let Some(collection::Event::HandshakeFinished {
-                        id: connection_id,
-                        peer_id,
-                        user_data: local_connection_index,
-                    }) = guarded.pending_inner_event.take()
-                    {
-                        let actual_peer_index = guarded.peer_index_or_insert(&peer_id);
+            match event {
+                collection::Event::HandshakeFinished {
+                    id: connection_id,
+                    peer_id,
+                } => {
+                    let actual_peer_index = self.peer_index_or_insert(&peer_id);
+                    let peer_id = self.peers[actual_peer_index].peer_id.clone();
 
-                        if let Some(expected_peer_index) =
-                            guarded.connections[local_connection_index].0
-                        {
-                            if expected_peer_index != actual_peer_index {
-                                let _was_in = guarded
-                                    .connections_by_peer
-                                    .remove(&(expected_peer_index, connection_id));
-                                debug_assert_eq!(_was_in, Some(false));
-                                let _was_in = guarded
-                                    .connections_by_peer
-                                    .insert((actual_peer_index, connection_id), true);
-                                debug_assert!(_was_in.is_none());
-                                guarded.connections[local_connection_index].0 =
-                                    Some(actual_peer_index);
-
-                                // TODO: report some kind of error on the outer API layers?
-                            } else {
-                                let _was_in = guarded
-                                    .connections_by_peer
-                                    .insert((actual_peer_index, connection_id), true);
-                                debug_assert_eq!(_was_in, Some(false));
-                            }
-                        } else {
-                            let _was_in = guarded
+                    if let Some(expected_peer_index) = self.inner[connection_id].peer_index {
+                        if expected_peer_index != actual_peer_index {
+                            let _was_in = self
                                 .connections_by_peer
-                                .insert((actual_peer_index, connection_id), true);
-                            debug_assert!(_was_in.is_none());
-                            guarded.connections[local_connection_index].0 = Some(actual_peer_index);
-                        }
-
-                        let num_peer_connections = {
-                            let num = guarded
+                                .remove(&(expected_peer_index, connection_id));
+                            debug_assert!(_was_in);
+                            let _inserted = self
                                 .connections_by_peer
-                                .range(
-                                    (actual_peer_index, collection::ConnectionId::min_value())
-                                        ..=(
-                                            actual_peer_index,
-                                            collection::ConnectionId::max_value(),
-                                        ),
-                                )
-                                .filter(|(_, established)| **established)
-                                .count();
-                            NonZeroU32::new(u32::try_from(num).unwrap()).unwrap()
-                        };
+                                .insert((actual_peer_index, connection_id));
+                            debug_assert!(_inserted);
+                            self.inner[connection_id].peer_index = Some(actual_peer_index);
 
-                        // If there isn't any other connection with this peer yet, check the desired
-                        // substreams and open them.
-                        if num_peer_connections.get() == 1 {
-                            let notification_protocols_indices = guarded
-                                .peers_notifications_out
-                                .range(
-                                    (actual_peer_index, usize::min_value())
-                                        ..=(actual_peer_index, usize::max_value()),
-                                )
-                                .filter(|(_, v)| {
-                                    // Since this check happens only at the first connection, all
-                                    // substreams are necessarily closed.
-                                    debug_assert!(matches!(
-                                        v.open,
-                                        NotificationsOutOpenState::Closed
-                                    ));
-                                    v.desired
-                                })
-                                .map(|((_, index), _)| *index)
-                                .collect::<Vec<_>>();
-
-                            for idx in notification_protocols_indices {
-                                let id = DesiredOutNotificationId(
-                                    guarded.desired_out_notifications.insert(Some((
-                                        actual_peer_index,
-                                        connection_id,
-                                        idx,
-                                    ))),
-                                );
-
-                                guarded
-                                    .peers_notifications_out
-                                    .get_mut(&(actual_peer_index, idx))
-                                    .unwrap()
-                                    .open = NotificationsOutOpenState::ApiHandshakeWait(id);
-
-                                guarded.pending_desired_out_notifs.push_back((
-                                    id,
-                                    peer_id.clone(),
-                                    idx,
-                                ));
-                            }
+                            // TODO: report some kind of error on the outer API layers?
                         }
-
-                        return Event::Connected {
-                            num_peer_connections,
-                            peer_id,
-                        };
                     } else {
-                        unreachable!()
+                        let _inserted = self
+                            .connections_by_peer
+                            .insert((actual_peer_index, connection_id));
+                        debug_assert!(_inserted);
+                        self.inner[connection_id].peer_index = Some(actual_peer_index);
+                    }
+
+                    let num_peer_connections = {
+                        let num = self
+                            .connections_by_peer
+                            .range(
+                                (actual_peer_index, collection::ConnectionId::min_value())
+                                    ..=(actual_peer_index, collection::ConnectionId::max_value()),
+                            )
+                            .filter(|(_, connection_id)| {
+                                // Note that connections that are shutting down are still counted,
+                                // as we report the disconnected event only at the end of the
+                                // shutdown.
+                                self.inner.connection_state(*connection_id).established
+                            })
+                            .count();
+                        NonZeroU32::new(u32::try_from(num).unwrap()).unwrap()
+                    };
+
+                    // If there isn't any other connection with this peer yet, check the desired
+                    // substreams and open them.
+                    if num_peer_connections.get() == 1 {
+                        let notification_protocols_indices = self
+                            .peers_notifications_out
+                            .range(
+                                (actual_peer_index, usize::min_value())
+                                    ..=(actual_peer_index, usize::max_value()),
+                            )
+                            .filter(|(_, v)| {
+                                // Since this check happens only at the first connection, all
+                                // substreams are necessarily closed.
+                                debug_assert!(matches!(v.open, NotificationsOutOpenState::Closed));
+                                v.desired
+                            })
+                            .map(|((_, index), _)| *index)
+                            .collect::<Vec<_>>();
+
+                        for idx in notification_protocols_indices {
+                            let id = DesiredOutNotificationId(
+                                self.desired_out_notifications.insert(Some((
+                                    actual_peer_index,
+                                    connection_id,
+                                    idx,
+                                ))),
+                            );
+
+                            self.peers_notifications_out
+                                .get_mut(&(actual_peer_index, idx))
+                                .unwrap()
+                                .open = NotificationsOutOpenState::ApiHandshakeWait(id);
+
+                            self.pending_desired_out_notifs
+                                .push_back((id, actual_peer_index, idx));
+                        }
+                    }
+
+                    return Some(Event::Connected {
+                        num_peer_connections,
+                        peer_id,
+                    });
+                }
+
+                collection::Event::StartShutdown { id, .. } => {
+                    // TODO: report the shutdown reason in the API; should be done after https://github.com/paritytech/smoldot/issues/2370
+                    // TODO: this is O(n)
+                    for (_, item) in &mut self.desired_out_notifications {
+                        if let Some((_, connection_id, _)) = item.as_ref() {
+                            if *connection_id == id {
+                                *item = None;
+                            }
+                        }
                     }
                 }
 
                 collection::Event::Shutdown {
                     id: connection_id,
-                    user_data: local_connection_index,
-                    ..
+                    was_established,
+                    user_data:
+                        Connection {
+                            peer_index: Some(expected_peer_index),
+                            fake_out_requests,
+                            user_data,
+                        },
                 } => {
-                    debug_assert!(guarded.connections.contains(*local_connection_index));
+                    // `expected_peer_index` is `None` iff the connection was an incoming
+                    // connection whose handshake isn't finished yet.
 
-                    let connection_id = *connection_id;
-                    let local_connection_index = *local_connection_index;
-                    guarded.pending_inner_event = None;
+                    let _was_in = self
+                        .connections_by_peer
+                        .remove(&(expected_peer_index, connection_id));
+                    debug_assert!(_was_in);
 
-                    // Update the state of `guarded` to match the fact that the connection has
-                    // been removed from `inner`.
-                    let (
-                        (peer_id, peer_is_desired, num_peer_connections, was_established),
-                        user_data,
-                    ) = match self.removed_from_inner(
-                        &mut *guarded,
-                        connection_id,
-                        local_connection_index,
-                    ) {
-                        (Some(a), b) => (a, b),
-                        (None, _) => {
-                            // A ping failure event can only happen after a connection has been
-                            // established, in which case `removed_from_inner` is guaranteed to
-                            // return `Some`.
-                            unreachable!()
-                        }
+                    let peer_id = self.peers[expected_peer_index].peer_id.clone();
+
+                    let num_peer_connections = {
+                        let num = self
+                            .connections_by_peer
+                            .range(
+                                (expected_peer_index, collection::ConnectionId::min_value())
+                                    ..=(expected_peer_index, collection::ConnectionId::max_value()),
+                            )
+                            .filter(|(_, connection_id)| {
+                                // Note that connections that are shutting down are still counted,
+                                // as we report the disconnected event only at the end of the
+                                // shutdown.
+                                self.inner.connection_state(*connection_id).established
+                            })
+                            .count();
+                        u32::try_from(num).unwrap()
                     };
+
+                    self.try_clean_up_peer(expected_peer_index);
+
+                    self.fake_out_requests_to_report.extend(fake_out_requests);
 
                     // Only produce a `Disconnected` event if connection wasn't handshaking.
                     if was_established {
-                        return Event::Disconnected {
+                        return Some(Event::Disconnected {
                             num_peer_connections,
                             peer_id,
-                            peer_is_desired,
                             user_data,
-                        };
+                        });
                     }
                 }
 
-                collection::Event::InboundError { .. } => {
-                    if let Some(collection::Event::InboundError {
-                        id,
+                collection::Event::Shutdown {
+                    user_data:
+                        Connection {
+                            peer_index: None,
+                            fake_out_requests,
+                            ..
+                        },
+                    ..
+                } => {
+                    // Connection was incoming but its handshake wasn't finished yet.
+                    // The shutdown isn't reported.
+                    debug_assert!(fake_out_requests.is_empty());
+                }
+
+                collection::Event::InboundError {
+                    id: connection_id,
+                    error,
+                } => {
+                    let peer_id = {
+                        let peer_index = self.inner[connection_id].peer_index.unwrap();
+                        self.peers[peer_index].peer_id.clone()
+                    };
+
+                    return Some(Event::InboundError {
+                        peer_id,
+                        connection_id,
                         error,
-                        user_data: local_connection_index,
-                    }) = guarded.pending_inner_event.take()
-                    {
-                        let peer_id = {
-                            let (peer_index, _) =
-                                guarded.connections[local_connection_index].clone();
-                            guarded.peers[peer_index.unwrap()].peer_id.clone()
-                        };
-
-                        return Event::InboundError {
-                            peer_id,
-                            connection_id: id,
-                            error,
-                        };
-                    } else {
-                        unreachable!()
-                    }
+                    });
                 }
 
-                collection::Event::RequestIn { .. } => {
-                    if let Some(collection::Event::RequestIn {
-                        id,
-                        substream_id,
+                collection::Event::Response {
+                    substream_id,
+                    response,
+                } => {
+                    return Some(Event::Response {
+                        request_id: OutRequestId(OutRequestIdInner::Real(substream_id)),
+                        response,
+                    });
+                }
+
+                collection::Event::RequestIn {
+                    id: connection_id,
+                    substream_id,
+                    protocol_index,
+                    request_payload,
+                } => {
+                    let peer_id = {
+                        // Incoming requests can only happen if the connection is no longer
+                        // handshaking, in which case `peer_index` is guaranteed to be `Some`.
+                        let peer_index = self.inner[connection_id].peer_index.unwrap();
+                        self.peers[peer_index].peer_id.clone()
+                    };
+
+                    return Some(Event::RequestIn {
+                        peer_id,
+                        connection_id,
                         protocol_index,
+                        request_id: InRequestId(substream_id),
                         request_payload,
-                        user_data: local_connection_index,
-                    }) = guarded.pending_inner_event.take()
-                    {
-                        let request_id = RequestId(guarded.requests_in.insert((id, substream_id)));
-                        let (peer_id, connection_user_data) = {
-                            let (peer_index, user_data) =
-                                guarded.connections[local_connection_index].clone();
-                            (
-                                guarded.peers[peer_index.unwrap()].peer_id.clone(),
-                                user_data,
-                            )
-                        };
-
-                        return Event::RequestIn {
-                            peer_id,
-                            connection_id: id,
-                            connection_user_data,
-                            protocol_index,
-                            request_id,
-                            request_payload,
-                        };
-                    } else {
-                        unreachable!()
-                    }
+                    });
                 }
 
-                collection::Event::NotificationsOutResult { .. } => {
-                    if let Some(collection::Event::NotificationsOutResult {
-                        id: connection_id,
-                        substream_id,
-                        notifications_protocol_index,
-                        result,
-                        user_data: local_connection_index,
-                    }) = guarded.pending_inner_event.take()
-                    {
-                        let peer_index = guarded.connections[local_connection_index].0.unwrap();
-                        let notification_out = guarded
-                            .peers_notifications_out
-                            .get_mut(&(peer_index, notifications_protocol_index))
-                            .unwrap();
-                        let desired = notification_out.desired;
-
-                        debug_assert!(matches!(
-                            notification_out.open,
-                            NotificationsOutOpenState::Opening(_, _)
-                        ));
-
-                        if result.is_ok() {
-                            notification_out.open =
-                                NotificationsOutOpenState::Open(connection_id, substream_id);
-                            // TODO: close if `!desired`
-                        } else {
-                            notification_out.open = NotificationsOutOpenState::Closed;
-
-                            // Remove entry from map if it has become useless.
-                            if !desired {
-                                guarded
-                                    .peers_notifications_out
-                                    .remove(&(peer_index, notifications_protocol_index));
-                            }
-                        }
-
-                        return Event::NotificationsOutResult {
-                            peer_id: guarded.peers[peer_index].peer_id.clone(),
-                            notifications_protocol_index,
-                            result,
-                        };
-                    } else {
-                        unreachable!()
-                    }
+                collection::Event::RequestInCancel { substream_id } => {
+                    return Some(Event::RequestInCancel {
+                        id: InRequestId(substream_id),
+                    })
                 }
 
-                collection::Event::NotificationsOutClose { .. } => {
-                    if let Some(collection::Event::NotificationsOutClose {
-                        notifications_protocol_index,
-                        user_data: local_connection_index,
-                        ..
-                    }) = guarded.pending_inner_event.take()
-                    {
-                        let peer_index = guarded.connections[local_connection_index].0.unwrap();
-                        let notification_out = guarded
-                            .peers_notifications_out
-                            .get_mut(&(peer_index, notifications_protocol_index))
-                            .unwrap();
+                collection::Event::NotificationsOutResult {
+                    substream_id,
+                    result,
+                } => {
+                    let (connection_id, notifications_protocol_index) = *self
+                        .inner_notification_substreams
+                        .get(&substream_id)
+                        .unwrap();
+                    let peer_index = self.inner[connection_id].peer_index.unwrap();
+                    let notification_out = self
+                        .peers_notifications_out
+                        .get_mut(&(peer_index, notifications_protocol_index))
+                        .unwrap();
+                    let desired = notification_out.desired;
 
-                        debug_assert!(matches!(
-                            notification_out.open,
-                            NotificationsOutOpenState::Open(_, _)
-                        ));
+                    debug_assert!(matches!(
+                        notification_out.open,
+                        NotificationsOutOpenState::Opening(_)
+                    ));
+
+                    if result.is_ok() {
+                        notification_out.open = NotificationsOutOpenState::Open(substream_id);
+                        // TODO: close if `!desired`
+                    } else {
                         notification_out.open = NotificationsOutOpenState::Closed;
+                        self.inner_notification_substreams
+                            .remove(&substream_id)
+                            .unwrap();
 
                         // Remove entry from map if it has become useless.
-                        if !notification_out.desired {
-                            guarded
-                                .peers_notifications_out
+                        if !desired {
+                            self.peers_notifications_out
                                 .remove(&(peer_index, notifications_protocol_index));
                         }
-
-                        return Event::NotificationsOutClose {
-                            peer_id: guarded.peers[peer_index].peer_id.clone(),
-                            notifications_protocol_index,
-                        };
-                    } else {
-                        unreachable!()
                     }
+
+                    return Some(Event::NotificationsOutResult {
+                        peer_id: self.peers[peer_index].peer_id.clone(),
+                        notifications_protocol_index,
+                        result,
+                    });
+                }
+
+                collection::Event::NotificationsOutCloseDemanded { substream_id }
+                | collection::Event::NotificationsOutReset { substream_id } => {
+                    // If the remote asks the substream to be closed, we immediately respond
+                    // accordingly without asking the higher level user. This is an opinionated
+                    // decision that could be changed in the future.
+                    if let collection::Event::NotificationsOutCloseDemanded { .. } = event {
+                        self.inner.close_out_notifications(substream_id);
+                    }
+
+                    let (connection_id, notifications_protocol_index) = self
+                        .inner_notification_substreams
+                        .remove(&substream_id)
+                        .unwrap();
+                    let peer_index = self.inner[connection_id].peer_index.unwrap();
+                    let notification_out = self
+                        .peers_notifications_out
+                        .get_mut(&(peer_index, notifications_protocol_index))
+                        .unwrap();
+
+                    debug_assert!(matches!(
+                        notification_out.open,
+                        NotificationsOutOpenState::Open(_)
+                    ));
+                    notification_out.open = NotificationsOutOpenState::Closed;
+
+                    // Remove entry from map if it has become useless.
+                    if !notification_out.desired {
+                        self.peers_notifications_out
+                            .remove(&(peer_index, notifications_protocol_index));
+                    }
+
+                    return Some(Event::NotificationsOutClose {
+                        peer_id: self.peers[peer_index].peer_id.clone(),
+                        notifications_protocol_index,
+                    });
                 }
 
                 collection::Event::NotificationsInOpen {
                     id: connection_id,
                     substream_id,
                     notifications_protocol_index,
-                    user_data: local_connection_index,
+                    remote_handshake: handshake,
                     ..
                 } => {
-                    let peer_index = guarded.connections[*local_connection_index].0.unwrap();
+                    // Incoming substreams can only happen if the connection is no longer
+                    // handshaking, in which case `peer_index` is guaranteed to be `Some`.
+                    let peer_index = self.inner[connection_id].peer_index.unwrap();
 
                     // If this peer has already opened an inbound notifications substream in the
                     // past, forbid any additional one.
-                    if guarded
+                    if self
                         .peers_notifications_in
-                        .contains(&(peer_index, *notifications_protocol_index))
+                        .contains(&(peer_index, notifications_protocol_index))
                     {
-                        let _ = self
-                            .inner
-                            .reject_notifications_in(*connection_id, *substream_id)
-                            .await;
-                    } else {
-                        guarded
-                            .peers_notifications_in
-                            .insert((peer_index, *notifications_protocol_index));
+                        self.inner.reject_in_notifications(substream_id);
+                        continue;
                     }
 
-                    // `pending_inner_event` is extracted after the `await` above.
-                    if let Some(collection::Event::NotificationsInOpen {
-                        id: connection_id,
-                        substream_id,
-                        notifications_protocol_index,
-                        remote_handshake: handshake,
-                        ..
-                    }) = guarded.pending_inner_event.take()
-                    {
-                        let desired_notif_id = DesiredInNotificationId(
-                            guarded.desired_in_notifications.insert(Some((
-                                connection_id,
-                                substream_id,
-                                peer_index,
-                                notifications_protocol_index,
-                            ))),
-                        );
+                    self.peers_notifications_in
+                        .insert((peer_index, notifications_protocol_index));
 
-                        let peer_id = guarded.peers[peer_index].peer_id.clone();
-
-                        return Event::DesiredInNotification {
-                            id: desired_notif_id,
-                            peer_id,
+                    let desired_notif_id =
+                        DesiredInNotificationId(self.desired_in_notifications.insert(Some((
+                            substream_id,
+                            peer_index,
                             notifications_protocol_index,
-                            handshake,
-                        };
-                    } else {
-                        unreachable!()
-                    }
+                        ))));
+
+                    let _was_in = self
+                        .inner_notification_substreams
+                        .insert(substream_id, (connection_id, notifications_protocol_index));
+                    debug_assert!(_was_in.is_none());
+
+                    return Some(Event::DesiredInNotification {
+                        id: desired_notif_id,
+                        peer_id: self.peers[peer_index].peer_id.clone(),
+                        notifications_protocol_index,
+                        handshake,
+                    });
                 }
 
-                collection::Event::NotificationsIn { .. } => {
-                    if let Some(collection::Event::NotificationsIn {
+                collection::Event::NotificationsIn {
+                    substream_id,
+                    notification,
+                } => {
+                    let (connection_id, notifications_protocol_index) = *self
+                        .inner_notification_substreams
+                        .get(&substream_id)
+                        .unwrap();
+
+                    let peer_id = {
+                        // Incoming notifications can only happen if the connection is no longer
+                        // handshaking, in which case `peer_index` is guaranteed to be `Some`.
+                        let peer_index = self.inner[connection_id].peer_index.unwrap();
+                        self.peers[peer_index].peer_id.clone()
+                    };
+
+                    return Some(Event::NotificationsIn {
+                        peer_id,
                         notifications_protocol_index,
                         notification,
-                        user_data: local_connection_index,
-                        ..
-                    }) = guarded.pending_inner_event.take()
-                    {
-                        let peer_id = {
-                            let peer_index = guarded.connections[local_connection_index].0.unwrap();
-                            guarded.peers[peer_index].peer_id.clone()
-                        };
-
-                        return Event::NotificationsIn {
-                            peer_id,
-                            notifications_protocol_index,
-                            notification,
-                        };
-                    } else {
-                        unreachable!()
-                    }
+                    });
                 }
 
-                collection::Event::NotificationsInClose { .. } => {
-                    if let Some(collection::Event::NotificationsInClose {
-                        notifications_protocol_index,
-                        user_data: local_connection_index,
-                        outcome,
-                        ..
-                    }) = guarded.pending_inner_event.take()
-                    {
-                        let peer_index = guarded.connections[local_connection_index].0.unwrap();
-                        let peer_id = guarded.peers[peer_index].peer_id.clone();
+                collection::Event::NotificationsInClose {
+                    substream_id,
+                    outcome,
+                } => {
+                    let (connection_id, notifications_protocol_index) = self
+                        .inner_notification_substreams
+                        .remove(&substream_id)
+                        .unwrap();
 
-                        let _was_in = guarded
-                            .peers_notifications_in
-                            .remove(&(peer_index, notifications_protocol_index));
-                        assert!(_was_in);
+                    let peer_index = {
+                        // Incoming substreams can only happen if the connection is no longer
+                        // handshaking, in which case `peer_index` is guaranteed to be `Some`.
+                        self.inner[connection_id].peer_index.unwrap()
+                    };
 
-                        return Event::NotificationsInClose {
-                            peer_id,
-                            notifications_protocol_index,
-                            outcome,
-                        };
-                    } else {
-                        unreachable!()
+                    // TODO: this is O(n)
+                    for (_, item) in self.desired_in_notifications.iter_mut() {
+                        if let Some((_, idx, _)) = *item {
+                            if idx == peer_index {
+                                *item = None;
+                            }
+                        }
                     }
+
+                    let _was_in = self
+                        .peers_notifications_in
+                        .remove(&(peer_index, notifications_protocol_index));
+                    assert!(_was_in);
+
+                    return Some(Event::NotificationsInClose {
+                        peer_id: self.peers[peer_index].peer_id.clone(),
+                        notifications_protocol_index,
+                        outcome,
+                    });
                 }
 
                 collection::Event::PingOutSuccess { .. } => {
                     // We don't care about or report successful pings at the moment.
-                    guarded.pending_inner_event = None;
                 }
 
-                collection::Event::PingOutFailed { id, .. } => {
-                    // A failed ping must lead to a disconnect.
-                    self.inner.start_shutdown(*id).await;
-                    guarded.pending_inner_event = None;
+                collection::Event::PingOutFailed { id } => {
+                    // A failed ping leads to a disconnect.
+                    self.inner.start_shutdown(id);
+
+                    // We need to perform the same clean up as if the remote started the
+                    // shutdown.
+                    // TODO: this is O(n)
+                    for (_, item) in &mut self.desired_out_notifications {
+                        if let Some((_, connection_id, _)) = item.as_ref() {
+                            if *connection_id == id {
+                                *item = None;
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    /// Inserts an incoming connection in the state machine.
+    /// Inserts a single-stream incoming connection in the state machine.
     ///
     /// This connection hasn't finished handshaking and the [`PeerId`] of the remote isn't known
     /// yet.
     ///
     /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
     /// to determine when the handshake timeout expires.
-    ///
-    /// After this function has returned, you must process the connection with
-    /// [`Peers::read_write`].
-    pub async fn add_incoming_connection(
-        &self,
+    pub fn add_single_stream_incoming_connection(
+        &mut self,
         when_connected: TNow,
         user_data: TConn,
-    ) -> ConnectionId {
-        let mut guarded = self.guarded.lock().await;
-
-        // A slab entry is first reserved without being inserted, so that the state remains
-        // consistent if the user cancels the returned future.
-        let entry = guarded.connections.vacant_entry();
-        let connection_id = self.inner.insert(when_connected, false, entry.key()).await;
-        entry.insert((None, user_data));
-        connection_id
+    ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
+        self.inner.insert_single_stream(
+            when_connected,
+            false,
+            Connection {
+                peer_index: None,
+                fake_out_requests: Vec::new(),
+                user_data,
+            },
+        )
     }
 
-    /// Inserts an outgoing connection in the state machine.
+    /// Inserts a single-stream outgoing connection in the state machine.
     ///
     /// This connection hasn't finished handshaking, and the [`PeerId`] of the remote isn't known
-    /// yet, but it is expected to be `unfulfilled_desired_peers`. After this function has been
+    /// yet, but it is expected to be in `unfulfilled_desired_peers`. After this function has been
     /// called, the provided `expected_peer_id` will no longer be part of the return value of
     /// [`Peers::unfulfilled_desired_peers`].
     ///
     /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
     /// to determine when the handshake timeout expires.
-    ///
-    /// After this function has returned, you must process the connection with
-    /// [`Peers::read_write`].
-    pub async fn add_outgoing_connection(
-        &self,
+    pub fn add_single_stream_outgoing_connection(
+        &mut self,
         when_connected: TNow,
         expected_peer_id: &PeerId,
         user_data: TConn,
-    ) -> ConnectionId {
-        let mut guarded = self.guarded.lock().await;
-        let guarded = &mut *guarded;
+    ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
+        let peer_index = self.peer_index_or_insert(expected_peer_id);
 
-        // A slab entry is first reserved without being inserted, so that the state remains
-        // consistent if the user cancels the returned future.
-        let entry = guarded.connections.vacant_entry();
-        let connection_id = self.inner.insert(when_connected, true, entry.key()).await;
+        let (connection_id, connection_task) = self.inner.insert_single_stream(
+            when_connected,
+            true,
+            Connection {
+                peer_index: Some(peer_index),
+                fake_out_requests: Vec::new(),
+                user_data,
+            },
+        );
 
-        // TODO: could use `peer_index_or_insert` but causes borrowck issues
-        let peer_index = if let Some(idx) = guarded.peer_indices.get(expected_peer_id) {
-            *idx
-        } else {
-            let idx = guarded.peers.insert(Peer {
-                desired: false,
-                peer_id: expected_peer_id.clone(),
-            });
-            guarded.peer_indices.insert(expected_peer_id.clone(), idx);
-            idx
-        };
+        let _inserted = self.connections_by_peer.insert((peer_index, connection_id));
+        debug_assert!(_inserted);
 
-        debug_assert!(!guarded
-            .connections_by_peer
-            .contains_key(&(peer_index, connection_id)));
-        guarded
-            .connections_by_peer
-            .insert((peer_index, connection_id), false);
+        (connection_id, connection_task)
+    }
 
-        entry.insert((Some(peer_index), user_data));
-        connection_id
+    /// Inserts a multi-stream outgoing connection in the state machine.
+    ///
+    /// The [`PeerId`] of the remote must already be known when this function is called. If it
+    /// was in `unfulfilled_desired_peers`, then after this function returns the provided
+    /// [`PeerId`] will no longer be part of the return value of
+    /// [`Peers::unfulfilled_desired_peers`].
+    ///
+    /// No [`Event::Connected`] will be generated. Calling this function implicitly acts as if
+    /// this event was generated.
+    pub fn add_multi_stream_outgoing_connection<TSubId>(
+        &mut self,
+        now: TNow,
+        peer_id: &PeerId,
+        user_data: TConn,
+    ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
+    where
+        TSubId: Clone + PartialEq + Eq + Hash,
+    {
+        let peer_index = self.peer_index_or_insert(peer_id);
+
+        let (connection_id, connection_task) = self.inner.insert_multi_stream(
+            now,
+            Connection {
+                peer_index: Some(peer_index),
+                fake_out_requests: Vec::new(),
+                user_data,
+            },
+        );
+
+        let _inserted = self.connections_by_peer.insert((peer_index, connection_id));
+        debug_assert!(_inserted);
+
+        // TODO: must immediately open all desired substreams
+
+        (connection_id, connection_task)
     }
 
     /// Returns the list of [`PeerId`]s that have been marked as desired, but that don't have any
     /// associated connection. An associated connection is either a fully established connection
     /// with that peer, or an outgoing connection that is still handshaking but expects to reach
     /// that peer.
-    pub async fn unfulfilled_desired_peers(&self) -> impl Iterator<Item = PeerId> {
-        let guarded = self.guarded.lock().await;
-
+    pub fn unfulfilled_desired_peers(&self) -> impl Iterator<Item = &PeerId> {
         // TODO: complexity of this method is too damn high
 
-        let mut desired = guarded
+        let mut desired = self
             .peers
             .iter()
             .filter(|(_, p)| p.desired)
             .map(|(peer_index, _)| peer_index)
             .collect::<BTreeSet<_>>();
 
-        for ((peer_index, _), state) in &guarded.peers_notifications_out {
+        for ((peer_index, _), state) in &self.peers_notifications_out {
             if state.desired {
                 desired.insert(*peer_index);
             }
@@ -779,19 +858,22 @@ where
 
         let mut out = Vec::with_capacity(desired.len());
         for peer_index in desired {
-            if guarded
+            if self
                 .connections_by_peer
                 .range(
                     (peer_index, ConnectionId::min_value())
                         ..=(peer_index, ConnectionId::max_value()),
                 )
+                .filter(|(_, connection_id)| {
+                    !self.inner.connection_state(*connection_id).shutting_down
+                })
                 .count()
                 != 0
             {
                 continue;
             }
 
-            out.push(guarded.peers[peer_index].peer_id.clone());
+            out.push(&self.peers[peer_index].peer_id);
         }
 
         out.into_iter()
@@ -801,11 +883,12 @@ where
     ///
     /// When a peer is marked as "desired" and there isn't any pending or established connection
     /// towards it, it is returned when calling [`Peers::unfulfilled_desired_peers`].
-    pub async fn set_peer_desired(&self, peer_id: &PeerId, desired: bool) {
-        let mut guarded = self.guarded.lock().await;
-        let peer_index = guarded.peer_index_or_insert(peer_id);
-        guarded.peers[peer_index].desired = desired;
-        guarded.try_clean_up_peer(peer_index);
+    pub fn set_peer_desired(&mut self, peer_id: &PeerId, desired: bool) {
+        let peer_index = self.peer_index_or_insert(peer_id);
+        self.peers[peer_index].desired = desired;
+        if !desired {
+            self.try_clean_up_peer(peer_index);
+        }
     }
 
     /// Sets the given combinations of notification protocol and [`PeerId`] as "desired".
@@ -816,16 +899,18 @@ where
     /// When a combination of network protocol and [`PeerId`] is marked as "desired", the state
     /// machine will try to maintain open an outbound substream. If the remote refuses the
     /// substream, it will be returned when calling [`Peers::refused_notifications_out`].
-    pub async fn set_peer_notifications_out_desired(
-        &self,
+    ///
+    /// This function might generate a message destined to a connection. Use
+    /// [`Peers::pull_message_to_connection`] to process these messages after it has returned.
+    pub fn set_peer_notifications_out_desired(
+        &mut self,
         peer_id: &PeerId,
         notification_protocol: usize,
         new_desired_state: DesiredState,
     ) {
-        let mut guarded = self.guarded.lock().await;
-        let peer_index = guarded.peer_index_or_insert(peer_id);
+        let peer_index = self.peer_index_or_insert(peer_id);
 
-        let current_state = guarded
+        let current_state = self
             .peers_notifications_out
             .entry((peer_index, notification_protocol));
 
@@ -843,27 +928,29 @@ where
                 desired: true,
                 open: NotificationsOutOpenState::Closed,
             });
+            current_state.desired = true;
 
             // If substream is closed, try to open it.
             if matches!(current_state.open, NotificationsOutOpenState::Closed) {
-                if let Some(connection_id) = self.connection_id_for_peer(&mut guarded, peer_id) {
+                if let ConnectionIdForPeer::Connected(connection_id) =
+                    self.connection_id_for_peer(peer_id)
+                {
                     let id =
-                        DesiredOutNotificationId(guarded.desired_out_notifications.insert(Some((
+                        DesiredOutNotificationId(self.desired_out_notifications.insert(Some((
                             peer_index,
                             connection_id,
                             notification_protocol,
                         ))));
 
                     // TODO: should use `current_state` instead, but this causes difficulties calling `connection_id_for_peer`
-                    guarded
-                        .peers_notifications_out
+                    self.peers_notifications_out
                         .get_mut(&(peer_index, notification_protocol))
                         .unwrap()
                         .open = NotificationsOutOpenState::ApiHandshakeWait(id);
 
-                    guarded.pending_desired_out_notifs.push_back((
+                    self.pending_desired_out_notifs.push_back((
                         id,
-                        peer_id.clone(),
+                        peer_index,
                         notification_protocol,
                     ));
                 }
@@ -875,29 +962,22 @@ where
                 _ => return,
             };
 
+            current_state.desired = false;
+
             match current_state.open {
                 NotificationsOutOpenState::ApiHandshakeWait(id) => {
-                    debug_assert!(guarded.desired_out_notifications[id.0].is_some());
-                    guarded.desired_out_notifications[id.0] = None;
+                    debug_assert!(self.desired_out_notifications[id.0].is_some());
+                    self.desired_out_notifications[id.0] = None;
                 }
                 NotificationsOutOpenState::Closed => {}
-                NotificationsOutOpenState::Open(connection_id, substream_id)
-                | NotificationsOutOpenState::Opening(connection_id, substream_id) => {
-                    self.inner
-                        .close_notifications_substream(connection_id, substream_id)
-                        .await
+                NotificationsOutOpenState::Open(substream_id)
+                | NotificationsOutOpenState::Opening(substream_id) => {
+                    self.inner.close_out_notifications(substream_id);
+                    current_state.open = NotificationsOutOpenState::Closed;
                 }
             }
 
-            // State is updated only after the `await` point above.
-            // TODO: should use `current_state` instead, but this causes difficulties calling `connection_id_for_peer`
-            guarded
-                .peers_notifications_out
-                .get_mut(&(peer_index, notification_protocol))
-                .unwrap()
-                .desired = false;
-
-            guarded.try_clean_up_peer(peer_index);
+            self.try_clean_up_peer(peer_index);
         }
     }
 
@@ -906,14 +986,10 @@ where
     ///
     /// Use [`Peers::set_peer_notifications_out_desired`] with [`DesiredState::DesiredReset`] in
     /// order to try again.
-    pub async fn refused_notifications_out(&self) -> impl Iterator<Item = (PeerId, usize)> {
-        let mut guarded = self.guarded.lock().await;
-        let guarded = &mut *guarded;
-
+    pub fn refused_notifications_out(&mut self) -> impl Iterator<Item = (PeerId, usize)> {
         // TODO: O(n)
-        let peers = &guarded.peers;
-        guarded
-            .peers_notifications_out
+        let peers = &self.peers;
+        self.peers_notifications_out
             .iter()
             .filter_map(|((peer_index, notif_proto_index), value)| {
                 if !value.desired || !matches!(value.open, NotificationsOutOpenState::Closed) {
@@ -933,99 +1009,118 @@ where
     /// If `Ok` is returned, the substream is now considered open. If `Err` is returned, then
     /// no substream has been opened.
     ///
+    /// This function might generate a message destined to a connection. Use
+    /// [`Peers::pull_message_to_connection`] to process these messages after it has returned.
+    ///
     /// # Panic
     ///
     /// Panics if the [`DesiredInNotificationId`] is invalid. Note that these ids remain valid
     /// forever until [`Peers::in_notification_accept`] or [`Peers::in_notification_refuse`] is
     /// called.
     ///
-    pub async fn in_notification_accept(
-        &self,
+    pub fn in_notification_accept(
+        &mut self,
         id: DesiredInNotificationId,
         handshake_back: Vec<u8>,
     ) -> Result<(), InNotificationAcceptError> {
-        let mut guarded = self.guarded.lock().await;
-        assert!(guarded.desired_in_notifications.contains(id.0));
+        let (substream_id, _, _) = match self.desired_in_notifications.remove(id.0) {
+            Some(v) => v,
+            None => {
+                return Err(InNotificationAcceptError::Obsolete);
+            }
+        };
 
-        let (connection_id, substream_id, _, _) =
-            match guarded.desired_in_notifications.get(id.0).unwrap() {
-                Some(v) => *v,
-                None => {
-                    guarded.desired_in_notifications.remove(id.0);
-                    return Err(InNotificationAcceptError::Obsolete);
-                }
-            };
+        self.inner
+            .accept_in_notifications(substream_id, handshake_back);
 
-        // TODO: use Result
-        let _ = self
-            .inner
-            .accept_notifications_in(connection_id, substream_id, handshake_back)
-            .await;
-
-        guarded.desired_in_notifications.remove(id.0);
         Ok(())
     }
 
     /// Responds to an [`Event::DesiredInNotification`] by refusing the request for an inbound
     /// substream.
     ///
+    /// This function might generate a message destined to a connection. Use
+    /// [`Peers::pull_message_to_connection`] to process these messages after it has returned.
+    ///
     /// # Panic
     ///
     /// Panics if the [`DesiredInNotificationId`] is invalid. Note that these ids remain valid
     /// forever until [`Peers::in_notification_accept`] or [`Peers::in_notification_refuse`] is
     /// called.
     ///
-    pub async fn in_notification_refuse(&self, id: DesiredInNotificationId) {
-        let mut guarded = self.guarded.lock().await;
-        assert!(guarded.desired_in_notifications.contains(id.0));
+    pub fn in_notification_refuse(&mut self, id: DesiredInNotificationId) {
+        assert!(self.desired_in_notifications.contains(id.0));
 
-        let (connection_id, substream_id, peer_index, notifications_protocol_index) =
-            match guarded.desired_in_notifications.get(id.0).unwrap() {
-                Some(v) => *v,
+        let (substream_id, peer_index, notifications_protocol_index) =
+            match self.desired_in_notifications.remove(id.0) {
+                Some(v) => v,
                 None => {
-                    guarded.desired_in_notifications.remove(id.0);
                     return;
                 }
             };
 
-        let _ = self
-            .inner
-            .reject_notifications_in(connection_id, substream_id)
-            .await;
+        self.inner.reject_in_notifications(substream_id);
 
-        guarded.desired_in_notifications.remove(id.0);
-        guarded
-            .peers_notifications_in
+        self.peers_notifications_in
             .remove(&(peer_index, notifications_protocol_index));
+        let _was_in = self.inner_notification_substreams.remove(&substream_id);
+        debug_assert!(_was_in.is_some());
     }
 
-    /// Responds to an [`Event::DesiredOutNotification`] by indicating the handshake to send to
-    /// the remote.
+    /// Finds a peer-substream combination marked as desired where there exists a connection to
+    /// this peer but the desired substream hasn't been opened yet.
+    /// If one is found, allocates a [`DesiredOutNotificationId`] that must be answered using
+    /// [`Peers::open_out_notification`].
+    ///
+    /// The allocated [`DesiredOutNotificationId`] remains valid forever until
+    /// [`Peers::open_out_notification`] is called.
+    ///
+    /// > **Note**: It is not possible to *not* open a desired outbound substream after it has
+    /// >           been returned by this function. This function and
+    /// >           [`Peers::open_out_notification`] are an API trick in order for the [`Peers`]
+    /// >           to fetch the content of the handshake to send to the remote.
+    pub fn next_unfulfilled_desired_outbound_substream(
+        &mut self,
+    ) -> Option<(DesiredOutNotificationId, &PeerId, usize)> {
+        let (id, peer_index, notifications_protocol_index) =
+            self.pending_desired_out_notifs.pop_front()?;
+        Some((
+            id,
+            &self.peers[peer_index].peer_id,
+            notifications_protocol_index,
+        ))
+    }
+
+    /// Continuation of calling [`Peers::next_unfulfilled_desired_outbound_substream`] by
+    /// indicating the handshake to send to the remote.
+    ///
+    /// Must be passed the current moment in time in order to determine when the operation of
+    /// opening the substream times out.
+    ///
+    /// This function might generate a message destined to a connection. Use
+    /// [`Peers::pull_message_to_connection`] to process these messages after it has returned.
     ///
     /// # Panic
     ///
     /// Panics if the [`DesiredOutNotificationId`] is invalid. Note that these ids remain valid
     /// forever until [`Peers::open_out_notification`] is called.
     ///
-    pub async fn open_out_notification(
-        &self,
+    pub fn open_out_notification(
+        &mut self,
         id: DesiredOutNotificationId,
         now: TNow,
         handshake: Vec<u8>,
     ) {
-        let mut guarded = self.guarded.lock().await;
-
         let (peer_index, connection_id, notifications_protocol_index) =
-            match guarded.desired_out_notifications.get(id.0).unwrap() {
-                Some(v) => *v,
+            match self.desired_out_notifications.remove(id.0) {
+                Some(v) => v,
                 None => {
                     // The "notification out request" is obsolete.
-                    guarded.desired_out_notifications.remove(id.0);
                     return;
                 }
             };
 
-        let notif_state = guarded
+        let notif_state = self
             .peers_notifications_out
             .get_mut(&(peer_index, notifications_protocol_index))
             .unwrap();
@@ -1034,67 +1129,51 @@ where
             NotificationsOutOpenState::ApiHandshakeWait(_)
         ));
 
-        let substream_id = self
-            .inner
-            .open_notifications_substream(
-                connection_id,
-                notifications_protocol_index,
-                now,
-                handshake,
-            )
-            .await;
+        let substream_id = self.inner.open_out_notifications(
+            connection_id,
+            notifications_protocol_index,
+            now,
+            handshake,
+        );
 
-        // Only do the state changes at the end, in case the user cancels the future returned by
-        // `open_notifications_substream`.
-        if let Ok(substream_id) = substream_id {
-            notif_state.open = NotificationsOutOpenState::Opening(connection_id, substream_id);
-        } else {
-            notif_state.open = NotificationsOutOpenState::Closed;
-        }
-        guarded.desired_out_notifications.remove(id.0);
+        let _prev_value = self
+            .inner_notification_substreams
+            .insert(substream_id, (connection_id, notifications_protocol_index));
+        debug_assert!(_prev_value.is_none());
+
+        notif_state.open = NotificationsOutOpenState::Opening(substream_id);
     }
 
+    ///
+    /// This function might generate a message destined to a connection. Use
+    /// [`Peers::pull_message_to_connection`] to process these messages after it has returned.
     // TODO: document
-    pub async fn queue_notification(
-        &self,
+    pub fn queue_notification(
+        &mut self,
         target: &PeerId,
         notifications_protocol_index: usize,
         notification: impl Into<Vec<u8>>,
     ) -> Result<(), QueueNotificationError> {
-        let guarded = self.guarded.lock().await;
+        let peer_index = *self.peer_indices.get(target).unwrap();
 
-        let peer_index = *guarded
-            .peer_indices
-            .get(target)
-            .ok_or(QueueNotificationError::NotConnected)?;
-
-        let (connection_id, substream_id) = match guarded
+        let substream_id = match self
             .peers_notifications_out
             .get(&(peer_index, notifications_protocol_index))
             .map(|state| &state.open)
         {
             None
-            | Some(NotificationsOutOpenState::Closed)
-            | Some(NotificationsOutOpenState::ApiHandshakeWait(_)) => {
-                return Err(QueueNotificationError::NoSubstream)
-            }
-            Some(NotificationsOutOpenState::Opening(c_id, s_id))
-            | Some(NotificationsOutOpenState::Open(c_id, s_id)) => (c_id, s_id),
+            | Some(
+                NotificationsOutOpenState::Opening(_)
+                | NotificationsOutOpenState::Closed
+                | NotificationsOutOpenState::ApiHandshakeWait(_),
+            ) => panic!(),
+            Some(NotificationsOutOpenState::Open(s_id)) => s_id,
         };
 
-        let result = self
-            .inner
-            .queue_notification(*connection_id, *substream_id, notification)
-            .await;
+        let result = self.inner.queue_notification(*substream_id, notification);
 
         match result {
             Ok(()) => Ok(()),
-            Err(collection::QueueNotificationError::InvalidConnection) => {
-                Err(QueueNotificationError::NotConnected)
-            } // TODO: better handling of this situation?
-            Err(collection::QueueNotificationError::NoSubstream) => {
-                Err(QueueNotificationError::NoSubstream)
-            } // TODO: better handling of this situation?
             Err(collection::QueueNotificationError::QueueFull) => {
                 Err(QueueNotificationError::QueueFull)
             }
@@ -1104,26 +1183,49 @@ where
     /// Equivalent to calling [`Peers::queue_notification`] for all peers an outbound
     /// notifications substream is open with.
     ///
-    /// Individual errors that would have occured when calling [`Peers::queue_notification`] are
+    /// Individual errors that would have occurred when calling [`Peers::queue_notification`] are
     /// silently discarded.
+    ///
+    /// This function might generate messages destined to connections. Use
+    /// [`Peers::pull_message_to_connection`] to process these messages after it has returned.
     // TODO: consider returning the peers we successfully sent to
-    pub async fn broadcast_notification(
-        &self,
+    pub fn broadcast_notification(
+        &mut self,
         notifications_protocol_index: usize,
         notification: impl Into<Vec<u8>>,
     ) {
-        // TODO: implement this better
         let notification = notification.into();
-        for peer in self.peers_list().await {
-            let _ = self
-                .queue_notification(&peer, notifications_protocol_index, notification.clone())
-                .await;
+
+        // TODO: implement this better; this is O(n)
+        for ((_, notif_proto_index), state) in self.peers_notifications_out.iter() {
+            if *notif_proto_index != notifications_protocol_index {
+                continue;
+            }
+
+            if let NotificationsOutOpenState::Open(substream_id) = &state.open {
+                let _ = self
+                    .inner
+                    .queue_notification(*substream_id, notification.clone());
+            }
         }
     }
 
-    /// Sends a request to the given peer, and waits for a response.
+    /// Sends a request to the given peer.
     ///
-    /// This consists in:
+    /// A [`Event::Response`] event will later be generated containing the result of the request.
+    ///
+    /// It is invalid to start a request on a peer before an [`Event::Connected`] has been
+    /// generated, or after a [`Event::Disconnected`] has been generated where
+    /// [`Event::Disconnected::num_peer_connections`] is 0.
+    ///
+    /// Returns a newly-allocated identifier for this request.
+    ///
+    /// This function generates a message destined to a connection. Use
+    /// [`Peers::pull_message_to_connection`] to process these messages after it has returned.
+    ///
+    /// # Requests
+    ///
+    /// A request consists in:
     ///
     /// - Opening a substream on an established connection with the target.
     /// - Negotiating the requested protocol (`protocol_index`) on this substream using the
@@ -1131,526 +1233,146 @@ where
     /// - Sending the request (`request_data` parameter), prefixed with its length.
     /// - Waiting for the response (prefixed with its length), which is then returned.
     ///
-    /// An error happens if there is no suitable connection for that request, if the connection
-    /// closes while the request is in progress, if the request or response doesn't respect
-    /// the protocol limits (see [`ConfigRequestResponse`]), or if the remote takes too much time
-    /// to answer.
+    /// An error happens if the connection closes while the request is in progress, if the remote
+    /// doesn't support the given protocol, if the request or response doesn't respect the protocol
+    /// limits (see [`ConfigRequestResponse`]), or if the remote takes too much time to answer.
     ///
-    /// As the API of this module is inherently subject to race conditions, it is never possible
-    /// to guarantee that this function will succeed. [`RequestError::ConnectionClosed`] should
-    /// be handled by retrying the same request again.
-    ///
-    /// > **Note**: This function doesn't return before the remote has answered. It is strongly
-    /// >           recommended to await the returned `Future` in the background, and not block
-    /// >           any important task on this.
+    /// The timeout is the time between the moment the substream is opened and the moment the
+    /// response is sent back. If the emitter doesn't send the request or if the receiver doesn't
+    /// answer during this time window, the request is considered failed.
     ///
     /// # Panic
     ///
     /// Panics if `protocol_index` isn't a valid index in [`Config::request_response_protocols`].
+    /// Panics if there is no open connection with the target.
     ///
-    pub async fn request(
-        &self,
+    #[track_caller]
+    pub fn start_request(
+        &mut self,
         target: &PeerId,
         protocol_index: usize,
         request_data: Vec<u8>,
         timeout: TNow,
-    ) -> Result<Vec<u8>, RequestError> {
-        let target = {
-            let mut guarded = self.guarded.lock().await;
-            match self.connection_id_for_peer(&mut *guarded, target) {
-                Some(id) => id,
-                None => return Err(RequestError::NotConnected),
+    ) -> OutRequestId {
+        let target_connection_id = match self.connection_id_for_peer(target) {
+            ConnectionIdForPeer::Connected(id) => id,
+            ConnectionIdForPeer::NotConnected => panic!(), // As documented.
+            ConnectionIdForPeer::ConnectedButShuttingDown(id) => {
+                // The situation where we are connected to the peer but only through a connection
+                // that is shutting down is a bit complicated. We can't start a request, as that
+                // would be invalid, so we generate a so-called "fake request" and when we
+                // connection later shuts down we report about the request failure.
+                // Note that we don't immediately report the failure, as that could cause an upper
+                // layer to immediately try the request again before it has processed the relevant
+                // `Disconnect` event.
+                let fake_id = self.next_fake_out_request_id;
+                self.next_fake_out_request_id += 1;
+                self.inner[id].fake_out_requests.push(fake_id);
+                return OutRequestId(OutRequestIdInner::Fake(fake_id));
             }
         };
 
-        let result = self
-            .inner
-            .request(target, protocol_index, request_data, timeout)
-            .await;
-
-        match result {
-            Ok(r) => Ok(r),
-            Err(collection::RequestError::InvalidConnection) => Err(RequestError::ConnectionClosed),
-            Err(collection::RequestError::ConnectionClosed) => Err(RequestError::ConnectionClosed),
-            Err(collection::RequestError::Connection(err)) => Err(RequestError::Connection(err)),
-        }
+        OutRequestId(OutRequestIdInner::Real(self.inner.start_request(
+            target_connection_id,
+            protocol_index,
+            request_data,
+            timeout,
+        )))
     }
 
     /// Responds to a previously-emitted [`Event::RequestIn`].
     ///
     /// # Panic
     ///
-    /// Panics if the [`RequestId`] is invalid. Note that these ids remain valid forever until
-    /// [`Peers::respond`] is called.
+    /// Panics if the [`InRequestId`] is invalid. Note that these ids remain valid forever until
+    /// [`Peers::respond_in_request`] is called or a [`Event::RequestInCancel`] is generated.
     ///
-    pub async fn respond(&self, id: RequestId, response: Result<Vec<u8>, ()>) {
-        let mut guarded = self.guarded.lock().await;
-
-        debug_assert!(guarded.requests_in.contains(id.0));
-
-        // First copy the content of `guarded.requests_in`, so that the state stays consistent if
-        // the user cancels the future of `respond_in_request`.
-        let (connection_id, substream_id) = *guarded.requests_in.get(id.0).unwrap();
-
-        self.inner
-            .respond_in_request(connection_id, substream_id, response)
-            .await;
-
-        guarded.requests_in.remove(id.0);
+    pub fn respond_in_request(&mut self, id: InRequestId, response: Result<Vec<u8>, ()>) {
+        self.inner.respond_in_request(id.0, response)
     }
 
-    /// Reads data coming from the connection, updates the internal state machine, and writes data
-    /// destined to the connection through the [`ReadWrite`].
-    ///
-    /// If an error is returned, the connection should be destroyed altogether and the
-    /// [`ConnectionId`] is no longer valid. You should continue calling this function until
-    /// an error is returned, even if the [`ReadWrite`] indicates a full shutdown.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`ConnectionId`] isn't a valid connection. Once this function returns an
-    /// error, is no longer valid to call this function with this [`ConnectionId`].
-    ///
-    pub async fn read_write(
-        &self,
-        connection_id: ConnectionId,
-        read_write: &'_ mut ReadWrite<'_, TNow>,
-    ) -> Result<(), collection::ConnectionError> {
-        self.inner.read_write(connection_id, read_write).await
+    /// Returns `true` if there exists an established connection with the given peer.
+    pub fn has_established_connection(&self, peer_id: &PeerId) -> bool {
+        // Connections that are shutting down are still counted, as we report the disconnected
+        // event only at the end of the shutdown.
+        match self.connection_id_for_peer(peer_id) {
+            ConnectionIdForPeer::Connected(_)
+            | ConnectionIdForPeer::ConnectedButShuttingDown(_) => true,
+            ConnectionIdForPeer::NotConnected => false,
+        }
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
     /// with.
-    pub async fn peers_list(&self) -> impl Iterator<Item = PeerId> {
-        let guarded = self.guarded.lock().await;
-        guarded
-            .peers
+    pub fn peers_list(&self) -> impl Iterator<Item = &PeerId> {
+        self.peers
             .iter()
             .filter(|(peer_index, _)| {
-                guarded
-                    .connections_by_peer
+                self.connections_by_peer
                     .range(
                         (*peer_index, ConnectionId::min_value())
                             ..=(*peer_index, ConnectionId::max_value()),
                     )
-                    .filter(|(_, established)| **established)
-                    .count()
-                    != 0
+                    .any(|(_, connection_id)| {
+                        // Note that connections that are shutting down are still counted,
+                        // as we report the disconnected event only at the end of the
+                        // shutdown.
+                        self.inner.connection_state(*connection_id).established
+                    })
             })
-            .map(|(_, p)| p.peer_id.clone())
-            .collect::<Vec<_>>()
-            .into_iter()
+            .map(|(_, p)| &p.peer_id)
     }
 
     /// Returns the number of connections we have a substream with.
-    pub async fn num_outgoing_substreams(&self, notifications_protocol_index: usize) -> usize {
-        let guarded = self.guarded.lock().await;
+    pub fn num_outgoing_substreams(&self, notifications_protocol_index: usize) -> usize {
         // TODO: O(n)
-        guarded
-            .peers_notifications_out
+        self.peers_notifications_out
             .iter()
             .filter(|((_, idx), state)| {
                 *idx == notifications_protocol_index
-                    && matches!(state.open, NotificationsOutOpenState::Open(_, _))
+                    && matches!(state.open, NotificationsOutOpenState::Open(_))
             })
             .count()
     }
 
     /// Picks the connection to use to send requests or notifications to the given peer.
-    fn connection_id_for_peer(
-        &self,
-        guarded: &mut Guarded<TConn>,
-        target: &PeerId,
-    ) -> Option<collection::ConnectionId> {
-        let peer_index = *guarded.peer_indices.get(target)?;
-
-        if let Some(((_, connection_id), _)) = guarded
-            .connections_by_peer
-            .range(
-                (peer_index, collection::ConnectionId::min_value())
-                    ..=(peer_index, collection::ConnectionId::max_value()),
-            )
-            .find(|(_, established)| **established)
-        {
-            return Some(*connection_id);
-        }
-
-        None
-    }
-
-    /// Updates the state of `guarded` after a connection has been removed from [`Peers::inner`].
-    /// Keep in mind that `guarded` should have been locked before the connection is removed, in
-    /// order to avoid race conditions where the methods of `Peers` find a connection within
-    /// `guarded` even though it no longer exists.
     ///
-    /// Returns information about the connection: the [`PeerId`], whether the peer was desired,
-    /// the number of connections remaining with this peer, and whether the connection was in the
-    /// established phrase (`false` is still handshaking). Returns `None` if the connection was an
-    /// incoming connection whose handshake wasn't finished yet.
-    fn removed_from_inner(
-        &self,
-        guarded: &mut Guarded<TConn>,
-        connection_id: ConnectionId,
-        local_connection_index: usize,
-    ) -> (Option<(PeerId, bool, u32, bool)>, TConn) {
-        debug_assert!(guarded.connections.contains(local_connection_index));
-        let (expected_peer_index, user_data) = guarded.connections.remove(local_connection_index);
+    /// This function tries to find a connection that is established and not shutting down. If it
+    /// can't find any, it instead tries to find a connection that is established but shutting
+    /// down. While it is technically not possible to send requests or notifications to connections
+    /// that are shutting down, the API user is still allowed to do so, and thus shouldn't lead to
+    /// a panic or error.
+    fn connection_id_for_peer(&self, target: &PeerId) -> ConnectionIdForPeer {
+        let peer_index = match self.peer_indices.get(target) {
+            Some(i) => *i,
+            None => return ConnectionIdForPeer::NotConnected,
+        };
 
-        // `expected_peer_index` is `None` iff the connection was an incoming connection whose
-        // handshake isn't finished yet.
+        let mut found_shutting_down = None;
 
-        if let Some(expected_peer_index) = expected_peer_index {
-            let was_established = guarded
-                .connections_by_peer
-                .remove(&(expected_peer_index, connection_id))
-                .unwrap();
-
-            for (_, state) in guarded.peers_notifications_out.range_mut(
-                (expected_peer_index, usize::min_value())
-                    ..=(expected_peer_index, usize::max_value()),
-            ) {
-                match state.open {
-                    NotificationsOutOpenState::Closed => {}
-                    NotificationsOutOpenState::Opening(id, _)
-                    | NotificationsOutOpenState::Open(id, _)
-                        if id == connection_id =>
-                    {
-                        state.open = NotificationsOutOpenState::Closed;
-                        // TODO: reopen in a different connection if desired
-                        /*if state.desired {
-                            todo!()
-                        }*/
-                    }
-                    NotificationsOutOpenState::Opening(_, _)
-                    | NotificationsOutOpenState::Open(_, _) => {}
-                    NotificationsOutOpenState::ApiHandshakeWait(id) => {
-                        debug_assert!(guarded.desired_out_notifications[id.0].is_some());
-                        guarded.desired_out_notifications[id.0] = None;
-                        // We intentionally don't clean up
-                        // `pending_desired_out_notifs`.
-                    }
-                }
+        for (_, connection_id) in self.connections_by_peer.range(
+            (peer_index, collection::ConnectionId::min_value())
+                ..=(peer_index, collection::ConnectionId::max_value()),
+        ) {
+            let state = self.inner.connection_state(*connection_id);
+            if !state.established {
+                continue;
             }
 
-            let peer_id = guarded.peers[expected_peer_index].peer_id.clone();
-            let peer_is_desired = guarded.peers[expected_peer_index].desired;
-            let num_peer_connections = {
-                let num = guarded
-                    .connections_by_peer
-                    .range(
-                        (expected_peer_index, collection::ConnectionId::min_value())
-                            ..=(expected_peer_index, collection::ConnectionId::max_value()),
-                    )
-                    .filter(|(_, established)| **established)
-                    .count();
-                u32::try_from(num).unwrap()
-            };
+            if !state.shutting_down {
+                return ConnectionIdForPeer::Connected(*connection_id);
+            } else {
+                found_shutting_down = Some(*connection_id);
+            }
+        }
 
-            guarded.try_clean_up_peer(expected_peer_index);
-
-            (
-                Some((
-                    peer_id,
-                    peer_is_desired,
-                    num_peer_connections,
-                    was_established,
-                )),
-                user_data,
-            )
+        if let Some(found_shutting_down) = found_shutting_down {
+            ConnectionIdForPeer::ConnectedButShuttingDown(found_shutting_down)
         } else {
-            (None, user_data)
+            ConnectionIdForPeer::NotConnected
         }
     }
-}
 
-/// See [`Event::DesiredInNotification`].
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DesiredInNotificationId(usize);
-
-/// See [`Event::DesiredOutNotification`].
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DesiredOutNotificationId(usize);
-
-/// See [`Event::RequestIn`].
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RequestId(usize);
-
-/// Event happening over the network. See [`Peers::next_event`].
-#[derive(Debug)]
-pub enum Event<TConn> {
-    /// Established a new connection to the given peer.
-    Connected {
-        /// Identity of the peer on the other side of the connection.
-        peer_id: PeerId,
-
-        /// Number of other established connections with the same peer, including the one that
-        /// has just been established.
-        num_peer_connections: NonZeroU32,
-    },
-
-    /// A connection has stopped.
-    Disconnected {
-        /// Identity of the peer on the other side of the connection.
-        peer_id: PeerId,
-
-        /// `true` if the peer is marked as desired. If this is `true` and `num_peer_connections`
-        /// is `0`, then calling [`Peers::unfulfilled_desired_peers`] will now return this peer.
-        ///
-        /// > **Note**: Keep in mind that everything is subject to race conditions. For example,
-        /// >           a parallel thread might at the same time remove the "desired" marker of
-        /// >           this peer, or an incoming connection might at the same time finish
-        /// >           negotiating a new connection with this peer. When sharing the [`Peers`]
-        /// >           between multiple threads, there is no guarantee that
-        /// >           [`Peers::unfulfilled_desired_peers`] will in fact return this peer.
-        peer_is_desired: bool,
-
-        /// Number of other established connections with the same peer remaining after the
-        /// disconnection.
-        num_peer_connections: u32,
-
-        /// User data that was associated to this connection.
-        user_data: TConn,
-    },
-
-    /// Received an incoming substream, but this substream has produced an error.
-    ///
-    /// > **Note**: This event exists only for diagnostic purposes. No action is expected in
-    /// >           return.
-    InboundError {
-        /// Peer which opened the substream.
-        peer_id: PeerId,
-        /// Identifier of the connection on which the problem happened.
-        connection_id: ConnectionId,
-        /// Error that happened.
-        error: InboundError,
-    },
-
-    /// Received a request from a request-response protocol.
-    RequestIn {
-        /// Identifier for this request. Must be passed back when calling [`Peers::respond`].
-        request_id: RequestId,
-        /// Peer which sent the request.
-        peer_id: PeerId,
-        /// Identifier of the connection that has sent the request.
-        connection_id: ConnectionId,
-        /// Copy of the user data associated to this connection.
-        connection_user_data: TConn,
-        /// Request-response protocol the request is about.
-        protocol_index: usize,
-        /// Payload of the request, opaque to this state machine.
-        ///
-        /// > **Note**: Keep in mind that this data is untrusted.
-        request_payload: Vec<u8>,
-    },
-
-    /// A previously-emitted [`Event::RequestIn`] is now obsolete. This event is for informative
-    /// purpose and does **not** invalidate the [`RequestId`].
-    RequestInCancel {
-        /// Identifier for this request.
-        id: RequestId,
-    },
-
-    /// A peer would like to open a notifications substream with the local node, in order to
-    /// send notifications.
-    ///
-    /// Only one inbound notifications substream can exist per peer and per protocol. Any
-    /// additional one will be automatically refused.
-    DesiredInNotification {
-        /// Identifier for this request. Must be passed back when calling
-        /// [`Peers::in_notification_accept`] or [`Peers::in_notification_refuse`].
-        id: DesiredInNotificationId,
-        /// Peer which tries to open an inbound substream.
-        peer_id: PeerId,
-        /// Notifications protocol the substream is about.
-        notifications_protocol_index: usize,
-        /// Handshake of the request sent by the peer. Opaque to this state machine.
-        ///
-        /// > **Note**: Keep in mind that this data is untrusted.
-        handshake: Vec<u8>,
-    },
-
-    /// A previously-emitted [`DesiredInNotificationId`] is now obsolete. This event is for
-    /// informative purpose and does **not** invalidate the [`DesiredInNotificationId`]. Use
-    /// [`Peers::in_notification_refuse`] if you no longer care about this request.
-    DesiredInNotificationCancel {
-        /// Identifier for this request.
-        id: DesiredInNotificationId,
-    },
-
-    /// Local node would like to open a notifications substream with the given peer. This can only
-    /// happen if the combination of peer and notification protocol was marked as desired.
-    DesiredOutNotification {
-        /// Identifier for this request. Must be passed back when calling
-        /// [`Peers::open_out_notification`].
-        id: DesiredOutNotificationId,
-        /// Peer which tries to open an outbound substream.
-        peer_id: PeerId,
-        /// Notifications protocol the substream is about.
-        notifications_protocol_index: usize,
-    },
-
-    /// A handshaking outbound substream has been accepted by the remote.
-    ///
-    /// Will happen for combinations of [`PeerId`] and notification protocols that have been
-    /// marked as desired. Can also happen for other combinations, if there were marked as desired
-    /// in the past but no longer are.
-    ///
-    /// If `Ok`, it is now possible to send notifications on this substream.
-    NotificationsOutResult {
-        /// Peer the substream is open with.
-        peer_id: PeerId,
-        /// Notifications protocol the substream is about.
-        notifications_protocol_index: usize,
-        /// If `Ok`, contains the handshake sent back by the remote. Its interpretation is out of
-        /// scope of this module.
-        /// If `Err`, the state machine will *not* automatically try to re-open a substream again.
-        /// Use [`Peers::set_peer_notifications_out_desired`] with [`DesiredState::DesiredReset`]
-        /// in order to try again.
-        result: Result<Vec<u8>, NotificationsOutErr>,
-    },
-
-    /// A previously open outbound substream has been closed by the remote. Can only happen after
-    /// a corresponding successful [`Event::NotificationsOutResult`] event has been emitted in the
-    /// past.
-    ///
-    /// This combination of [`PeerId`] and notification protocol will now be returned when calling
-    /// [`Peers::refused_notifications_out`].
-    NotificationsOutClose {
-        /// Peer the subtream is no longer open with.
-        peer_id: PeerId,
-        /// Notifications protocol the substream is about.
-        notifications_protocol_index: usize,
-    },
-
-    /// Received a notification on a notifications substream of a connection.
-    NotificationsIn {
-        /// Peer that sent the notification.
-        peer_id: PeerId,
-        /// Notifications protocol the substream is about.
-        notifications_protocol_index: usize,
-        /// Payload of the notification. Opaque to this state machine.
-        ///
-        /// > **Note**: Keep in mind that this data is untrusted.
-        notification: Vec<u8>,
-    },
-
-    /// Remote has closed a previously-open inbound notifications substream.
-    NotificationsInClose {
-        /// Peer the substream is no longer with.
-        peer_id: PeerId,
-        /// Notifications protocol the substream is about.
-        notifications_protocol_index: usize,
-        /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
-        outcome: Result<(), NotificationsInClosedErr>,
-    },
-}
-
-/// See [`Peers::set_peer_notifications_out_desired`].
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum DesiredState {
-    /// Substream is no longer desired. Close any existing substream.
-    NotDesired,
-    /// Substream is now desired. If the state was already "desired" and the peer has refused this
-    /// substream in the past, do nothing.
-    Desired,
-    /// Substream is now desired. If the peer has refused this substream in the past, try to open
-    /// one again.
-    DesiredReset,
-}
-
-/// Error potentially returned by [`Peers::request`].
-#[derive(Debug, Clone, derive_more::Display)]
-pub enum RequestError {
-    /// Not connected to target.
-    NotConnected,
-    /// Connection has been unexpectedly closed by the remote during the request.
-    ConnectionClosed,
-    /// Error in the context of the connection.
-    Connection(libp2p::connection::established::RequestError),
-}
-
-/// Error potentially returned by [`Peers::in_notification_accept`].
-#[derive(Debug, derive_more::Display)]
-pub enum InNotificationAcceptError {
-    /// The request is now obsolete, either because the connection has been shut down or the
-    /// remote has cancelled their request.
-    Obsolete,
-}
-
-/// Error potentially returned by [`Peers::queue_notification`].
-#[derive(Debug, derive_more::Display)]
-pub enum QueueNotificationError {
-    /// Not connected to target.
-    NotConnected,
-    /// No substream with the given target of the given protocol.
-    NoSubstream,
-    /// Queue of notifications with that peer is full.
-    QueueFull,
-}
-
-struct Guarded<TConn> {
-    /// When a [`DesiredOutNotificationId`] is allocated, the values of the fields of the
-    /// corresponding [`Event::DesiredOutNotification`] are added to this FIFO queue.
-    /// This list is later processed in the [`Peers::next_event`] function, ahead of grabbing an
-    /// event from the underlying [`Peers::inner`].
-    // TODO: explain why it can't grow unbounded
-    pending_desired_out_notifs: VecDeque<(DesiredOutNotificationId, PeerId, usize)>,
-
-    /// Event that has been pulled from [`Peers::inner`] but not processed yet.
-    pending_inner_event: Option<collection::Event<usize>>,
-
-    /// List of all peer identities known to the state machine.
-    peers: slab::Slab<Peer>,
-
-    /// For each known peer, the corresponding index within [`Guarded::peers`].
-    peer_indices: hashbrown::HashMap<PeerId, usize, SipHasherBuild>,
-
-    /// Each connection (handshaking or established) stored in [`Peers::inner`] has a `usize` user
-    /// data that is an index within this slab.
-    /// The first tuple element of the items are indices within [`Guarded::peers`], or `None` if
-    /// and only if the connection is an incoming connection whose handshake isn't finished yet.
-    connections: slab::Slab<(Option<usize>, TConn)>,
-
-    /// List of all established connections, as a tuple of `(peer_index, connection_id)`.
-    /// `peer_index` is the index in [`Guarded::peers`]. Values are `bool` indicating whether the
-    /// connection is fully established: `true` if fully established, `false` if handshaking.
-    connections_by_peer: BTreeMap<(usize, collection::ConnectionId), bool>,
-
-    /// Keys are combinations of `(peer_index, notifications_protocol_index)`. Contains all the
-    /// inbound notification substreams that are either pending or accepted. Used in order to
-    /// prevent a peer from opening multiple inbound substreams.
-    peers_notifications_in: BTreeSet<(usize, usize)>,
-
-    /// Keys are combinations of `(peer_index, notifications_protocol_index)`. Values are the
-    /// state of the corresponding outbound notifications substream.
-    peers_notifications_out: BTreeMap<(usize, usize), NotificationsOutState>,
-
-    /// Each [`DesiredInNotificationId`] points to this slab. Contains the connection and
-    /// substream id to accept or refuse. Items are always initially set to `Some`, but they can
-    /// be set to `None` if the remote cancels its request.
-    ///
-    /// It is possible for the [`ConnectionId`]s to be obsolete.
-    desired_in_notifications: slab::Slab<
-        Option<(
-            collection::ConnectionId,
-            collection::SubstreamId,
-            usize,
-            usize,
-        )>,
-    >,
-
-    /// Each [`DesiredOutNotificationId`] points to this slab.
-    // TODO: doc
-    desired_out_notifications: slab::Slab<Option<(usize, collection::ConnectionId, usize)>>,
-
-    /// Each [`RequestId`] points to this slab. Contains the arguments to pass when calling
-    /// [`collection::Network::respond_in_request`].
-    ///
-    /// It is possible for the [`ConnectionId`]s to be obsolete.
-    requests_in: slab::Slab<(ConnectionId, collection::SubstreamId)>,
-}
-
-impl<TConn> Guarded<TConn> {
     fn peer_index_or_insert(&mut self, peer_id: &PeerId) -> usize {
         if let Some(idx) = self.peer_indices.get(peer_id) {
             return *idx;
@@ -1698,39 +1420,240 @@ impl<TConn> Guarded<TConn> {
             return;
         }
 
-        // TODO: O(n)
-        if self
-            .connections
-            .iter()
-            .any(|(_, (idx, _))| *idx == Some(peer_index))
-        {
-            return;
-        }
-
         let peer_id = self.peers.remove(peer_index).peer_id;
         let _index = self.peer_indices.remove(&peer_id).unwrap();
         debug_assert_eq!(_index, peer_index);
     }
 }
 
-/// See [`Guarded::peers_notifications_out`].
-///
-/// Note that the state where `desired` is `true` and `open` is `Closed` means that the remote
-/// has refused or has closed the substream.
-struct NotificationsOutState {
-    desired: bool,
-    open: NotificationsOutOpenState,
+impl<TConn, TNow> ops::Index<ConnectionId> for Peers<TConn, TNow> {
+    type Output = TConn;
+    fn index(&self, id: ConnectionId) -> &TConn {
+        &self.inner[id].user_data
+    }
 }
 
-enum NotificationsOutOpenState {
-    Closed,
-    ApiHandshakeWait(DesiredOutNotificationId),
-    Opening(ConnectionId, collection::SubstreamId),
-    Open(ConnectionId, collection::SubstreamId),
+impl<TConn, TNow> ops::IndexMut<ConnectionId> for Peers<TConn, TNow> {
+    fn index_mut(&mut self, id: ConnectionId) -> &mut TConn {
+        &mut self.inner[id].user_data
+    }
 }
 
-/// See [`Guarded::peers`]
-struct Peer {
-    peer_id: PeerId,
-    desired: bool,
+enum ConnectionIdForPeer {
+    Connected(ConnectionId),
+    ConnectedButShuttingDown(ConnectionId),
+    NotConnected,
+}
+
+/// See [`Event::DesiredInNotification`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DesiredInNotificationId(usize);
+
+/// See [`Peers::next_unfulfilled_desired_outbound_substream`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DesiredOutNotificationId(usize);
+
+/// See [`Event::RequestIn`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InRequestId(collection::SubstreamId);
+
+/// See [`Peers::start_request`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OutRequestId(OutRequestIdInner);
+
+/// There are two kinds of outgoing requests: "real" ones, and "fake" ones. Fake requests exist for
+/// API consistency purposes: when a connection is shutting down and the user starts an outgoing
+/// request, we create a fake request then report its failure.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum OutRequestIdInner {
+    Real(collection::SubstreamId),
+    Fake(u64),
+}
+
+/// Event happening over the network. See [`Peers::next_event`].
+// TODO: in principle we could return `&PeerId` instead of `PeerId` most of the time, but this causes many borrow checker issues in the upper layer and I'm not motivated enough to deal with that
+#[derive(Debug)]
+pub enum Event<TConn> {
+    /// Established a new connection to the given peer.
+    Connected {
+        /// Identity of the peer on the other side of the connection.
+        peer_id: PeerId,
+
+        /// Number of other established connections with the same peer, including the one that
+        /// has just been established.
+        num_peer_connections: NonZeroU32,
+    },
+
+    /// A connection has stopped.
+    Disconnected {
+        /// Identity of the peer on the other side of the connection.
+        peer_id: PeerId,
+
+        /// Number of other established connections with the same peer remaining after the
+        /// disconnection.
+        num_peer_connections: u32,
+
+        /// User data that was associated to this connection.
+        // TODO: ?!
+        user_data: TConn,
+    },
+
+    /// Received an incoming substream, but this substream has produced an error.
+    ///
+    /// > **Note**: This event exists only for diagnostic purposes. No action is expected in
+    /// >           return.
+    InboundError {
+        /// Peer which opened the substream.
+        peer_id: PeerId,
+        /// Identifier of the connection on which the problem happened.
+        connection_id: ConnectionId,
+        /// Error that happened.
+        error: InboundError,
+    },
+
+    /// Outcome of a request started using [`Peers::start_request`].
+    ///
+    /// *All* requests always lead to an outcome, even if the connection has been closed while the
+    /// request was in progress.
+    Response {
+        /// Identifier for this request. Was returned by [`Peers::start_request`].
+        request_id: OutRequestId,
+        response: Result<Vec<u8>, RequestError>,
+    },
+
+    /// Received a request from a request-response protocol.
+    RequestIn {
+        /// Identifier for this request. Must be passed back when calling
+        /// [`Peers::respond_in_request`].
+        request_id: InRequestId,
+        /// Peer which sent the request.
+        peer_id: PeerId,
+        /// Identifier of the connection that has sent the request.
+        connection_id: ConnectionId,
+        /// Request-response protocol the request is about.
+        protocol_index: usize,
+        /// Payload of the request, opaque to this state machine.
+        ///
+        /// > **Note**: Keep in mind that this data is untrusted.
+        request_payload: Vec<u8>,
+    },
+
+    /// A previously-emitted [`Event::RequestIn`] is now obsolete.
+    ///
+    /// The [`InRequestId`] is now considered dead, and calling [`Peers::respond_in_request`] is
+    /// now invalid.
+    RequestInCancel {
+        /// Identifier for this request.
+        id: InRequestId,
+    },
+
+    /// A peer would like to open a notifications substream with the local node, in order to
+    /// send notifications.
+    ///
+    /// Only one inbound notifications substream can exist per peer and per protocol. Any
+    /// additional one will be automatically refused.
+    DesiredInNotification {
+        /// Identifier for this request. Must be passed back when calling
+        /// [`Peers::in_notification_accept`] or [`Peers::in_notification_refuse`].
+        id: DesiredInNotificationId,
+        /// Peer which tries to open an inbound substream.
+        peer_id: PeerId,
+        /// Notifications protocol the substream is about.
+        notifications_protocol_index: usize,
+        /// Handshake of the request sent by the peer. Opaque to this state machine.
+        ///
+        /// > **Note**: Keep in mind that this data is untrusted.
+        handshake: Vec<u8>,
+    },
+
+    /// A previously-emitted [`DesiredInNotificationId`] is now obsolete. This event is for
+    /// informative purpose and does **not** invalidate the [`DesiredInNotificationId`]. Use
+    /// [`Peers::in_notification_refuse`] if you no longer care about this request.
+    DesiredInNotificationCancel {
+        /// Identifier for this request.
+        id: DesiredInNotificationId,
+    },
+
+    /// A handshaking outbound substream has been accepted by the remote.
+    ///
+    /// Will happen for combinations of [`PeerId`] and notification protocols that have been
+    /// marked as desired. Can also happen for other combinations, if there were marked as desired
+    /// in the past but no longer are.
+    ///
+    /// If `Ok`, it is now possible to send notifications on this substream.
+    NotificationsOutResult {
+        /// Peer the substream is open with.
+        peer_id: PeerId,
+        /// Notifications protocol the substream is about.
+        notifications_protocol_index: usize,
+        /// If `Ok`, contains the handshake sent back by the remote. Its interpretation is out of
+        /// scope of this module.
+        /// If `Err`, the state machine will *not* automatically try to re-open a substream again.
+        /// Use [`Peers::set_peer_notifications_out_desired`] with [`DesiredState::DesiredReset`]
+        /// in order to try again.
+        result: Result<Vec<u8>, NotificationsOutErr>,
+    },
+
+    /// A previously open outbound substream has been closed by the remote. Can only happen after
+    /// a corresponding successful [`Event::NotificationsOutResult`] event has been emitted in the
+    /// past.
+    ///
+    /// This combination of [`PeerId`] and notification protocol will now be returned when calling
+    /// [`Peers::refused_notifications_out`].
+    NotificationsOutClose {
+        /// Peer the substream is no longer open with.
+        peer_id: PeerId,
+        /// Notifications protocol the substream is about.
+        notifications_protocol_index: usize,
+    },
+
+    /// Received a notification on a notifications substream of a connection.
+    NotificationsIn {
+        /// Peer that sent the notification.
+        peer_id: PeerId,
+        /// Notifications protocol the substream is about.
+        notifications_protocol_index: usize,
+        /// Payload of the notification. Opaque to this state machine.
+        ///
+        /// > **Note**: Keep in mind that this data is untrusted.
+        notification: Vec<u8>,
+    },
+
+    /// Remote has closed a previously-open inbound notifications substream.
+    NotificationsInClose {
+        /// Peer the substream is no longer with.
+        peer_id: PeerId,
+        /// Notifications protocol the substream is about.
+        notifications_protocol_index: usize,
+        /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
+        outcome: Result<(), NotificationsInClosedErr>,
+    },
+}
+
+/// See [`Peers::set_peer_notifications_out_desired`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum DesiredState {
+    /// Substream is no longer desired. Close any existing substream.
+    NotDesired,
+    /// Substream is now desired. If the state was already "desired" and the peer has refused this
+    /// substream in the past, do nothing.
+    Desired,
+    /// Substream is now desired. If the peer has refused this substream in the past, try to open
+    /// one again.
+    DesiredReset,
+}
+
+/// Error potentially returned by [`Peers::in_notification_accept`].
+#[derive(Debug, derive_more::Display)]
+pub enum InNotificationAcceptError {
+    /// The request is now obsolete, either because the connection has been shut down or the
+    /// remote has canceled their request.
+    Obsolete,
+}
+
+/// Error potentially returned by [`Peers::queue_notification`].
+#[derive(Debug, derive_more::Display)]
+pub enum QueueNotificationError {
+    /// Queue of notifications with that peer is full.
+    QueueFull,
 }

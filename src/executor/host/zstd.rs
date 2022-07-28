@@ -19,7 +19,7 @@ use alloc::{borrow::Cow, vec::Vec};
 
 mod tests;
 
-/// A runtime blob beginning with this prefix should first be decompressed with zstandard
+/// A runtime blob beginning with this prefix should first be decompressed with `zstandard`
 /// compression.
 ///
 /// This differs from the Wasm magic bytes, so real Wasm blobs will not have this prefix.

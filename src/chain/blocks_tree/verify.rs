@@ -22,15 +22,18 @@
 
 use crate::{
     chain::{chain_information, fork_tree},
-    executor::host,
+    executor::{host, storage_diff},
     header,
     trie::calculate_root,
     verify,
 };
 
-use super::*;
+use super::{
+    best_block, fmt, Arc, Block, BlockAccess, BlockConsensus, Duration, FinalizedConsensus,
+    NonFinalizedTree, NonFinalizedTreeInner, Vec,
+};
 
-use alloc::{boxed::Box, collections::BTreeMap};
+use alloc::boxed::Box;
 use core::cmp::Ordering;
 
 impl<T> NonFinalizedTree<T> {
@@ -56,7 +59,7 @@ impl<T> NonFinalizedTree<T> {
                 Err(err)
             }
             VerifyOut::HeaderOk(context, is_new_best, consensus) => {
-                let hash = context.header.hash();
+                let hash = context.header.hash(context.chain.block_number_bytes);
                 Ok(HeaderVerifySuccess::Insert {
                     block_height: context.header.number,
                     is_new_best,
@@ -119,7 +122,7 @@ impl<T> NonFinalizedTreeInner<T> {
         now_from_unix_epoch: Duration,
         full: bool,
     ) -> VerifyOut<T> {
-        let decoded_header = match header::decode(&scale_encoded_header) {
+        let decoded_header = match header::decode(&scale_encoded_header, self.block_number_bytes) {
             Ok(h) => h,
             Err(err) => {
                 return if full {
@@ -174,7 +177,6 @@ impl<T> NonFinalizedTreeInner<T> {
         // information is found either in the parent block, or in the finalized block.
         let consensus = if let Some(parent_tree_index) = parent_tree_index {
             match &self.blocks.get(parent_tree_index).unwrap().consensus {
-                BlockConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
                 BlockConsensus::Aura { authorities_list } => VerifyConsensusSpecific::Aura {
                     authorities_list: authorities_list.clone(),
                 },
@@ -188,7 +190,7 @@ impl<T> NonFinalizedTreeInner<T> {
             }
         } else {
             match &self.finalized_consensus {
-                FinalizedConsensus::AllAuthorized => VerifyConsensusSpecific::AllAuthorized,
+                FinalizedConsensus::Unknown => VerifyConsensusSpecific::Unknown,
                 FinalizedConsensus::Aura {
                     authorities_list, ..
                 } => VerifyConsensusSpecific::Aura {
@@ -252,8 +254,11 @@ impl<T> NonFinalizedTreeInner<T> {
                         slots_per_epoch: *slots_per_epoch,
                         now_from_unix_epoch,
                     },
-                    (FinalizedConsensus::AllAuthorized, VerifyConsensusSpecific::AllAuthorized) => {
-                        verify::header_only::ConfigConsensus::AllAuthorized
+                    (FinalizedConsensus::Unknown, VerifyConsensusSpecific::Unknown) => {
+                        return VerifyOut::HeaderErr(
+                            context.chain,
+                            HeaderVerifyError::UnknownConsensusEngine,
+                        )
                     }
                     _ => {
                         return VerifyOut::HeaderErr(
@@ -262,7 +267,9 @@ impl<T> NonFinalizedTreeInner<T> {
                         )
                     }
                 },
+                allow_unknown_consensus_engines: context.chain.allow_unknown_consensus_engines,
                 block_header: (&context.header).into(), // TODO: inefficiency ; in case of header only verify we do an extra allocation to build the context above
+                block_number_bytes: context.chain.block_number_bytes,
                 parent_block_header: parent_block_header.into(),
             })
             .map_err(HeaderVerifyError::VerificationFailed);
@@ -298,9 +305,6 @@ impl<T> VerifyContext<T> {
         success_consensus: verify::header_only::Success,
     ) -> (bool, BlockConsensus) {
         let success_consensus = match success_consensus {
-            verify::header_only::Success::AllAuthorized => {
-                verify::header_body::SuccessConsensus::AllAuthorized
-            }
             verify::header_only::Success::Aura { authorities_change } => {
                 verify::header_body::SuccessConsensus::Aura { authorities_change }
             }
@@ -338,12 +342,6 @@ impl<T> VerifyContext<T> {
             self.parent_tree_index
                 .map(|idx| self.chain.blocks.get(idx).unwrap().consensus.clone()),
         ) {
-            (
-                verify::header_body::SuccessConsensus::AllAuthorized,
-                VerifyConsensusSpecific::AllAuthorized,
-                FinalizedConsensus::AllAuthorized,
-                _,
-            ) => BlockConsensus::AllAuthorized,
             (
                 verify::header_body::SuccessConsensus::Aura { authorities_change },
                 VerifyConsensusSpecific::Aura {
@@ -486,7 +484,7 @@ impl<T> VerifyContext<T> {
 
                 // Block verification is successful!
                 let (is_new_best, consensus) = self.apply_success_body(success.consensus);
-                let hash = self.header.hash();
+                let hash = self.header.hash(self.chain.block_number_bytes);
 
                 BodyVerifyStep2::Finished {
                     parent_runtime: success.parent_runtime,
@@ -565,7 +563,7 @@ pub enum BodyVerifyStep1<T> {
 
 #[derive(Debug)]
 enum VerifyConsensusSpecific {
-    AllAuthorized,
+    Unknown,
     Aura {
         authorities_list: Arc<Vec<header::AuraAuthority>>,
     },
@@ -662,15 +660,20 @@ impl<T> BodyVerifyRuntimeRequired<T> {
             &self.context.chain.finalized_consensus,
             &self.context.consensus,
         ) {
-            (FinalizedConsensus::AllAuthorized, VerifyConsensusSpecific::AllAuthorized) => {
-                verify::header_body::ConfigConsensus::AllAuthorized
+            (FinalizedConsensus::Unknown, VerifyConsensusSpecific::Unknown) => {
+                return BodyVerifyStep2::Error {
+                    chain: NonFinalizedTree {
+                        inner: Some(self.context.chain),
+                    },
+                    error: BodyVerifyError::UnknownConsensusEngine,
+                    parent_runtime,
+                }
             }
             (
                 FinalizedConsensus::Aura { slot_duration, .. },
                 VerifyConsensusSpecific::Aura { authorities_list },
             ) => verify::header_body::ConfigConsensus::Aura {
                 current_authorities: header::AuraAuthoritiesIter::from_slice(&*authorities_list),
-                now_from_unix_epoch: self.now_from_unix_epoch,
                 slot_duration: *slot_duration,
             },
             (
@@ -685,7 +688,6 @@ impl<T> BodyVerifyRuntimeRequired<T> {
                 parent_block_epoch: current_epoch.as_ref().map(|v| (&**v).into()),
                 parent_block_next_epoch: (&**next_epoch).into(),
                 slots_per_epoch: *slots_per_epoch,
-                now_from_unix_epoch: self.now_from_unix_epoch,
             },
             _ => {
                 return BodyVerifyStep2::Error {
@@ -701,7 +703,10 @@ impl<T> BodyVerifyRuntimeRequired<T> {
         let process = verify::header_body::verify(verify::header_body::Config {
             parent_runtime,
             consensus: config_consensus,
+            allow_unknown_consensus_engines: self.context.chain.allow_unknown_consensus_engines,
+            now_from_unix_epoch: self.now_from_unix_epoch,
             block_header: (&self.context.header).into(),
+            block_number_bytes: self.context.chain.block_number_bytes,
             parent_block_header: parent_block_header.into(),
             block_body,
             top_trie_root_calculation_cache,
@@ -740,9 +745,9 @@ pub enum BodyVerifyStep2<T> {
         /// been modified. Contains the new runtime.
         new_runtime: Option<host::HostVmPrototype>,
         /// List of changes to the storage top trie that the block performs.
-        storage_top_trie_changes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
-        /// List of changes to the offchain storage that this block performs.
-        offchain_storage_changes: HashMap<Vec<u8>, Option<Vec<u8>>, fnv::FnvBuildHasher>,
+        storage_top_trie_changes: storage_diff::StorageDiff,
+        /// List of changes to the off-chain storage that this block performs.
+        offchain_storage_changes: storage_diff::StorageDiff,
         /// Cache of calculation for the storage trie of the best block.
         /// Pass this value to [`BodyVerifyRuntimeRequired::resume`] when verifying a children of
         /// this block in order to considerably speed up the verification.
@@ -768,7 +773,7 @@ pub enum BodyVerifyStep2<T> {
     /// A new runtime must be compiled.
     ///
     /// This variant doesn't require any specific input from the user, but is provided in order to
-    /// make it possible to benchmBodyVerifyStep2<ark the time it takes to compile runtimes.
+    /// make it possible to benchmark the time it takes to compile runtimes.
     RuntimeCompilation(RuntimeCompilation<T>),
 }
 
@@ -776,7 +781,10 @@ pub enum BodyVerifyStep2<T> {
 #[derive(Debug, derive_more::Display)]
 pub enum BodyVerifyError {
     /// Error during the consensus-related check.
+    #[display(fmt = "{}", _0)]
     Consensus(verify::header_body::Error),
+    /// Block can't be verified as it uses an unknown consensus engine.
+    UnknownConsensusEngine,
     /// Block uses a different consensus than the rest of the chain.
     ConsensusMismatch,
 }
@@ -1081,7 +1089,10 @@ impl<'c, T> Drop for HeaderInsert<'c, T> {
 #[derive(Debug, derive_more::Display)]
 pub enum HeaderVerifyError {
     /// Error while decoding the header.
+    #[display(fmt = "Error while decoding the header: {}", _0)]
     InvalidHeader(header::Error),
+    /// Block can't be verified as it uses an unknown consensus engine.
+    UnknownConsensusEngine,
     /// Block uses a different consensus than the rest of the chain.
     ConsensusMismatch,
     /// The parent of the block isn't known.
@@ -1091,6 +1102,7 @@ pub enum HeaderVerifyError {
         parent_hash: [u8; 32],
     },
     /// The block verification has failed. The block is invalid and should be thrown away.
+    #[display(fmt = "{}", _0)]
     VerificationFailed(verify::header_only::Error),
 }
 

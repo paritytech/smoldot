@@ -24,7 +24,7 @@ use smoldot::{
     json_rpc::{methods, requests_subscriptions},
     network::protocol,
 };
-use std::{str, sync::Arc};
+use std::{num::NonZeroUsize, str, sync::Arc};
 
 impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::chain_getFinalizedHead`].
@@ -36,7 +36,11 @@ impl<TPlat: Platform> Background<TPlat> {
         // TODO: maybe optimize?
         let response = methods::Response::chain_getFinalizedHead(methods::HashHexString(
             header::hash_from_scale_encoded_header(
-                &self.runtime_service.subscribe_finalized().await.0,
+                &self
+                    .runtime_service
+                    .subscribe_all(16, NonZeroUsize::new(24).unwrap())
+                    .await
+                    .finalized_block_scale_encoded_header,
             ),
         ))
         .to_json_response(request_id);
@@ -72,7 +76,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
-                methods::Response::chainSpec_unstable_chainName(&self.chain_name)
+                methods::Response::chainSpec_unstable_chainName((&self.chain_name).into())
                     .to_json_response(request_id),
             )
             .await;
@@ -141,10 +145,9 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
-                methods::Response::sudo_unstable_version(&format!(
-                    "{} {}",
-                    self.system_name, self.system_version
-                ))
+                methods::Response::sudo_unstable_version(
+                    format!("{} {}", self.system_name, self.system_version).into(),
+                )
                 .to_json_response(request_id),
             )
             .await;
@@ -159,7 +162,8 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
-                methods::Response::system_chain(&self.chain_name).to_json_response(request_id),
+                methods::Response::system_chain((&self.chain_name).into())
+                    .to_json_response(request_id),
             )
             .await;
     }
@@ -173,7 +177,8 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
-                methods::Response::system_chainType(&self.chain_ty).to_json_response(request_id),
+                methods::Response::system_chainType((&self.chain_ty).into())
+                    .to_json_response(request_id),
             )
             .await;
     }
@@ -224,7 +229,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
-                methods::Response::system_localPeerId(&self.peer_id_base58)
+                methods::Response::system_localPeerId((&self.peer_id_base58).into())
                     .to_json_response(request_id),
             )
             .await;
@@ -239,7 +244,8 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
-                methods::Response::system_name(&self.system_name).to_json_response(request_id),
+                methods::Response::system_name((&self.system_name).into())
+                    .to_json_response(request_id),
             )
             .await;
     }
@@ -300,7 +306,7 @@ impl<TPlat: Platform> Background<TPlat> {
         self.requests_subscriptions
             .respond(
                 state_machine_request_id,
-                methods::Response::system_version(&self.system_version)
+                methods::Response::system_version((&self.system_version).into())
                     .to_json_response(request_id),
             )
             .await;

@@ -97,6 +97,11 @@ impl<TSrc> AllForksSources<TSrc> {
         self.sources.len()
     }
 
+    /// Returns the list of all user datas of all sources.
+    pub fn user_data_iter_mut(&'_ mut self) -> impl ExactSizeIterator<Item = &'_ mut TSrc> + '_ {
+        self.sources.values_mut().map(|s| &mut s.user_data)
+    }
+
     /// Returns the number of unique blocks in the data structure.
     // TODO: is this method needed at all?
     pub fn num_blocks(&self) -> usize {
@@ -279,14 +284,22 @@ impl<TSrc> AllForksSources<TSrc> {
         debug_assert_eq!(_was_in1, _was_in2);
     }
 
-    /// Sets the best block of this source.
+    /// Registers a new block that the source is aware of and sets it as its best block.
+    ///
+    /// If the block height is inferior or equal to the finalized block height, the block itself
+    /// isn't kept in memory but is still set as the source's best block.
     ///
     /// # Panic
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
     #[track_caller]
-    pub fn set_best_block(&mut self, source_id: SourceId, height: u64, hash: [u8; 32]) {
+    pub fn add_known_block_and_set_best(
+        &mut self,
+        source_id: SourceId,
+        height: u64,
+        hash: [u8; 32],
+    ) {
         self.add_known_block(source_id, height, hash);
 
         let source = self.sources.get_mut(&source_id).unwrap();
@@ -296,8 +309,9 @@ impl<TSrc> AllForksSources<TSrc> {
 
     /// Returns the current best block of the given source.
     ///
-    /// This corresponds either the latest call to [`AllForksSources::set_best_block`],
-    /// or to the parameter passed to [`AllForksSources::add_source`].
+    /// This corresponds either to the latest call to
+    /// [`AllForksSources::add_known_block_and_set_best`], or to the parameter passed to
+    /// [`AllForksSources::add_source`].
     ///
     /// # Panic
     ///
@@ -331,9 +345,10 @@ impl<TSrc> AllForksSources<TSrc> {
             .map(|(_, _, id)| *id)
     }
 
-    /// Returns true if [`AllForksSources::add_known_block`] or [`AllForksSources::set_best_block`]
-    /// has earlier been called on this source with this height and hash, or if the source was
-    /// originally created (using [`AllForksSources::add_source`]) with this height and hash.
+    /// Returns true if [`AllForksSources::add_known_block`] or
+    /// [`AllForksSources::add_known_block_and_set_best`] has earlier been called on this source
+    /// with this height and hash, or if the source was originally created (using
+    /// [`AllForksSources::add_source`]) with this height and hash.
     ///
     /// # Panic
     ///
@@ -400,7 +415,7 @@ mod tests {
         assert_eq!(sources.num_blocks(), 1);
         assert!(sources.source_knows_non_finalized_block(source1, 12, &[1; 32]));
 
-        sources.set_best_block(source1, 13, [2; 32]);
+        sources.add_known_block_and_set_best(source1, 13, [2; 32]);
         assert_eq!(sources.num_blocks(), 2);
         assert!(sources.source_knows_non_finalized_block(source1, 12, &[1; 32]));
         assert!(sources.source_knows_non_finalized_block(source1, 13, &[2; 32]));

@@ -23,7 +23,7 @@
 //! protocol is supported at the moment.
 //! - A noise protocol handshake, where public keys are exchanged and symmetric encryption is
 //! initialized.
-//! - A multistream-select negotiation to negotiate the yamux protocol. Only the yamux protocol is
+//! - A multistream-select negotiation to negotiate the Yamux protocol. Only the Yamux protocol is
 //! supported at the moment. This negotiation is performed on top of the noise cipher.
 //!
 //! This entire handshake requires in total either three or five TCP packets (not including the
@@ -133,7 +133,7 @@ impl HealthyHandshake {
                     // Delegating read/write to the negotiation.
                     let updated = negotiation
                         .read_write(read_write)
-                        .map_err(HandshakeError::MultistreamSelect)?;
+                        .map_err(HandshakeError::EncryptionMultistreamSelect)?;
 
                     return match updated {
                         multistream_select::Negotiation::InProgress(updated) => {
@@ -209,12 +209,12 @@ impl HealthyHandshake {
                     // through the Noise cipher.
 
                     if read_write.incoming_buffer.is_none() {
-                        return Err(HandshakeError::MultistreamSelect(
+                        return Err(HandshakeError::MultiplexingMultistreamSelect(
                             multistream_select::Error::ReadClosed,
                         ));
                     }
                     if read_write.outgoing_buffer.is_none() {
-                        return Err(HandshakeError::MultistreamSelect(
+                        return Err(HandshakeError::MultiplexingMultistreamSelect(
                             multistream_select::Error::WriteClosed,
                         ));
                     }
@@ -245,11 +245,10 @@ impl HealthyHandshake {
                             read_bytes: 0,
                             written_bytes: 0,
                             wake_up_after: None,
-                            wake_up_future: None,
                         };
                         let updated = negotiation
                             .read_write(&mut interm_read_write)
-                            .map_err(HandshakeError::MultistreamSelect)?;
+                            .map_err(HandshakeError::MultiplexingMultistreamSelect)?;
                         (
                             updated,
                             interm_read_write.read_bytes,
@@ -335,9 +334,14 @@ impl fmt::Debug for NoiseKeyRequired {
 /// Error during a connection handshake. The connection should be shut down.
 #[derive(Debug, derive_more::Display)]
 pub enum HandshakeError {
-    /// Protocol error during a multistream-select negotiation.
-    MultistreamSelect(multistream_select::Error),
+    /// Protocol error during the multistream-select negotiation of the encryption protocol.
+    #[display(fmt = "Encryption protocol selection error: {}", _0)]
+    EncryptionMultistreamSelect(multistream_select::Error),
+    /// Protocol error during the multistream-select negotiation of the multiplexing protocol.
+    #[display(fmt = "Multiplexing protocol selection error: {}", _0)]
+    MultiplexingMultistreamSelect(multistream_select::Error),
     /// Protocol error during the noise handshake.
+    #[display(fmt = "Noise handshake error: {}", _0)]
     NoiseHandshake(noise::HandshakeError),
     /// No encryption protocol in common with the remote.
     ///
@@ -348,5 +352,6 @@ pub enum HandshakeError {
     /// The remote is behaving correctly but isn't compatible with the local node.
     NoMultiplexingProtocol,
     /// Error in the noise cipher. Data has most likely been corrupted.
+    #[display(fmt = "Noise cipher error: {}", _0)]
     Noise(noise::CipherError),
 }

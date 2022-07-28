@@ -54,6 +54,9 @@ pub struct VerifyConfig<'a, TAuthList> {
     /// Header of the block to verify.
     pub header: header::HeaderRef<'a>,
 
+    /// Number of bytes used to encode the block number in the header.
+    pub block_number_bytes: usize,
+
     /// Header of the parent of the block to verify.
     ///
     /// [`verify_header`] assumes that this block has been successfully verified before.
@@ -99,7 +102,7 @@ pub enum VerifyError {
     TooFarInFuture,
     /// Block header signature is invalid.
     BadSignature,
-    /// Failed to parse ed25519 public key.
+    /// Failed to parse Ed25519 public key.
     BadPublicKey,
     /// List of authorities is empty.
     EmptyAuthorities,
@@ -170,7 +173,10 @@ pub fn verify_header<'a>(
             }
             _ => return Err(VerifyError::MissingSeal),
         };
-        (seal_signature, unsealed_header.hash())
+        (
+            seal_signature,
+            unsealed_header.hash(config.block_number_bytes),
+        )
     };
 
     // Fetch the authority that has supposedly signed the block.

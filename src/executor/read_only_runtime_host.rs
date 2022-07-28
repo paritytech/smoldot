@@ -302,12 +302,12 @@ impl Inner {
                     // upgrades are quite uncommon and that a caching system is rather non-trivial
                     // to set up, the approach of recompiling every single time is preferred here.
                     // TODO: number of heap pages?! we use the default here, but not sure whether that's correct or if we have to take the current heap pages
-                    let vm_prototype = match host::HostVmPrototype::new(
-                        req.wasm_code(),
-                        executor::DEFAULT_HEAP_PAGES,
-                        vm::ExecHint::Oneshot,
-                        false, // TODO: what is a correct value here?
-                    ) {
+                    let vm_prototype = match host::HostVmPrototype::new(host::Config {
+                        module: req.wasm_code(),
+                        heap_pages: executor::DEFAULT_HEAP_PAGES,
+                        exec_hint: vm::ExecHint::Oneshot,
+                        allow_unresolved_imports: false, // TODO: what is a correct value here?
+                    }) {
                         Ok(w) => w,
                         Err(_) => {
                             self.vm = req.resume(Err(()));
@@ -315,14 +315,7 @@ impl Inner {
                         }
                     };
 
-                    match super::core_version(vm_prototype) {
-                        (Ok(version), _) => {
-                            self.vm = req.resume(Ok(version.as_ref()));
-                        }
-                        (Err(_), _) => {
-                            self.vm = req.resume(Err(()));
-                        }
-                    }
+                    self.vm = req.resume(Ok(vm_prototype.runtime_version().as_ref()));
                 }
 
                 host::HostVm::ExternalStorageRoot(req) => {

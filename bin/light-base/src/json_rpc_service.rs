@@ -57,7 +57,7 @@ use smoldot::{
 use std::{
     collections::HashMap,
     iter,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     str,
     sync::{atomic, Arc},
     time::Duration,
@@ -167,7 +167,7 @@ impl Sender {
         if log::log_enabled!(log::Level::Debug) {
             log::debug!(
                 target: &self.log_target,
-                "JSON-RPC => {}",
+                "PendingRequestsQueue <= {}",
                 crate::util::truncate_str_iter(
                     json_rpc_request.chars().filter(|c| !c.is_control()),
                     100,
@@ -407,8 +407,8 @@ struct Background<TPlat: Platform> {
     chain_properties_json: String,
     /// Whether the chain is a live network. Found in the chain specification.
     chain_is_live: bool,
-    /// See [`StartConfig::peer_id`]. The only use for this field is to send the base58 encoding of
-    /// the [`PeerId`]. Consequently, we store the conversion to base58 ahead of time.
+    /// See [`StartConfig::peer_id`]. The only use for this field is to send the Base58 encoding of
+    /// the [`PeerId`]. Consequently, we store the conversion to Base58 ahead of time.
     peer_id_base58: String,
     /// Value to return when the `system_name` RPC is called.
     system_name: String,
@@ -572,7 +572,11 @@ impl<TPlat: Platform> Background<TPlat> {
             tasks.push(
                 async move {
                     loop {
-                        me.handle_request().await
+                        me.handle_request().await;
+
+                        // We yield once between each request in order to politely let other tasks
+                        // do some work and not monopolize the CPU.
+                        crate::util::yield_once().await;
                     }
                 }
                 .boxed(),
@@ -591,9 +595,14 @@ impl<TPlat: Platform> Background<TPlat> {
 
                     // Subscribe to new runtime service blocks in order to push them in the
                     // cache as soon as they are available.
+                    // The buffer size should be large enough so that, if the CPU is busy, it
+                    // doesn't become full before the execution of this task resumes.
+                    // The maximum number of pinned block is ignored, as this maximum is a way to
+                    // avoid malicious behaviors. This code is by definition not considered
+                    // malicious.
                     let mut subscribe_all = me
                         .runtime_service
-                        .subscribe_all(8, cache.recent_pinned_blocks.cap())
+                        .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
                         .await;
 
                     cache.subscription_id = Some(subscribe_all.new_blocks.id());
@@ -643,7 +652,8 @@ impl<TPlat: Platform> Background<TPlat> {
                                     .recent_pinned_blocks
                                     .put(hash, block.scale_encoded_header);
                             }
-                            Some(runtime_service::Notification::Finalized { .. }) => {}
+                            Some(runtime_service::Notification::Finalized { .. })
+                            | Some(runtime_service::Notification::BestBlockChanged { .. }) => {}
                             None => break,
                         }
                     }
@@ -671,17 +681,19 @@ impl<TPlat: Platform> Background<TPlat> {
     async fn handle_request(self: &Arc<Self>) {
         let (json_rpc_request, state_machine_request_id) =
             self.requests_subscriptions.next_request().await;
+        log::debug!(target: &self.log_target, "PendingRequestsQueue => {}", 
+            crate::util::truncate_str_iter(
+                json_rpc_request.chars().filter(|c| !c.is_control()),
+                100,
+            ).collect::<String>());
 
         // Check whether the JSON-RPC request is correct, and bail out if it isn't.
         let (request_id, call) = match methods::parse_json_call(&json_rpc_request) {
-            Ok((request_id, call)) => {
-                log::debug!(target: &self.log_target, "Handler <= Request(id_json={:?}, method={})", request_id, call.name());
-                (request_id, call)
-            }
+            Ok((request_id, call)) => (request_id, call),
             Err(methods::ParseError::Method { request_id, error }) => {
                 log::warn!(
                     target: &self.log_target,
-                    "Error in JSON-RPC method call: {}", error
+                    "Error in JSON-RPC method call with id {:?}: {}", request_id, error
                 );
                 self.requests_subscriptions
                     .respond(&state_machine_request_id, error.to_json_error(request_id))
@@ -715,8 +727,12 @@ impl<TPlat: Platform> Background<TPlat> {
                 .await
             }
             methods::MethodCall::author_unwatchExtrinsic { subscription } => {
-                self.author_unwatch_extrinsic(request_id, &state_machine_request_id, subscription)
-                    .await;
+                self.author_unwatch_extrinsic(
+                    request_id,
+                    &state_machine_request_id,
+                    &*subscription,
+                )
+                .await;
             }
             methods::MethodCall::chain_getBlock { hash } => {
                 self.chain_get_block(request_id, &state_machine_request_id, hash)
@@ -783,6 +799,24 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.rpc_methods(request_id, &state_machine_request_id)
                     .await;
             }
+            methods::MethodCall::state_call {
+                name,
+                parameters,
+                hash,
+            } => {
+                self.state_call(
+                    request_id,
+                    &state_machine_request_id,
+                    &name,
+                    parameters,
+                    hash,
+                )
+                .await;
+            }
+            methods::MethodCall::state_getKeys { prefix, hash } => {
+                self.state_get_keys(request_id, &state_machine_request_id, prefix, hash)
+                    .await;
+            }
             methods::MethodCall::state_getKeysPaged {
                 prefix,
                 count,
@@ -819,7 +853,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.state_unsubscribe_runtime_version(
                     request_id,
                     &state_machine_request_id,
-                    subscription,
+                    &*subscription,
                 )
                 .await;
             }
@@ -828,8 +862,12 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::state_unsubscribeStorage { subscription } => {
-                self.state_unsubscribe_storage(request_id, &state_machine_request_id, subscription)
-                    .await;
+                self.state_unsubscribe_storage(
+                    request_id,
+                    &state_machine_request_id,
+                    &*subscription,
+                )
+                .await;
             }
             methods::MethodCall::state_getRuntimeVersion { at } => {
                 self.state_get_runtime_version(
@@ -880,30 +918,30 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
 
-            methods::MethodCall::chainHead_unstable_stopBody { subscription_id } => {
+            methods::MethodCall::chainHead_unstable_stopBody { subscription } => {
                 self.chain_head_unstable_stop_body(
                     request_id,
                     &state_machine_request_id,
-                    subscription_id,
+                    &*subscription,
                 )
                 .await;
             }
             methods::MethodCall::chainHead_unstable_body {
-                follow_subscription_id,
+                follow_subscription,
                 hash,
                 network_config,
             } => {
                 self.chain_head_unstable_body(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription_id,
+                    &*follow_subscription,
                     hash,
                     network_config,
                 )
                 .await;
             }
             methods::MethodCall::chainHead_unstable_call {
-                follow_subscription_id,
+                follow_subscription,
                 hash,
                 function,
                 call_parameters,
@@ -912,32 +950,32 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_call(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription_id,
+                    &*follow_subscription,
                     hash,
-                    function,
+                    &*function,
                     call_parameters,
                     network_config,
                 )
                 .await;
             }
-            methods::MethodCall::chainHead_unstable_stopCall { subscription_id } => {
+            methods::MethodCall::chainHead_unstable_stopCall { subscription } => {
                 self.chain_head_unstable_stop_call(
                     request_id,
                     &state_machine_request_id,
-                    subscription_id,
+                    &*subscription,
                 )
                 .await;
             }
-            methods::MethodCall::chainHead_unstable_stopStorage { subscription_id } => {
+            methods::MethodCall::chainHead_unstable_stopStorage { subscription } => {
                 self.chain_head_unstable_stop_storage(
                     request_id,
                     &state_machine_request_id,
-                    subscription_id,
+                    &*subscription,
                 )
                 .await;
             }
             methods::MethodCall::chainHead_unstable_storage {
-                follow_subscription_id,
+                follow_subscription,
                 hash,
                 key,
                 child_key,
@@ -947,7 +985,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.chain_head_storage(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription_id,
+                    &*follow_subscription,
                     hash,
                     key,
                     child_key,
@@ -965,36 +1003,36 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::chainHead_unstable_header {
-                follow_subscription_id,
+                follow_subscription,
                 hash,
             } => {
                 self.chain_head_unstable_header(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription_id,
+                    &*follow_subscription,
                     hash,
                 )
                 .await;
             }
             methods::MethodCall::chainHead_unstable_unpin {
-                follow_subscription_id,
+                follow_subscription,
                 hash,
             } => {
                 self.chain_head_unstable_unpin(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription_id,
+                    &*follow_subscription,
                     hash,
                 )
                 .await;
             }
             methods::MethodCall::chainHead_unstable_unfollow {
-                follow_subscription_id,
+                follow_subscription,
             } => {
                 self.chain_head_unstable_unfollow(
                     request_id,
                     &state_machine_request_id,
-                    follow_subscription_id,
+                    &*follow_subscription,
                 )
                 .await;
             }
@@ -1011,7 +1049,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     .await;
             }
             methods::MethodCall::sudo_unstable_p2pDiscover { multiaddr } => {
-                self.sudo_unstable_p2p_discover(request_id, &state_machine_request_id, multiaddr)
+                self.sudo_unstable_p2p_discover(request_id, &state_machine_request_id, &*multiaddr)
                     .await;
             }
             methods::MethodCall::sudo_unstable_version {} => {
@@ -1031,7 +1069,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.transaction_unstable_unwatch(
                     request_id,
                     &state_machine_request_id,
-                    subscription,
+                    &*subscription,
                 )
                 .await;
             }
@@ -1050,8 +1088,6 @@ impl<TPlat: Platform> Background<TPlat> {
             | methods::MethodCall::grandpa_roundState { .. }
             | methods::MethodCall::offchain_localStorageGet { .. }
             | methods::MethodCall::offchain_localStorageSet { .. }
-            | methods::MethodCall::state_call { .. }
-            | methods::MethodCall::state_getKeys { .. }
             | methods::MethodCall::state_getPairs { .. }
             | methods::MethodCall::state_getReadProof { .. }
             | methods::MethodCall::state_getStorageHash { .. }
@@ -1061,7 +1097,9 @@ impl<TPlat: Platform> Background<TPlat> {
             | methods::MethodCall::system_dryRun { .. }
             | methods::MethodCall::system_networkState { .. }
             | methods::MethodCall::system_nodeRoles { .. }
-            | methods::MethodCall::system_removeReservedPeer { .. }) => {
+            | methods::MethodCall::system_removeReservedPeer { .. }
+            | methods::MethodCall::network_unstable_subscribeEvents { .. }
+            | methods::MethodCall::network_unstable_unsubscribeEvents { .. }) => {
                 // TODO: implement the ones that make sense to implement ^
                 log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
                 self.requests_subscriptions
@@ -1146,7 +1184,7 @@ impl<TPlat: Platform> Background<TPlat> {
             match cache_lock
                 .recent_pinned_blocks
                 .get(hash)
-                .map(|h| header::decode(h))
+                .map(|h| header::decode(h, self.sync_service.block_number_bytes()))
             {
                 Some(Ok(header)) => return Ok((*header.state_root, header.number)),
                 Some(Err(_)) => return Err(()),
@@ -1169,6 +1207,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             // The sync service knows which peers are potentially aware of
                             // this block.
                             let result = sync_service
+                                .clone()
                                 .block_query_unknown_number(
                                     hash,
                                     protocol::BlocksRequestFields {
@@ -1190,7 +1229,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                     header::hash_from_scale_encoded_header(&header),
                                     hash
                                 );
-                                let decoded = header::decode(&header).unwrap();
+                                let decoded =
+                                    header::decode(&header, sync_service.block_number_bytes())
+                                        .unwrap();
                                 Ok((*decoded.state_root, decoded.number))
                             } else {
                                 Err(())
@@ -1414,6 +1455,7 @@ enum StorageQueryError {
     StorageRetrieval(sync_service::StorageQueryError),
 }
 
+// TODO: doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone)]
 enum RuntimeCallError {
     Call(runtime_service::RuntimeCallError),

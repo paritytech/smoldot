@@ -43,9 +43,9 @@
 //! header.
 //!
 //! Verifying the block's validity consists, in addition to verifying its header, in *executing*
-//! the block. This involves calling the `Core_execute_block` runtime function, passing as
-//! parameter the header and body of the block, and providing access to the storage of the parent
-//! block. The runtime verifies that the header and body are correct.
+//! the block. This involves calling the `BlockBuilder_check_inherents` and `Core_execute_block`
+//! runtime functions, passing as parameter the header and body of the block, and providing access
+//! to the storage of the parent block. The runtime verifies that the header and body are correct.
 //!
 //! # Trust
 //!
@@ -66,9 +66,8 @@
 //! happen, and many valid blocks don't get finalized.
 //!
 
-mod execute_block;
-
 pub mod aura;
 pub mod babe;
 pub mod header_body;
 pub mod header_only;
+pub mod inherents;

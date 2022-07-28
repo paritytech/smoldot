@@ -35,6 +35,7 @@
 //! let mut tree = async_tree::AsyncTree::new(async_tree::Config {
 //!     finalized_async_user_data: "hello",
 //!     retry_after_failed: Duration::from_secs(5),
+//!     blocks_capacity: 32,
 //! });
 //!
 //! // Insert a new best block, parent of the finalized block.
@@ -114,6 +115,17 @@ pub struct Config<TAsync> {
 
     /// After an asynchronous operation fails, retry after this given duration.
     pub retry_after_failed: Duration,
+
+    /// Number of elements to initially allocate to store blocks.
+    ///
+    /// This is not a cap to the number of blocks, but merely the amount of memory to initially
+    /// reserve.
+    ///
+    /// This covers all blocks from the moment they're added as input to the moment they're
+    /// finalized in the output.
+    ///
+    /// It is legal to pass 0, in which case no memory is pre-allocated.
+    pub blocks_capacity: usize,
 }
 
 pub struct AsyncTree<TNow, TBl, TAsync> {
@@ -160,13 +172,20 @@ where
         AsyncTree {
             best_block_index: None,
             finalized_async_user_data: config.finalized_async_user_data,
-            non_finalized_blocks: fork_tree::ForkTree::with_capacity(32),
+            non_finalized_blocks: fork_tree::ForkTree::with_capacity(config.blocks_capacity),
             input_finalized_index: None,
             input_best_block_next_weight: 2,
             finalized_block_weight: 1, // `0` is reserved for blocks who are never best.
             next_async_op_id: AsyncOpId(0),
             retry_after_failed: config.retry_after_failed,
         }
+    }
+
+    /// Returns the number of non-finalized blocks.
+    ///
+    /// This is equal to the number of items yielded by [`AsyncTree::input_iter_unordered`].
+    pub fn num_input_non_finalized_blocks(&self) -> usize {
+        self.non_finalized_blocks.len()
     }
 
     /// Replaces all asynchronous operation user data with new values.
@@ -219,8 +238,8 @@ where
     /// Returns `None` if there is no best block. In terms of logic, this means that the best block
     /// is the finalized block, which is out of scope of this data structure.
     pub fn best_block_index(&self) -> Option<(NodeIndex, &'_ TAsync)> {
-        if let Some(best_block_index) = self.best_block_index {
-            Some((
+        self.best_block_index.map(|best_block_index| {
+            (
                 best_block_index,
                 match &self
                     .non_finalized_blocks
@@ -234,10 +253,8 @@ where
                     } => user_data,
                     _ => unreachable!(),
                 },
-            ))
-        } else {
-            None
-        }
+            )
+        })
     }
 
     /// Returns the user data associated to the given block.
@@ -483,15 +500,14 @@ where
             let same_as_parent = self
                 .non_finalized_blocks
                 .parent(index)
-                .map(
-                    |idx| match self.non_finalized_blocks.get(idx).unwrap().async_op {
+                .map_or(false, |idx| {
+                    match self.non_finalized_blocks.get(idx).unwrap().async_op {
                         AsyncOpState::InProgress {
                             async_op_id: id, ..
                         } => id == async_op_id,
                         _ => false,
-                    },
-                )
-                .unwrap_or(false);
+                    }
+                });
 
             self.non_finalized_blocks.get_mut(index).unwrap().async_op = AsyncOpState::Pending {
                 same_as_parent,
@@ -754,6 +770,45 @@ where
         )
     }
 
+    /// Updates the state machine to take into account that the best block of the input has been
+    /// modified.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `new_best_block` isn't a valid node.
+    /// Panics if `new_best_block` isn't equal or a descendant of the input finalized block.
+    ///
+    pub fn input_set_best_block(&mut self, new_best_block: NodeIndex) {
+        // Make sure that `new_best_block` is a descendant of the current input finalized block,
+        // otherwise the state of the tree will be corrupted.
+        // This is checked with an `assert!` rather than a `debug_assert!`, as this constraint
+        // is part of the public API of this method.
+        assert!(self.input_finalized_index.map_or(true, |fin_idx| self
+            .non_finalized_blocks
+            .is_ancestor(fin_idx, new_best_block)));
+
+        // If necessary, update the weight of the block.
+        // TODO: this will panic if the new best block is equal to the output finalized block?
+        match &mut self
+            .non_finalized_blocks
+            .get_mut(new_best_block)
+            .unwrap()
+            .input_best_block_weight
+        {
+            w if *w == self.input_best_block_next_weight - 1 => {}
+            w => {
+                *w = self.input_best_block_next_weight;
+                self.input_best_block_next_weight += 1;
+            }
+        }
+
+        // Minor sanity checks.
+        debug_assert!(self
+            .non_finalized_blocks
+            .iter_unordered()
+            .all(|(_, b)| b.input_best_block_weight < self.input_best_block_next_weight));
+    }
+
     /// Updates the state machine to take into account that the input of blocks has finalized the
     /// given block.
     ///
@@ -1002,6 +1057,58 @@ where
             }));
         }
 
+        // Try to advance the output best block.
+        {
+            let mut best_block_updated = false;
+
+            // Try to advance the output best block to the `Finished` block with the highest
+            // weight.
+            // Weight of the current output best block.
+            let mut current_runtime_service_best_block_weight = match self.best_block_index {
+                None => self.finalized_block_weight,
+                Some(idx) => {
+                    self.non_finalized_blocks
+                        .get(idx)
+                        .unwrap()
+                        .input_best_block_weight
+                }
+            };
+
+            for (node_index, block) in self.non_finalized_blocks.iter_unordered() {
+                // Check uniqueness of weights.
+                debug_assert!(
+                    block.input_best_block_weight != current_runtime_service_best_block_weight
+                        || block.input_best_block_weight == 0
+                        || self.best_block_index == Some(node_index)
+                );
+
+                if block.input_best_block_weight <= current_runtime_service_best_block_weight {
+                    continue;
+                }
+
+                if !matches!(
+                    block.async_op,
+                    AsyncOpState::Finished { reported: true, .. }
+                ) {
+                    continue;
+                }
+
+                // Input best can be updated to the block being iterated.
+                current_runtime_service_best_block_weight = block.input_best_block_weight;
+                self.best_block_index = Some(node_index);
+                best_block_updated = true;
+
+                // Continue looping, as there might be another block with an even
+                // higher weight.
+            }
+
+            if best_block_updated {
+                return Some(OutputUpdate::BestBlockChanged {
+                    best_block_index: self.best_block_index,
+                });
+            }
+        }
+
         // Nothing to do.
         None
     }
@@ -1044,13 +1151,13 @@ pub enum OutputUpdate<'a, TBl, TAsync> {
         /// User data associated to this block.
         user_data: TBl,
 
-        /// User data associated to the async operation of this block.
+        /// User data associated to the `async` operation of this block.
         ///
         /// This is the same value as is now returned by
         /// [`AsyncTree::finalized_async_user_data`], and is provided here for convenience.
         async_op_user_data: &'a TAsync,
 
-        /// User data associated to the async operation of the previous finalized block.
+        /// User data associated to the `async` operation of the previous finalized block.
         former_finalized_async_op_user_data: TAsync,
 
         /// Index of the best block after the finalization. `None` if the best block is the block
@@ -1067,6 +1174,13 @@ pub enum OutputUpdate<'a, TBl, TAsync> {
 
     /// A new block has been added to the list of output unfinalized blocks.
     Block(OutputUpdateBlock<'a, TBl, TAsync>),
+
+    /// The output best block has been modified.
+    BestBlockChanged {
+        /// Index of the best block after the finalization. `None` if the best block is the
+        /// output finalized block.
+        best_block_index: Option<NodeIndex>,
+    },
 }
 
 /// See [`OutputUpdate`].
@@ -1078,7 +1192,7 @@ pub struct OutputUpdateBlock<'a, TBl, TAsync> {
     /// User data associated to this block.
     pub user_data: &'a TBl,
 
-    /// User data associated to the async operation of this block.
+    /// User data associated to the `async` operation of this block.
     pub async_op_user_data: &'a TAsync,
 
     /// True if this block is considered as the best block of the chain.

@@ -11,15 +11,17 @@ publish = false
 [dependencies]
 blake2-rfc = { version = "0.2.18", default-features = false }
 derive_more = "0.99.17"
-either = { version = "1.6.1", default-features = false }
+either = { version = "1.7.0", default-features = false }
+event-listener = { version = "2.5.3" }
 fnv = { version = "1.0.7", default-features = false }
 futures = "0.3.21"
-hashbrown = { version = "0.12.0", default-features = false }
+hashbrown = { version = "0.12.3", default-features = false }
 hex = { version = "0.4.3", default-features = false }
 itertools = "0.10.3"
-log = { version = "0.4.14", default-features = false }
-lru = { version = "0.7.1", default-features = false }  # TODO: there's no way to use a custom hasher; remove this dependency
-rand = "0.8.4"
-serde_json = "1.0.78"
-slab = { version = "0.4.5", default-features = false }
+log = { version = "0.4.17", default-features = false }
+lru = { version = "0.7.8", default-features = false }  # TODO: there's no way to use a custom hasher; remove this dependency
+rand = "0.8.5"
+serde = { version = "1.0.140", default-features = false, features = ["alloc", "derive"] }
+serde_json = "1.0.82"
+slab = { version = "0.4.7", default-features = false }
 smoldot = { version = "0.2.0", path = "../..", default-features = false }

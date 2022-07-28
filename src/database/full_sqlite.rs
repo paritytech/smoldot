@@ -54,7 +54,7 @@
 //!
 //! The SQL schema of the database, with explanatory comments, can be found in `open.rs`.
 //!
-//! # About blocking behaviour
+//! # About blocking behavior
 //!
 //! This implementation uses the SQLite library, which isn't Rust-asynchronous-compatible. Many
 //! functions will, with the help of the operating system, put the current thread to sleep while
@@ -88,6 +88,9 @@ pub struct SqliteFullDatabase {
     /// call `COMMIT; BEGIN_TRANSACTION` when deemed necessary. `COMMIT` is basically the
     /// equivalent of `fsync`, and must be called carefully in order to not lose too much speed.
     database: Mutex<sqlite::Connection>,
+
+    /// Number of bytes used to encode the block number.
+    block_number_bytes: usize,
 }
 
 impl SqliteFullDatabase {
@@ -221,8 +224,9 @@ impl SqliteFullDatabase {
             return Err(FinalizedAccessError::Obsolete);
         }
 
-        let finalized_block_header = block_header(&connection, finalized_block_hash)?
-            .ok_or(AccessError::Corrupted(CorruptedError::MissingBlockHeader))?;
+        let finalized_block_header =
+            block_header(&connection, finalized_block_hash, self.block_number_bytes)?
+                .ok_or(AccessError::Corrupted(CorruptedError::MissingBlockHeader))?;
 
         let finality = match (
             grandpa_authorities_set_id(&connection)?,
@@ -275,7 +279,7 @@ impl SqliteFullDatabase {
                     slot_duration,
                 }
             }
-            (None, None, None) => chain_information::ChainInformationConsensus::AllAuthorized,
+            (None, None, None) => chain_information::ChainInformationConsensus::Unknown,
             _ => {
                 return Err(FinalizedAccessError::Access(AccessError::Corrupted(
                     CorruptedError::ConsensusAlgorithmMix,
@@ -316,7 +320,8 @@ impl SqliteFullDatabase {
         let block_hash = header::hash_from_scale_encoded_header(scale_encoded_header);
 
         // Decode the header, as we will need various information from it.
-        let header = header::decode(scale_encoded_header).map_err(InsertError::BadHeader)?;
+        let header = header::decode(scale_encoded_header, self.block_number_bytes)
+            .map_err(InsertError::BadHeader)?;
 
         // Locking is performed as late as possible.
         let connection = self.database.lock();
@@ -404,8 +409,12 @@ impl SqliteFullDatabase {
         let connection = self.database.lock();
 
         // Fetch the header of the block to finalize.
-        let new_finalized_header = block_header(&connection, new_finalized_block_hash)?
-            .ok_or(SetFinalizedError::UnknownBlock)?;
+        let new_finalized_header = block_header(
+            &connection,
+            new_finalized_block_hash,
+            self.block_number_bytes,
+        )?
+        .ok_or(SetFinalizedError::UnknownBlock)?;
 
         // Fetch the current finalized block.
         let current_finalized = finalized_num(&connection)?;
@@ -462,11 +471,12 @@ impl SqliteFullDatabase {
                 // Update `expected_hash` to point to the parent of the current
                 // `expected_hash`.
                 expected_hash = {
-                    let header = block_header(&connection, &expected_hash)?.ok_or(
-                        SetFinalizedError::Access(AccessError::Corrupted(
-                            CorruptedError::BrokenChain,
-                        )),
-                    )?;
+                    let header =
+                        block_header(&connection, &expected_hash, self.block_number_bytes)?.ok_or(
+                            SetFinalizedError::Access(AccessError::Corrupted(
+                                CorruptedError::BrokenChain,
+                            )),
+                        )?;
                     header.parent_hash
                 };
             }
@@ -484,7 +494,7 @@ impl SqliteFullDatabase {
             }
 
             for block_hash in blocks_list {
-                let header = block_header(&connection, &block_hash)?
+                let header = block_header(&connection, &block_hash, self.block_number_bytes)?
                     .ok_or(AccessError::Corrupted(CorruptedError::MissingBlockHeader))?;
                 if allowed_parents.iter().any(|p| *p == header.parent_hash) {
                     next_iter_allowed_parents.push(block_hash);
@@ -508,10 +518,10 @@ impl SqliteFullDatabase {
                     ))?
                 };
 
-            let block_header =
-                block_header(&connection, &block_hash)?.ok_or(SetFinalizedError::Access(
-                    AccessError::Corrupted(CorruptedError::MissingBlockHeader),
-                ))?;
+            let block_header = block_header(&connection, &block_hash, self.block_number_bytes)?
+                .ok_or(SetFinalizedError::Access(AccessError::Corrupted(
+                    CorruptedError::MissingBlockHeader,
+                )))?;
 
             let mut statement = connection
                 .prepare(
@@ -831,6 +841,7 @@ pub enum AccessError {
     ///
     /// While these corruption errors are probably unrecoverable, the inner error might however
     /// be useful for debugging purposes.
+    #[display(fmt = "Database corrupted: {}", _0)]
     Corrupted(CorruptedError),
 }
 
@@ -838,10 +849,12 @@ pub enum AccessError {
 #[derive(Debug, derive_more::Display, derive_more::From)]
 pub enum InsertError {
     /// Error accessing the database.
+    #[display(fmt = "{}", _0)]
     Access(AccessError),
     /// Block was already in the database.
     Duplicate,
     /// Error when decoding the header to import.
+    #[display(fmt = "Failed to decode header: {}", _0)]
     BadHeader(header::Error),
     /// Parent of the block to insert isn't in the database.
     MissingParent,
@@ -881,6 +894,7 @@ pub enum CorruptedError {
     /// A block hash is expected to be 32 bytes. This isn't the case.
     InvalidBlockHashLen,
     /// Values in the database are all well-formatted, but are incoherent.
+    #[display(fmt = "Invalid chain information: {}", _0)]
     InvalidChainInformation(chain_information::ValidityError),
     /// The parent of a block in the database couldn't be found in that same database.
     BrokenChain,
@@ -890,11 +904,13 @@ pub enum CorruptedError {
     /// couldn't be found.
     MissingBlockHeader,
     /// The header of a block in the database has failed to decode.
+    #[display(fmt = "Corrupted block header: {}", _0)]
     BlockHeaderCorrupted(header::Error),
     /// Multiple different consensus algorithms are mixed within the database.
     ConsensusAlgorithmMix,
     /// The information about a Babe epoch found in the database has failed to decode.
     InvalidBabeEpochInformation,
+    #[display(fmt = "Internal error: {}", _0)]
     Internal(InternalError),
 }
 
@@ -1059,6 +1075,7 @@ fn block_hashes_by_number(
 fn block_header(
     database: &sqlite::Connection,
     hash: &[u8; 32],
+    block_number_bytes: usize,
 ) -> Result<Option<header::Header>, AccessError> {
     let mut statement = database
         .prepare(r#"SELECT header FROM blocks WHERE hash = ?"#)
@@ -1077,7 +1094,7 @@ fn block_header(
         .map_err(CorruptedError::Internal)
         .map_err(AccessError::Corrupted)?;
 
-    match header::decode(&encoded) {
+    match header::decode(&encoded, block_number_bytes) {
         Ok(h) => Ok(Some(h.into())),
         Err(err) => Err(AccessError::Corrupted(
             CorruptedError::BlockHeaderCorrupted(err),
@@ -1298,8 +1315,7 @@ fn decode_babe_epoch_information(
 
     let result = match result {
         Ok(r) if r.validate().is_ok() => Ok(r),
-        Ok(_) => Err(()),
-        Err(()) => Err(()),
+        Ok(_) | Err(()) => Err(()),
     };
 
     result

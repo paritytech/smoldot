@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::{alloc, bindings, platform, timers::Delay};
+use crate::{alloc, bindings, cpu_rate_limiter, platform, timers::Delay};
 
 use core::{
     future::Future,
@@ -43,6 +43,7 @@ pub(crate) struct Client<TChain, TPlat: smoldot_light_base::Platform> {
 pub(crate) fn init<TChain, TPlat: smoldot_light_base::Platform>(
     max_log_level: u32,
     enable_current_task: bool,
+    cpu_rate_limit: u32,
 ) -> Client<TChain, TPlat> {
     // Try initialize the logging and the panic hook.
     let _ = log::set_boxed_logger(Box::new(Logger)).map(|()| {
@@ -80,53 +81,56 @@ pub(crate) fn init<TChain, TPlat: smoldot_light_base::Platform>(
 
     // This is the main future that executes the entire client.
     // It receives new tasks from `new_task_rx` and runs them.
-    spawn_background_task(async move {
-        let mut all_tasks = stream::FuturesUnordered::new();
+    spawn_background_task(cpu_rate_limiter::CpuRateLimiter::new(
+        async move {
+            let mut all_tasks = stream::FuturesUnordered::new();
 
-        // The code below processes tasks that have names.
-        #[pin_project::pin_project]
-        struct FutureAdapter<F> {
-            name: String,
-            enable_current_task: bool,
-            #[pin]
-            future: F,
-        }
-
-        impl<F: Future> Future for FutureAdapter<F> {
-            type Output = F::Output;
-            fn poll(self: Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
-                let this = self.project();
-                if *this.enable_current_task {
-                    unsafe {
-                        bindings::current_task_entered(
-                            u32::try_from(this.name.as_bytes().as_ptr() as usize).unwrap(),
-                            u32::try_from(this.name.as_bytes().len()).unwrap(),
-                        )
-                    }
-                }
-                let out = this.future.poll(cx);
-                if *this.enable_current_task {
-                    unsafe {
-                        bindings::current_task_exit();
-                    }
-                }
-                out
+            // The code below processes tasks that have names.
+            #[pin_project::pin_project]
+            struct FutureAdapter<F> {
+                name: String,
+                enable_current_task: bool,
+                #[pin]
+                future: F,
             }
-        }
 
-        loop {
-            futures::select! {
-                (new_task_name, new_task) = new_task_rx.select_next_some() => {
-                    all_tasks.push(FutureAdapter {
-                        name: new_task_name,
-                        enable_current_task,
-                        future: new_task,
-                    });
-                },
-                () = all_tasks.select_next_some() => {},
+            impl<F: Future> Future for FutureAdapter<F> {
+                type Output = F::Output;
+                fn poll(self: Pin<&mut Self>, cx: &mut task::Context) -> task::Poll<Self::Output> {
+                    let this = self.project();
+                    if *this.enable_current_task {
+                        unsafe {
+                            bindings::current_task_entered(
+                                u32::try_from(this.name.as_bytes().as_ptr() as usize).unwrap(),
+                                u32::try_from(this.name.as_bytes().len()).unwrap(),
+                            )
+                        }
+                    }
+                    let out = this.future.poll(cx);
+                    if *this.enable_current_task {
+                        unsafe {
+                            bindings::current_task_exit();
+                        }
+                    }
+                    out
+                }
             }
-        }
-    });
+
+            loop {
+                futures::select! {
+                    (new_task_name, new_task) = new_task_rx.select_next_some() => {
+                        all_tasks.push(FutureAdapter {
+                            name: new_task_name,
+                            enable_current_task,
+                            future: new_task,
+                        });
+                    },
+                    () = all_tasks.select_next_some() => {},
+                }
+            }
+        },
+        cpu_rate_limit,
+    ));
 
     // Spawn a constantly-running task that periodically prints the total memory usage of
     // the node.
