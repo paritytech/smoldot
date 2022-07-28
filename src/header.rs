@@ -52,9 +52,12 @@
 //!
 //! // Decoding the header can panic if it is malformed. Do not unwrap if, for example, the
 //! // header has been received from a remote!
-//! let decoded_header = smoldot::header::decode(&scale_encoded_header).unwrap();
+//! // The second parameter is specific to each chain and corresponds to the number of bytes
+//! // that are used to encode block numbers. This value is also necessary when calculating
+//! // the hash of the header or encoding it.
+//! let decoded_header = smoldot::header::decode(&scale_encoded_header, 4).unwrap();
 //!
-//! println!("Block hash: {:?}", decoded_header.hash());
+//! println!("Block hash: {:?}", decoded_header.hash(4));
 //! println!("Header number: {}", decoded_header.number);
 //! println!("Parent block hash: {:?}", decoded_header.parent_hash);
 //! for item in decoded_header.digest.logs() {
@@ -63,7 +66,7 @@
 //!
 //! // Call `scale_encoding` to produce the header encoding.
 //! let reencoded: Vec<u8> = decoded_header
-//!     .scale_encoding()
+//!     .scale_encoding(4)
 //!     .fold(Vec::new(), |mut a, b| { a.extend_from_slice(b.as_ref()); a });
 //! assert_eq!(reencoded, scale_encoded_header);
 //! ```
