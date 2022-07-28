@@ -243,7 +243,7 @@ impl<'a> HeaderRef<'a> {
     /// encoding of the header.
     pub fn scale_encoding(
         &self,
-        block_number_bytes: usize, // TODO: unused
+        block_number_bytes: usize,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
         iter::once(either::Left(either::Left(&self.parent_hash[..])))
             .chain(iter::once(either::Left(either::Right(
@@ -253,7 +253,11 @@ impl<'a> HeaderRef<'a> {
             .chain(iter::once(either::Left(either::Left(
                 &self.extrinsics_root[..],
             ))))
-            .chain(self.digest.scale_encoding().map(either::Right))
+            .chain(
+                self.digest
+                    .scale_encoding(block_number_bytes)
+                    .map(either::Right),
+            )
     }
 
     /// Equivalent to [`HeaderRef::scale_encoding`] but returns the data in a `Vec`.
@@ -576,11 +580,12 @@ impl<'a> DigestRef<'a> {
     /// encoding of the digest items.
     pub fn scale_encoding(
         &self,
+        block_number_bytes: usize,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
         let encoded_len = util::encode_scale_compact_usize(self.logs().len());
         iter::once(either::Left(encoded_len)).chain(
             self.logs()
-                .flat_map(|v| v.scale_encoding().map(either::Right)),
+                .flat_map(move |v| v.scale_encoding(block_number_bytes).map(either::Right)),
         )
     }
 
@@ -1045,6 +1050,7 @@ impl<'a> DigestItemRef<'a> {
     /// encoding of that digest item.
     pub fn scale_encoding(
         &self,
+        block_number_bytes: usize,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
         // TODO: don't use Vecs?
         match *self {
@@ -1114,10 +1120,13 @@ impl<'a> DigestItemRef<'a> {
                 iter::once(ret)
             }
             DigestItemRef::GrandpaConsensus(ref gp_consensus) => {
-                let encoded = gp_consensus.scale_encoding().fold(Vec::new(), |mut a, b| {
-                    a.extend_from_slice(b.as_ref());
-                    a
-                });
+                let encoded =
+                    gp_consensus
+                        .scale_encoding(block_number_bytes)
+                        .fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        });
 
                 let mut ret = vec![4];
                 ret.extend_from_slice(b"FRNK");

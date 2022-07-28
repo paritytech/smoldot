@@ -85,6 +85,7 @@ impl<'a> GrandpaConsensusLogRef<'a> {
     /// encoding of that object.
     pub fn scale_encoding(
         &self,
+        block_number_bytes: usize,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
         let index = iter::once(match self {
             GrandpaConsensusLogRef::ScheduledChange(_) => [1],
@@ -101,20 +102,32 @@ impl<'a> GrandpaConsensusLogRef<'a> {
             GrandpaConsensusLogRef::ForcedChange {
                 reset_block_height,
                 change,
-            } => either::Left(either::Right(
-                iter::once(either::Right(either::Right(
-                    reset_block_height.to_le_bytes(),
-                )))
-                .chain(change.scale_encoding().map(either::Right).map(either::Left)),
-            )),
+            } => {
+                let mut data = Vec::with_capacity(block_number_bytes);
+                data.extend_from_slice(&reset_block_height.to_le_bytes());
+                // TODO: unclear what to do if the block number doesn't fit within `expected_block_number_bytes`
+                data.resize(block_number_bytes, 0);
+                either::Left(either::Right(
+                    iter::once(either::Right(either::Right(data)))
+                        .chain(change.scale_encoding().map(either::Right).map(either::Left)),
+                ))
+            }
             GrandpaConsensusLogRef::OnDisabled(n) => {
                 either::Right(iter::once(either::Right(either::Left(n.to_le_bytes()))))
             }
             GrandpaConsensusLogRef::Pause(n) => {
-                either::Right(iter::once(either::Right(either::Right(n.to_le_bytes()))))
+                let mut data = Vec::with_capacity(block_number_bytes);
+                data.extend_from_slice(&n.to_le_bytes());
+                // TODO: unclear what to do if the block number doesn't fit within `expected_block_number_bytes`
+                data.resize(block_number_bytes, 0);
+                either::Right(iter::once(either::Right(either::Right(data))))
             }
             GrandpaConsensusLogRef::Resume(n) => {
-                either::Right(iter::once(either::Right(either::Right(n.to_le_bytes()))))
+                let mut data = Vec::with_capacity(block_number_bytes);
+                data.extend_from_slice(&n.to_le_bytes());
+                // TODO: unclear what to do if the block number doesn't fit within `expected_block_number_bytes`
+                data.resize(block_number_bytes, 0);
+                either::Right(iter::once(either::Right(either::Right(data))))
             }
         };
 

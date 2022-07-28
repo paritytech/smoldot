@@ -853,10 +853,13 @@ impl Header {
                     .digest
                     .logs()
                     .map(|log| {
-                        HexString(log.scale_encoding().fold(Vec::new(), |mut a, b| {
-                            a.extend_from_slice(b.as_ref());
-                            a
-                        }))
+                        HexString(log.scale_encoding(block_number_bytes).fold(
+                            Vec::new(),
+                            |mut a, b| {
+                                a.extend_from_slice(b.as_ref());
+                                a
+                            },
+                        ))
                     })
                     .collect(),
             },
