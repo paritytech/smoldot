@@ -60,6 +60,9 @@ use core::{iter, mem};
 
 /// Configuration for a block generation.
 pub struct Config<'a> {
+    /// Number of bytes used to encode block numbers in the header.
+    pub block_number_bytes: usize,
+
     /// Hash of the parent of the block to generate.
     ///
     /// Used to populate the header of the new block.
@@ -180,7 +183,7 @@ pub fn build_block(config: Config) -> BlockBuild {
                 }])
                 .unwrap(),
             }
-            .scale_encoding()
+            .scale_encoding(config.block_number_bytes)
         },
         top_trie_root_calculation_cache: config.top_trie_root_calculation_cache,
         storage_top_trie_changes: Default::default(),

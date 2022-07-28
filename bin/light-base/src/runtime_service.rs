@@ -174,6 +174,12 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         }
     }
 
+    /// Calls [`sync_service::SyncService::block_number_bytes`] on the sync service associated to
+    /// this runtime service.
+    pub fn block_number_bytes(&self) -> usize {
+        self.sync_service.block_number_bytes()
+    }
+
     /// Subscribes to the state of the chain: the current state and the new blocks.
     ///
     /// This function only returns once the runtime of the current finalized block is known. This
@@ -236,8 +242,11 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         let subscription_id = guarded_lock.next_subscription_id;
         guarded_lock.next_subscription_id += 1;
 
-        let decoded_finalized_block =
-            header::decode(&finalized_block.scale_encoded_header).unwrap();
+        let decoded_finalized_block = header::decode(
+            &finalized_block.scale_encoded_header,
+            self.sync_service.block_number_bytes(),
+        )
+        .unwrap();
         pinned_blocks.insert(
             (subscription_id, finalized_block.hash),
             (
@@ -263,9 +272,12 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                     tree.block_async_user_data(parent_idx).unwrap().clone()
                 });
 
-            let parent_hash = *header::decode(&block.user_data.scale_encoded_header)
-                .unwrap()
-                .parent_hash; // TODO: correct? if yes, document
+            let parent_hash = *header::decode(
+                &block.user_data.scale_encoded_header,
+                self.sync_service.block_number_bytes(),
+            )
+            .unwrap()
+            .parent_hash; // TODO: correct? if yes, document
             debug_assert!(
                 parent_hash == finalized_block.hash
                     || tree
@@ -273,7 +285,11 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                         .any(|b| parent_hash == b.user_data.hash && b.async_op_user_data.is_some())
             );
 
-            let decoded_header = header::decode(&block.user_data.scale_encoded_header).unwrap();
+            let decoded_header = header::decode(
+                &block.user_data.scale_encoded_header,
+                self.sync_service.block_number_bytes(),
+            )
+            .unwrap();
             pinned_blocks.insert(
                 (subscription_id, block_hash),
                 (
@@ -1137,8 +1153,10 @@ async fn run_background<TPlat: Platform>(
                                 )
                             };
 
-                            let same_runtime_as_parent =
-                                same_runtime_as_parent(&block.scale_encoded_header);
+                            let same_runtime_as_parent = same_runtime_as_parent(
+                                &block.scale_encoded_header,
+                                sync_service.block_number_bytes(),
+                            );
                             let _ = tree.input_insert_block(
                                 Block {
                                     hash: header::hash_from_scale_encoded_header(
@@ -1189,8 +1207,10 @@ async fn run_background<TPlat: Platform>(
                                 .unwrap()
                                 .id;
 
-                            let same_runtime_as_parent =
-                                same_runtime_as_parent(&block.scale_encoded_header);
+                            let same_runtime_as_parent = same_runtime_as_parent(
+                                &block.scale_encoded_header,
+                                sync_service.block_number_bytes(),
+                            );
                             let _ = tree.input_insert_block(
                                 Block {
                                     hash: header::hash_from_scale_encoded_header(
@@ -1249,7 +1269,7 @@ async fn run_background<TPlat: Platform>(
                                 guarded.best_near_head_of_chain = near_head_of_chain;
                             }
 
-                            let same_runtime_as_parent = same_runtime_as_parent(&new_block.scale_encoded_header);
+                            let same_runtime_as_parent = same_runtime_as_parent(&new_block.scale_encoded_header, sync_service.block_number_bytes());
 
                             match &mut guarded.tree {
                                 GuardedInner::FinalizedBlockRuntimeKnown {
@@ -1576,7 +1596,11 @@ impl<TPlat: Platform> Background<TPlat> {
                         let is_new_best = block.is_new_best;
 
                         let (block_number, block_state_root_hash) = {
-                            let decoded = header::decode(&scale_encoded_header).unwrap();
+                            let decoded = header::decode(
+                                &scale_encoded_header,
+                                self.sync_service.block_number_bytes(),
+                            )
+                            .unwrap();
                             (decoded.number, *decoded.state_root)
                         };
 
@@ -1776,7 +1800,10 @@ impl<TPlat: Platform> Background<TPlat> {
                 // block in question, which requires decoding the block. If the decoding fails,
                 // we report that the asynchronous operation has failed with the hope that this
                 // block gets pruned in the future.
-                match header::decode(&download_params.block_user_data.scale_encoded_header) {
+                match header::decode(
+                    &download_params.block_user_data.scale_encoded_header,
+                    self.sync_service.block_number_bytes(),
+                ) {
                     Ok(decoded_header) => {
                         let sync_service = self.sync_service.clone();
                         let block_hash = download_params.block_user_data.hash;
@@ -1979,8 +2006,8 @@ impl SuccessfulRuntime {
 }
 
 /// Returns `true` if the block can be assumed to have the same runtime as its parent.
-fn same_runtime_as_parent(header: &[u8]) -> bool {
-    match header::decode(header) {
+fn same_runtime_as_parent(header: &[u8], block_number_bytes: usize) -> bool {
+    match header::decode(header, block_number_bytes) {
         Ok(h) => !h.digest.has_runtime_environment_updated(),
         Err(_) => false,
     }

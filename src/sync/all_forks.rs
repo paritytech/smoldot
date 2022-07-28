@@ -447,6 +447,11 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         }
     }
 
+    /// Returns the value that was initially passed in [`Config::block_number_bytes`].
+    pub fn block_number_bytes(&self) -> usize {
+        self.chain.block_number_bytes()
+    }
+
     /// Builds a [`chain_information::ChainInformationRef`] struct corresponding to the current
     /// latest finalized block. Can later be used to reconstruct a chain.
     pub fn as_chain_information(&self) -> chain_information::ValidChainInformationRef {
@@ -831,14 +836,17 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         announced_scale_encoded_header: Vec<u8>,
         is_best: bool,
     ) -> BlockAnnounceOutcome<TBl, TRq, TSrc> {
-        let announced_header = match header::decode(&announced_scale_encoded_header) {
+        let announced_header = match header::decode(
+            &announced_scale_encoded_header,
+            self.chain.block_number_bytes(),
+        ) {
             Ok(h) => h,
             Err(error) => return BlockAnnounceOutcome::InvalidHeader(error),
         };
 
         let announced_header_number = announced_header.number;
         let announced_header_parent_hash = *announced_header.parent_hash;
-        let announced_header_hash = announced_header.hash();
+        let announced_header_hash = announced_header.hash(self.chain.block_number_bytes());
 
         // It is assumed that all sources will eventually agree on the same finalized chain. If
         // the block number is lower or equal than the locally-finalized block number, it is
@@ -1124,15 +1132,16 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
         }
 
         // Invalid headers are erroneous.
-        let decoded_header = match header::decode(scale_encoded_header) {
-            Ok(h) => h,
-            Err(err) => {
-                return Err((
-                    AncestrySearchResponseError::InvalidHeader(err),
-                    self.finish(),
-                ))
-            }
-        };
+        let decoded_header =
+            match header::decode(scale_encoded_header, self.inner.chain.block_number_bytes()) {
+                Ok(h) => h,
+                Err(err) => {
+                    return Err((
+                        AncestrySearchResponseError::InvalidHeader(err),
+                        self.finish(),
+                    ))
+                }
+            };
 
         // Also compare the block numbers.
         // The utility of checking the height (even though we've already checked the hash) is
@@ -1919,7 +1928,7 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
             .header
             .as_ref()
             .unwrap()
-            .scale_encoding_vec();
+            .scale_encoding_vec(self.parent.chain.block_number_bytes());
 
         let result = match self
             .parent

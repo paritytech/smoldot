@@ -900,7 +900,9 @@ impl<TPlat: Platform> Background<TPlat> {
             let lock = self.subscriptions.lock().await;
             if let Some(subscription) = lock.chain_head_follow.get(follow_subscription) {
                 if let Some(header) = subscription.pinned_blocks_headers.get(&hash.0) {
-                    if let Ok(decoded) = header::decode(&header) {
+                    if let Ok(decoded) =
+                        header::decode(&header, self.sync_service.block_number_bytes())
+                    {
                         Some((*decoded.state_root, decoded.number))
                     } else {
                         None // TODO: what to return?!
@@ -1081,7 +1083,8 @@ impl<TPlat: Platform> Background<TPlat> {
             let lock = self.subscriptions.lock().await;
             if let Some(subscription) = lock.chain_head_follow.get(follow_subscription) {
                 if let Some(header) = subscription.pinned_blocks_headers.get(&hash.0) {
-                    let decoded = header::decode(&header).unwrap(); // TODO: unwrap?
+                    let decoded =
+                        header::decode(&header, self.sync_service.block_number_bytes()).unwrap(); // TODO: unwrap?
                     Some(decoded.number)
                 } else {
                     self.requests_subscriptions

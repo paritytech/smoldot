@@ -121,7 +121,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 cache_lock
                     .recent_pinned_blocks
                     .get(&hash)
-                    .map(|h| header::decode(h)),
+                    .map(|h| header::decode(h, self.sync_service.block_number_bytes())),
                 cache_lock.block_state_root_hashes_numbers.get(&hash),
             ) {
                 (Some(Ok(header)), _) => Some(header.number),
@@ -175,7 +175,11 @@ impl<TPlat: Platform> Background<TPlat> {
                     .into_iter()
                     .map(methods::HexString)
                     .collect(),
-                header: methods::Header::from_scale_encoded_header(&block.header.unwrap()).unwrap(),
+                header: methods::Header::from_scale_encoded_header(
+                    &block.header.unwrap(),
+                    self.sync_service.block_number_bytes(),
+                )
+                .unwrap(),
                 justifications: block.justifications,
             })
             .to_json_response(request_id)
@@ -318,7 +322,10 @@ impl<TPlat: Platform> Background<TPlat> {
                 // In the case of a parachain, it is possible for the header to be in
                 // a format that smoldot isn't capable of parsing. In that situation,
                 // we take of liberty of returning a JSON-RPC error.
-                match methods::Header::from_scale_encoded_header(&header) {
+                match methods::Header::from_scale_encoded_header(
+                    &header,
+                    self.sync_service.block_number_bytes(),
+                ) {
                     Ok(decoded) => {
                         methods::Response::chain_getHeader(decoded).to_json_response(request_id)
                     }
@@ -444,6 +451,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                                 let header = match methods::Header::from_scale_encoded_header(
                                     &block.scale_encoded_header,
+                                    me.sync_service.block_number_bytes(),
                                 ) {
                                     Ok(h) => h,
                                     Err(error) => {
@@ -563,7 +571,10 @@ impl<TPlat: Platform> Background<TPlat> {
                     // Stream returned by `subscribe_finalized` is always unlimited.
                     let header = blocks_list.next().await.unwrap();
 
-                    let header = match methods::Header::from_scale_encoded_header(&header) {
+                    let header = match methods::Header::from_scale_encoded_header(
+                        &header,
+                        me.sync_service.block_number_bytes(),
+                    ) {
                         Ok(h) => h,
                         Err(error) => {
                             log::warn!(
@@ -668,7 +679,10 @@ impl<TPlat: Platform> Background<TPlat> {
                     // Stream returned by `subscribe_best` is always unlimited.
                     let header = blocks_list.next().await.unwrap();
 
-                    let header = match methods::Header::from_scale_encoded_header(&header) {
+                    let header = match methods::Header::from_scale_encoded_header(
+                        &header,
+                        me.sync_service.block_number_bytes(),
+                    ) {
                         Ok(h) => h,
                         Err(error) => {
                             log::warn!(
@@ -1637,7 +1651,9 @@ impl<TPlat: Platform> Background<TPlat> {
 
                             let block_hash = header::hash_from_scale_encoded_header(&block);
                             let (state_trie_root, block_number) = {
-                                let decoded = header::decode(&block).unwrap();
+                                let decoded =
+                                    header::decode(&block, sync_service.block_number_bytes())
+                                        .unwrap();
                                 (decoded.state_root, decoded.number)
                             };
 

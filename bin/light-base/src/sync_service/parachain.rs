@@ -41,6 +41,7 @@ use std::{
 pub(super) async fn start_parachain<TPlat: Platform>(
     log_target: String,
     chain_information: chain::chain_information::ValidChainInformation,
+    block_number_bytes: usize,
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
     relay_chain_block_number_bytes: usize,
     parachain_id: u32,
@@ -58,7 +59,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
     let mut finalized_parahead = chain_information
         .as_ref()
         .finalized_block_header
-        .scale_encoding_vec();
+        .scale_encoding_vec(block_number_bytes);
 
     // Hash of the best parachain that has been reported to the output.
     let mut best_parahead_hash = header::hash_from_scale_encoded_header(&finalized_parahead);
@@ -66,7 +67,9 @@ pub(super) async fn start_parachain<TPlat: Platform>(
     // State machine that tracks the list of parachain network sources and their known blocks.
     let mut sync_sources = sources::AllForksSources::<(PeerId, protocol::Role)>::new(
         40,
-        header::decode(&finalized_parahead).unwrap().number,
+        header::decode(&finalized_parahead, block_number_bytes)
+            .unwrap()
+            .number,
     );
     // Maps `PeerId`s to their indices within `sync_sources`.
     let mut sync_sources_map = HashMap::new();
@@ -202,7 +205,8 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
                         finalized_parahead = new_parahead.clone().unwrap();
 
-                        if let Ok(header) = header::decode(&finalized_parahead) {
+                        if let Ok(header) = header::decode(&finalized_parahead, block_number_bytes)
+                        {
                             sync_sources.set_finalized_block_height(header.number);
                             // TODO: what about an `else`? does sync_sources leak if the block can't be decoded?
                         }
@@ -565,7 +569,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         {
                             let local_id = *sync_sources_map.get(&peer_id).unwrap();
                             let decoded = announce.decode();
-                            if let Ok(decoded_header) = header::decode(&decoded.scale_encoded_header) {
+                            if let Ok(decoded_header) = header::decode(&decoded.scale_encoded_header, block_number_bytes) {
                                 let decoded_header_hash = header::hash_from_scale_encoded_header(
                                     &decoded.scale_encoded_header
                                 );

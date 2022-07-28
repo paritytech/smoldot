@@ -139,6 +139,9 @@ pub struct VerifyConfig<'a> {
     /// Header of the block to verify.
     pub header: header::HeaderRef<'a>,
 
+    /// Number of bytes used to encode the block number in the header.
+    pub block_number_bytes: usize,
+
     /// Header of the parent of the block to verify.
     ///
     /// [`verify_header`] assumes that this block has been successfully verified before.
@@ -391,7 +394,7 @@ pub fn verify_header(config: VerifyConfig) -> Result<VerifySuccess, VerifyError>
         let mut unsealed_header = config.header;
         let _popped = unsealed_header.digest.pop_seal();
         debug_assert!(matches!(_popped, Some(header::Seal::Babe(_))));
-        unsealed_header.hash()
+        unsealed_header.hash(config.block_number_bytes)
     };
 
     // Fetch the authority that has supposedly signed the block.

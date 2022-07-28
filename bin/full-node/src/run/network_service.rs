@@ -759,14 +759,18 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     let decoded = announce.decode();
                     let header_hash =
                         header::hash_from_scale_encoded_header(&decoded.scale_encoded_header);
-                    match header::decode(decoded.scale_encoded_header) {
+                    match header::decode(
+                        decoded.scale_encoded_header,
+                        guarded.network.block_number_bytes(chain_index),
+                    ) {
                         Ok(decoded_header) => {
                             let mut _jaeger_span =
                                 inner.jaeger_service.block_announce_receive_span(
                                     &inner.local_peer_id,
                                     &peer_id,
                                     decoded_header.number,
-                                    &decoded_header.hash(),
+                                    &decoded_header
+                                        .hash(guarded.network.block_number_bytes(chain_index)),
                                 );
 
                             tracing::debug!(
@@ -905,8 +909,12 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     );
 
                     // TODO: is it a good idea to await here while the lock is held and freezing the entire networking background task?
-                    let response =
-                        blocks_request_response(&inner.databases[chain_index], config).await;
+                    let response = blocks_request_response(
+                        &inner.databases[chain_index],
+                        guarded.network.block_number_bytes(chain_index),
+                        config,
+                    )
+                    .await;
                     guarded.network.respond_blocks(
                         request_id,
                         match response {
@@ -1364,6 +1372,7 @@ fn multiaddr_to_socket(
 /// Builds the response to a block request by reading from the given database.
 async fn blocks_request_response(
     database: &database_thread::DatabaseThread,
+    block_number_bytes: usize,
     config: protocol::BlocksRequestConfig,
 ) -> Result<Vec<protocol::BlockData>, full_sqlite::AccessError> {
     database
@@ -1398,7 +1407,7 @@ async fn blocks_request_response(
                 };
 
                 next_block = {
-                    let decoded = header::decode(&header).unwrap();
+                    let decoded = header::decode(&header, block_number_bytes).unwrap();
                     match config.direction {
                         protocol::BlocksRequestDirection::Ascending => {
                             protocol::BlocksRequestConfigStart::Hash(*decoded.parent_hash)

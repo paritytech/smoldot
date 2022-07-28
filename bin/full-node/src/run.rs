@@ -187,6 +187,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                     .unwrap()
             })
             .await,
+        chain_spec.block_number_bytes().into(),
     )
     .unwrap()
     .number;
@@ -236,15 +237,18 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                     genesis_chain_information.finality,
                     chain::chain_information::ChainInformationFinality::Grandpa { .. }
                 ),
-                genesis_block_hash: genesis_chain_information.finalized_block_header.hash(),
-                best_block: database
-                    .with_database(|database| {
-                        let hash = database.finalized_block_hash().unwrap();
-                        let header = database.block_scale_encoded_header(&hash).unwrap().unwrap();
-                        let number = header::decode(&header).unwrap().number;
-                        (number, hash)
-                    })
-                    .await,
+                genesis_block_hash: genesis_chain_information.finalized_block_header.hash(chain_spec.block_number_bytes().into(),),
+                best_block: {
+                    let block_number_bytes = chain_spec.block_number_bytes();
+                    database
+                        .with_database(move |database| {
+                            let hash = database.finalized_block_hash().unwrap();
+                            let header = database.block_scale_encoded_header(&hash).unwrap().unwrap();
+                            let number = header::decode(&header, block_number_bytes.into(),).unwrap().number;
+                            (number, hash)
+                        })
+                        .await
+                },
                 bootstrap_nodes: {
                     let mut list = Vec::with_capacity(
                         chain_spec.boot_nodes().len() + cli_options.additional_bootnode.len(),
@@ -290,15 +294,18 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                             .as_ref()
                             .unwrap()
                             .finalized_block_header
-                            .hash(),
+                            .hash(chain_spec.block_number_bytes().into(),),
                         best_block: relay_chain_database
                             .as_ref()
                             .unwrap()
-                            .with_database(|db| {
-                                let hash = db.finalized_block_hash().unwrap();
-                                let header = db.block_scale_encoded_header(&hash).unwrap().unwrap();
-                                let number = header::decode(&header).unwrap().number;
-                                (number, hash)
+                            .with_database({
+                                let block_number_bytes = chain_spec.block_number_bytes();
+                                move |db| {
+                                    let hash = db.finalized_block_hash().unwrap();
+                                    let header = db.block_scale_encoded_header(&hash).unwrap().unwrap();
+                                    let number = header::decode(&header, block_number_bytes.into()).unwrap().number;
+                                    (number, hash)
+                                }
                             })
                             .await,
                         bootstrap_nodes: {
@@ -609,14 +616,20 @@ async fn open_database(
     };
 
     // The `unwrap()` here can panic for example in case of access denied.
-    match background_open_database(db_path.clone(), show_progress)
-        .await
-        .unwrap()
+    match background_open_database(
+        db_path.clone(),
+        chain_spec.block_number_bytes().into(),
+        show_progress,
+    )
+    .await
+    .unwrap()
     {
         // Database already exists and contains data.
         full_sqlite::DatabaseOpen::Open(database) => {
             if database.block_hash_by_number(0).unwrap().next().unwrap()
-                != genesis_chain_information.finalized_block_header.hash()
+                != genesis_chain_information
+                    .finalized_block_header
+                    .hash(chain_spec.block_number_bytes().into())
             {
                 panic!("Mismatch between database and chain specification. Shutting down node.");
             }
@@ -652,6 +665,7 @@ async fn open_database(
 #[tracing::instrument(level = "trace", skip(show_progress))]
 async fn background_open_database(
     path: Option<PathBuf>,
+    block_number_bytes: usize,
     show_progress: bool,
 ) -> Result<full_sqlite::DatabaseOpen, full_sqlite::InternalError> {
     let (tx, rx) = oneshot::channel();
@@ -661,6 +675,7 @@ async fn background_open_database(
         let path = path.clone();
         move || {
             let result = full_sqlite::open(full_sqlite::Config {
+                block_number_bytes,
                 ty: if let Some(path) = &path {
                     full_sqlite::ConfigTy::Disk(path)
                 } else {
@@ -674,6 +689,7 @@ async fn background_open_database(
     // Fall back to opening the database on the same thread if the thread spawn failed.
     if thread_spawn_result.is_err() {
         return full_sqlite::open(full_sqlite::Config {
+            block_number_bytes,
             ty: if let Some(path) = &path {
                 full_sqlite::ConfigTy::Disk(path)
             } else {

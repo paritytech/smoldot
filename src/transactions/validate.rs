@@ -35,6 +35,9 @@ pub struct Config<'a, TTx> {
     /// The runtime of this block must be the one in [`Config::runtime`].
     pub scale_encoded_header: &'a [u8],
 
+    /// Number of bytes used to encode the block number in the header.
+    pub block_number_bytes: usize,
+
     /// SCALE-encoded transaction.
     pub scale_encoded_transaction: TTx,
 
@@ -296,28 +299,29 @@ pub fn validate_transaction(
             // The `Core_initialize_block` function called below expects a partially-initialized
             // SCALE-encoded header. Importantly, passing the entire header will lead to different code
             // paths in the runtime and not match what Substrate does.
-            let decoded_header = match header::decode(config.scale_encoded_header) {
-                Ok(h) => h,
-                Err(err) => {
-                    return Query::Finished {
-                        result: Err(Error::InvalidHeader(err)),
-                        virtual_machine: config.runtime,
+            let decoded_header =
+                match header::decode(config.scale_encoded_header, config.block_number_bytes) {
+                    Ok(h) => h,
+                    Err(err) => {
+                        return Query::Finished {
+                            result: Err(Error::InvalidHeader(err)),
+                            virtual_machine: config.runtime,
+                        }
                     }
-                }
-            };
+                };
 
             // Start the call to `Core_initialize_block`.
             let vm = runtime_host::run(runtime_host::Config {
                 virtual_machine: config.runtime,
                 function_to_call: "Core_initialize_block",
                 parameter: header::HeaderRef {
-                    parent_hash: &decoded_header.hash(),
+                    parent_hash: &decoded_header.hash(config.block_number_bytes),
                     number: decoded_header.number + 1,
                     extrinsics_root: &[0; 32],
                     state_root: &[0; 32],
                     digest: header::DigestRef::empty(),
                 }
-                .scale_encoding(),
+                .scale_encoding(config.block_number_bytes),
                 top_trie_root_calculation_cache: None,
                 storage_top_trie_changes: storage_diff::StorageDiff::empty(),
                 offchain_storage_changes: storage_diff::StorageDiff::empty(),
