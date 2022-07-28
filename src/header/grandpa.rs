@@ -97,7 +97,10 @@ impl<'a> GrandpaConsensusLogRef<'a> {
 
         let body = match self {
             GrandpaConsensusLogRef::ScheduledChange(change) => either::Left(either::Left(
-                change.scale_encoding().map(either::Left).map(either::Left),
+                change
+                    .scale_encoding(block_number_bytes)
+                    .map(either::Left)
+                    .map(either::Left),
             )),
             GrandpaConsensusLogRef::ForcedChange {
                 reset_block_height,
@@ -108,8 +111,12 @@ impl<'a> GrandpaConsensusLogRef<'a> {
                 // TODO: unclear what to do if the block number doesn't fit within `expected_block_number_bytes`
                 data.resize(block_number_bytes, 0);
                 either::Left(either::Right(
-                    iter::once(either::Right(either::Right(data)))
-                        .chain(change.scale_encoding().map(either::Right).map(either::Left)),
+                    iter::once(either::Right(either::Right(data))).chain(
+                        change
+                            .scale_encoding(block_number_bytes)
+                            .map(either::Right)
+                            .map(either::Left),
+                    ),
                 ))
             }
             GrandpaConsensusLogRef::OnDisabled(n) => {
@@ -237,8 +244,15 @@ impl<'a> GrandpaScheduledChangeRef<'a> {
     /// encoding of that object.
     pub fn scale_encoding(
         &self,
+        block_number_bytes: usize,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
         let header = util::encode_scale_compact_usize(self.next_authorities.len());
+
+        let mut delay = Vec::with_capacity(block_number_bytes);
+        delay.extend_from_slice(&self.delay.to_le_bytes());
+        // TODO: unclear what to do if the block number doesn't fit within `expected_block_number_bytes`
+        delay.resize(block_number_bytes, 0);
+
         iter::once(either::Left(either::Left(header)))
             .chain(
                 self.next_authorities
@@ -246,9 +260,7 @@ impl<'a> GrandpaScheduledChangeRef<'a> {
                     .flat_map(|a| a.scale_encoding())
                     .map(either::Right),
             )
-            .chain(iter::once(either::Left(either::Right(
-                self.delay.to_le_bytes(),
-            ))))
+            .chain(iter::once(either::Left(either::Right(delay))))
     }
 }
 
