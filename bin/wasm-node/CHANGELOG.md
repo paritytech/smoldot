@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The JavaScript code now targets ES6. This should ensure compatibility on a wider range of platforms.
+
 ## 0.6.26 - 2022-07-20
 
 ### Added

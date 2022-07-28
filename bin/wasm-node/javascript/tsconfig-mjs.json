@@ -2,10 +2,10 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "lib": [
-      "es2020"
+      "es6",
     ],
-    "target": "es2020",
-    "module": "es2020",
+    "target": "es6",
+    "module": "es6",
     "outDir": "./dist/mjs",
   }
 }
