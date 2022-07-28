@@ -159,7 +159,7 @@ pub fn decode_partial(
     let extrinsics_root: &[u8; 32] = TryFrom::try_from(&scale_encoded[0..32]).unwrap();
     scale_encoded = &scale_encoded[32..];
 
-    let (digest, remainder) = DigestRef::from_scale_bytes(scale_encoded)?;
+    let (digest, remainder) = DigestRef::from_scale_bytes(scale_encoded, block_number_bytes)?;
 
     let header = HeaderRef {
         parent_hash,
@@ -371,6 +371,8 @@ enum DigestRefInner<'a> {
         /// Encoded digest. Its validity must be verified before a [`DigestRef`] object is
         /// instantiated.
         digest: &'a [u8],
+        /// Number of bytes used to encode block numbers in headers.
+        block_number_bytes: usize,
     },
     Parsed(&'a [DigestItem]),
 }
@@ -513,6 +515,7 @@ impl<'a> DigestRef<'a> {
             DigestRefInner::Undecoded {
                 digest,
                 digest_logs_len,
+                block_number_bytes,
             } => {
                 debug_assert_eq!(seal_pos, *digest_logs_len - 1);
 
@@ -520,6 +523,7 @@ impl<'a> DigestRef<'a> {
                     inner: LogsIterInner::Undecoded {
                         pointer: *digest,
                         remaining_len: *digest_logs_len,
+                        block_number_bytes: *block_number_bytes,
                     },
                 };
                 for _ in 0..seal_pos {
@@ -530,6 +534,7 @@ impl<'a> DigestRef<'a> {
                 if let LogsIterInner::Undecoded {
                     pointer,
                     remaining_len,
+                    ..
                 } = iter.inner
                 {
                     *digest_logs_len -= 1;
@@ -557,9 +562,11 @@ impl<'a> DigestRef<'a> {
                 DigestRefInner::Undecoded {
                     digest,
                     digest_logs_len,
+                    block_number_bytes,
                 } => LogsIterInner::Undecoded {
                     pointer: digest,
                     remaining_len: digest_logs_len,
+                    block_number_bytes,
                 },
             },
         }
@@ -666,7 +673,10 @@ impl<'a> DigestRef<'a> {
     }
 
     /// Try to decode a list of digest items, from their SCALE encoding.
-    fn from_scale_bytes(scale_encoded: &'a [u8]) -> Result<(Self, &'a [u8]), Error> {
+    fn from_scale_bytes(
+        scale_encoded: &'a [u8],
+        block_number_bytes: usize,
+    ) -> Result<(Self, &'a [u8]), Error> {
         let (scale_encoded, digest_logs_len) =
             crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(scale_encoded)
                 .map_err(|_| Error::DigestItemLenDecodeError)?;
@@ -682,7 +692,7 @@ impl<'a> DigestRef<'a> {
         // Iterate through the log items to see if anything is wrong.
         let mut next_digest = scale_encoded;
         for item_num in 0..digest_logs_len {
-            let (item, next) = decode_item(next_digest)?;
+            let (item, next) = decode_item(next_digest, block_number_bytes)?;
             next_digest = next;
 
             match item {
@@ -754,6 +764,7 @@ impl<'a> DigestRef<'a> {
             inner: DigestRefInner::Undecoded {
                 digest_logs_len,
                 digest: scale_encoded,
+                block_number_bytes,
             },
             aura_seal_index,
             aura_predigest_index,
@@ -914,6 +925,8 @@ enum LogsIterInner<'a> {
         pointer: &'a [u8],
         /// Number of log items remaining.
         remaining_len: usize,
+        /// Number of bytes used to encode block numbers in the header.
+        block_number_bytes: usize,
     },
 }
 
@@ -926,13 +939,14 @@ impl<'a> Iterator for LogsIter<'a> {
             LogsIterInner::Undecoded {
                 pointer,
                 remaining_len,
+                block_number_bytes,
             } => {
                 if *remaining_len == 0 {
                     return None;
                 }
 
                 // Validity is guaranteed when the `DigestRef` is constructed.
-                let (item, new_pointer) = decode_item(*pointer).unwrap();
+                let (item, new_pointer) = decode_item(*pointer, *block_number_bytes).unwrap();
                 *pointer = new_pointer;
                 *remaining_len -= 1;
 
@@ -1263,7 +1277,10 @@ impl<'a> From<DigestItemRef<'a>> for DigestItem {
 
 /// Decodes a single digest log item. On success, returns the item and the data that remains
 /// after the item.
-fn decode_item(mut slice: &[u8]) -> Result<(DigestItemRef, &[u8]), Error> {
+fn decode_item(
+    mut slice: &[u8],
+    block_number_bytes: usize,
+) -> Result<(DigestItemRef, &[u8]), Error> {
     let index = *slice.get(0).ok_or(Error::TooShort)?;
     slice = &slice[1..];
 
@@ -1287,7 +1304,7 @@ fn decode_item(mut slice: &[u8]) -> Result<(DigestItemRef, &[u8]), Error> {
             let content = &slice[..len];
             slice = &slice[len..];
 
-            let item = decode_item_from_parts(index, engine_id, content)?;
+            let item = decode_item_from_parts(index, block_number_bytes, engine_id, content)?;
             Ok((item, slice))
         }
         8 => Ok((DigestItemRef::RuntimeEnvironmentUpdated, slice)),
@@ -1314,6 +1331,7 @@ fn decode_item(mut slice: &[u8]) -> Result<(DigestItemRef, &[u8]), Error> {
 /// When we know the index, engine id, and content of an item, we can finish decoding.
 fn decode_item_from_parts<'a>(
     index: u8,
+    block_number_bytes: usize,
     engine_id: &'a [u8; 4],
     content: &'a [u8],
 ) -> Result<DigestItemRef<'a>, Error> {
@@ -1322,9 +1340,10 @@ fn decode_item_from_parts<'a>(
         // 4 = Consensus
         (4, b"aura") => DigestItemRef::AuraConsensus(AuraConsensusLogRef::from_slice(content)?),
         (4, b"BABE") => DigestItemRef::BabeConsensus(BabeConsensusLogRef::from_slice(content)?),
-        (4, b"FRNK") => {
-            DigestItemRef::GrandpaConsensus(GrandpaConsensusLogRef::from_slice(content)?)
-        }
+        (4, b"FRNK") => DigestItemRef::GrandpaConsensus(GrandpaConsensusLogRef::from_slice(
+            content,
+            block_number_bytes,
+        )?),
         (4, engine) => DigestItemRef::UnknownConsensus {
             engine: *engine,
             opaque: content,

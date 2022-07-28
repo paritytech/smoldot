@@ -53,7 +53,7 @@ pub enum GrandpaConsensusLogRef<'a> {
     /// the digest type it should return the same result regardless of the current
     /// state.
     ForcedChange {
-        reset_block_height: u32,
+        reset_block_height: u64,
         change: GrandpaScheduledChangeRef<'a>,
     },
 
@@ -62,18 +62,18 @@ pub enum GrandpaConsensusLogRef<'a> {
 
     /// A signal to pause the current authority set after the given delay.
     /// After finalizing the block at _delay_ the authorities should stop voting.
-    Pause(u32),
+    Pause(u64),
 
     /// A signal to resume the current authority set after the given delay.
     /// After authoring the block at _delay_ the authorities should resume voting.
-    Resume(u32),
+    Resume(u64),
 }
 
 impl<'a> GrandpaConsensusLogRef<'a> {
     /// Decodes a [`GrandpaConsensusLogRef`] from a slice of bytes.
-    pub fn from_slice(slice: &'a [u8]) -> Result<Self, Error> {
+    pub fn from_slice(slice: &'a [u8], block_number_bytes: usize) -> Result<Self, Error> {
         Ok(
-            nom::combinator::all_consuming(grandpa_consensus_log_ref)(slice)
+            nom::combinator::all_consuming(grandpa_consensus_log_ref(block_number_bytes))(slice)
                 .map_err(|_: nom::Err<(&[u8], nom::error::ErrorKind)>| {
                     Error::GrandpaConsensusLogDecodeError
                 })?
@@ -174,7 +174,7 @@ pub enum GrandpaConsensusLog {
     /// the digest type it should return the same result regardless of the current
     /// state.
     ForcedChange {
-        reset_block_height: u32,
+        reset_block_height: u64,
         change: GrandpaScheduledChange,
     },
 
@@ -183,11 +183,11 @@ pub enum GrandpaConsensusLog {
 
     /// A signal to pause the current authority set after the given delay.
     /// After finalizing the block at _delay_ the authorities should stop voting.
-    Pause(u32),
+    Pause(u64),
 
     /// A signal to resume the current authority set after the given delay.
     /// After authoring the block at _delay_ the authorities should resume voting.
-    Resume(u32),
+    Resume(u64),
 }
 
 impl<'a> From<GrandpaConsensusLogRef<'a>> for GrandpaConsensusLog {
@@ -216,7 +216,7 @@ pub struct GrandpaScheduledChangeRef<'a> {
     /// The new authorities after the change, along with their respective weights.
     pub next_authorities: GrandpaAuthoritiesIter<'a>,
     /// The number of blocks to delay.
-    pub delay: u32,
+    pub delay: u64,
 }
 
 impl<'a> GrandpaScheduledChangeRef<'a> {
@@ -256,7 +256,7 @@ pub struct GrandpaScheduledChange {
     /// The new authorities after the change, along with their respective weights.
     pub next_authorities: Vec<GrandpaAuthority>,
     /// The number of blocks to delay.
-    pub delay: u32,
+    pub delay: u64,
 }
 
 impl<'a> From<GrandpaScheduledChangeRef<'a>> for GrandpaScheduledChange {
@@ -401,15 +401,15 @@ fn grandpa_consensus_log_ref<
     'a,
     E: nom::error::ParseError<&'a [u8]> + nom::error::ContextError<&'a [u8]>,
 >(
-    bytes: &'a [u8],
-) -> nom::IResult<&'a [u8], GrandpaConsensusLogRef<'a>, E> {
+    block_number_bytes: usize,
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], GrandpaConsensusLogRef<'a>, E> {
     nom::error::context(
         "grandpa_consensus_log_ref",
         nom::branch::alt((
             nom::combinator::map(
                 nom::sequence::preceded(
                     nom::bytes::complete::tag(&[1]),
-                    grandpa_scheduled_change_ref,
+                    grandpa_scheduled_change_ref(block_number_bytes),
                 ),
                 GrandpaConsensusLogRef::ScheduledChange,
             ),
@@ -417,8 +417,8 @@ fn grandpa_consensus_log_ref<
                 nom::sequence::preceded(
                     nom::bytes::complete::tag(&[2]),
                     nom::sequence::tuple((
-                        nom::number::complete::le_u32, // TODO: this corresponds to a block number; check whether it's 32bits or 64bits
-                        grandpa_scheduled_change_ref,
+                        crate::util::nom_varsize_number_decode_u64(block_number_bytes),
+                        grandpa_scheduled_change_ref(block_number_bytes),
                     )),
                 ),
                 |(reset_block_height, change)| GrandpaConsensusLogRef::ForcedChange {
@@ -436,27 +436,27 @@ fn grandpa_consensus_log_ref<
             nom::combinator::map(
                 nom::sequence::preceded(
                     nom::bytes::complete::tag(&[4]),
-                    nom::number::complete::le_u32,
+                    crate::util::nom_varsize_number_decode_u64(block_number_bytes),
                 ),
                 GrandpaConsensusLogRef::Pause,
             ),
             nom::combinator::map(
                 nom::sequence::preceded(
                     nom::bytes::complete::tag(&[5]),
-                    nom::number::complete::le_u32,
+                    crate::util::nom_varsize_number_decode_u64(block_number_bytes),
                 ),
                 GrandpaConsensusLogRef::Resume,
             ),
         )),
-    )(bytes)
+    )
 }
 
 fn grandpa_scheduled_change_ref<
     'a,
     E: nom::error::ParseError<&'a [u8]> + nom::error::ContextError<&'a [u8]>,
 >(
-    bytes: &'a [u8],
-) -> nom::IResult<&'a [u8], GrandpaScheduledChangeRef<'a>, E> {
+    block_number_bytes: usize,
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], GrandpaScheduledChangeRef<'a>, E> {
     nom::error::context(
         "grandpa_scheduled_change_ref",
         nom::combinator::map(
@@ -477,14 +477,14 @@ fn grandpa_scheduled_change_ref<
                         },
                     )
                 }),
-                nom::number::complete::le_u32,
+                crate::util::nom_varsize_number_decode_u64(block_number_bytes),
             )),
             |(next_authorities, delay)| GrandpaScheduledChangeRef {
                 next_authorities,
                 delay,
             },
         ),
-    )(bytes)
+    )
 }
 
 fn grandpa_authority_ref<
