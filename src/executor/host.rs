@@ -191,7 +191,7 @@
 //! }
 //! ```
 
-use super::{allocator, vm, CoreVersion, CoreVersionError};
+use super::{allocator, vm};
 use crate::{trie, util};
 
 use alloc::{borrow::ToOwned as _, format, string::String, vec, vec::Vec};
@@ -199,8 +199,9 @@ use core::{fmt, hash::Hasher as _, iter, str};
 use sha2::Digest as _;
 use tiny_keccak::Hasher as _;
 
-pub mod embedded_runtime_version;
+pub mod runtime_version;
 
+pub use runtime_version::{CoreVersion, CoreVersionError, CoreVersionRef};
 pub use vm::HeapPages;
 pub use zstd::Error as ModuleFormatError;
 
@@ -275,7 +276,7 @@ impl HostVmPrototype {
         // TODO: configurable maximum allowed size? a uniform value is important for consensus
         let module = zstd::zstd_decode_if_necessary(config.module.as_ref(), 50 * 1024 * 1024)
             .map_err(NewErr::BadFormat)?;
-        let runtime_version = embedded_runtime_version::find_embedded_runtime_version(&module)
+        let runtime_version = runtime_version::find_embedded_runtime_version(&module)
             .ok()
             .flatten(); // TODO: return error instead of using `ok()`? unclear
         let module = vm::Module::new(module, config.exec_hint).map_err(vm::NewErr::ModuleError)?;
@@ -364,11 +365,14 @@ impl HostVmPrototype {
                 match vm {
                     HostVm::ReadyToRun(r) => vm = r.run(),
                     HostVm::Finished(finished) => {
-                        if super::decode(finished.value().as_ref()).is_err() {
-                            return Err(NewErr::CoreVersion(CoreVersionError::Decode));
-                        }
+                        let version =
+                            match CoreVersion::from_slice(finished.value().as_ref().to_vec()) {
+                                Ok(v) => v,
+                                Err(_) => {
+                                    return Err(NewErr::CoreVersion(CoreVersionError::Decode))
+                                }
+                            };
 
-                        let version = CoreVersion(finished.value().as_ref().to_vec());
                         host_vm_prototype = finished.into_prototype();
                         host_vm_prototype.runtime_version = Some(version);
                         break;
