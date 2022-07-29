@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.27 - 2022-07-29
+
 ### Changed
 
 - The JavaScript code now targets ES6. This should ensure compatibility on a wider range of platforms. ([#2565](https://github.com/paritytech/smoldot/pull/2565))
