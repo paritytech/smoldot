@@ -256,13 +256,11 @@ where
             .flat_map(|chain| {
                 iter::once(peers::NotificationProtocolConfig {
                     protocol_name: format!("/{}/block-announces/1", chain.protocol_id),
-                    fallback_protocol_names: Vec::new(),
                     max_handshake_size: 1024 * 1024, // TODO: arbitrary
                     max_notification_size: 1024 * 1024,
                 })
                 .chain(iter::once(peers::NotificationProtocolConfig {
                     protocol_name: format!("/{}/transactions/1", chain.protocol_id),
-                    fallback_protocol_names: Vec::new(),
                     max_handshake_size: 4,
                     max_notification_size: 16 * 1024 * 1024,
                 }))
@@ -273,7 +271,6 @@ where
                     // comprehensible.
                     iter::once(peers::NotificationProtocolConfig {
                         protocol_name: "/paritytech/grandpa/1".to_string(),
-                        fallback_protocol_names: Vec::new(),
                         max_handshake_size: 4,
                         max_notification_size: 1024 * 1024,
                     })

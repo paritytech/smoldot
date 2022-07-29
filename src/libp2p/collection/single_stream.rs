@@ -29,7 +29,7 @@ use super::{
 
 use alloc::{collections::VecDeque, string::ToString as _, sync::Arc};
 use core::{
-    iter, mem,
+    mem,
     ops::{Add, Sub},
     time::Duration,
 };
@@ -680,19 +680,10 @@ where
                                 established: connection.into_connection(established::Config {
                                     notifications_protocols: notification_protocols
                                         .iter()
-                                        .flat_map(|net| {
-                                            let max_handshake_size = net.config.max_handshake_size;
-                                            let max_notification_size =
-                                                net.config.max_notification_size;
-                                            iter::once(&net.config.protocol_name)
-                                                .chain(net.config.fallback_protocol_names.iter())
-                                                .map(move |name| {
-                                                    established::ConfigNotifications {
-                                                        name: name.clone(), // TODO: cloning :-/
-                                                        max_handshake_size,
-                                                        max_notification_size,
-                                                    }
-                                                })
+                                        .map(|net| established::ConfigNotifications {
+                                            name: net.config.protocol_name.clone(), // TODO: clone :-/
+                                            max_handshake_size: net.config.max_handshake_size,
+                                            max_notification_size: net.config.max_notification_size,
                                         })
                                         .collect(),
                                     request_protocols: request_response_protocols.to_vec(), // TODO: overhead
