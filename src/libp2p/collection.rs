@@ -105,12 +105,6 @@ pub struct NotificationProtocolConfig {
     /// Name of the protocol negotiated on the wire.
     pub protocol_name: String,
 
-    /// Optional alternative names for this protocol. Can represent different versions.
-    ///
-    /// Negotiated in order in which they are passed.
-    // TODO: presently unused
-    pub fallback_protocol_names: Vec<String>,
-
     /// Maximum size, in bytes, of the handshake that can be received.
     pub max_handshake_size: usize,
 
@@ -1676,7 +1670,6 @@ pub enum Event<TConn> {
     /// If `Ok`, it is now possible to send notifications on this substream.
     /// If `Err`, the substream no longer exists and the [`SubstreamId`] becomes invalid.
     NotificationsOutResult {
-        // TODO: what if fallback?
         substream_id: SubstreamId,
         /// If `Ok`, contains the handshake sent back by the remote. Its interpretation is out of
         /// scope of this module.
