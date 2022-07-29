@@ -29,7 +29,7 @@ use super::{
 
 use alloc::{collections::VecDeque, string::ToString as _, sync::Arc};
 use core::{
-    iter, mem,
+    mem,
     ops::{Add, Sub},
     time::Duration,
 };
