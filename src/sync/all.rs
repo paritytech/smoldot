@@ -386,7 +386,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     warp_sync::InProgressWarpSync::WarpSyncRequest(sync) => {
                         sync.add_source(source_extra)
                     }
-                    warp_sync::InProgressWarpSync::VirtualMachineParamsGet(sync) => {
+                    warp_sync::InProgressWarpSync::ChainInfoQuery(sync) => {
                         sync.add_source(source_extra)
                     }
                     warp_sync::InProgressWarpSync::StorageGet(sync) => {
@@ -842,7 +842,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             keys: vec![get.key_as_vec()],
                         },
                     )),
-                    warp_sync::InProgressWarpSync::VirtualMachineParamsGet(rq) => Some((
+                    warp_sync::InProgressWarpSync::ChainInfoQuery(rq) => Some((
                         rq.warp_sync_source().1.outer_source_id,
                         &rq.warp_sync_source().1.user_data,
                         RequestDetail::StorageGet {
@@ -1399,7 +1399,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         ) {
             (
                 AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::VirtualMachineParamsGet(sync),
+                    inner: warp_sync::InProgressWarpSync::ChainInfoQuery(sync),
                 },
                 Ok(mut response),
             ) => {
@@ -1488,7 +1488,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             }
             (
                 AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::VirtualMachineParamsGet(sync),
+                    inner: warp_sync::InProgressWarpSync::ChainInfoQuery(sync),
                 },
                 Err(_),
             ) => {

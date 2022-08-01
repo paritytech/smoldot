@@ -186,9 +186,9 @@ pub enum InProgressWarpSync<TSrc> {
     /// Requesting GrandPa warp sync data from a source is required to continue.
     #[from]
     WarpSyncRequest(GrandpaWarpSyncRequest<TSrc>),
-    /// Fetching the parameters for the virtual machine is required to continue.
+    /// Warp syncing process now obtaining the chain information.
     #[from]
-    VirtualMachineParamsGet(VirtualMachineParamsGet<TSrc>),
+    ChainInfoQuery(ChainInfoQuery<TSrc>),
     /// Adding more sources of warp sync data to is required to continue.
     #[from]
     WaitingForSources(WaitingForSources<TSrc>),
@@ -339,7 +339,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             Self::NextKey(next_key) => next_key.state.block_number_bytes,
             Self::Verifier(verifier) => verifier.state.block_number_bytes,
             Self::WarpSyncRequest(warp_sync_request) => warp_sync_request.state.block_number_bytes,
-            Self::VirtualMachineParamsGet(virtual_machine_params_get) => {
+            Self::ChainInfoQuery(virtual_machine_params_get) => {
                 virtual_machine_params_get.state.block_number_bytes
             }
             Self::WaitingForSources(waiting_for_sources) => {
@@ -357,7 +357,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             Self::WarpSyncRequest(warp_sync_request) => {
                 &warp_sync_request.state.start_chain_information
             }
-            Self::VirtualMachineParamsGet(virtual_machine_params_get) => {
+            Self::ChainInfoQuery(virtual_machine_params_get) => {
                 &virtual_machine_params_get.state.start_chain_information
             }
             Self::WaitingForSources(waiting_for_sources) => {
@@ -374,7 +374,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             Self::NextKey(next_key) => &next_key.state.sources,
             Self::Verifier(verifier) => &verifier.sources,
             Self::WarpSyncRequest(warp_sync_request) => &warp_sync_request.sources,
-            Self::VirtualMachineParamsGet(virtual_machine_params_get) => {
+            Self::ChainInfoQuery(virtual_machine_params_get) => {
                 &virtual_machine_params_get.state.sources
             }
             Self::WaitingForSources(waiting_for_sources) => &waiting_for_sources.sources,
@@ -432,14 +432,14 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             }
             Self::WarpSyncRequest(warp_sync_request) => warp_sync_request.remove_source(to_remove),
             Self::Verifier(verifier) => verifier.remove_source(to_remove),
-            Self::VirtualMachineParamsGet(mut virtual_machine_params_get) => {
+            Self::ChainInfoQuery(mut virtual_machine_params_get) => {
                 let (removed, result) = virtual_machine_params_get.state.remove_source(to_remove);
                 match result {
                     StateRemoveSourceResult::RemovedOther(state) => {
                         virtual_machine_params_get.state = state;
                         (
                             removed,
-                            Self::VirtualMachineParamsGet(virtual_machine_params_get),
+                            Self::ChainInfoQuery(virtual_machine_params_get),
                         )
                     }
                     StateRemoveSourceResult::RemovedCurrent(warp_sync) => (removed, warp_sync),
@@ -479,7 +479,7 @@ impl<TSrc> ops::Index<SourceId> for InProgressWarpSync<TSrc> {
             Self::NextKey(next_key) => &next_key.state.sources,
             Self::Verifier(verifier) => &verifier.sources,
             Self::WarpSyncRequest(warp_sync_request) => &warp_sync_request.sources,
-            Self::VirtualMachineParamsGet(virtual_machine_params_get) => {
+            Self::ChainInfoQuery(virtual_machine_params_get) => {
                 &virtual_machine_params_get.state.sources
             }
             Self::WaitingForSources(waiting_for_sources) => &waiting_for_sources.sources,
@@ -498,7 +498,7 @@ impl<TSrc> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc> {
             Self::NextKey(next_key) => &mut next_key.state.sources,
             Self::Verifier(verifier) => &mut verifier.sources,
             Self::WarpSyncRequest(warp_sync_request) => &mut warp_sync_request.sources,
-            Self::VirtualMachineParamsGet(virtual_machine_params_get) => {
+            Self::ChainInfoQuery(virtual_machine_params_get) => {
                 &mut virtual_machine_params_get.state.sources
             }
             Self::WaitingForSources(waiting_for_sources) => &mut waiting_for_sources.sources,
@@ -706,7 +706,7 @@ impl<TSrc> Verifier<TSrc> {
             ),
             Ok(warp_sync::Next::EmptyProof) => (
                 // TODO: should return success immediately; unfortunately the AllSync is quite complicated to update if we do this
-                InProgressWarpSync::VirtualMachineParamsGet(VirtualMachineParamsGet {
+                InProgressWarpSync::ChainInfoQuery(ChainInfoQuery {
                     state: PostVerificationState {
                         header: self
                             .state
@@ -741,7 +741,7 @@ impl<TSrc> Verifier<TSrc> {
 
                 if self.final_set_of_fragments {
                     (
-                        InProgressWarpSync::VirtualMachineParamsGet(VirtualMachineParamsGet {
+                        InProgressWarpSync::ChainInfoQuery(ChainInfoQuery {
                             state: PostVerificationState {
                                 header,
                                 chain_information_finality,
@@ -932,12 +932,12 @@ impl<TSrc> GrandpaWarpSyncRequest<TSrc> {
     }
 }
 
-/// Fetching the parameters for the virtual machine is required to continue.
-pub struct VirtualMachineParamsGet<TSrc> {
+/// Warp syncing process now obtaining the chain information.
+pub struct ChainInfoQuery<TSrc> {
     state: PostVerificationState<TSrc>,
 }
 
-impl<TSrc> VirtualMachineParamsGet<TSrc> {
+impl<TSrc> ChainInfoQuery<TSrc> {
     /// Returns the source that we received the warp sync data from.
     pub fn warp_sync_source(&self) -> (SourceId, &TSrc) {
         debug_assert!(self
