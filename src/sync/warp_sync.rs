@@ -437,10 +437,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                 match result {
                     StateRemoveSourceResult::RemovedOther(state) => {
                         virtual_machine_params_get.state = state;
-                        (
-                            removed,
-                            Self::ChainInfoQuery(virtual_machine_params_get),
-                        )
+                        (removed, Self::ChainInfoQuery(virtual_machine_params_get))
                     }
                     StateRemoveSourceResult::RemovedCurrent(warp_sync) => (removed, warp_sync),
                 }

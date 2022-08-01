@@ -913,7 +913,8 @@ impl SyncBackground {
                         .push(request.map(move |r| (request_id, r)).boxed());
                 }
                 all::RequestDetail::GrandpaWarpSync { .. }
-                | all::RequestDetail::StorageGet { .. } => {
+                | all::RequestDetail::StorageGet { .. }
+                | all::RequestDetail::RuntimeCallMerkleProof { .. } => {
                     // Not used in "full" mode.
                     unreachable!()
                 }

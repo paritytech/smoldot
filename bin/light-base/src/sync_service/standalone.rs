@@ -29,6 +29,7 @@ use smoldot::{
 };
 use std::{
     collections::{HashMap, HashSet},
+    iter,
     marker::PhantomData,
     num::{NonZeroU32, NonZeroU64},
     sync::Arc,
@@ -81,6 +82,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
         pending_block_requests: stream::FuturesUnordered::new(),
         pending_grandpa_requests: stream::FuturesUnordered::new(),
         pending_storage_requests: stream::FuturesUnordered::new(),
+        pending_call_proof_requests: stream::FuturesUnordered::new(),
         warp_sync_taking_long_time_warning: future::Either::Left(TPlat::sleep(
             Duration::from_secs(15),
         ))
@@ -293,6 +295,10 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                 }
             },
 
+            (request_id, result) = task.pending_call_proof_requests.select_next_some() => {
+                todo!()
+            },
+
             () = &mut task.warp_sync_taking_long_time_warning => {
                 log::warn!(
                     target: &task.log_target,
@@ -446,6 +452,11 @@ struct Task<TPlat: Platform> {
         >,
     >,
 
+    /// List of call proof requests currently in progress.
+    pending_call_proof_requests: stream::FuturesUnordered<
+        future::BoxFuture<'static, (all::RequestId, Result<Result<Vec<u8>, ()>, future::Aborted>)>,
+    >,
+
     platform: PhantomData<fn() -> TPlat>,
 }
 
@@ -587,6 +598,43 @@ impl<TPlat: Platform> Task<TPlat> {
 
                 self.pending_storage_requests
                     .push(async move { (request_id, storage_request.await) }.boxed());
+            }
+
+            all::RequestDetail::RuntimeCallMerkleProof {
+                block_hash,
+                ref function_name,
+                ref parameter_vectored,
+            } => {
+                let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
+                let network_service = self.network_service.clone();
+                let network_chain_index = self.network_chain_index;
+                // TODO: all this copying is done because of lifetime requirements in NetworkService::call_proof_request; maybe check if it can be avoided
+                let parameter_vectored = parameter_vectored.clone();
+                let function_name = function_name.clone();
+
+                let call_proof_request = async move {
+                    let rq = network_service.call_proof_request(
+                        network_chain_index,
+                        peer_id,
+                        network::protocol::CallProofRequestConfig {
+                            block_hash,
+                            method: &function_name,
+                            parameter_vectored: iter::once(parameter_vectored),
+                        },
+                        Duration::from_secs(16),
+                    );
+
+                    match rq.await {
+                        Ok(p) => Ok(Vec::<u8>::from(p)),
+                        Err(_) => Err(()),
+                    }
+                };
+
+                let (call_proof_request, abort) = future::abortable(call_proof_request);
+                let request_id = self.sync.add_request(source_id, request_detail, abort);
+
+                self.pending_call_proof_requests
+                    .push(async move { (request_id, call_proof_request.await) }.boxed());
             }
         }
 

@@ -1517,6 +1517,32 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
         (user_data, outcome)
     }
+
+    /// Inject a response to a previously-emitted call proof request.
+    ///
+    /// On success, must contain the encoded Merkle proof. See the
+    /// (`trie`)[crate::trie::proof_verify] module for a description of the format of Merkle
+    /// proofs.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] doesn't correspond to any request, or corresponds to a request
+    /// of a different type.
+    ///
+    pub fn call_proof_response(
+        &mut self,
+        request_id: RequestId,
+        response: Result<impl Iterator<Item = Option<impl AsRef<[u8]>>>, ()>,
+    ) -> (TRq, ResponseOutcome) {
+        debug_assert!(self.shared.requests.contains(request_id.0));
+        let request = self.shared.requests.remove(request_id.0);
+        let user_data = match request {
+            RequestMapping::Inline(_, _, user_data) => user_data,
+            _ => panic!(),
+        };
+
+        todo!()
+    }
 }
 
 impl<TRq, TSrc, TBl> ops::Index<SourceId> for AllSync<TRq, TSrc, TBl> {
@@ -1627,6 +1653,16 @@ pub enum RequestDetail {
         state_trie_root: [u8; 32],
         /// Keys whose values is requested.
         keys: Vec<Vec<u8>>,
+    },
+
+    /// Sending a call proof query is requested.
+    RuntimeCallMerkleProof {
+        /// Hash of the block whose call is made against.
+        block_hash: [u8; 32],
+        /// Name of the function to be called.
+        function_name: String,
+        /// Concatenated SCALE-encoded parameters to provide to the call.
+        parameter_vectored: Vec<u8>,
     },
 }
 
