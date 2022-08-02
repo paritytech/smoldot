@@ -70,7 +70,7 @@ use crate::{
 };
 
 use alloc::vec::Vec;
-use core::ops;
+use core::{iter, ops};
 
 pub use warp_sync::{Error as FragmentError, WarpSyncFragment};
 
@@ -704,6 +704,7 @@ impl<TSrc> Verifier<TSrc> {
             Ok(warp_sync::Next::EmptyProof) => (
                 // TODO: should return success immediately; unfortunately the AllSync is quite complicated to update if we do this
                 InProgressWarpSync::ChainInfoQuery(ChainInfoQuery {
+                    requests: slab::Slab::with_capacity(self.sources.capacity()),
                     state: PostVerificationState {
                         header: self
                             .state
@@ -739,6 +740,7 @@ impl<TSrc> Verifier<TSrc> {
                 if self.final_set_of_fragments {
                     (
                         InProgressWarpSync::ChainInfoQuery(ChainInfoQuery {
+                            requests: slab::Slab::with_capacity(self.sources.capacity()),
                             state: PostVerificationState {
                                 header,
                                 chain_information_finality,
@@ -932,6 +934,7 @@ impl<TSrc> GrandpaWarpSyncRequest<TSrc> {
 /// Warp syncing process now obtaining the chain information.
 pub struct ChainInfoQuery<TSrc> {
     state: PostVerificationState<TSrc>,
+    requests: slab::Slab<(SourceId, RequestDetail)>,
 }
 
 impl<TSrc> ChainInfoQuery<TSrc> {
@@ -961,8 +964,40 @@ impl<TSrc> ChainInfoQuery<TSrc> {
         }))
     }
 
+    pub fn desired_requests(
+        &'_ self,
+    ) -> impl Iterator<Item = (SourceId, &'_ TSrc, RequestDetail)> + '_ {
+        let (id, user_data) = self.warp_sync_source();
+        if self.requests.iter().any(|(_, rq)| rq.0 == id) {
+            either::Left(iter::empty())
+        } else {
+            either::Right(iter::once((
+                id,
+                user_data,
+                RequestDetail::RuntimeParametersGet,
+            )))
+        }
+    }
+
+    /// Inserts a new request in the data structure.
+    ///
+    /// > **Note**: The request doesn't necessarily have to match a request returned by
+    /// >           [`ChainInfoQuery::desired_requests`].
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is out of range.
+    ///
+    pub fn add_request(&mut self, source_id: SourceId, detail: RequestDetail) -> RequestId {
+        assert!(self.state.sources.contains(source_id.0));
+        let request_id = RequestId(self.requests.insert((source_id, detail)));
+        request_id
+    }
+
     /// Injects a failure to retrieve the parameters.
-    pub fn inject_error(self) -> InProgressWarpSync<TSrc> {
+    pub fn inject_error(mut self, id: RequestId) -> InProgressWarpSync<TSrc> {
+        self.requests.remove(id.0);
+
         InProgressWarpSync::warp_sync_request_from_next_source(
             self.state.sources,
             PreVerificationState {
@@ -976,12 +1011,15 @@ impl<TSrc> ChainInfoQuery<TSrc> {
     /// Set the code and heap pages from storage using the keys `:code` and `:heappages`
     /// respectively. Also allows setting an execution hint for the virtual machine.
     pub fn set_virtual_machine_params(
-        self,
+        mut self,
+        id: RequestId,
         code: Option<impl AsRef<[u8]>>,
         heap_pages: Option<impl AsRef<[u8]>>,
         exec_hint: ExecHint,
         allow_unresolved_imports: bool,
     ) -> (WarpSync<TSrc>, Option<Error>) {
+        self.requests.remove(id.0);
+
         let code = match code {
             Some(code) => code.as_ref().to_vec(),
             None => {
@@ -1123,3 +1161,11 @@ struct Source<TSrc> {
     /// currently in a `WarpSyncRequest`.
     already_tried: bool,
 }
+
+pub enum RequestDetail {
+    RuntimeParametersGet,
+}
+
+/// Identifier for a request in the warp sync state machine.
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+pub struct RequestId(usize);

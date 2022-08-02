@@ -38,7 +38,7 @@ use crate::{
     verify,
 };
 
-use alloc::{vec, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 use core::{
     cmp, iter, mem,
     num::{NonZeroU32, NonZeroU64},
@@ -809,7 +809,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     },
                 );
 
-                either::Left(iter)
+                either::Left(either::Right(iter))
             }
             AllSyncInner::Optimistic { inner } => {
                 let iter = inner.desired_requests().map(move |rq_detail| {
@@ -821,6 +821,28 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 });
 
                 either::Right(either::Left(iter))
+            }
+            AllSyncInner::GrandpaWarpSync {
+                inner: warp_sync::InProgressWarpSync::ChainInfoQuery(inner),
+            } => {
+                let iter =
+                    inner
+                        .desired_requests()
+                        .map(move |(src_id, src_user_data, rq_detail)| {
+                            (
+                                src_user_data.outer_source_id,
+                                &src_user_data.user_data,
+                                RequestDetail::StorageGet {
+                                    block_hash: inner
+                                        .warp_sync_header()
+                                        .hash(self.shared.block_number_bytes),
+                                    state_trie_root: *inner.warp_sync_header().state_root,
+                                    keys: vec![b":code".to_vec(), b":heappages".to_vec()],
+                                },
+                            )
+                        });
+
+                either::Left(either::Left(iter))
             }
             AllSyncInner::GrandpaWarpSync { inner } => {
                 // Grandpa warp sync only ever requires one request at a time. Determine which
@@ -842,15 +864,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             keys: vec![get.key_as_vec()],
                         },
                     )),
-                    warp_sync::InProgressWarpSync::ChainInfoQuery(rq) => Some((
-                        rq.warp_sync_source().1.outer_source_id,
-                        &rq.warp_sync_source().1.user_data,
-                        RequestDetail::StorageGet {
-                            block_hash: rq.warp_sync_header().hash(inner.block_number_bytes()),
-                            state_trie_root: *rq.warp_sync_header().state_root,
-                            keys: vec![b":code".to_vec(), b":heappages".to_vec()],
-                        },
-                    )),
+                    warp_sync::InProgressWarpSync::ChainInfoQuery(rq) => unreachable!(),
                     _ => None,
                 };
 
@@ -956,6 +970,32 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 );
 
                 request_mapping_entry.insert(RequestMapping::Optimistic(inner_request_id));
+                return outer_request_id;
+            }
+            (
+                AllSyncInner::GrandpaWarpSync {
+                    inner: warp_sync::InProgressWarpSync::ChainInfoQuery(inner),
+                },
+                RequestDetail::StorageGet {
+                    block_hash,
+                    state_trie_root,
+                    keys,
+                },
+            ) if keys == &[&b":code"[..], &b":heappages"[..]] => {
+                let inner_source_id = match self.shared.sources.get(source_id.0).unwrap() {
+                    SourceMapping::GrandpaWarpSync(inner_source_id) => *inner_source_id,
+                    _ => unreachable!(),
+                };
+
+                let request_mapping_entry = self.shared.requests.vacant_entry();
+                let outer_request_id = RequestId(request_mapping_entry.key());
+
+                let inner_request_id = inner.add_request(
+                    inner_source_id,
+                    warp_sync::RequestDetail::RuntimeParametersGet,
+                );
+
+                request_mapping_entry.insert(RequestMapping::WarpSync(inner_request_id, user_data));
                 return outer_request_id;
             }
             (AllSyncInner::AllForks { .. }, _) => {}
@@ -1388,20 +1428,18 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ) -> (TRq, ResponseOutcome) {
         debug_assert!(self.shared.requests.contains(request_id.0));
         let request = self.shared.requests.remove(request_id.0);
-        let user_data = match request {
-            RequestMapping::Inline(_, _, user_data) => user_data,
-            _ => panic!(),
-        };
 
-        let outcome = match (
+        match (
             mem::replace(&mut self.inner, AllSyncInner::Poisoned),
             response,
+            request,
         ) {
             (
                 AllSyncInner::GrandpaWarpSync {
                     inner: warp_sync::InProgressWarpSync::ChainInfoQuery(sync),
                 },
                 Ok(mut response),
+                RequestMapping::WarpSync(request_id, user_data),
             ) => {
                 // In this state, we expect the response to be one value for `:code` and one for
                 // `:heappages`. As documented, we panic if the number of items isn't 2.
@@ -1416,13 +1454,14 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 // this.
                 // TODO: make `allow_unresolved_imports` configurable
                 let outcome = sync.set_virtual_machine_params(
+                    request_id,
                     code,
                     heap_pages,
                     ExecHint::CompileAheadOfTime,
                     false,
                 );
 
-                match outcome {
+                let outcome = match outcome {
                     (warp_sync::WarpSync::InProgress(inner), None) => {
                         self.inner = AllSyncInner::GrandpaWarpSync { inner };
                         ResponseOutcome::Queued
@@ -1446,13 +1485,16 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         }
                     }
                     (warp_sync::WarpSync::Finished(_), Some(_)) => unreachable!(),
-                }
+                };
+
+                (user_data, outcome)
             }
             (
                 AllSyncInner::GrandpaWarpSync {
                     inner: warp_sync::InProgressWarpSync::StorageGet(sync),
                 },
                 Ok(mut response),
+                RequestMapping::Inline(_, _, user_data),
             ) => {
                 // In this state, we expect the response to be one value. As documented, we panic
                 // if the number of items isn't 1.
@@ -1460,7 +1502,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 assert!(response.next().is_none());
 
                 let outcome = sync.inject_value(value.map(iter::once));
-                match outcome {
+                let outcome = match outcome {
                     (warp_sync::WarpSync::InProgress(inner), None) => {
                         self.inner = AllSyncInner::GrandpaWarpSync { inner };
                         ResponseOutcome::Queued
@@ -1484,38 +1526,44 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         }
                     }
                     (warp_sync::WarpSync::Finished(_), Some(_)) => unreachable!(),
-                }
+                };
+
+                (user_data, outcome)
             }
             (
                 AllSyncInner::GrandpaWarpSync {
                     inner: warp_sync::InProgressWarpSync::ChainInfoQuery(sync),
                 },
                 Err(_),
+                RequestMapping::WarpSync(request_id, user_data),
             ) => {
-                let inner = sync.inject_error();
+                let inner = sync.inject_error(request_id);
                 // TODO: notify user of the problem
                 self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                ResponseOutcome::Queued
+                (user_data, ResponseOutcome::Queued)
             }
             (
                 AllSyncInner::GrandpaWarpSync {
                     inner: warp_sync::InProgressWarpSync::StorageGet(sync),
                 },
                 Err(_),
+                RequestMapping::Inline(_, _, user_data),
             ) => {
                 let inner = sync.inject_error();
                 // TODO: notify user of the problem
                 self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                ResponseOutcome::Queued
+                (user_data, ResponseOutcome::Queued)
             }
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
-            (other, _) => {
+            (other, _, RequestMapping::Inline(_, _, user_data)) => {
                 self.inner = other;
-                ResponseOutcome::Queued // TODO: no
+                (user_data, ResponseOutcome::Queued) // TODO: no
             }
-        };
-
-        (user_data, outcome)
+            (_, _, _) => {
+                // Type of request doesn't correspond to a storage get.
+                panic!()
+            }
+        }
     }
 
     /// Inject a response to a previously-emitted call proof request.
@@ -2536,6 +2584,7 @@ enum RequestMapping<TRq> {
     Inline(SourceId, RequestDetail, TRq),
     AllForks(all_forks::RequestId),
     Optimistic(optimistic::RequestId),
+    WarpSync(warp_sync::RequestId, TRq), // TODO: move TRq to warp sync state machine
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
