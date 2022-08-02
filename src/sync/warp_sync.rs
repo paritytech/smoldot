@@ -69,7 +69,7 @@ use crate::{
     header::{self, Header, HeaderRef},
 };
 
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 use core::{iter, ops};
 
 pub use warp_sync::{Error as FragmentError, WarpSyncFragment};
@@ -1164,6 +1164,10 @@ struct Source<TSrc> {
 
 pub enum RequestDetail {
     RuntimeParametersGet,
+    RuntimeCallMerkleProof {
+        function_name: String,
+        parameter_vectored: Vec<u8>,
+    },
 }
 
 /// Identifier for a request in the warp sync state machine.
