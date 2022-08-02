@@ -938,8 +938,8 @@ pub struct ChainInfoQuery<TSrc> {
 }
 
 impl<TSrc> ChainInfoQuery<TSrc> {
-    /// Returns the source that we received the warp sync data from.
-    pub fn warp_sync_source(&self) -> (SourceId, &TSrc) {
+    // TODO: remove
+    fn warp_sync_source(&self) -> (SourceId, &TSrc) {
         debug_assert!(self
             .state
             .sources

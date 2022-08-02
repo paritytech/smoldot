@@ -2565,6 +2565,16 @@ impl<TRq> Shared<TRq> {
             self.sources[source.outer_source_id.0] = SourceMapping::AllForks(updated_source_id);
         }
 
+        // TODO: convert requests
+        /*for (_, request) in self.requests.iter_mut() {
+            match request {
+                RequestMapping::WarpSync(_, user_data) => {
+                    *request = RequestMapping::Inline(_, _, user_data)
+                }
+                _ => {}
+            }
+        }*/
+
         debug_assert!(self
             .sources
             .iter()
