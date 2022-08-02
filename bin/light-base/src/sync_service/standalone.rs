@@ -279,8 +279,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
 
             (request_id, result) = task.pending_storage_requests.select_next_some() => {
                 // A storage request has been finished.
-                // `result` is an error if the block request got cancelled by the sync state
-                // machine.
+                // `result` is an error if the request got cancelled by the sync state machine.
                 if let Ok(result) = result {
                     // Inject the result of the request into the sync state machine.
                     task.sync.storage_get_response(
@@ -296,7 +295,23 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
             },
 
             (request_id, result) = task.pending_call_proof_requests.select_next_some() => {
-                todo!()
+                // A call proof request has been finished.
+                // `result` is an error if the request got cancelled by the sync state machine.
+                if let Ok(result) = result {
+                    // Inject the result of the request into the sync state machine.
+                    task.sync.call_proof_response(
+                        request_id,
+                        match result {
+                            Ok(ref r) => Ok(r.decode().into_iter()),
+                            Err(err) => Err(err),
+                        }
+                    ).1
+
+                } else {
+                    // The sync state machine has emitted a `Action::Cancel` earlier, and is
+                    // thus no longer interested in the response.
+                    continue;
+                }
             },
 
             () = &mut task.warp_sync_taking_long_time_warning => {
@@ -454,7 +469,13 @@ struct Task<TPlat: Platform> {
 
     /// List of call proof requests currently in progress.
     pending_call_proof_requests: stream::FuturesUnordered<
-        future::BoxFuture<'static, (all::RequestId, Result<Result<Vec<u8>, ()>, future::Aborted>)>,
+        future::BoxFuture<
+            'static,
+            (
+                all::RequestId,
+                Result<Result<network::service::EncodedMerkleProof, ()>, future::Aborted>,
+            ),
+        >,
     >,
 
     platform: PhantomData<fn() -> TPlat>,
@@ -625,7 +646,7 @@ impl<TPlat: Platform> Task<TPlat> {
                     );
 
                     match rq.await {
-                        Ok(p) => Ok(Vec::<u8>::from(p)),
+                        Ok(p) => Ok(p),
                         Err(_) => Err(()),
                     }
                 };

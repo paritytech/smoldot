@@ -2464,12 +2464,6 @@ impl EncodedMerkleProof {
     }
 }
 
-impl From<EncodedMerkleProof> for Vec<u8> {
-    fn from(proof: EncodedMerkleProof) -> Self {
-        proof.0
-    }
-}
-
 impl fmt::Debug for EncodedMerkleProof {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.decode(), f)
