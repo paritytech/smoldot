@@ -704,7 +704,7 @@ impl<TSrc> Verifier<TSrc> {
             Ok(warp_sync::Next::EmptyProof) => (
                 // TODO: should return success immediately; unfortunately the AllSync is quite complicated to update if we do this
                 InProgressWarpSync::ChainInfoQuery(ChainInfoQuery {
-                    requests: slab::Slab::with_capacity(self.sources.capacity()),
+                    in_progress_requests: slab::Slab::with_capacity(self.sources.capacity()),
                     state: PostVerificationState {
                         header: self
                             .state
@@ -740,7 +740,9 @@ impl<TSrc> Verifier<TSrc> {
                 if self.final_set_of_fragments {
                     (
                         InProgressWarpSync::ChainInfoQuery(ChainInfoQuery {
-                            requests: slab::Slab::with_capacity(self.sources.capacity()),
+                            in_progress_requests: slab::Slab::with_capacity(
+                                self.sources.capacity(),
+                            ),
                             state: PostVerificationState {
                                 header,
                                 chain_information_finality,
@@ -934,7 +936,7 @@ impl<TSrc> GrandpaWarpSyncRequest<TSrc> {
 /// Warp syncing process now obtaining the chain information.
 pub struct ChainInfoQuery<TSrc> {
     state: PostVerificationState<TSrc>,
-    requests: slab::Slab<(SourceId, RequestDetail)>,
+    in_progress_requests: slab::Slab<(SourceId, RequestDetail)>,
 }
 
 impl<TSrc> ChainInfoQuery<TSrc> {
@@ -968,13 +970,15 @@ impl<TSrc> ChainInfoQuery<TSrc> {
         &'_ self,
     ) -> impl Iterator<Item = (SourceId, &'_ TSrc, RequestDetail)> + '_ {
         let (id, user_data) = self.warp_sync_source();
-        if self.requests.iter().any(|(_, rq)| rq.0 == id) {
+        if self.in_progress_requests.iter().any(|(_, rq)| rq.0 == id) {
             either::Left(iter::empty())
         } else {
             either::Right(iter::once((
                 id,
                 user_data,
-                RequestDetail::RuntimeParametersGet,
+                RequestDetail::RuntimeParametersGet {
+                    block_hash: self.state.header.hash(self.state.block_number_bytes),
+                },
             )))
         }
     }
@@ -990,13 +994,13 @@ impl<TSrc> ChainInfoQuery<TSrc> {
     ///
     pub fn add_request(&mut self, source_id: SourceId, detail: RequestDetail) -> RequestId {
         assert!(self.state.sources.contains(source_id.0));
-        let request_id = RequestId(self.requests.insert((source_id, detail)));
+        let request_id = RequestId(self.in_progress_requests.insert((source_id, detail)));
         request_id
     }
 
     /// Injects a failure to retrieve the parameters.
     pub fn inject_error(mut self, id: RequestId) -> InProgressWarpSync<TSrc> {
-        self.requests.remove(id.0);
+        self.in_progress_requests.remove(id.0);
 
         InProgressWarpSync::warp_sync_request_from_next_source(
             self.state.sources,
@@ -1018,7 +1022,12 @@ impl<TSrc> ChainInfoQuery<TSrc> {
         exec_hint: ExecHint,
         allow_unresolved_imports: bool,
     ) -> (WarpSync<TSrc>, Option<Error>) {
-        self.requests.remove(id.0);
+        match self.in_progress_requests.remove(id.0) {
+            (_, RequestDetail::RuntimeParametersGet { block_hash })
+                if block_hash == self.state.header.hash(self.state.block_number_bytes) => {}
+            (_, RequestDetail::RuntimeParametersGet { .. }) => todo!(), // TODO: ignore request
+            (_, RequestDetail::RuntimeCallMerkleProof { .. }) => panic!(),
+        }
 
         let code = match code {
             Some(code) => code.as_ref().to_vec(),
@@ -1163,8 +1172,11 @@ struct Source<TSrc> {
 }
 
 pub enum RequestDetail {
-    RuntimeParametersGet,
+    RuntimeParametersGet {
+        block_hash: [u8; 32],
+    },
     RuntimeCallMerkleProof {
+        block_hash: [u8; 32],
         function_name: String,
         parameter_vectored: Vec<u8>,
     },

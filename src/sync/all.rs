@@ -829,22 +829,19 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     .desired_requests()
                     .map(move |(_, src_user_data, rq_detail)| {
                         let detail = match rq_detail {
-                            warp_sync::RequestDetail::RuntimeParametersGet => {
+                            warp_sync::RequestDetail::RuntimeParametersGet { block_hash } => {
                                 RequestDetail::StorageGet {
-                                    block_hash: inner
-                                        .warp_sync_header()
-                                        .hash(self.shared.block_number_bytes),
-                                    state_trie_root: *inner.warp_sync_header().state_root,
+                                    block_hash,
+                                    state_trie_root: *inner.warp_sync_header().state_root, // TODO: no; must match block_hash, or remove field altogether
                                     keys: vec![b":code".to_vec(), b":heappages".to_vec()],
                                 }
                             }
                             warp_sync::RequestDetail::RuntimeCallMerkleProof {
+                                block_hash,
                                 function_name,
                                 parameter_vectored,
                             } => RequestDetail::RuntimeCallMerkleProof {
-                                block_hash: inner
-                                    .warp_sync_header()
-                                    .hash(self.shared.block_number_bytes),
+                                block_hash,
                                 function_name,
                                 parameter_vectored,
                             },
@@ -996,12 +993,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     state_trie_root,
                     keys,
                 },
-            ) if keys == &[&b":code"[..], &b":heappages"[..]]
-                && *block_hash
-                    == inner
-                        .warp_sync_header()
-                        .hash(self.shared.block_number_bytes) =>
-            {
+            ) if keys == &[&b":code"[..], &b":heappages"[..]] => {
                 let inner_source_id = match self.shared.sources.get(source_id.0).unwrap() {
                     SourceMapping::GrandpaWarpSync(inner_source_id) => *inner_source_id,
                     _ => unreachable!(),
@@ -1012,7 +1004,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 let inner_request_id = inner.add_request(
                     inner_source_id,
-                    warp_sync::RequestDetail::RuntimeParametersGet,
+                    warp_sync::RequestDetail::RuntimeParametersGet {
+                        block_hash: *block_hash,
+                    },
                 );
 
                 request_mapping_entry.insert(RequestMapping::WarpSync(inner_request_id, user_data));
@@ -1027,11 +1021,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     function_name,
                     parameter_vectored,
                 },
-            ) if *block_hash
-                == inner
-                    .warp_sync_header()
-                    .hash(self.shared.block_number_bytes) =>
-            {
+            ) => {
                 let inner_source_id = match self.shared.sources.get(source_id.0).unwrap() {
                     SourceMapping::GrandpaWarpSync(inner_source_id) => *inner_source_id,
                     _ => unreachable!(),
@@ -1043,6 +1033,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let inner_request_id = inner.add_request(
                     inner_source_id,
                     warp_sync::RequestDetail::RuntimeCallMerkleProof {
+                        block_hash: *block_hash,
                         function_name: function_name.clone(), // TODO: don't clone
                         parameter_vectored: parameter_vectored.clone(), // TODO: don't clone
                     },
