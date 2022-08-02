@@ -969,18 +969,51 @@ impl<TSrc> ChainInfoQuery<TSrc> {
     pub fn desired_requests(
         &'_ self,
     ) -> impl Iterator<Item = (SourceId, &'_ TSrc, RequestDetail)> + '_ {
-        let (id, user_data) = self.warp_sync_source();
-        if self.in_progress_requests.iter().any(|(_, rq)| rq.0 == id) {
-            either::Left(iter::empty())
-        } else {
-            either::Right(iter::once((
-                id,
+        let (source_id, user_data) = self.warp_sync_source();
+        let block_hash = self.state.header.hash(self.state.block_number_bytes);
+
+        let runtime_parameters_get = if !self.in_progress_requests.iter().any(|(_, rq)| {
+            rq.0 == source_id && matches!(rq.1, RequestDetail::RuntimeParametersGet { block_hash: b } if b == block_hash)
+        }) {
+            Some((
+                source_id,
                 user_data,
                 RequestDetail::RuntimeParametersGet {
-                    block_hash: self.state.header.hash(self.state.block_number_bytes),
+                    block_hash,
                 },
-            )))
-        }
+            ))
+        } else {
+            None
+        };
+
+        let babe_current_epoch = if !self.in_progress_requests.iter().any(|(_, rq)| {
+            rq.0 == source_id && matches!(rq.1, RequestDetail::RuntimeCallMerkleProof { block_hash: b, function_name: ref f,  parameter_vectored: ref p } if b == block_hash && f == "BabeApi_current_epoch" && p.is_empty())
+        }) {Some((
+            source_id,
+            user_data,
+            RequestDetail::RuntimeCallMerkleProof {
+                block_hash,
+                function_name: "BabeApi_current_epoch".into(), // TODO: consider Cow<'static, str> instead of String
+                parameter_vectored: Vec::new(),
+            },
+        )) } else { None };
+
+        let babe_next_epoch = if !self.in_progress_requests.iter().any(|(_, rq)| {
+            rq.0 == source_id && matches!(rq.1, RequestDetail::RuntimeCallMerkleProof { block_hash: b, function_name: ref f,  parameter_vectored: ref p } if b == block_hash && f == "BabeApi_next_epoch" && p.is_empty())
+        }) {Some((
+            source_id,
+            user_data,
+            RequestDetail::RuntimeCallMerkleProof {
+                block_hash,
+                function_name: "BabeApi_next_epoch".into(), // TODO: consider Cow<'static, str> instead of String
+                parameter_vectored: Vec::new(),
+            },
+        )) } else { None };
+
+        runtime_parameters_get
+            .into_iter()
+            .chain(babe_current_epoch.into_iter())
+            .chain(babe_next_epoch.into_iter())
     }
 
     /// Inserts a new request in the data structure.
@@ -994,8 +1027,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
     ///
     pub fn add_request(&mut self, source_id: SourceId, detail: RequestDetail) -> RequestId {
         assert!(self.state.sources.contains(source_id.0));
-        let request_id = RequestId(self.in_progress_requests.insert((source_id, detail)));
-        request_id
+        RequestId(self.in_progress_requests.insert((source_id, detail)))
     }
 
     /// Injects a failure to retrieve the parameters.
@@ -1025,7 +1057,12 @@ impl<TSrc> ChainInfoQuery<TSrc> {
         match self.in_progress_requests.remove(id.0) {
             (_, RequestDetail::RuntimeParametersGet { block_hash })
                 if block_hash == self.state.header.hash(self.state.block_number_bytes) => {}
-            (_, RequestDetail::RuntimeParametersGet { .. }) => todo!(), // TODO: ignore request
+            (_, RequestDetail::RuntimeParametersGet { .. }) => {
+                return (
+                    WarpSync::InProgress(InProgressWarpSync::ChainInfoQuery(self)),
+                    None,
+                )
+            }
             (_, RequestDetail::RuntimeCallMerkleProof { .. }) => panic!(),
         }
 
@@ -1123,6 +1160,18 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                 )
             }
         }
+    }
+
+    pub fn runtime_call_merkle_proof_success(
+        mut self,
+        request_id: RequestId,
+        response: impl Iterator<Item = impl AsRef<[u8]>>,
+    ) -> (WarpSync<TSrc>, Option<Error>) {
+        // TODO:
+        (
+            WarpSync::InProgress(InProgressWarpSync::ChainInfoQuery(self)),
+            None,
+        )
     }
 }
 

@@ -1624,7 +1624,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn call_proof_response(
         &mut self,
         request_id: RequestId,
-        response: Result<impl Iterator<Item = Option<impl AsRef<[u8]>>>, ()>,
+        response: Result<impl Iterator<Item = impl AsRef<[u8]>>, ()>,
     ) -> (TRq, ResponseOutcome) {
         debug_assert!(self.shared.requests.contains(request_id.0));
         let request = self.shared.requests.remove(request_id.0);
@@ -1638,18 +1638,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 AllSyncInner::GrandpaWarpSync {
                     inner: warp_sync::InProgressWarpSync::ChainInfoQuery(sync),
                 },
-                Ok(mut response),
+                Ok(response),
                 RequestMapping::WarpSync(request_id, user_data),
             ) => {
-                /*let outcome = sync.(
-                    request_id,
-                    code,
-                    heap_pages,
-                    ExecHint::CompileAheadOfTime,
-                    false,
-                );
-
-                let outcome = match outcome {
+                let outcome = match sync.runtime_call_merkle_proof_success(request_id, response) {
                     (warp_sync::WarpSync::InProgress(inner), None) => {
                         self.inner = AllSyncInner::GrandpaWarpSync { inner };
                         ResponseOutcome::Queued
@@ -1675,9 +1667,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     (warp_sync::WarpSync::Finished(_), Some(_)) => unreachable!(),
                 };
 
-                (user_data, outcome)*/
-
-                todo!() // TODO:
+                (user_data, outcome)
             }
             (
                 AllSyncInner::GrandpaWarpSync {
