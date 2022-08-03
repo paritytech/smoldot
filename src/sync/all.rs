@@ -389,10 +389,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     warp_sync::InProgressWarpSync::ChainInfoQuery(sync) => {
                         sync.add_source(source_extra)
                     }
-                    warp_sync::InProgressWarpSync::StorageGet(sync) => {
-                        sync.add_source(source_extra)
-                    }
-                    warp_sync::InProgressWarpSync::NextKey(sync) => sync.add_source(source_extra),
                 };
 
                 outer_source_id_entry.insert(SourceMapping::GrandpaWarpSync(inner_source_id));
@@ -865,15 +861,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         &rq.current_source().1.user_data,
                         RequestDetail::GrandpaWarpSync {
                             sync_start_block_hash: rq.start_block_hash(),
-                        },
-                    )),
-                    warp_sync::InProgressWarpSync::StorageGet(get) => Some((
-                        get.warp_sync_source().1.outer_source_id,
-                        &get.warp_sync_source().1.user_data,
-                        RequestDetail::StorageGet {
-                            block_hash: get.warp_sync_header().hash(inner.block_number_bytes()),
-                            state_trie_root: *get.warp_sync_header().state_root,
-                            keys: vec![get.key_as_vec()],
                         },
                     )),
                     warp_sync::InProgressWarpSync::ChainInfoQuery(rq) => unreachable!(),
@@ -1535,65 +1522,12 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             }
             (
                 AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::StorageGet(sync),
-                },
-                Ok(mut response),
-                RequestMapping::Inline(_, _, user_data),
-            ) => {
-                // In this state, we expect the response to be one value. As documented, we panic
-                // if the number of items isn't 1.
-                let value = response.next().unwrap();
-                assert!(response.next().is_none());
-
-                let outcome = sync.inject_value(value.map(iter::once));
-                let outcome = match outcome {
-                    (warp_sync::WarpSync::InProgress(inner), None) => {
-                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                        ResponseOutcome::Queued
-                    }
-                    (warp_sync::WarpSync::InProgress(inner), Some(error)) => {
-                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                        ResponseOutcome::WarpSyncError { error }
-                    }
-                    (warp_sync::WarpSync::Finished(success), None) => {
-                        let (
-                            all_forks,
-                            finalized_block_runtime,
-                            finalized_storage_code,
-                            finalized_storage_heap_pages,
-                        ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
-                        self.inner = AllSyncInner::AllForks(all_forks);
-                        ResponseOutcome::WarpSyncFinished {
-                            finalized_block_runtime,
-                            finalized_storage_code,
-                            finalized_storage_heap_pages,
-                        }
-                    }
-                    (warp_sync::WarpSync::Finished(_), Some(_)) => unreachable!(),
-                };
-
-                (user_data, outcome)
-            }
-            (
-                AllSyncInner::GrandpaWarpSync {
                     inner: warp_sync::InProgressWarpSync::ChainInfoQuery(sync),
                 },
                 Err(_),
                 RequestMapping::WarpSync(request_id, user_data),
             ) => {
                 let inner = sync.inject_error(request_id);
-                // TODO: notify user of the problem
-                self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                (user_data, ResponseOutcome::Queued)
-            }
-            (
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::StorageGet(sync),
-                },
-                Err(_),
-                RequestMapping::Inline(_, _, user_data),
-            ) => {
-                let inner = sync.inject_error();
                 // TODO: notify user of the problem
                 self.inner = AllSyncInner::GrandpaWarpSync { inner };
                 (user_data, ResponseOutcome::Queued)

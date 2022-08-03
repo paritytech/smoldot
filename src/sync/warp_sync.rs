@@ -175,12 +175,6 @@ pub enum WarpSync<TSrc> {
 
 #[derive(derive_more::From)]
 pub enum InProgressWarpSync<TSrc> {
-    /// Loading a storage value is required in order to continue.
-    #[from]
-    StorageGet(StorageGet<TSrc>),
-    /// Fetching the key that follows a given one is required in order to continue.
-    #[from]
-    NextKey(NextKey<TSrc>),
     /// Verifying the warp sync response is required to continue.
     #[from]
     Verifier(Verifier<TSrc>),
@@ -195,149 +189,10 @@ pub enum InProgressWarpSync<TSrc> {
     WaitingForSources(WaitingForSources<TSrc>),
 }
 
-impl<TSrc> WarpSync<TSrc> {
-    fn from_babe_fetch_epoch_query(
-        mut query: babe_fetch_epoch::Query,
-        mut fetched_current_epoch: Option<BabeEpochInformation>,
-        mut state: PostVerificationState<TSrc>,
-        post_download: PostRuntimeDownloadState,
-    ) -> (Self, Option<Error>) {
-        loop {
-            match (query, fetched_current_epoch) {
-                (
-                    babe_fetch_epoch::Query::Finished {
-                        result: Ok(next_epoch),
-                        virtual_machine,
-                    },
-                    Some(current_epoch),
-                ) => {
-                    // The number of slots per epoch is never modified once the chain is running,
-                    // and as such is copied from the original chain information.
-                    let slots_per_epoch = match state.start_chain_information.as_ref().consensus {
-                        ChainInformationConsensusRef::Babe {
-                            slots_per_epoch, ..
-                        } => slots_per_epoch,
-                        _ => unreachable!(),
-                    };
-
-                    // Build a `ChainInformation` using the parameters found in the runtime.
-                    // It is possible, however, that the runtime produces parameters that aren't
-                    // coherent. For example the runtime could give "current" and "next" Babe
-                    // epochs that don't follow each other.
-                    let chain_information =
-                        match ValidChainInformation::try_from(ChainInformation {
-                            finalized_block_header: state.header,
-                            finality: state.chain_information_finality,
-                            consensus: ChainInformationConsensus::Babe {
-                                finalized_block_epoch_information: Some(current_epoch),
-                                finalized_next_epoch_transition: next_epoch,
-                                slots_per_epoch,
-                            },
-                        }) {
-                            Ok(ci) => ci,
-                            Err(err) => {
-                                return (
-                                    Self::InProgress(
-                                        InProgressWarpSync::warp_sync_request_from_next_source(
-                                            state.sources,
-                                            PreVerificationState {
-                                                start_chain_information: state
-                                                    .start_chain_information,
-                                                block_number_bytes: state.block_number_bytes,
-                                            },
-                                            None,
-                                        ),
-                                    ),
-                                    Some(Error::InvalidChain(err)),
-                                )
-                            }
-                        };
-
-                    return (
-                        Self::Finished(Success {
-                            chain_information,
-                            finalized_runtime: virtual_machine,
-                            finalized_storage_code: post_download.finalized_storage_code,
-                            finalized_storage_heap_pages: post_download
-                                .finalized_storage_heap_pages,
-                            sources: state
-                                .sources
-                                .drain()
-                                .map(|source| source.user_data)
-                                .collect(),
-                        }),
-                        None,
-                    );
-                }
-                (
-                    babe_fetch_epoch::Query::Finished {
-                        result: Ok(current_epoch),
-                        virtual_machine,
-                    },
-                    None,
-                ) => {
-                    fetched_current_epoch = Some(current_epoch);
-                    query = babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
-                        runtime: virtual_machine,
-                        epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::NextEpoch,
-                    });
-                }
-                (
-                    babe_fetch_epoch::Query::Finished {
-                        result: Err(error),
-                        virtual_machine: _,
-                    },
-                    _,
-                ) => {
-                    return (
-                        Self::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
-                            state.sources,
-                            PreVerificationState {
-                                start_chain_information: state.start_chain_information,
-                                block_number_bytes: state.block_number_bytes,
-                            },
-                            None,
-                        )),
-                        Some(Error::BabeFetchEpoch(error)),
-                    )
-                }
-                (babe_fetch_epoch::Query::StorageGet(storage_get), fetched_current_epoch) => {
-                    return (
-                        Self::InProgress(InProgressWarpSync::StorageGet(StorageGet {
-                            inner: storage_get,
-                            fetched_current_epoch,
-                            state,
-                            post_download,
-                        })),
-                        None,
-                    )
-                }
-                (babe_fetch_epoch::Query::StorageRoot(storage_root), e) => {
-                    fetched_current_epoch = e;
-                    query = storage_root.resume(&state.header.state_root);
-                }
-                (babe_fetch_epoch::Query::NextKey(next_key), fetched_current_epoch) => {
-                    return (
-                        Self::InProgress(InProgressWarpSync::NextKey(NextKey {
-                            inner: next_key,
-                            fetched_current_epoch,
-                            state,
-                            post_download,
-                        })),
-                        None,
-                    )
-                }
-            }
-        }
-    }
-}
-
 impl<TSrc> InProgressWarpSync<TSrc> {
     /// Returns the value that was initially passed in [`Config::block_number_bytes`].
     pub fn block_number_bytes(&self) -> usize {
         match self {
-            Self::StorageGet(storage_get) => storage_get.state.block_number_bytes,
-            Self::NextKey(next_key) => next_key.state.block_number_bytes,
             Self::Verifier(verifier) => verifier.state.block_number_bytes,
             Self::WarpSyncRequest(warp_sync_request) => warp_sync_request.state.block_number_bytes,
             Self::ChainInfoQuery(virtual_machine_params_get) => {
@@ -352,8 +207,6 @@ impl<TSrc> InProgressWarpSync<TSrc> {
     /// Returns the chain information that is considered verified.
     pub fn as_chain_information(&self) -> ValidChainInformationRef {
         match self {
-            Self::StorageGet(storage_get) => &storage_get.state.start_chain_information,
-            Self::NextKey(next_key) => &next_key.state.start_chain_information,
             Self::Verifier(verifier) => &verifier.state.start_chain_information,
             Self::WarpSyncRequest(warp_sync_request) => {
                 &warp_sync_request.state.start_chain_information
@@ -371,8 +224,6 @@ impl<TSrc> InProgressWarpSync<TSrc> {
     /// Returns a list of all known sources stored in the state machine.
     pub fn sources(&'_ self) -> impl Iterator<Item = SourceId> + '_ {
         let sources = match self {
-            Self::StorageGet(storage_get) => &storage_get.state.sources,
-            Self::NextKey(next_key) => &next_key.state.sources,
             Self::Verifier(verifier) => &verifier.sources,
             Self::WarpSyncRequest(warp_sync_request) => &warp_sync_request.sources,
             Self::ChainInfoQuery(virtual_machine_params_get) => {
@@ -443,26 +294,6 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                     StateRemoveSourceResult::RemovedCurrent(warp_sync) => (removed, warp_sync),
                 }
             }
-            Self::StorageGet(mut storage_get) => {
-                let (removed, result) = storage_get.state.remove_source(to_remove);
-                match result {
-                    StateRemoveSourceResult::RemovedOther(state) => {
-                        storage_get.state = state;
-                        (removed, Self::StorageGet(storage_get))
-                    }
-                    StateRemoveSourceResult::RemovedCurrent(warp_sync) => (removed, warp_sync),
-                }
-            }
-            Self::NextKey(mut next_key) => {
-                let (removed, result) = next_key.state.remove_source(to_remove);
-                match result {
-                    StateRemoveSourceResult::RemovedOther(state) => {
-                        next_key.state = state;
-                        (removed, Self::NextKey(next_key))
-                    }
-                    StateRemoveSourceResult::RemovedCurrent(warp_sync) => (removed, warp_sync),
-                }
-            }
         }
     }
 }
@@ -473,8 +304,6 @@ impl<TSrc> ops::Index<SourceId> for InProgressWarpSync<TSrc> {
     #[track_caller]
     fn index(&self, source_id: SourceId) -> &TSrc {
         let sources = match self {
-            Self::StorageGet(storage_get) => &storage_get.state.sources,
-            Self::NextKey(next_key) => &next_key.state.sources,
             Self::Verifier(verifier) => &verifier.sources,
             Self::WarpSyncRequest(warp_sync_request) => &warp_sync_request.sources,
             Self::ChainInfoQuery(virtual_machine_params_get) => {
@@ -492,8 +321,6 @@ impl<TSrc> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc> {
     #[track_caller]
     fn index_mut(&mut self, source_id: SourceId) -> &mut TSrc {
         let sources = match self {
-            Self::StorageGet(storage_get) => &mut storage_get.state.sources,
-            Self::NextKey(next_key) => &mut next_key.state.sources,
             Self::Verifier(verifier) => &mut verifier.sources,
             Self::WarpSyncRequest(warp_sync_request) => &mut warp_sync_request.sources,
             Self::ChainInfoQuery(virtual_machine_params_get) => {
@@ -504,136 +331,6 @@ impl<TSrc> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc> {
 
         debug_assert!(sources.contains(source_id.0));
         &mut sources[source_id.0].user_data
-    }
-}
-
-/// Loading a storage value is required in order to continue.
-#[must_use]
-pub struct StorageGet<TSrc> {
-    inner: babe_fetch_epoch::StorageGet,
-    fetched_current_epoch: Option<BabeEpochInformation>,
-    state: PostVerificationState<TSrc>,
-    post_download: PostRuntimeDownloadState,
-}
-
-impl<TSrc> StorageGet<TSrc> {
-    /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    pub fn key(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
-        self.inner.key()
-    }
-
-    /// Returns the source that we received the warp sync data from.
-    pub fn warp_sync_source(&self) -> (SourceId, &TSrc) {
-        debug_assert!(self
-            .state
-            .sources
-            .contains(self.state.warp_sync_source_id.0));
-
-        (
-            self.state.warp_sync_source_id,
-            &self.state.sources[self.state.warp_sync_source_id.0].user_data,
-        )
-    }
-
-    /// Returns the header that we're warp syncing up to.
-    pub fn warp_sync_header(&self) -> HeaderRef {
-        (&self.state.header).into()
-    }
-
-    /// Add a source to the list of sources.
-    pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
-        SourceId(self.state.sources.insert(Source {
-            user_data,
-            already_tried: false,
-        }))
-    }
-
-    /// Returns the key whose value must be passed to [`StorageGet::inject_value`].
-    ///
-    /// This method is a shortcut for calling `key` and concatenating the returned slices.
-    pub fn key_as_vec(&self) -> Vec<u8> {
-        self.inner.key_as_vec()
-    }
-
-    /// Injects the corresponding storage value.
-    pub fn inject_value(
-        self,
-        value: Option<impl Iterator<Item = impl AsRef<[u8]>>>,
-    ) -> (WarpSync<TSrc>, Option<Error>) {
-        WarpSync::from_babe_fetch_epoch_query(
-            self.inner.inject_value(value),
-            self.fetched_current_epoch,
-            self.state,
-            self.post_download,
-        )
-    }
-
-    /// Injects a failure to retrieve the storage value.
-    pub fn inject_error(self) -> InProgressWarpSync<TSrc> {
-        InProgressWarpSync::warp_sync_request_from_next_source(
-            self.state.sources,
-            PreVerificationState {
-                start_chain_information: self.state.start_chain_information,
-                block_number_bytes: self.state.block_number_bytes,
-            },
-            None,
-        )
-    }
-}
-
-/// Fetching the key that follows a given one is required in order to continue.
-#[must_use]
-pub struct NextKey<TSrc> {
-    inner: babe_fetch_epoch::NextKey,
-    fetched_current_epoch: Option<BabeEpochInformation>,
-    state: PostVerificationState<TSrc>,
-    post_download: PostRuntimeDownloadState,
-}
-
-impl<TSrc> NextKey<TSrc> {
-    /// Returns the key whose next key must be passed back.
-    pub fn key(&'_ self) -> impl AsRef<[u8]> + '_ {
-        self.inner.key()
-    }
-
-    /// Returns the source that we received the warp sync data from.
-    pub fn warp_sync_source(&self) -> (SourceId, &TSrc) {
-        debug_assert!(self
-            .state
-            .sources
-            .contains(self.state.warp_sync_source_id.0));
-        (
-            self.state.warp_sync_source_id,
-            &self.state.sources[self.state.warp_sync_source_id.0].user_data,
-        )
-    }
-
-    /// Returns the header that we're warp syncing up to.
-    pub fn warp_sync_header(&self) -> HeaderRef {
-        (&self.state.header).into()
-    }
-
-    /// Add a source to the list of sources.
-    pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
-        SourceId(self.state.sources.insert(Source {
-            user_data,
-            already_tried: false,
-        }))
-    }
-
-    /// Injects the key.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the key passed as parameter isn't strictly superior to the requested key.
-    ///
-    pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> (WarpSync<TSrc>, Option<Error>) {
-        WarpSync::from_babe_fetch_epoch_query(
-            self.inner.inject_key(key),
-            self.fetched_current_epoch,
-            self.state,
-            self.post_download,
-        )
     }
 }
 
@@ -827,11 +524,6 @@ impl<TSrc> PostVerificationState<TSrc> {
 enum StateRemoveSourceResult<TSrc> {
     RemovedCurrent(InProgressWarpSync<TSrc>),
     RemovedOther(PostVerificationState<TSrc>),
-}
-
-struct PostRuntimeDownloadState {
-    finalized_storage_code: Option<Vec<u8>>,
-    finalized_storage_heap_pages: Option<Vec<u8>>,
 }
 
 /// Requesting GrandPa warp sync data from a source is required to continue.
