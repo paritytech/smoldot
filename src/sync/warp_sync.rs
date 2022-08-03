@@ -196,7 +196,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             Self::Verifier(verifier) => verifier.state.block_number_bytes,
             Self::WarpSyncRequest(warp_sync_request) => warp_sync_request.state.block_number_bytes,
             Self::ChainInfoQuery(virtual_machine_params_get) => {
-                virtual_machine_params_get.state.block_number_bytes
+                virtual_machine_params_get.block_number_bytes
             }
             Self::WaitingForSources(waiting_for_sources) => {
                 waiting_for_sources.state.block_number_bytes
@@ -212,7 +212,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                 &warp_sync_request.state.start_chain_information
             }
             Self::ChainInfoQuery(virtual_machine_params_get) => {
-                &virtual_machine_params_get.state.start_chain_information
+                &virtual_machine_params_get.start_chain_information
             }
             Self::WaitingForSources(waiting_for_sources) => {
                 &waiting_for_sources.state.start_chain_information
@@ -226,9 +226,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
         let sources = match self {
             Self::Verifier(verifier) => &verifier.sources,
             Self::WarpSyncRequest(warp_sync_request) => &warp_sync_request.sources,
-            Self::ChainInfoQuery(virtual_machine_params_get) => {
-                &virtual_machine_params_get.state.sources
-            }
+            Self::ChainInfoQuery(virtual_machine_params_get) => &virtual_machine_params_get.sources,
             Self::WaitingForSources(waiting_for_sources) => &waiting_for_sources.sources,
         };
 
@@ -284,16 +282,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             }
             Self::WarpSyncRequest(warp_sync_request) => warp_sync_request.remove_source(to_remove),
             Self::Verifier(verifier) => verifier.remove_source(to_remove),
-            Self::ChainInfoQuery(mut virtual_machine_params_get) => {
-                let (removed, result) = virtual_machine_params_get.state.remove_source(to_remove);
-                match result {
-                    StateRemoveSourceResult::RemovedOther(state) => {
-                        virtual_machine_params_get.state = state;
-                        (removed, Self::ChainInfoQuery(virtual_machine_params_get))
-                    }
-                    StateRemoveSourceResult::RemovedCurrent(warp_sync) => (removed, warp_sync),
-                }
-            }
+            Self::ChainInfoQuery(chain_info_query) => chain_info_query.remove_source(to_remove),
         }
     }
 }
@@ -306,9 +295,7 @@ impl<TSrc> ops::Index<SourceId> for InProgressWarpSync<TSrc> {
         let sources = match self {
             Self::Verifier(verifier) => &verifier.sources,
             Self::WarpSyncRequest(warp_sync_request) => &warp_sync_request.sources,
-            Self::ChainInfoQuery(virtual_machine_params_get) => {
-                &virtual_machine_params_get.state.sources
-            }
+            Self::ChainInfoQuery(virtual_machine_params_get) => &virtual_machine_params_get.sources,
             Self::WaitingForSources(waiting_for_sources) => &waiting_for_sources.sources,
         };
 
@@ -324,7 +311,7 @@ impl<TSrc> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc> {
             Self::Verifier(verifier) => &mut verifier.sources,
             Self::WarpSyncRequest(warp_sync_request) => &mut warp_sync_request.sources,
             Self::ChainInfoQuery(virtual_machine_params_get) => {
-                &mut virtual_machine_params_get.state.sources
+                &mut virtual_machine_params_get.sources
             }
             Self::WaitingForSources(waiting_for_sources) => &mut waiting_for_sources.sources,
         };
@@ -406,24 +393,22 @@ impl<TSrc> Verifier<TSrc> {
                     babeapi_current_epoch_response: None,
                     babeapi_next_epoch_response: None,
                     runtime: None,
-                    state: PostVerificationState {
-                        header: self
-                            .state
-                            .start_chain_information
-                            .as_ref()
-                            .finalized_block_header
-                            .into(),
-                        chain_information_finality: self
-                            .state
-                            .start_chain_information
-                            .as_ref()
-                            .finality
-                            .into(),
-                        block_number_bytes: self.state.block_number_bytes,
-                        start_chain_information: self.state.start_chain_information,
-                        sources: self.sources,
-                        warp_sync_source_id: self.warp_sync_source_id,
-                    },
+                    header: self
+                        .state
+                        .start_chain_information
+                        .as_ref()
+                        .finalized_block_header
+                        .into(),
+                    chain_information_finality: self
+                        .state
+                        .start_chain_information
+                        .as_ref()
+                        .finality
+                        .into(),
+                    block_number_bytes: self.state.block_number_bytes,
+                    start_chain_information: self.state.start_chain_information,
+                    sources: self.sources,
+                    warp_sync_source_id: self.warp_sync_source_id,
                 }),
                 Ok(()),
             ),
@@ -447,14 +432,12 @@ impl<TSrc> Verifier<TSrc> {
                             babeapi_current_epoch_response: None,
                             babeapi_next_epoch_response: None,
                             runtime: None,
-                            state: PostVerificationState {
-                                header,
-                                chain_information_finality,
-                                start_chain_information: self.state.start_chain_information,
-                                block_number_bytes: self.state.block_number_bytes,
-                                sources: self.sources,
-                                warp_sync_source_id: self.warp_sync_source_id,
-                            },
+                            header,
+                            chain_information_finality,
+                            start_chain_information: self.state.start_chain_information,
+                            block_number_bytes: self.state.block_number_bytes,
+                            sources: self.sources,
+                            warp_sync_source_id: self.warp_sync_source_id,
                         }),
                         Ok(()),
                     )
@@ -485,45 +468,6 @@ impl<TSrc> Verifier<TSrc> {
 struct PreVerificationState {
     start_chain_information: ValidChainInformation,
     block_number_bytes: usize,
-}
-
-struct PostVerificationState<TSrc> {
-    header: Header,
-    chain_information_finality: ChainInformationFinality,
-    start_chain_information: ValidChainInformation,
-    block_number_bytes: usize,
-    sources: slab::Slab<Source<TSrc>>,
-    warp_sync_source_id: SourceId,
-}
-
-impl<TSrc> PostVerificationState<TSrc> {
-    fn remove_source(mut self, to_remove: SourceId) -> (TSrc, StateRemoveSourceResult<TSrc>) {
-        debug_assert!(self.sources.contains(to_remove.0));
-        let removed = self.sources.remove(to_remove.0).user_data;
-
-        if to_remove == self.warp_sync_source_id {
-            (
-                removed,
-                StateRemoveSourceResult::RemovedCurrent(
-                    InProgressWarpSync::warp_sync_request_from_next_source(
-                        self.sources,
-                        PreVerificationState {
-                            start_chain_information: self.start_chain_information,
-                            block_number_bytes: self.block_number_bytes,
-                        },
-                        None,
-                    ),
-                ),
-            )
-        } else {
-            (removed, StateRemoveSourceResult::RemovedOther(self))
-        }
-    }
-}
-
-enum StateRemoveSourceResult<TSrc> {
-    RemovedCurrent(InProgressWarpSync<TSrc>),
-    RemovedOther(PostVerificationState<TSrc>),
 }
 
 /// Requesting GrandPa warp sync data from a source is required to continue.
@@ -634,7 +578,12 @@ impl<TSrc> GrandpaWarpSyncRequest<TSrc> {
 
 /// Warp syncing process now obtaining the chain information.
 pub struct ChainInfoQuery<TSrc> {
-    state: PostVerificationState<TSrc>,
+    header: Header,
+    chain_information_finality: ChainInformationFinality,
+    start_chain_information: ValidChainInformation,
+    block_number_bytes: usize,
+    sources: slab::Slab<Source<TSrc>>,
+    warp_sync_source_id: SourceId,
     in_progress_requests: slab::Slab<(SourceId, RequestDetail)>,
     // TODO: use struct
     runtime: Option<(HostVmPrototype, Option<Vec<u8>>, Option<Vec<u8>>)>,
@@ -645,35 +594,53 @@ pub struct ChainInfoQuery<TSrc> {
 impl<TSrc> ChainInfoQuery<TSrc> {
     // TODO: remove
     fn warp_sync_source(&self) -> (SourceId, &TSrc) {
-        debug_assert!(self
-            .state
-            .sources
-            .contains(self.state.warp_sync_source_id.0));
+        debug_assert!(self.sources.contains(self.warp_sync_source_id.0));
 
         (
-            self.state.warp_sync_source_id,
-            &self.state.sources[self.state.warp_sync_source_id.0].user_data,
+            self.warp_sync_source_id,
+            &self.sources[self.warp_sync_source_id.0].user_data,
         )
     }
 
     /// Returns the header that we're warp syncing up to.
     pub fn warp_sync_header(&self) -> HeaderRef {
-        (&self.state.header).into()
+        (&self.header).into()
     }
 
     /// Add a source to the list of sources.
     pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
-        SourceId(self.state.sources.insert(Source {
+        SourceId(self.sources.insert(Source {
             user_data,
             already_tried: false,
         }))
+    }
+
+    pub fn remove_source(mut self, to_remove: SourceId) -> (TSrc, InProgressWarpSync<TSrc>) {
+        debug_assert!(self.sources.contains(to_remove.0));
+        let removed = self.sources.remove(to_remove.0).user_data;
+
+        if to_remove == self.warp_sync_source_id {
+            (
+                removed,
+                InProgressWarpSync::warp_sync_request_from_next_source(
+                    self.sources,
+                    PreVerificationState {
+                        start_chain_information: self.start_chain_information,
+                        block_number_bytes: self.block_number_bytes,
+                    },
+                    None,
+                ),
+            )
+        } else {
+            (removed, InProgressWarpSync::ChainInfoQuery(self))
+        }
     }
 
     pub fn desired_requests(
         &'_ self,
     ) -> impl Iterator<Item = (SourceId, &'_ TSrc, RequestDetail)> + '_ {
         let (source_id, user_data) = self.warp_sync_source();
-        let block_hash = self.state.header.hash(self.state.block_number_bytes);
+        let block_hash = self.header.hash(self.block_number_bytes);
 
         let runtime_parameters_get = if !self.in_progress_requests.iter().any(|(_, rq)| {
             rq.0 == source_id && matches!(rq.1, RequestDetail::RuntimeParametersGet { block_hash: b } if b == block_hash)
@@ -729,7 +696,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
     /// Panics if the [`SourceId`] is out of range.
     ///
     pub fn add_request(&mut self, source_id: SourceId, detail: RequestDetail) -> RequestId {
-        assert!(self.state.sources.contains(source_id.0));
+        assert!(self.sources.contains(source_id.0));
         RequestId(self.in_progress_requests.insert((source_id, detail)))
     }
 
@@ -738,10 +705,10 @@ impl<TSrc> ChainInfoQuery<TSrc> {
         self.in_progress_requests.remove(id.0);
 
         InProgressWarpSync::warp_sync_request_from_next_source(
-            self.state.sources,
+            self.sources,
             PreVerificationState {
-                start_chain_information: self.state.start_chain_information,
-                block_number_bytes: self.state.block_number_bytes,
+                start_chain_information: self.start_chain_information,
+                block_number_bytes: self.block_number_bytes,
             },
             None,
         )
@@ -759,7 +726,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
     ) -> (WarpSync<TSrc>, Option<Error>) {
         match self.in_progress_requests.remove(id.0) {
             (_, RequestDetail::RuntimeParametersGet { block_hash })
-                if block_hash == self.state.header.hash(self.state.block_number_bytes) => {}
+                if block_hash == self.header.hash(self.block_number_bytes) => {}
             (_, RequestDetail::RuntimeParametersGet { .. }) => {
                 return (
                     WarpSync::InProgress(InProgressWarpSync::ChainInfoQuery(self)),
@@ -775,10 +742,10 @@ impl<TSrc> ChainInfoQuery<TSrc> {
             None => {
                 return (
                     WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
-                        self.state.sources,
+                        self.sources,
                         PreVerificationState {
-                            start_chain_information: self.state.start_chain_information,
-                            block_number_bytes: self.state.block_number_bytes,
+                            start_chain_information: self.start_chain_information,
+                            block_number_bytes: self.block_number_bytes,
                         },
                         None,
                     )),
@@ -794,10 +761,10 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                     return (
                         WarpSync::InProgress(
                             InProgressWarpSync::warp_sync_request_from_next_source(
-                                self.state.sources,
+                                self.sources,
                                 PreVerificationState {
-                                    start_chain_information: self.state.start_chain_information,
-                                    block_number_bytes: self.state.block_number_bytes,
+                                    start_chain_information: self.start_chain_information,
+                                    block_number_bytes: self.block_number_bytes,
                                 },
                                 None,
                             ),
@@ -817,10 +784,10 @@ impl<TSrc> ChainInfoQuery<TSrc> {
             Err(error) => {
                 return (
                     WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
-                        self.state.sources,
+                        self.sources,
                         PreVerificationState {
-                            start_chain_information: self.state.start_chain_information,
-                            block_number_bytes: self.state.block_number_bytes,
+                            start_chain_information: self.start_chain_information,
+                            block_number_bytes: self.block_number_bytes,
                         },
                         None,
                     )),
@@ -854,7 +821,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
         let babeapi_current_epoch_response = self.babeapi_current_epoch_response.take().unwrap();
         let babeapi_next_epoch_response = self.babeapi_next_epoch_response.take().unwrap();
 
-        match self.state.start_chain_information.as_ref().consensus {
+        match self.start_chain_information.as_ref().consensus {
             ChainInformationConsensusRef::Babe { .. } => {
                 let mut babe_current_epoch_query =
                     babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
@@ -867,7 +834,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                         babe_fetch_epoch::Query::StorageGet(get) => {
                             let value = match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
                                 requested_key: &get.key_as_vec(), // TODO: allocating vec
-                                trie_root_hash: &self.state.header.state_root,
+                                trie_root_hash: &self.header.state_root,
                                 proof: babeapi_current_epoch_response.iter().map(|v| &v[..]),
                             }) {
                                 Ok(v) => v,
@@ -878,7 +845,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                         },
                         babe_fetch_epoch::Query::NextKey(nk) => todo!(), // TODO:
                         babe_fetch_epoch::Query::StorageRoot(root) => {
-                            babe_current_epoch_query = root.resume(&self.state.header.state_root);
+                            babe_current_epoch_query = root.resume(&self.header.state_root);
                         },
                         babe_fetch_epoch::Query::Finished { result: Ok(result), virtual_machine } => break (result, virtual_machine),
                         babe_fetch_epoch::Query::Finished { result: Err(_), virtual_machine } => todo!(), // TODO:
@@ -896,7 +863,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                         babe_fetch_epoch::Query::StorageGet(get) => {
                             let value = match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
                                 requested_key: &get.key_as_vec(), // TODO: allocating vec
-                                trie_root_hash: &self.state.header.state_root,
+                                trie_root_hash: &self.header.state_root,
                                 proof: babeapi_next_epoch_response.iter().map(|v| &v[..]),
                             }) {
                                 Ok(v) => v,
@@ -907,7 +874,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                         },
                         babe_fetch_epoch::Query::NextKey(nk) => todo!(), // TODO:
                         babe_fetch_epoch::Query::StorageRoot(root) => {
-                            babe_next_epoch_query = root.resume(&self.state.header.state_root);
+                            babe_next_epoch_query = root.resume(&self.header.state_root);
                         },
                         babe_fetch_epoch::Query::Finished { result: Ok(result), virtual_machine } => break (result, virtual_machine),
                         babe_fetch_epoch::Query::Finished { result: Err(_), virtual_machine } => todo!(), // TODO:
@@ -916,7 +883,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
 
                 // The number of slots per epoch is never modified once the chain is running,
                 // and as such is copied from the original chain information.
-                let slots_per_epoch = match self.state.start_chain_information.as_ref().consensus {
+                let slots_per_epoch = match self.start_chain_information.as_ref().consensus {
                     ChainInformationConsensusRef::Babe {
                         slots_per_epoch, ..
                     } => slots_per_epoch,
@@ -929,8 +896,8 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                 // epochs that don't follow each other.
                 let chain_information =
                     match ValidChainInformation::try_from(ChainInformation {
-                        finalized_block_header: self.state.header,
-                        finality: self.state.chain_information_finality,
+                        finalized_block_header: self.header,
+                        finality: self.chain_information_finality,
                         consensus: ChainInformationConsensus::Babe {
                             finalized_block_epoch_information: Some(current_epoch),
                             finalized_next_epoch_transition: next_epoch,
@@ -942,11 +909,11 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                             return (
                                 WarpSync::InProgress(
                                     InProgressWarpSync::warp_sync_request_from_next_source(
-                                        self.state.sources,
+                                        self.sources,
                                         PreVerificationState {
-                                            start_chain_information: self.state
+                                            start_chain_information: self
                                                 .start_chain_information,
-                                            block_number_bytes: self.state.block_number_bytes,
+                                            block_number_bytes: self.block_number_bytes,
                                         },
                                         None,
                                     ),
@@ -962,7 +929,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                         finalized_runtime: runtime,
                         finalized_storage_code,
                         finalized_storage_heap_pages,
-                        sources: self.state
+                        sources: self
                             .sources
                             .drain()
                             .map(|source| source.user_data)
@@ -975,10 +942,10 @@ impl<TSrc> ChainInfoQuery<TSrc> {
             ChainInformationConsensusRef::Unknown => {
                 (
                     WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
-                        self.state.sources,
+                        self.sources,
                         PreVerificationState {
-                            start_chain_information: self.state.start_chain_information,
-                            block_number_bytes: self.state.block_number_bytes,
+                            start_chain_information: self.start_chain_information,
+                            block_number_bytes: self.block_number_bytes,
                         },
                         None,
                     )),
@@ -993,7 +960,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
         request_id: RequestId,
         response: impl Iterator<Item = impl AsRef<[u8]>>,
     ) -> (WarpSync<TSrc>, Option<Error>) {
-        let desired_block_hash = self.state.header.hash(self.state.block_number_bytes);
+        let desired_block_hash = self.header.hash(self.block_number_bytes);
 
         match self.in_progress_requests.remove(request_id.0) {
             (
