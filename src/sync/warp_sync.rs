@@ -766,7 +766,8 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                     None,
                 )
             }
-            (_, RequestDetail::RuntimeCallMerkleProof { .. }) => panic!(),
+            (_, RequestDetail::RuntimeCallMerkleProof { .. })
+            | (_, RequestDetail::WarpSyncRequest { .. }) => panic!(),
         }
 
         let code = match code {
@@ -1029,10 +1030,21 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                     None,
                 )
             }
-            (_, RequestDetail::RuntimeParametersGet { .. }) => panic!(),
+            (_, RequestDetail::RuntimeParametersGet { .. })
+            | (_, RequestDetail::WarpSyncRequest { .. }) => panic!(),
         }
 
         self.try_advance()
+    }
+
+    /// Submit a GrandPa warp sync successful response.
+    pub fn handle_response_ok(
+        mut self,
+        request_id: RequestId,
+        fragments: Vec<WarpSyncFragment>,
+        final_set_of_fragments: bool,
+    ) -> InProgressWarpSync<TSrc> {
+        todo!()
     }
 }
 
@@ -1082,6 +1094,9 @@ struct Source<TSrc> {
 }
 
 pub enum RequestDetail {
+    WarpSyncRequest {
+        block_hash: [u8; 32],
+    },
     RuntimeParametersGet {
         block_hash: [u8; 32],
     },

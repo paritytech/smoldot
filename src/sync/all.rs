@@ -825,6 +825,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     .desired_requests()
                     .map(move |(_, src_user_data, rq_detail)| {
                         let detail = match rq_detail {
+                            warp_sync::RequestDetail::WarpSyncRequest { block_hash } => {
+                                RequestDetail::GrandpaWarpSync {
+                                    sync_start_block_hash: block_hash,
+                                }
+                            }
                             warp_sync::RequestDetail::RuntimeParametersGet { block_hash } => {
                                 RequestDetail::StorageGet {
                                     block_hash,
@@ -969,6 +974,32 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 );
 
                 request_mapping_entry.insert(RequestMapping::Optimistic(inner_request_id));
+                return outer_request_id;
+            }
+            (
+                AllSyncInner::GrandpaWarpSync {
+                    inner: warp_sync::InProgressWarpSync::ChainInfoQuery(inner),
+                },
+                RequestDetail::GrandpaWarpSync {
+                    sync_start_block_hash,
+                },
+            ) => {
+                let inner_source_id = match self.shared.sources.get(source_id.0).unwrap() {
+                    SourceMapping::GrandpaWarpSync(inner_source_id) => *inner_source_id,
+                    _ => unreachable!(),
+                };
+
+                let request_mapping_entry = self.shared.requests.vacant_entry();
+                let outer_request_id = RequestId(request_mapping_entry.key());
+
+                let inner_request_id = inner.add_request(
+                    inner_source_id,
+                    warp_sync::RequestDetail::WarpSyncRequest {
+                        block_hash: *sync_start_block_hash,
+                    },
+                );
+
+                request_mapping_entry.insert(RequestMapping::WarpSync(inner_request_id, user_data));
                 return outer_request_id;
             }
             (
@@ -1412,15 +1443,17 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ) -> (TRq, ResponseOutcome) {
         debug_assert!(self.shared.requests.contains(request_id.0));
         let request = self.shared.requests.remove(request_id.0);
-        let user_data = match request {
-            RequestMapping::Inline(_, _, user_data) => user_data,
-            _ => panic!(),
-        };
 
-        let outcome = match mem::replace(&mut self.inner, AllSyncInner::Poisoned) {
-            AllSyncInner::GrandpaWarpSync {
-                inner: warp_sync::InProgressWarpSync::WarpSyncRequest(grandpa),
-            } => {
+        match (
+            mem::replace(&mut self.inner, AllSyncInner::Poisoned),
+            request,
+        ) {
+            (
+                AllSyncInner::GrandpaWarpSync {
+                    inner: warp_sync::InProgressWarpSync::WarpSyncRequest(grandpa),
+                },
+                RequestMapping::Inline(_, _, user_data),
+            ) => {
                 let updated_grandpa = if let Some((fragments, is_finished)) = response {
                     grandpa.handle_response_ok(fragments, is_finished)
                 } else {
@@ -1429,17 +1462,34 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 self.inner = AllSyncInner::GrandpaWarpSync {
                     inner: updated_grandpa,
                 };
-                ResponseOutcome::Queued
+                (user_data, ResponseOutcome::Queued)
+            }
+
+            (
+                AllSyncInner::GrandpaWarpSync {
+                    inner: warp_sync::InProgressWarpSync::ChainInfoQuery(grandpa),
+                },
+                RequestMapping::WarpSync(request_id, user_data),
+            ) => {
+                let updated_grandpa = if let Some((fragments, is_finished)) = response {
+                    grandpa.handle_response_ok(request_id, fragments, is_finished)
+                } else {
+                    grandpa.inject_error(request_id)
+                };
+                self.inner = AllSyncInner::GrandpaWarpSync {
+                    inner: updated_grandpa,
+                };
+                (user_data, ResponseOutcome::Queued)
             }
 
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
-            other => {
+            (other, RequestMapping::Inline(_, _, user_data)) => {
                 self.inner = other;
-                ResponseOutcome::Queued // TODO: no
+                (user_data, ResponseOutcome::Queued) // TODO: no
             }
-        };
 
-        (user_data, outcome)
+            _ => todo!(), // TODO: handle other variants
+        }
     }
 
     /// Inject a response to a previously-emitted storage proof request.
