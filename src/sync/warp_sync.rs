@@ -217,14 +217,6 @@ enum Phase {
 }
 
 impl<TSrc> InProgressWarpSync<TSrc> {
-    /// Returns the header that we're warp syncing up to.
-    pub fn warp_sync_header(&self) -> HeaderRef {
-        match &self.phase {
-            Phase::PostVerification { header, .. } => header.into(),
-            _ => panic!(), // TODO: remove this function altogether, it's weird
-        }
-    }
-
     /// Returns the value that was initially passed in [`Config::block_number_bytes`].
     pub fn block_number_bytes(&self) -> usize {
         self.block_number_bytes
@@ -273,7 +265,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
 
     pub fn desired_requests(
         &'_ self,
-    ) -> impl Iterator<Item = (SourceId, &'_ TSrc, RequestDetail)> + '_ {
+    ) -> impl Iterator<Item = (SourceId, &'_ TSrc, DesiredRequest)> + '_ {
         let warp_sync_request = if let Phase::PreVerification {
             previous_verifier_values,
         } = &self.phase
@@ -305,7 +297,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                         Some((
                             SourceId(src_id),
                             &src.user_data,
-                            RequestDetail::WarpSyncRequest {
+                            DesiredRequest::WarpSyncRequest {
                                 block_hash: start_block_hash,
                             },
                         ))
@@ -335,8 +327,9 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             Some((
                 *warp_sync_source_id,
                 &self.sources[warp_sync_source_id.0].user_data,
-                RequestDetail::RuntimeParametersGet {
+                DesiredRequest::RuntimeParametersGet {
                     block_hash: header.hash(self.block_number_bytes),
+                    state_trie_root: header.state_root,
                 },
             ))
         } else {
@@ -360,7 +353,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
         }) {Some((
             *warp_sync_source_id,
             &self.sources[warp_sync_source_id.0].user_data,
-            RequestDetail::RuntimeCallMerkleProof {
+            DesiredRequest::RuntimeCallMerkleProof {
                 block_hash: header.hash(self.block_number_bytes),
                 function_name: "BabeApi_current_epoch".into(), // TODO: consider Cow<'static, str> instead of String
                 parameter_vectored: Vec::new(),
@@ -384,7 +377,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             }) {Some((
                 *warp_sync_source_id,
                 &self.sources[warp_sync_source_id.0].user_data,
-                RequestDetail::RuntimeCallMerkleProof {
+                DesiredRequest::RuntimeCallMerkleProof {
                     block_hash: header.hash(self.block_number_bytes),
                     function_name: "BabeApi_next_epoch".into(), // TODO: consider Cow<'static, str> instead of String
                     parameter_vectored: Vec::new(),
@@ -437,10 +430,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                 Phase::PostVerification { header, .. },
             ) if block_hash == header.hash(self.block_number_bytes) => {}
             ((_, RequestDetail::RuntimeParametersGet { .. }), _) => {
-                return (
-                    WarpSync::InProgress(self),
-                    None,
-                )
+                return (WarpSync::InProgress(self), None)
             }
             (
                 (
@@ -520,10 +510,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                 || babeapi_current_epoch_response.is_none()
                 || babeapi_next_epoch_response.is_none()
             {
-                return (
-                    WarpSync::InProgress(self),
-                    None,
-                );
+                return (WarpSync::InProgress(self), None);
             }
 
             let (runtime, finalized_storage_code, finalized_storage_heap_pages) =
@@ -644,10 +631,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                 }
             }
         } else {
-            (
-                WarpSync::InProgress(self),
-                None,
-            )
+            (WarpSync::InProgress(self), None)
         }
     }
 
@@ -703,10 +687,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                     Some(response.map(|e| e.as_ref().to_vec()).collect());
             }
             ((_, RequestDetail::RuntimeCallMerkleProof { .. }), _) => {
-                return (
-                    WarpSync::InProgress(self),
-                    None,
-                )
+                return (WarpSync::InProgress(self), None)
             }
             (
                 (_, RequestDetail::RuntimeParametersGet { .. })
@@ -813,9 +794,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
 
                 self
             }
-            ((_, RequestDetail::WarpSyncRequest { .. }), _) => {
-                self
-            }
+            ((_, RequestDetail::WarpSyncRequest { .. }), _) => self,
             ((_, _), _) => panic!(),
         }
     }
@@ -827,6 +806,21 @@ struct Source<TSrc> {
     /// `true` if this source has been in a past `WarpSyncRequest`. `false` if the source is
     /// currently in a `WarpSyncRequest`.
     already_tried: bool,
+}
+
+pub enum DesiredRequest {
+    WarpSyncRequest {
+        block_hash: [u8; 32],
+    },
+    RuntimeParametersGet {
+        block_hash: [u8; 32],
+        state_trie_root: [u8; 32],
+    },
+    RuntimeCallMerkleProof {
+        block_hash: [u8; 32],
+        function_name: String,
+        parameter_vectored: Vec<u8>,
+    },
 }
 
 pub enum RequestDetail {

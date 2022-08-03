@@ -790,19 +790,20 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     .desired_requests()
                     .map(move |(_, src_user_data, rq_detail)| {
                         let detail = match rq_detail {
-                            warp_sync::RequestDetail::WarpSyncRequest { block_hash } => {
+                            warp_sync::DesiredRequest::WarpSyncRequest { block_hash } => {
                                 RequestDetail::GrandpaWarpSync {
                                     sync_start_block_hash: block_hash,
                                 }
                             }
-                            warp_sync::RequestDetail::RuntimeParametersGet { block_hash } => {
-                                RequestDetail::StorageGet {
-                                    block_hash,
-                                    state_trie_root: *inner.warp_sync_header().state_root, // TODO: no; must match block_hash, or remove field altogether
-                                    keys: vec![b":code".to_vec(), b":heappages".to_vec()],
-                                }
-                            }
-                            warp_sync::RequestDetail::RuntimeCallMerkleProof {
+                            warp_sync::DesiredRequest::RuntimeParametersGet {
+                                block_hash,
+                                state_trie_root,
+                            } => RequestDetail::StorageGet {
+                                block_hash,
+                                state_trie_root,
+                                keys: vec![b":code".to_vec(), b":heappages".to_vec()],
+                            },
+                            warp_sync::DesiredRequest::RuntimeCallMerkleProof {
                                 block_hash,
                                 function_name,
                                 parameter_vectored,
