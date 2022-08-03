@@ -705,6 +705,9 @@ impl<TSrc> Verifier<TSrc> {
                 // TODO: should return success immediately; unfortunately the AllSync is quite complicated to update if we do this
                 InProgressWarpSync::ChainInfoQuery(ChainInfoQuery {
                     in_progress_requests: slab::Slab::with_capacity(self.sources.capacity()),
+                    babeapi_current_epoch_response: None,
+                    babeapi_next_epoch_response: None,
+                    runtime: None,
                     state: PostVerificationState {
                         header: self
                             .state
@@ -743,6 +746,9 @@ impl<TSrc> Verifier<TSrc> {
                             in_progress_requests: slab::Slab::with_capacity(
                                 self.sources.capacity(),
                             ),
+                            babeapi_current_epoch_response: None,
+                            babeapi_next_epoch_response: None,
+                            runtime: None,
                             state: PostVerificationState {
                                 header,
                                 chain_information_finality,
@@ -937,6 +943,9 @@ impl<TSrc> GrandpaWarpSyncRequest<TSrc> {
 pub struct ChainInfoQuery<TSrc> {
     state: PostVerificationState<TSrc>,
     in_progress_requests: slab::Slab<(SourceId, RequestDetail)>,
+    runtime: Option<HostVmPrototype>,
+    babeapi_current_epoch_response: Option<Vec<Vec<u8>>>,
+    babeapi_next_epoch_response: Option<Vec<Vec<u8>>>,
 }
 
 impl<TSrc> ChainInfoQuery<TSrc> {
@@ -986,7 +995,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
             None
         };
 
-        let babe_current_epoch = if !self.in_progress_requests.iter().any(|(_, rq)| {
+        let babe_current_epoch = if self.babeapi_current_epoch_response.is_none() && !self.in_progress_requests.iter().any(|(_, rq)| {
             rq.0 == source_id && matches!(rq.1, RequestDetail::RuntimeCallMerkleProof { block_hash: b, function_name: ref f,  parameter_vectored: ref p } if b == block_hash && f == "BabeApi_current_epoch" && p.is_empty())
         }) {Some((
             source_id,
@@ -998,7 +1007,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
             },
         )) } else { None };
 
-        let babe_next_epoch = if !self.in_progress_requests.iter().any(|(_, rq)| {
+        let babe_next_epoch = if self.babeapi_next_epoch_response.is_none() && !self.in_progress_requests.iter().any(|(_, rq)| {
             rq.0 == source_id && matches!(rq.1, RequestDetail::RuntimeCallMerkleProof { block_hash: b, function_name: ref f,  parameter_vectored: ref p } if b == block_hash && f == "BabeApi_next_epoch" && p.is_empty())
         }) {Some((
             source_id,
@@ -1167,6 +1176,46 @@ impl<TSrc> ChainInfoQuery<TSrc> {
         request_id: RequestId,
         response: impl Iterator<Item = impl AsRef<[u8]>>,
     ) -> (WarpSync<TSrc>, Option<Error>) {
+        let desired_block_hash = self.state.header.hash(self.state.block_number_bytes);
+
+        match self.in_progress_requests.remove(request_id.0) {
+            (
+                _,
+                RequestDetail::RuntimeCallMerkleProof {
+                    block_hash,
+                    function_name,
+                    parameter_vectored,
+                },
+            ) if block_hash == desired_block_hash
+                && function_name == "BabeApi_current_epoch"
+                && parameter_vectored.is_empty() =>
+            {
+                self.babeapi_current_epoch_response =
+                    Some(response.map(|e| e.as_ref().to_vec()).collect());
+            }
+            (
+                _,
+                RequestDetail::RuntimeCallMerkleProof {
+                    block_hash,
+                    function_name,
+                    parameter_vectored,
+                },
+            ) if block_hash == desired_block_hash
+                && function_name == "BabeApi_next_epoch"
+                && parameter_vectored.is_empty() =>
+            {
+                self.babeapi_next_epoch_response =
+                    Some(response.map(|e| e.as_ref().to_vec()).collect());
+            }
+            (_, RequestDetail::RuntimeCallMerkleProof { .. }) => {
+                return (
+                    WarpSync::InProgress(InProgressWarpSync::ChainInfoQuery(self)),
+                    None,
+                )
+            }
+            (_, RequestDetail::RuntimeParametersGet { .. }) => panic!(),
+        }
+
         // TODO:
         (
             WarpSync::InProgress(InProgressWarpSync::ChainInfoQuery(self)),
