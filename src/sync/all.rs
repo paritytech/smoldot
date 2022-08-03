@@ -367,7 +367,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 outer_source_id
             }
-            AllSyncInner::GrandpaWarpSync { inner: mut grandpa } => {
+            AllSyncInner::GrandpaWarpSync {
+                inner: warp_sync::InProgressWarpSync::ChainInfoQuery(mut sync),
+            } => {
                 let outer_source_id_entry = self.shared.sources.vacant_entry();
                 let outer_source_id = SourceId(outer_source_id_entry.key());
 
@@ -378,22 +380,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     best_block_hash,
                 };
 
-                let inner_source_id = match &mut grandpa {
-                    warp_sync::InProgressWarpSync::WaitingForSources(_) => {
-                        unreachable!()
-                    }
-                    warp_sync::InProgressWarpSync::Verifier(sync) => sync.add_source(source_extra),
-                    warp_sync::InProgressWarpSync::WarpSyncRequest(sync) => {
-                        sync.add_source(source_extra)
-                    }
-                    warp_sync::InProgressWarpSync::ChainInfoQuery(sync) => {
-                        sync.add_source(source_extra)
-                    }
-                };
+                let inner_source_id = sync.add_source(source_extra);
 
                 outer_source_id_entry.insert(SourceMapping::GrandpaWarpSync(inner_source_id));
 
-                self.inner = AllSyncInner::GrandpaWarpSync { inner: grandpa };
+                self.inner = AllSyncInner::GrandpaWarpSync {
+                    inner: warp_sync::InProgressWarpSync::ChainInfoQuery(sync),
+                };
                 outer_source_id
             }
             AllSyncInner::AllForks(mut all_forks) => {
@@ -857,38 +850,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 either::Left(either::Left(iter))
             }
-            AllSyncInner::GrandpaWarpSync { inner } => {
-                // Grandpa warp sync only ever requires one request at a time. Determine which
-                // one it is, if any.
-                let desired_request = match inner {
-                    warp_sync::InProgressWarpSync::WarpSyncRequest(rq) => Some((
-                        rq.current_source().1.outer_source_id,
-                        &rq.current_source().1.user_data,
-                        RequestDetail::GrandpaWarpSync {
-                            sync_start_block_hash: rq.start_block_hash(),
-                        },
-                    )),
-                    warp_sync::InProgressWarpSync::ChainInfoQuery(rq) => unreachable!(),
-                    _ => None,
-                };
-
-                let iter = if let Some(desired_request) = desired_request {
-                    if self.shared.requests.iter().any(|(_, rq)| match rq {
-                        RequestMapping::Inline(src_id, ud, _) => {
-                            (src_id, ud) == (&desired_request.0, &desired_request.2)
-                        }
-                        _ => false,
-                    }) {
-                        either::Left(iter::empty())
-                    } else {
-                        either::Right(iter::once(desired_request))
-                    }
-                } else {
-                    either::Left(iter::empty())
-                };
-
-                either::Right(either::Right(iter))
-            }
+            AllSyncInner::GrandpaWarpSync { .. } => either::Right(either::Right(iter::empty())),
             AllSyncInner::Poisoned => unreachable!(),
         }
     }
@@ -1120,9 +1082,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// [`AllSync`] is yielded back at the end of this process.
     pub fn process_one(mut self) -> ProcessOne<TRq, TSrc, TBl> {
         match self.inner {
-            AllSyncInner::GrandpaWarpSync {
-                inner: warp_sync::InProgressWarpSync::Verifier(_),
-            } => ProcessOne::VerifyWarpSyncFragment(WarpSyncFragmentVerify { inner: self }),
             AllSyncInner::GrandpaWarpSync { .. } => ProcessOne::AllSync(self),
             AllSyncInner::AllForks(sync) => match sync.process_one() {
                 all_forks::ProcessOne::AllSync { sync } => {
@@ -1448,23 +1407,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             mem::replace(&mut self.inner, AllSyncInner::Poisoned),
             request,
         ) {
-            (
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::WarpSyncRequest(grandpa),
-                },
-                RequestMapping::Inline(_, _, user_data),
-            ) => {
-                let updated_grandpa = if let Some((fragments, is_finished)) = response {
-                    grandpa.handle_response_ok(fragments, is_finished)
-                } else {
-                    grandpa.handle_response_err()
-                };
-                self.inner = AllSyncInner::GrandpaWarpSync {
-                    inner: updated_grandpa,
-                };
-                (user_data, ResponseOutcome::Queued)
-            }
-
             (
                 AllSyncInner::GrandpaWarpSync {
                     inner: warp_sync::InProgressWarpSync::ChainInfoQuery(grandpa),
@@ -2253,14 +2195,12 @@ impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
     /// Returns the identifier and user data of the source that has sent the fragment to be
     /// verified.
     pub fn proof_sender(&self) -> (SourceId, &TSrc) {
+        // TODO: restore this feature
         let sender = match &self.inner.inner {
-            AllSyncInner::GrandpaWarpSync {
-                inner: warp_sync::InProgressWarpSync::Verifier(verifier),
-            } => verifier.proof_sender(),
             _ => unreachable!(),
         };
 
-        (sender.1.outer_source_id, &sender.1.user_data)
+        //(sender.1.outer_source_id, &sender.1.user_data)
     }
 
     /// Perform the verification.
@@ -2270,11 +2210,9 @@ impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
         AllSync<TRq, TSrc, TBl>,
         Result<(), warp_sync::FragmentError>,
     ) {
+        // TODO: restore this feature
         let (next_grandpa_warp_sync, error) =
             match mem::replace(&mut self.inner.inner, AllSyncInner::Poisoned) {
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::Verifier(verifier),
-                } => verifier.next(),
                 _ => unreachable!(),
             };
 

@@ -175,12 +175,6 @@ pub enum WarpSync<TSrc> {
 
 #[derive(derive_more::From)]
 pub enum InProgressWarpSync<TSrc> {
-    /// Verifying the warp sync response is required to continue.
-    #[from]
-    Verifier(Verifier<TSrc>),
-    /// Requesting GrandPa warp sync data from a source is required to continue.
-    #[from]
-    WarpSyncRequest(GrandpaWarpSyncRequest<TSrc>),
     /// Warp syncing process now obtaining the chain information.
     #[from]
     ChainInfoQuery(ChainInfoQuery<TSrc>),
@@ -193,8 +187,6 @@ impl<TSrc> InProgressWarpSync<TSrc> {
     /// Returns the value that was initially passed in [`Config::block_number_bytes`].
     pub fn block_number_bytes(&self) -> usize {
         match self {
-            Self::Verifier(verifier) => verifier.state.block_number_bytes,
-            Self::WarpSyncRequest(warp_sync_request) => warp_sync_request.state.block_number_bytes,
             Self::ChainInfoQuery(virtual_machine_params_get) => {
                 virtual_machine_params_get.block_number_bytes
             }
@@ -207,10 +199,6 @@ impl<TSrc> InProgressWarpSync<TSrc> {
     /// Returns the chain information that is considered verified.
     pub fn as_chain_information(&self) -> ValidChainInformationRef {
         match self {
-            Self::Verifier(verifier) => &verifier.state.start_chain_information,
-            Self::WarpSyncRequest(warp_sync_request) => {
-                &warp_sync_request.state.start_chain_information
-            }
             Self::ChainInfoQuery(virtual_machine_params_get) => {
                 &virtual_machine_params_get.start_chain_information
             }
@@ -224,49 +212,11 @@ impl<TSrc> InProgressWarpSync<TSrc> {
     /// Returns a list of all known sources stored in the state machine.
     pub fn sources(&'_ self) -> impl Iterator<Item = SourceId> + '_ {
         let sources = match self {
-            Self::Verifier(verifier) => &verifier.sources,
-            Self::WarpSyncRequest(warp_sync_request) => &warp_sync_request.sources,
             Self::ChainInfoQuery(virtual_machine_params_get) => &virtual_machine_params_get.sources,
             Self::WaitingForSources(waiting_for_sources) => &waiting_for_sources.sources,
         };
 
         sources.iter().map(|(id, _)| SourceId(id))
-    }
-
-    fn warp_sync_request_from_next_source(
-        mut sources: slab::Slab<Source<TSrc>>,
-        state: PreVerificationState,
-        previous_verifier_values: Option<(Header, ChainInformationFinality)>,
-    ) -> Self {
-        // It is possible for a source to be banned because of, say, networking errors.
-        // If all sources are "banned", unban them in order to try make progress again with the
-        // hopes that this time it will work.
-        if sources.iter().all(|(_, s)| s.already_tried) {
-            for (_, s) in &mut sources {
-                s.already_tried = false;
-            }
-        }
-
-        let next_id = sources
-            .iter()
-            .find(|(_, s)| !s.already_tried)
-            .map(|(id, _)| SourceId(id));
-
-        if let Some(next_id) = next_id {
-            Self::WarpSyncRequest(GrandpaWarpSyncRequest {
-                source_id: next_id,
-                sources,
-                state,
-                previous_verifier_values,
-            })
-        } else {
-            debug_assert!(sources.is_empty());
-            Self::WaitingForSources(WaitingForSources {
-                sources,
-                state,
-                previous_verifier_values,
-            })
-        }
     }
 
     /// Remove a source from the list of sources.
@@ -280,8 +230,6 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             Self::WaitingForSources(waiting_for_sources) => {
                 waiting_for_sources.remove_source(to_remove)
             }
-            Self::WarpSyncRequest(warp_sync_request) => warp_sync_request.remove_source(to_remove),
-            Self::Verifier(verifier) => verifier.remove_source(to_remove),
             Self::ChainInfoQuery(chain_info_query) => chain_info_query.remove_source(to_remove),
         }
     }
@@ -293,8 +241,6 @@ impl<TSrc> ops::Index<SourceId> for InProgressWarpSync<TSrc> {
     #[track_caller]
     fn index(&self, source_id: SourceId) -> &TSrc {
         let sources = match self {
-            Self::Verifier(verifier) => &verifier.sources,
-            Self::WarpSyncRequest(warp_sync_request) => &warp_sync_request.sources,
             Self::ChainInfoQuery(virtual_machine_params_get) => &virtual_machine_params_get.sources,
             Self::WaitingForSources(waiting_for_sources) => &waiting_for_sources.sources,
         };
@@ -308,8 +254,6 @@ impl<TSrc> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc> {
     #[track_caller]
     fn index_mut(&mut self, source_id: SourceId) -> &mut TSrc {
         let sources = match self {
-            Self::Verifier(verifier) => &mut verifier.sources,
-            Self::WarpSyncRequest(warp_sync_request) => &mut warp_sync_request.sources,
             Self::ChainInfoQuery(virtual_machine_params_get) => {
                 &mut virtual_machine_params_get.sources
             }
@@ -321,263 +265,9 @@ impl<TSrc> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc> {
     }
 }
 
-/// Verifying the warp sync response is required to continue.
-pub struct Verifier<TSrc> {
-    verifier: warp_sync::Verifier,
-    state: PreVerificationState,
-    warp_sync_source_id: SourceId,
-    sources: slab::Slab<Source<TSrc>>,
-    final_set_of_fragments: bool,
-    previous_verifier_values: Option<(Header, ChainInformationFinality)>,
-}
-
-impl<TSrc> Verifier<TSrc> {
-    /// Add a source to the list of sources.
-    pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
-        SourceId(self.sources.insert(Source {
-            user_data,
-            already_tried: false,
-        }))
-    }
-
-    /// Remove a source from the list of sources.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the source wasn't added to the list earlier.
-    ///
-    pub fn remove_source(mut self, to_remove: SourceId) -> (TSrc, InProgressWarpSync<TSrc>) {
-        debug_assert!(self.sources.contains(to_remove.0));
-        let removed = self.sources.remove(to_remove.0).user_data;
-
-        if to_remove == self.warp_sync_source_id {
-            let next_state = InProgressWarpSync::warp_sync_request_from_next_source(
-                self.sources,
-                self.state,
-                self.previous_verifier_values,
-            );
-
-            (removed, next_state)
-        } else {
-            (removed, InProgressWarpSync::Verifier(self))
-        }
-    }
-
-    /// Returns the identifier and user data of the source that has sent the fragment that is to
-    /// be verified.
-    pub fn proof_sender(&self) -> (SourceId, &TSrc) {
-        (
-            self.warp_sync_source_id,
-            &self.sources[self.warp_sync_source_id.0].user_data,
-        )
-    }
-
-    /// Verifies the next warp sync fragment in queue.
-    pub fn next(self) -> (InProgressWarpSync<TSrc>, Result<(), FragmentError>) {
-        match self.verifier.next() {
-            Ok(warp_sync::Next::NotFinished(next_verifier)) => (
-                InProgressWarpSync::Verifier(Self {
-                    verifier: next_verifier,
-                    state: self.state,
-                    sources: self.sources,
-                    warp_sync_source_id: self.warp_sync_source_id,
-                    final_set_of_fragments: self.final_set_of_fragments,
-                    previous_verifier_values: self.previous_verifier_values,
-                }),
-                Ok(()),
-            ),
-            Ok(warp_sync::Next::EmptyProof) => (
-                // TODO: should return success immediately; unfortunately the AllSync is quite complicated to update if we do this
-                InProgressWarpSync::ChainInfoQuery(ChainInfoQuery {
-                    in_progress_requests: slab::Slab::with_capacity(self.sources.capacity()),
-                    phase: Phase::PostVerification {
-                        babeapi_current_epoch_response: None,
-                        babeapi_next_epoch_response: None,
-                        runtime: None,
-                        header: self
-                            .state
-                            .start_chain_information
-                            .as_ref()
-                            .finalized_block_header
-                            .into(),
-                        chain_information_finality: self
-                            .state
-                            .start_chain_information
-                            .as_ref()
-                            .finality
-                            .into(),
-                        warp_sync_source_id: self.warp_sync_source_id,
-                    },
-                    block_number_bytes: self.state.block_number_bytes,
-                    start_chain_information: self.state.start_chain_information,
-                    sources: self.sources,
-                }),
-                Ok(()),
-            ),
-            Ok(warp_sync::Next::Success {
-                scale_encoded_header,
-                chain_information_finality,
-            }) => {
-                // As the verification of the fragment has succeeded, we are sure that the header
-                // is valid and can decode it.
-                let header: Header =
-                    header::decode(&scale_encoded_header, self.state.block_number_bytes)
-                        .unwrap()
-                        .into();
-
-                if self.final_set_of_fragments {
-                    (
-                        InProgressWarpSync::ChainInfoQuery(ChainInfoQuery {
-                            in_progress_requests: slab::Slab::with_capacity(
-                                self.sources.capacity(),
-                            ),
-                            phase: Phase::PostVerification {
-                                babeapi_current_epoch_response: None,
-                                babeapi_next_epoch_response: None,
-                                runtime: None,
-                                header,
-                                chain_information_finality,
-                                warp_sync_source_id: self.warp_sync_source_id,
-                            },
-                            start_chain_information: self.state.start_chain_information,
-                            block_number_bytes: self.state.block_number_bytes,
-                            sources: self.sources,
-                        }),
-                        Ok(()),
-                    )
-                } else {
-                    (
-                        InProgressWarpSync::WarpSyncRequest(GrandpaWarpSyncRequest {
-                            source_id: self.warp_sync_source_id,
-                            sources: self.sources,
-                            state: self.state,
-                            previous_verifier_values: Some((header, chain_information_finality)),
-                        }),
-                        Ok(()),
-                    )
-                }
-            }
-            Err(error) => (
-                InProgressWarpSync::warp_sync_request_from_next_source(
-                    self.sources,
-                    self.state,
-                    self.previous_verifier_values,
-                ),
-                Err(error),
-            ),
-        }
-    }
-}
-
 struct PreVerificationState {
     start_chain_information: ValidChainInformation,
     block_number_bytes: usize,
-}
-
-/// Requesting GrandPa warp sync data from a source is required to continue.
-pub struct GrandpaWarpSyncRequest<TSrc> {
-    source_id: SourceId,
-    sources: slab::Slab<Source<TSrc>>,
-    state: PreVerificationState,
-    previous_verifier_values: Option<(Header, ChainInformationFinality)>,
-}
-
-impl<TSrc> GrandpaWarpSyncRequest<TSrc> {
-    /// The source to make a GrandPa warp sync request to.
-    pub fn current_source(&self) -> (SourceId, &TSrc) {
-        debug_assert!(self.sources.contains(self.source_id.0));
-        (self.source_id, &self.sources[self.source_id.0].user_data)
-    }
-
-    /// The hash of the header to warp sync from.
-    pub fn start_block_hash(&self) -> [u8; 32] {
-        match self.previous_verifier_values.as_ref() {
-            Some((header, _)) => header.hash(self.state.block_number_bytes),
-            None => self
-                .state
-                .start_chain_information
-                .as_ref()
-                .finalized_block_header
-                .hash(self.state.block_number_bytes),
-        }
-    }
-
-    /// Add a source to the list of sources.
-    pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
-        SourceId(self.sources.insert(Source {
-            user_data,
-            already_tried: false,
-        }))
-    }
-
-    /// Remove a source from the list of sources.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the source wasn't added to the list earlier.
-    ///
-    pub fn remove_source(mut self, to_remove: SourceId) -> (TSrc, InProgressWarpSync<TSrc>) {
-        debug_assert!(self.sources.contains(to_remove.0));
-        let removed = self.sources.remove(to_remove.0).user_data;
-
-        if to_remove == self.source_id {
-            let next_state = InProgressWarpSync::warp_sync_request_from_next_source(
-                self.sources,
-                self.state,
-                self.previous_verifier_values,
-            );
-
-            (removed, next_state)
-        } else {
-            (removed, InProgressWarpSync::WarpSyncRequest(self))
-        }
-    }
-
-    /// Submit a GrandPa warp sync successful response.
-    pub fn handle_response_ok(
-        mut self,
-        fragments: Vec<WarpSyncFragment>,
-        final_set_of_fragments: bool,
-    ) -> InProgressWarpSync<TSrc> {
-        debug_assert!(self.sources.contains(self.source_id.0));
-        self.sources[self.source_id.0].already_tried = true;
-
-        let verifier = match &self.previous_verifier_values {
-            Some((_, chain_information_finality)) => warp_sync::Verifier::new(
-                chain_information_finality.into(),
-                self.state.block_number_bytes,
-                fragments,
-                final_set_of_fragments,
-            ),
-            None => warp_sync::Verifier::new(
-                self.state.start_chain_information.as_ref().finality,
-                self.state.block_number_bytes,
-                fragments,
-                final_set_of_fragments,
-            ),
-        };
-
-        InProgressWarpSync::Verifier(Verifier {
-            final_set_of_fragments,
-            verifier,
-            state: self.state,
-            sources: self.sources,
-            warp_sync_source_id: self.source_id,
-            previous_verifier_values: self.previous_verifier_values,
-        })
-    }
-
-    /// Submit a GrandPa warp sync request failure.
-    pub fn handle_response_err(mut self) -> InProgressWarpSync<TSrc> {
-        debug_assert!(self.sources.contains(self.source_id.0));
-        self.sources[self.source_id.0].already_tried = true;
-
-        InProgressWarpSync::warp_sync_request_from_next_source(
-            self.sources,
-            self.state,
-            self.previous_verifier_values,
-        )
-    }
 }
 
 /// Warp syncing process now obtaining the chain information.
@@ -646,14 +336,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
             if to_remove == *warp_sync_source_id {
                 (
                     removed,
-                    InProgressWarpSync::warp_sync_request_from_next_source(
-                        self.sources,
-                        PreVerificationState {
-                            start_chain_information: self.start_chain_information,
-                            block_number_bytes: self.block_number_bytes,
-                        },
-                        None,
-                    ),
+                    todo!(), // TODO:
                 )
             } else {
                 (removed, InProgressWarpSync::ChainInfoQuery(self))
@@ -804,14 +487,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
     pub fn inject_error(mut self, id: RequestId) -> InProgressWarpSync<TSrc> {
         self.in_progress_requests.remove(id.0);
 
-        InProgressWarpSync::warp_sync_request_from_next_source(
-            self.sources,
-            PreVerificationState {
-                start_chain_information: self.start_chain_information,
-                block_number_bytes: self.block_number_bytes,
-            },
-            None,
-        )
+        todo!()
     }
 
     /// Set the code and heap pages from storage using the keys `:code` and `:heappages`
@@ -849,16 +525,9 @@ impl<TSrc> ChainInfoQuery<TSrc> {
             Some(code) => code.as_ref().to_vec(),
             None => {
                 return (
-                    WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
-                        self.sources,
-                        PreVerificationState {
-                            start_chain_information: self.start_chain_information,
-                            block_number_bytes: self.block_number_bytes,
-                        },
-                        None,
-                    )),
+                    todo!(), // TODO:
                     Some(Error::MissingCode),
-                )
+                );
             }
         };
 
@@ -867,18 +536,9 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                 Ok(hp) => hp,
                 Err(err) => {
                     return (
-                        WarpSync::InProgress(
-                            InProgressWarpSync::warp_sync_request_from_next_source(
-                                self.sources,
-                                PreVerificationState {
-                                    start_chain_information: self.start_chain_information,
-                                    block_number_bytes: self.block_number_bytes,
-                                },
-                                None,
-                            ),
-                        ),
+                        todo!(), // TODO:
                         Some(Error::InvalidHeapPages(err)),
-                    )
+                    );
                 }
             };
 
@@ -891,16 +551,9 @@ impl<TSrc> ChainInfoQuery<TSrc> {
             Ok(runtime) => runtime,
             Err(error) => {
                 return (
-                    WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
-                        self.sources,
-                        PreVerificationState {
-                            start_chain_information: self.start_chain_information,
-                            block_number_bytes: self.block_number_bytes,
-                        },
-                        None,
-                    )),
+                    todo!(), // TODO:
                     Some(Error::NewRuntime(error)),
-                )
+                );
             }
         };
 
@@ -1032,20 +685,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                         }) {
                             Ok(ci) => ci,
                             Err(err) => {
-                                return (
-                                    WarpSync::InProgress(
-                                        InProgressWarpSync::warp_sync_request_from_next_source(
-                                            self.sources,
-                                            PreVerificationState {
-                                                start_chain_information: self
-                                                    .start_chain_information,
-                                                block_number_bytes: self.block_number_bytes,
-                                            },
-                                            None,
-                                        ),
-                                    ),
-                                    Some(Error::InvalidChain(err)),
-                                )
+                                todo!() // TODO:
                             }
                         };
 
@@ -1067,14 +707,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                 ChainInformationConsensusRef::Aura { .. } |  // TODO: https://github.com/paritytech/smoldot/issues/933
                 ChainInformationConsensusRef::Unknown => {
                     (
-                        WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
-                            self.sources,
-                            PreVerificationState {
-                                start_chain_information: self.start_chain_information,
-                                block_number_bytes: self.block_number_bytes,
-                            },
-                            None,
-                        )),
+                        todo!(), // TODO:
                         Some(Error::UnknownConsensus),
                     )
                 }
