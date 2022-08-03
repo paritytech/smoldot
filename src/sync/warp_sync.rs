@@ -281,7 +281,6 @@ pub struct ChainInfoQuery<TSrc> {
 
 enum Phase {
     PreVerification {
-        source_id: SourceId,
         previous_verifier_values: Option<(Header, ChainInformationFinality)>,
     },
     PostVerification {
@@ -338,7 +337,6 @@ impl<TSrc> ChainInfoQuery<TSrc> {
         &'_ self,
     ) -> impl Iterator<Item = (SourceId, &'_ TSrc, RequestDetail)> + '_ {
         let warp_sync_request = if let Phase::PreVerification {
-            source_id,
             previous_verifier_values,
         } = &self.phase
         {
@@ -351,29 +349,37 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                     .hash(self.block_number_bytes),
             };
 
-            if !self.in_progress_requests.iter().any(|(_, (src_id, rq))| {
-                src_id == source_id
-                    && match rq {
-                        RequestDetail::WarpSyncRequest { block_hash }
-                            if *block_hash == start_block_hash =>
-                        {
-                            true
-                        }
-                        _ => false,
+            if !self
+                .in_progress_requests
+                .iter()
+                .any(|(_, (_, rq))| match rq {
+                    RequestDetail::WarpSyncRequest { block_hash }
+                        if *block_hash == start_block_hash =>
+                    {
+                        true
                     }
-            }) {
-                Some((
-                    *source_id,
-                    &self.sources[source_id.0].user_data,
-                    RequestDetail::WarpSyncRequest {
-                        block_hash: start_block_hash,
-                    },
-                ))
+                    _ => false,
+                })
+            {
+                either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
+                    // TODO: also filter by source finalized block? so that we don't request from sources below us
+                    if !src.already_tried {
+                        Some((
+                            SourceId(src_id),
+                            &src.user_data,
+                            RequestDetail::WarpSyncRequest {
+                                block_hash: start_block_hash,
+                            },
+                        ))
+                    } else {
+                        None
+                    }
+                }))
             } else {
-                None
+                either::Right(iter::empty())
             }
         } else {
-            None
+            either::Right(iter::empty())
         };
 
         let runtime_parameters_get = if let Phase::PostVerification {
@@ -451,7 +457,6 @@ impl<TSrc> ChainInfoQuery<TSrc> {
         };
 
         warp_sync_request
-            .into_iter()
             .chain(runtime_parameters_get.into_iter())
             .chain(babe_current_epoch.into_iter())
             .chain(babe_next_epoch.into_iter())
@@ -789,11 +794,10 @@ impl<TSrc> ChainInfoQuery<TSrc> {
             (
                 (rq_source_id, RequestDetail::WarpSyncRequest { block_hash }),
                 Phase::PreVerification {
-                    source_id,
                     previous_verifier_values,
                 },
-            ) if rq_source_id == *source_id => {
-                // TODO: check block_hash
+            ) => {
+                // TODO: check block_hash ^
                 self.sources[rq_source_id.0].already_tried = true;
 
                 let mut verifier = match &previous_verifier_values {
@@ -898,7 +902,6 @@ impl<TSrc> WaitingForSources<TSrc> {
         (
             ChainInfoQuery {
                 phase: Phase::PreVerification {
-                    source_id,
                     previous_verifier_values: self.previous_verifier_values,
                 },
                 sources: self.sources,
