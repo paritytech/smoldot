@@ -122,13 +122,14 @@ pub fn warp_sync<TSrc>(
         }
     }
 
-    Ok(InProgressWarpSync::WaitingForSources(WaitingForSources {
-        state: PreVerificationState {
-            start_chain_information: config.start_chain_information,
-            block_number_bytes: config.block_number_bytes,
-        },
+    Ok(InProgressWarpSync::ChainInfoQuery(ChainInfoQuery {
+        start_chain_information: config.start_chain_information,
+        block_number_bytes: config.block_number_bytes,
         sources: slab::Slab::with_capacity(config.sources_capacity),
-        previous_verifier_values: None,
+        in_progress_requests: slab::Slab::with_capacity(config.sources_capacity), // TODO: requests_capacity?
+        phase: Phase::PreVerification {
+            previous_verifier_values: None,
+        },
     }))
 }
 
@@ -178,9 +179,6 @@ pub enum InProgressWarpSync<TSrc> {
     /// Warp syncing process now obtaining the chain information.
     #[from]
     ChainInfoQuery(ChainInfoQuery<TSrc>),
-    /// Adding more sources of warp sync data to is required to continue.
-    #[from]
-    WaitingForSources(WaitingForSources<TSrc>),
 }
 
 impl<TSrc> InProgressWarpSync<TSrc> {
@@ -189,9 +187,6 @@ impl<TSrc> InProgressWarpSync<TSrc> {
         match self {
             Self::ChainInfoQuery(virtual_machine_params_get) => {
                 virtual_machine_params_get.block_number_bytes
-            }
-            Self::WaitingForSources(waiting_for_sources) => {
-                waiting_for_sources.state.block_number_bytes
             }
         }
     }
@@ -202,9 +197,6 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             Self::ChainInfoQuery(virtual_machine_params_get) => {
                 &virtual_machine_params_get.start_chain_information
             }
-            Self::WaitingForSources(waiting_for_sources) => {
-                &waiting_for_sources.state.start_chain_information
-            }
         }
         .into()
     }
@@ -213,7 +205,6 @@ impl<TSrc> InProgressWarpSync<TSrc> {
     pub fn sources(&'_ self) -> impl Iterator<Item = SourceId> + '_ {
         let sources = match self {
             Self::ChainInfoQuery(virtual_machine_params_get) => &virtual_machine_params_get.sources,
-            Self::WaitingForSources(waiting_for_sources) => &waiting_for_sources.sources,
         };
 
         sources.iter().map(|(id, _)| SourceId(id))
@@ -227,9 +218,6 @@ impl<TSrc> InProgressWarpSync<TSrc> {
     ///
     pub fn remove_source(self, to_remove: SourceId) -> (TSrc, InProgressWarpSync<TSrc>) {
         match self {
-            Self::WaitingForSources(waiting_for_sources) => {
-                waiting_for_sources.remove_source(to_remove)
-            }
             Self::ChainInfoQuery(chain_info_query) => chain_info_query.remove_source(to_remove),
         }
     }
@@ -242,7 +230,6 @@ impl<TSrc> ops::Index<SourceId> for InProgressWarpSync<TSrc> {
     fn index(&self, source_id: SourceId) -> &TSrc {
         let sources = match self {
             Self::ChainInfoQuery(virtual_machine_params_get) => &virtual_machine_params_get.sources,
-            Self::WaitingForSources(waiting_for_sources) => &waiting_for_sources.sources,
         };
 
         debug_assert!(sources.contains(source_id.0));
@@ -257,17 +244,11 @@ impl<TSrc> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc> {
             Self::ChainInfoQuery(virtual_machine_params_get) => {
                 &mut virtual_machine_params_get.sources
             }
-            Self::WaitingForSources(waiting_for_sources) => &mut waiting_for_sources.sources,
         };
 
         debug_assert!(sources.contains(source_id.0));
         &mut sources[source_id.0].user_data
     }
-}
-
-struct PreVerificationState {
-    start_chain_information: ValidChainInformation,
-    block_number_bytes: usize,
 }
 
 /// Warp syncing process now obtaining the chain information.
@@ -880,49 +861,6 @@ impl<TSrc> ChainInfoQuery<TSrc> {
             }
             ((_, _), _) => panic!(),
         }
-    }
-}
-
-/// Adding more sources of warp sync data to is required to continue.
-pub struct WaitingForSources<TSrc> {
-    /// List of sources. It is guaranteed that they all have `already_tried` equal to `true`.
-    sources: slab::Slab<Source<TSrc>>,
-    state: PreVerificationState,
-    previous_verifier_values: Option<(Header, ChainInformationFinality)>,
-}
-
-impl<TSrc> WaitingForSources<TSrc> {
-    /// Add a source to the list of sources.
-    pub fn add_source(mut self, user_data: TSrc) -> (ChainInfoQuery<TSrc>, SourceId) {
-        let source_id = SourceId(self.sources.insert(Source {
-            user_data,
-            already_tried: false,
-        }));
-
-        (
-            ChainInfoQuery {
-                phase: Phase::PreVerification {
-                    previous_verifier_values: self.previous_verifier_values,
-                },
-                sources: self.sources,
-                block_number_bytes: self.state.block_number_bytes,
-                in_progress_requests: slab::Slab::new(),
-                start_chain_information: self.state.start_chain_information,
-            },
-            source_id,
-        )
-    }
-
-    /// Remove a source from the list of sources.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the source wasn't added to the list earlier.
-    ///
-    pub fn remove_source(mut self, to_remove: SourceId) -> (TSrc, InProgressWarpSync<TSrc>) {
-        debug_assert!(self.sources.contains(to_remove.0));
-        let removed = self.sources.remove(to_remove.0).user_data;
-        (removed, InProgressWarpSync::WaitingForSources(self))
     }
 }
 

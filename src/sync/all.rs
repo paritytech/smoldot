@@ -346,27 +346,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         // returning.
         match mem::replace(&mut self.inner, AllSyncInner::Poisoned) {
             AllSyncInner::GrandpaWarpSync {
-                inner: warp_sync::InProgressWarpSync::WaitingForSources(waiting),
-            } => {
-                let outer_source_id_entry = self.shared.sources.vacant_entry();
-                let outer_source_id = SourceId(outer_source_id_entry.key());
-
-                let (warp_sync_request, inner_source_id) = waiting.add_source(GrandpaWarpSyncSourceExtra {
-                    outer_source_id,
-                    user_data,
-                    best_block_number,
-                    best_block_hash,
-                });
-
-                outer_source_id_entry.insert(SourceMapping::GrandpaWarpSync(inner_source_id));
-
-                self.inner = AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync_request.into(),
-                };
-
-                outer_source_id
-            }
-            AllSyncInner::GrandpaWarpSync {
                 inner: warp_sync::InProgressWarpSync::ChainInfoQuery(mut sync),
             } => {
                 let outer_source_id_entry = self.shared.sources.vacant_entry();
