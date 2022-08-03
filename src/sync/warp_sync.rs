@@ -304,18 +304,6 @@ impl<TSrc> ChainInfoQuery<TSrc> {
         }
     }
 
-    /// The source to make a GrandPa warp sync request to.
-    // TODO: weird function, remove
-    pub fn current_source(&self) -> (SourceId, &TSrc) {
-        match &self.phase {
-            Phase::PreVerification { source_id, .. } => {
-                debug_assert!(self.sources.contains(source_id.0));
-                (*source_id, &self.sources[source_id.0].user_data)
-            }
-            _ => panic!(),
-        }
-    }
-
     /// Add a source to the list of sources.
     pub fn add_source(&mut self, user_data: TSrc) -> SourceId {
         SourceId(self.sources.insert(Source {
@@ -901,22 +889,25 @@ pub struct WaitingForSources<TSrc> {
 
 impl<TSrc> WaitingForSources<TSrc> {
     /// Add a source to the list of sources.
-    pub fn add_source(mut self, user_data: TSrc) -> ChainInfoQuery<TSrc> {
+    pub fn add_source(mut self, user_data: TSrc) -> (ChainInfoQuery<TSrc>, SourceId) {
         let source_id = SourceId(self.sources.insert(Source {
             user_data,
             already_tried: false,
         }));
 
-        ChainInfoQuery {
-            phase: Phase::PreVerification {
-                source_id,
-                previous_verifier_values: self.previous_verifier_values,
+        (
+            ChainInfoQuery {
+                phase: Phase::PreVerification {
+                    source_id,
+                    previous_verifier_values: self.previous_verifier_values,
+                },
+                sources: self.sources,
+                block_number_bytes: self.state.block_number_bytes,
+                in_progress_requests: slab::Slab::new(),
+                start_chain_information: self.state.start_chain_information,
             },
-            sources: self.sources,
-            block_number_bytes: self.state.block_number_bytes,
-            in_progress_requests: slab::Slab::new(),
-            start_chain_information: self.state.start_chain_information,
-        }
+            source_id,
+        )
     }
 
     /// Remove a source from the list of sources.

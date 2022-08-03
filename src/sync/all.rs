@@ -351,14 +351,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let outer_source_id_entry = self.shared.sources.vacant_entry();
                 let outer_source_id = SourceId(outer_source_id_entry.key());
 
-                let warp_sync_request = waiting.add_source(GrandpaWarpSyncSourceExtra {
+                let (warp_sync_request, inner_source_id) = waiting.add_source(GrandpaWarpSyncSourceExtra {
                     outer_source_id,
                     user_data,
                     best_block_number,
                     best_block_hash,
                 });
 
-                let inner_source_id = warp_sync_request.current_source().0;
                 outer_source_id_entry.insert(SourceMapping::GrandpaWarpSync(inner_source_id));
 
                 self.inner = AllSyncInner::GrandpaWarpSync {
