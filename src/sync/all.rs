@@ -345,9 +345,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         // `inner` is temporarily replaced with `Poisoned`. A new value must be put back before
         // returning.
         match mem::replace(&mut self.inner, AllSyncInner::Poisoned) {
-            AllSyncInner::GrandpaWarpSync {
-                inner: warp_sync::InProgressWarpSync::ChainInfoQuery(mut sync),
-            } => {
+            AllSyncInner::GrandpaWarpSync { inner: mut sync } => {
                 let outer_source_id_entry = self.shared.sources.vacant_entry();
                 let outer_source_id = SourceId(outer_source_id_entry.key());
 
@@ -362,9 +360,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 outer_source_id_entry.insert(SourceMapping::GrandpaWarpSync(inner_source_id));
 
-                self.inner = AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::ChainInfoQuery(sync),
-                };
+                self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
                 outer_source_id
             }
             AllSyncInner::AllForks(mut all_forks) => {
@@ -789,9 +785,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 either::Right(either::Left(iter))
             }
-            AllSyncInner::GrandpaWarpSync {
-                inner: warp_sync::InProgressWarpSync::ChainInfoQuery(inner),
-            } => {
+            AllSyncInner::GrandpaWarpSync { inner } => {
                 let iter = inner
                     .desired_requests()
                     .map(move |(_, src_user_data, rq_detail)| {
@@ -917,9 +911,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 return outer_request_id;
             }
             (
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::ChainInfoQuery(inner),
-                },
+                AllSyncInner::GrandpaWarpSync { inner },
                 RequestDetail::GrandpaWarpSync {
                     sync_start_block_hash,
                 },
@@ -943,9 +935,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 return outer_request_id;
             }
             (
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::ChainInfoQuery(inner),
-                },
+                AllSyncInner::GrandpaWarpSync { inner },
                 RequestDetail::StorageGet {
                     block_hash,
                     state_trie_root,
@@ -971,9 +961,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 return outer_request_id;
             }
             (
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::ChainInfoQuery(inner),
-                },
+                AllSyncInner::GrandpaWarpSync { inner },
                 RequestDetail::RuntimeCallMerkleProof {
                     block_hash,
                     function_name,
@@ -1386,9 +1374,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             request,
         ) {
             (
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::ChainInfoQuery(grandpa),
-                },
+                AllSyncInner::GrandpaWarpSync { inner: grandpa },
                 RequestMapping::WarpSync(request_id, user_data),
             ) => {
                 let updated_grandpa = if let Some((fragments, is_finished)) = response {
@@ -1436,9 +1422,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             request,
         ) {
             (
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::ChainInfoQuery(sync),
-                },
+                AllSyncInner::GrandpaWarpSync { inner: sync },
                 Ok(mut response),
                 RequestMapping::WarpSync(request_id, user_data),
             ) => {
@@ -1491,9 +1475,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 (user_data, outcome)
             }
             (
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::ChainInfoQuery(sync),
-                },
+                AllSyncInner::GrandpaWarpSync { inner: sync },
                 Err(_),
                 RequestMapping::WarpSync(request_id, user_data),
             ) => {
@@ -1539,9 +1521,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             request,
         ) {
             (
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::ChainInfoQuery(sync),
-                },
+                AllSyncInner::GrandpaWarpSync { inner: sync },
                 Ok(response),
                 RequestMapping::WarpSync(request_id, user_data),
             ) => {
@@ -1574,9 +1554,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 (user_data, outcome)
             }
             (
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::ChainInfoQuery(sync),
-                },
+                AllSyncInner::GrandpaWarpSync { inner: sync },
                 Err(_),
                 RequestMapping::WarpSync(request_id, user_data),
             ) => {

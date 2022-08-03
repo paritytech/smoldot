@@ -122,7 +122,7 @@ pub fn warp_sync<TSrc>(
         }
     }
 
-    Ok(InProgressWarpSync::ChainInfoQuery(ChainInfoQuery {
+    Ok(InProgressWarpSync {
         start_chain_information: config.start_chain_information,
         block_number_bytes: config.block_number_bytes,
         sources: slab::Slab::with_capacity(config.sources_capacity),
@@ -130,7 +130,7 @@ pub fn warp_sync<TSrc>(
         phase: Phase::PreVerification {
             previous_verifier_values: None,
         },
-    }))
+    })
 }
 
 /// Error potentially returned by [`warp_sync()`].
@@ -174,85 +174,26 @@ pub enum WarpSync<TSrc> {
     InProgress(InProgressWarpSync<TSrc>),
 }
 
-#[derive(derive_more::From)]
-pub enum InProgressWarpSync<TSrc> {
-    /// Warp syncing process now obtaining the chain information.
-    #[from]
-    ChainInfoQuery(ChainInfoQuery<TSrc>),
-}
-
-impl<TSrc> InProgressWarpSync<TSrc> {
-    /// Returns the value that was initially passed in [`Config::block_number_bytes`].
-    pub fn block_number_bytes(&self) -> usize {
-        match self {
-            Self::ChainInfoQuery(virtual_machine_params_get) => {
-                virtual_machine_params_get.block_number_bytes
-            }
-        }
-    }
-
-    /// Returns the chain information that is considered verified.
-    pub fn as_chain_information(&self) -> ValidChainInformationRef {
-        match self {
-            Self::ChainInfoQuery(virtual_machine_params_get) => {
-                &virtual_machine_params_get.start_chain_information
-            }
-        }
-        .into()
-    }
-
-    /// Returns a list of all known sources stored in the state machine.
-    pub fn sources(&'_ self) -> impl Iterator<Item = SourceId> + '_ {
-        let sources = match self {
-            Self::ChainInfoQuery(virtual_machine_params_get) => &virtual_machine_params_get.sources,
-        };
-
-        sources.iter().map(|(id, _)| SourceId(id))
-    }
-
-    /// Remove a source from the list of sources.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the source wasn't added to the list earlier.
-    ///
-    pub fn remove_source(self, to_remove: SourceId) -> (TSrc, InProgressWarpSync<TSrc>) {
-        match self {
-            Self::ChainInfoQuery(chain_info_query) => chain_info_query.remove_source(to_remove),
-        }
-    }
-}
-
 impl<TSrc> ops::Index<SourceId> for InProgressWarpSync<TSrc> {
     type Output = TSrc;
 
     #[track_caller]
     fn index(&self, source_id: SourceId) -> &TSrc {
-        let sources = match self {
-            Self::ChainInfoQuery(virtual_machine_params_get) => &virtual_machine_params_get.sources,
-        };
-
-        debug_assert!(sources.contains(source_id.0));
-        &sources[source_id.0].user_data
+        debug_assert!(self.sources.contains(source_id.0));
+        &self.sources[source_id.0].user_data
     }
 }
 
 impl<TSrc> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc> {
     #[track_caller]
     fn index_mut(&mut self, source_id: SourceId) -> &mut TSrc {
-        let sources = match self {
-            Self::ChainInfoQuery(virtual_machine_params_get) => {
-                &mut virtual_machine_params_get.sources
-            }
-        };
-
-        debug_assert!(sources.contains(source_id.0));
-        &mut sources[source_id.0].user_data
+        debug_assert!(self.sources.contains(source_id.0));
+        &mut self.sources[source_id.0].user_data
     }
 }
 
 /// Warp syncing process now obtaining the chain information.
-pub struct ChainInfoQuery<TSrc> {
+pub struct InProgressWarpSync<TSrc> {
     phase: Phase,
     start_chain_information: ValidChainInformation,
     block_number_bytes: usize,
@@ -275,13 +216,29 @@ enum Phase {
     },
 }
 
-impl<TSrc> ChainInfoQuery<TSrc> {
+impl<TSrc> InProgressWarpSync<TSrc> {
     /// Returns the header that we're warp syncing up to.
     pub fn warp_sync_header(&self) -> HeaderRef {
         match &self.phase {
             Phase::PostVerification { header, .. } => header.into(),
             _ => panic!(), // TODO: remove this function altogether, it's weird
         }
+    }
+
+    /// Returns the value that was initially passed in [`Config::block_number_bytes`].
+    pub fn block_number_bytes(&self) -> usize {
+        self.block_number_bytes
+    }
+
+    /// Returns the chain information that is considered verified.
+    pub fn as_chain_information(&self) -> ValidChainInformationRef {
+        // TODO: not correct
+        (&self.start_chain_information).into()
+    }
+
+    /// Returns a list of all known sources stored in the state machine.
+    pub fn sources(&'_ self) -> impl Iterator<Item = SourceId> + '_ {
+        self.sources.iter().map(|(id, _)| SourceId(id))
     }
 
     /// Add a source to the list of sources.
@@ -307,10 +264,10 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                     todo!(), // TODO:
                 )
             } else {
-                (removed, InProgressWarpSync::ChainInfoQuery(self))
+                (removed, self)
             }
         } else {
-            (removed, InProgressWarpSync::ChainInfoQuery(self))
+            (removed, self)
         }
     }
 
@@ -481,7 +438,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
             ) if block_hash == header.hash(self.block_number_bytes) => {}
             ((_, RequestDetail::RuntimeParametersGet { .. }), _) => {
                 return (
-                    WarpSync::InProgress(InProgressWarpSync::ChainInfoQuery(self)),
+                    WarpSync::InProgress(self),
                     None,
                 )
             }
@@ -564,7 +521,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                 || babeapi_next_epoch_response.is_none()
             {
                 return (
-                    WarpSync::InProgress(InProgressWarpSync::ChainInfoQuery(self)),
+                    WarpSync::InProgress(self),
                     None,
                 );
             }
@@ -688,7 +645,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
             }
         } else {
             (
-                WarpSync::InProgress(InProgressWarpSync::ChainInfoQuery(self)),
+                WarpSync::InProgress(self),
                 None,
             )
         }
@@ -747,7 +704,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
             }
             ((_, RequestDetail::RuntimeCallMerkleProof { .. }), _) => {
                 return (
-                    WarpSync::InProgress(InProgressWarpSync::ChainInfoQuery(self)),
+                    WarpSync::InProgress(self),
                     None,
                 )
             }
@@ -854,10 +811,10 @@ impl<TSrc> ChainInfoQuery<TSrc> {
                     }
                 }
 
-                InProgressWarpSync::ChainInfoQuery(self)
+                self
             }
             ((_, RequestDetail::WarpSyncRequest { .. }), _) => {
-                InProgressWarpSync::ChainInfoQuery(self)
+                self
             }
             ((_, _), _) => panic!(),
         }
