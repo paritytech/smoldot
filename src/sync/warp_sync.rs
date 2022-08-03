@@ -390,25 +390,27 @@ impl<TSrc> Verifier<TSrc> {
                 // TODO: should return success immediately; unfortunately the AllSync is quite complicated to update if we do this
                 InProgressWarpSync::ChainInfoQuery(ChainInfoQuery {
                     in_progress_requests: slab::Slab::with_capacity(self.sources.capacity()),
-                    babeapi_current_epoch_response: None,
-                    babeapi_next_epoch_response: None,
-                    runtime: None,
-                    header: self
-                        .state
-                        .start_chain_information
-                        .as_ref()
-                        .finalized_block_header
-                        .into(),
-                    chain_information_finality: self
-                        .state
-                        .start_chain_information
-                        .as_ref()
-                        .finality
-                        .into(),
+                    phase: Phase::PostVerification {
+                        babeapi_current_epoch_response: None,
+                        babeapi_next_epoch_response: None,
+                        runtime: None,
+                        header: self
+                            .state
+                            .start_chain_information
+                            .as_ref()
+                            .finalized_block_header
+                            .into(),
+                        chain_information_finality: self
+                            .state
+                            .start_chain_information
+                            .as_ref()
+                            .finality
+                            .into(),
+                        warp_sync_source_id: self.warp_sync_source_id,
+                    },
                     block_number_bytes: self.state.block_number_bytes,
                     start_chain_information: self.state.start_chain_information,
                     sources: self.sources,
-                    warp_sync_source_id: self.warp_sync_source_id,
                 }),
                 Ok(()),
             ),
@@ -429,15 +431,17 @@ impl<TSrc> Verifier<TSrc> {
                             in_progress_requests: slab::Slab::with_capacity(
                                 self.sources.capacity(),
                             ),
-                            babeapi_current_epoch_response: None,
-                            babeapi_next_epoch_response: None,
-                            runtime: None,
-                            header,
-                            chain_information_finality,
+                            phase: Phase::PostVerification {
+                                babeapi_current_epoch_response: None,
+                                babeapi_next_epoch_response: None,
+                                runtime: None,
+                                header,
+                                chain_information_finality,
+                                warp_sync_source_id: self.warp_sync_source_id,
+                            },
                             start_chain_information: self.state.start_chain_information,
                             block_number_bytes: self.state.block_number_bytes,
                             sources: self.sources,
-                            warp_sync_source_id: self.warp_sync_source_id,
                         }),
                         Ok(()),
                     )
@@ -578,33 +582,32 @@ impl<TSrc> GrandpaWarpSyncRequest<TSrc> {
 
 /// Warp syncing process now obtaining the chain information.
 pub struct ChainInfoQuery<TSrc> {
-    header: Header,
-    chain_information_finality: ChainInformationFinality,
+    phase: Phase,
     start_chain_information: ValidChainInformation,
     block_number_bytes: usize,
     sources: slab::Slab<Source<TSrc>>,
-    warp_sync_source_id: SourceId,
     in_progress_requests: slab::Slab<(SourceId, RequestDetail)>,
-    // TODO: use struct
-    runtime: Option<(HostVmPrototype, Option<Vec<u8>>, Option<Vec<u8>>)>,
-    babeapi_current_epoch_response: Option<Vec<Vec<u8>>>,
-    babeapi_next_epoch_response: Option<Vec<Vec<u8>>>,
+}
+
+enum Phase {
+    PostVerification {
+        header: Header,
+        chain_information_finality: ChainInformationFinality,
+        warp_sync_source_id: SourceId,
+        // TODO: use struct instead
+        runtime: Option<(HostVmPrototype, Option<Vec<u8>>, Option<Vec<u8>>)>,
+        babeapi_current_epoch_response: Option<Vec<Vec<u8>>>,
+        babeapi_next_epoch_response: Option<Vec<Vec<u8>>>,
+    },
 }
 
 impl<TSrc> ChainInfoQuery<TSrc> {
-    // TODO: remove
-    fn warp_sync_source(&self) -> (SourceId, &TSrc) {
-        debug_assert!(self.sources.contains(self.warp_sync_source_id.0));
-
-        (
-            self.warp_sync_source_id,
-            &self.sources[self.warp_sync_source_id.0].user_data,
-        )
-    }
-
     /// Returns the header that we're warp syncing up to.
     pub fn warp_sync_header(&self) -> HeaderRef {
-        (&self.header).into()
+        match &self.phase {
+            Phase::PostVerification { header, .. } => header.into(),
+            _ => panic!(), // TODO: remove this function altogether, it's weird
+        }
     }
 
     /// Add a source to the list of sources.
@@ -619,18 +622,26 @@ impl<TSrc> ChainInfoQuery<TSrc> {
         debug_assert!(self.sources.contains(to_remove.0));
         let removed = self.sources.remove(to_remove.0).user_data;
 
-        if to_remove == self.warp_sync_source_id {
-            (
-                removed,
-                InProgressWarpSync::warp_sync_request_from_next_source(
-                    self.sources,
-                    PreVerificationState {
-                        start_chain_information: self.start_chain_information,
-                        block_number_bytes: self.block_number_bytes,
-                    },
-                    None,
-                ),
-            )
+        if let Phase::PostVerification {
+            warp_sync_source_id,
+            ..
+        } = &self.phase
+        {
+            if to_remove == *warp_sync_source_id {
+                (
+                    removed,
+                    InProgressWarpSync::warp_sync_request_from_next_source(
+                        self.sources,
+                        PreVerificationState {
+                            start_chain_information: self.start_chain_information,
+                            block_number_bytes: self.block_number_bytes,
+                        },
+                        None,
+                    ),
+                )
+            } else {
+                (removed, InProgressWarpSync::ChainInfoQuery(self))
+            }
         } else {
             (removed, InProgressWarpSync::ChainInfoQuery(self))
         }
@@ -639,46 +650,79 @@ impl<TSrc> ChainInfoQuery<TSrc> {
     pub fn desired_requests(
         &'_ self,
     ) -> impl Iterator<Item = (SourceId, &'_ TSrc, RequestDetail)> + '_ {
-        let (source_id, user_data) = self.warp_sync_source();
-        let block_hash = self.header.hash(self.block_number_bytes);
-
-        let runtime_parameters_get = if !self.in_progress_requests.iter().any(|(_, rq)| {
-            rq.0 == source_id && matches!(rq.1, RequestDetail::RuntimeParametersGet { block_hash: b } if b == block_hash)
+        let runtime_parameters_get = if let Phase::PostVerification {
+            header,
+            chain_information_finality,
+            warp_sync_source_id,
+            runtime,
+            babeapi_current_epoch_response,
+            babeapi_next_epoch_response,
+        } = &self.phase
+        {
+            if !self.in_progress_requests.iter().any(|(_, rq)| {
+            rq.0 == *warp_sync_source_id && matches!(rq.1, RequestDetail::RuntimeParametersGet { block_hash: b } if b == header.hash(self.block_number_bytes))
         }) {
             Some((
-                source_id,
-                user_data,
+                *warp_sync_source_id,
+                &self.sources[warp_sync_source_id.0].user_data,
                 RequestDetail::RuntimeParametersGet {
-                    block_hash,
+                    block_hash: header.hash(self.block_number_bytes),
                 },
             ))
         } else {
             None
+        }
+        } else {
+            None
         };
 
-        let babe_current_epoch = if self.babeapi_current_epoch_response.is_none() && !self.in_progress_requests.iter().any(|(_, rq)| {
-            rq.0 == source_id && matches!(rq.1, RequestDetail::RuntimeCallMerkleProof { block_hash: b, function_name: ref f,  parameter_vectored: ref p } if b == block_hash && f == "BabeApi_current_epoch" && p.is_empty())
+        let babe_current_epoch = if let Phase::PostVerification {
+            header,
+            chain_information_finality,
+            warp_sync_source_id,
+            runtime,
+            babeapi_current_epoch_response,
+            babeapi_next_epoch_response,
+        } = &self.phase
+        {
+            if babeapi_current_epoch_response.is_none() && !self.in_progress_requests.iter().any(|(_, rq)| {
+            rq.0 == *warp_sync_source_id && matches!(rq.1, RequestDetail::RuntimeCallMerkleProof { block_hash: b, function_name: ref f,  parameter_vectored: ref p } if b == header.hash(self.block_number_bytes) && f == "BabeApi_current_epoch" && p.is_empty())
         }) {Some((
-            source_id,
-            user_data,
+            *warp_sync_source_id,
+            &self.sources[warp_sync_source_id.0].user_data,
             RequestDetail::RuntimeCallMerkleProof {
-                block_hash,
+                block_hash: header.hash(self.block_number_bytes),
                 function_name: "BabeApi_current_epoch".into(), // TODO: consider Cow<'static, str> instead of String
                 parameter_vectored: Vec::new(),
             },
-        )) } else { None };
+        )) } else { None }
+        } else {
+            None
+        };
 
-        let babe_next_epoch = if self.babeapi_next_epoch_response.is_none() && !self.in_progress_requests.iter().any(|(_, rq)| {
-            rq.0 == source_id && matches!(rq.1, RequestDetail::RuntimeCallMerkleProof { block_hash: b, function_name: ref f,  parameter_vectored: ref p } if b == block_hash && f == "BabeApi_next_epoch" && p.is_empty())
-        }) {Some((
-            source_id,
-            user_data,
-            RequestDetail::RuntimeCallMerkleProof {
-                block_hash,
-                function_name: "BabeApi_next_epoch".into(), // TODO: consider Cow<'static, str> instead of String
-                parameter_vectored: Vec::new(),
-            },
-        )) } else { None };
+        let babe_next_epoch = if let Phase::PostVerification {
+            header,
+            chain_information_finality,
+            warp_sync_source_id,
+            runtime,
+            babeapi_current_epoch_response,
+            babeapi_next_epoch_response,
+        } = &self.phase
+        {
+            if babeapi_next_epoch_response.is_none() && !self.in_progress_requests.iter().any(|(_, rq)| {
+                rq.0 == *warp_sync_source_id && matches!(rq.1, RequestDetail::RuntimeCallMerkleProof { block_hash: b, function_name: ref f,  parameter_vectored: ref p } if b == header.hash(self.block_number_bytes) && f == "BabeApi_next_epoch" && p.is_empty())
+            }) {Some((
+                *warp_sync_source_id,
+                &self.sources[warp_sync_source_id.0].user_data,
+                RequestDetail::RuntimeCallMerkleProof {
+                    block_hash: header.hash(self.block_number_bytes),
+                    function_name: "BabeApi_next_epoch".into(), // TODO: consider Cow<'static, str> instead of String
+                    parameter_vectored: Vec::new(),
+                },
+            )) } else { None }
+        } else {
+            None
+        };
 
         runtime_parameters_get
             .into_iter()
@@ -724,17 +768,25 @@ impl<TSrc> ChainInfoQuery<TSrc> {
         exec_hint: ExecHint,
         allow_unresolved_imports: bool,
     ) -> (WarpSync<TSrc>, Option<Error>) {
-        match self.in_progress_requests.remove(id.0) {
-            (_, RequestDetail::RuntimeParametersGet { block_hash })
-                if block_hash == self.header.hash(self.block_number_bytes) => {}
-            (_, RequestDetail::RuntimeParametersGet { .. }) => {
+        match (self.in_progress_requests.remove(id.0), &self.phase) {
+            (
+                (_, RequestDetail::RuntimeParametersGet { block_hash }),
+                Phase::PostVerification { header, .. },
+            ) if block_hash == header.hash(self.block_number_bytes) => {}
+            ((_, RequestDetail::RuntimeParametersGet { .. }), _) => {
                 return (
                     WarpSync::InProgress(InProgressWarpSync::ChainInfoQuery(self)),
                     None,
                 )
             }
-            (_, RequestDetail::RuntimeCallMerkleProof { .. })
-            | (_, RequestDetail::WarpSyncRequest { .. }) => panic!(),
+            (
+                (
+                    _,
+                    RequestDetail::RuntimeCallMerkleProof { .. }
+                    | RequestDetail::WarpSyncRequest { .. },
+                ),
+                _,
+            ) => panic!(),
         }
 
         let code = match code {
@@ -796,162 +848,186 @@ impl<TSrc> ChainInfoQuery<TSrc> {
             }
         };
 
-        self.runtime = Some((
-            runtime,
-            Some(code),
-            heap_pages.map(|hp| hp.as_ref().to_vec()),
-        ));
+        if let Phase::PostVerification {
+            runtime: ref mut runtime_store,
+            ..
+        } = self.phase
+        {
+            *runtime_store = Some((
+                runtime,
+                Some(code),
+                heap_pages.map(|hp| hp.as_ref().to_vec()),
+            ));
+        } else {
+            // This is checked at the beginning of this function.
+            unreachable!()
+        }
 
         self.try_advance()
     }
 
     fn try_advance(mut self) -> (WarpSync<TSrc>, Option<Error>) {
-        if self.runtime.is_none()
-            || self.babeapi_current_epoch_response.is_none()
-            || self.babeapi_next_epoch_response.is_none()
+        if let Phase::PostVerification {
+            header,
+            chain_information_finality,
+            warp_sync_source_id,
+            runtime,
+            babeapi_current_epoch_response,
+            babeapi_next_epoch_response,
+        } = &mut self.phase
         {
-            return (
-                WarpSync::InProgress(InProgressWarpSync::ChainInfoQuery(self)),
-                None,
-            );
-        }
-
-        let (runtime, finalized_storage_code, finalized_storage_heap_pages) =
-            self.runtime.take().unwrap();
-        let babeapi_current_epoch_response = self.babeapi_current_epoch_response.take().unwrap();
-        let babeapi_next_epoch_response = self.babeapi_next_epoch_response.take().unwrap();
-
-        match self.start_chain_information.as_ref().consensus {
-            ChainInformationConsensusRef::Babe { .. } => {
-                let mut babe_current_epoch_query =
-                    babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
-                        runtime,
-                        epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch,
-                    });
-
-                let (current_epoch, runtime) = loop {
-                    match babe_current_epoch_query {
-                        babe_fetch_epoch::Query::StorageGet(get) => {
-                            let value = match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-                                requested_key: &get.key_as_vec(), // TODO: allocating vec
-                                trie_root_hash: &self.header.state_root,
-                                proof: babeapi_current_epoch_response.iter().map(|v| &v[..]),
-                            }) {
-                                Ok(v) => v,
-                                Err(err) => todo!(), // TODO:
-                            };
-
-                            babe_current_epoch_query = get.inject_value(value.map(iter::once));
-                        },
-                        babe_fetch_epoch::Query::NextKey(nk) => todo!(), // TODO:
-                        babe_fetch_epoch::Query::StorageRoot(root) => {
-                            babe_current_epoch_query = root.resume(&self.header.state_root);
-                        },
-                        babe_fetch_epoch::Query::Finished { result: Ok(result), virtual_machine } => break (result, virtual_machine),
-                        babe_fetch_epoch::Query::Finished { result: Err(_), virtual_machine } => todo!(), // TODO:
-                    }
-                };
-
-                let mut babe_next_epoch_query =
-                    babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
-                        runtime,
-                        epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::NextEpoch,
-                    });
-
-                let (next_epoch, runtime) = loop {
-                    match babe_next_epoch_query {
-                        babe_fetch_epoch::Query::StorageGet(get) => {
-                            let value = match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-                                requested_key: &get.key_as_vec(), // TODO: allocating vec
-                                trie_root_hash: &self.header.state_root,
-                                proof: babeapi_next_epoch_response.iter().map(|v| &v[..]),
-                            }) {
-                                Ok(v) => v,
-                                Err(err) => todo!(), // TODO:
-                            };
-
-                            babe_next_epoch_query = get.inject_value(value.map(iter::once));
-                        },
-                        babe_fetch_epoch::Query::NextKey(nk) => todo!(), // TODO:
-                        babe_fetch_epoch::Query::StorageRoot(root) => {
-                            babe_next_epoch_query = root.resume(&self.header.state_root);
-                        },
-                        babe_fetch_epoch::Query::Finished { result: Ok(result), virtual_machine } => break (result, virtual_machine),
-                        babe_fetch_epoch::Query::Finished { result: Err(_), virtual_machine } => todo!(), // TODO:
-                    }
-                };
-
-                // The number of slots per epoch is never modified once the chain is running,
-                // and as such is copied from the original chain information.
-                let slots_per_epoch = match self.start_chain_information.as_ref().consensus {
-                    ChainInformationConsensusRef::Babe {
-                        slots_per_epoch, ..
-                    } => slots_per_epoch,
-                    _ => unreachable!(),
-                };
-
-                // Build a `ChainInformation` using the parameters found in the runtime.
-                // It is possible, however, that the runtime produces parameters that aren't
-                // coherent. For example the runtime could give "current" and "next" Babe
-                // epochs that don't follow each other.
-                let chain_information =
-                    match ValidChainInformation::try_from(ChainInformation {
-                        finalized_block_header: self.header,
-                        finality: self.chain_information_finality,
-                        consensus: ChainInformationConsensus::Babe {
-                            finalized_block_epoch_information: Some(current_epoch),
-                            finalized_next_epoch_transition: next_epoch,
-                            slots_per_epoch,
-                        },
-                    }) {
-                        Ok(ci) => ci,
-                        Err(err) => {
-                            return (
-                                WarpSync::InProgress(
-                                    InProgressWarpSync::warp_sync_request_from_next_source(
-                                        self.sources,
-                                        PreVerificationState {
-                                            start_chain_information: self
-                                                .start_chain_information,
-                                            block_number_bytes: self.block_number_bytes,
-                                        },
-                                        None,
-                                    ),
-                                ),
-                                Some(Error::InvalidChain(err)),
-                            )
-                        }
-                    };
-
+            if runtime.is_none()
+                || babeapi_current_epoch_response.is_none()
+                || babeapi_next_epoch_response.is_none()
+            {
                 return (
-                    WarpSync::Finished(Success {
-                        chain_information,
-                        finalized_runtime: runtime,
-                        finalized_storage_code,
-                        finalized_storage_heap_pages,
-                        sources: self
-                            .sources
-                            .drain()
-                            .map(|source| source.user_data)
-                            .collect(),
-                    }),
+                    WarpSync::InProgress(InProgressWarpSync::ChainInfoQuery(self)),
                     None,
                 );
             }
-            ChainInformationConsensusRef::Aura { .. } |  // TODO: https://github.com/paritytech/smoldot/issues/933
-            ChainInformationConsensusRef::Unknown => {
-                (
-                    WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
-                        self.sources,
-                        PreVerificationState {
-                            start_chain_information: self.start_chain_information,
-                            block_number_bytes: self.block_number_bytes,
-                        },
+
+            let (runtime, finalized_storage_code, finalized_storage_heap_pages) =
+                runtime.take().unwrap();
+            let babeapi_current_epoch_response = babeapi_current_epoch_response.take().unwrap();
+            let babeapi_next_epoch_response = babeapi_next_epoch_response.take().unwrap();
+
+            match self.start_chain_information.as_ref().consensus {
+                ChainInformationConsensusRef::Babe { .. } => {
+                    let mut babe_current_epoch_query =
+                        babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
+                            runtime,
+                            epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch,
+                        });
+
+                    let (current_epoch, runtime) = loop {
+                        match babe_current_epoch_query {
+                            babe_fetch_epoch::Query::StorageGet(get) => {
+                                let value = match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
+                                    requested_key: &get.key_as_vec(), // TODO: allocating vec
+                                    trie_root_hash: &header.state_root,
+                                    proof: babeapi_current_epoch_response.iter().map(|v| &v[..]),
+                                }) {
+                                    Ok(v) => v,
+                                    Err(err) => todo!(), // TODO:
+                                };
+
+                                babe_current_epoch_query = get.inject_value(value.map(iter::once));
+                            },
+                            babe_fetch_epoch::Query::NextKey(nk) => todo!(), // TODO:
+                            babe_fetch_epoch::Query::StorageRoot(root) => {
+                                babe_current_epoch_query = root.resume(&header.state_root);
+                            },
+                            babe_fetch_epoch::Query::Finished { result: Ok(result), virtual_machine } => break (result, virtual_machine),
+                            babe_fetch_epoch::Query::Finished { result: Err(_), virtual_machine } => todo!(), // TODO:
+                        }
+                    };
+
+                    let mut babe_next_epoch_query =
+                        babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
+                            runtime,
+                            epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::NextEpoch,
+                        });
+
+                    let (next_epoch, runtime) = loop {
+                        match babe_next_epoch_query {
+                            babe_fetch_epoch::Query::StorageGet(get) => {
+                                let value = match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
+                                    requested_key: &get.key_as_vec(), // TODO: allocating vec
+                                    trie_root_hash: &header.state_root,
+                                    proof: babeapi_next_epoch_response.iter().map(|v| &v[..]),
+                                }) {
+                                    Ok(v) => v,
+                                    Err(err) => todo!(), // TODO:
+                                };
+
+                                babe_next_epoch_query = get.inject_value(value.map(iter::once));
+                            },
+                            babe_fetch_epoch::Query::NextKey(nk) => todo!(), // TODO:
+                            babe_fetch_epoch::Query::StorageRoot(root) => {
+                                babe_next_epoch_query = root.resume(&header.state_root);
+                            },
+                            babe_fetch_epoch::Query::Finished { result: Ok(result), virtual_machine } => break (result, virtual_machine),
+                            babe_fetch_epoch::Query::Finished { result: Err(_), virtual_machine } => todo!(), // TODO:
+                        }
+                    };
+
+                    // The number of slots per epoch is never modified once the chain is running,
+                    // and as such is copied from the original chain information.
+                    let slots_per_epoch = match self.start_chain_information.as_ref().consensus {
+                        ChainInformationConsensusRef::Babe {
+                            slots_per_epoch, ..
+                        } => slots_per_epoch,
+                        _ => unreachable!(),
+                    };
+
+                    // Build a `ChainInformation` using the parameters found in the runtime.
+                    // It is possible, however, that the runtime produces parameters that aren't
+                    // coherent. For example the runtime could give "current" and "next" Babe
+                    // epochs that don't follow each other.
+                    let chain_information =
+                        match ValidChainInformation::try_from(ChainInformation {
+                            finalized_block_header: header.clone(),
+                            finality: chain_information_finality.clone(),
+                            consensus: ChainInformationConsensus::Babe {
+                                finalized_block_epoch_information: Some(current_epoch),
+                                finalized_next_epoch_transition: next_epoch,
+                                slots_per_epoch,
+                            },
+                        }) {
+                            Ok(ci) => ci,
+                            Err(err) => {
+                                return (
+                                    WarpSync::InProgress(
+                                        InProgressWarpSync::warp_sync_request_from_next_source(
+                                            self.sources,
+                                            PreVerificationState {
+                                                start_chain_information: self
+                                                    .start_chain_information,
+                                                block_number_bytes: self.block_number_bytes,
+                                            },
+                                            None,
+                                        ),
+                                    ),
+                                    Some(Error::InvalidChain(err)),
+                                )
+                            }
+                        };
+
+                    return (
+                        WarpSync::Finished(Success {
+                            chain_information,
+                            finalized_runtime: runtime,
+                            finalized_storage_code,
+                            finalized_storage_heap_pages,
+                            sources: self
+                                .sources
+                                .drain()
+                                .map(|source| source.user_data)
+                                .collect(),
+                        }),
                         None,
-                    )),
-                    Some(Error::UnknownConsensus),
-                )
+                    );
+                }
+                ChainInformationConsensusRef::Aura { .. } |  // TODO: https://github.com/paritytech/smoldot/issues/933
+                ChainInformationConsensusRef::Unknown => {
+                    (
+                        WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(
+                            self.sources,
+                            PreVerificationState {
+                                start_chain_information: self.start_chain_information,
+                                block_number_bytes: self.block_number_bytes,
+                            },
+                            None,
+                        )),
+                        Some(Error::UnknownConsensus),
+                    )
+                }
             }
+        } else {
+            (
+                WarpSync::InProgress(InProgressWarpSync::ChainInfoQuery(self)),
+                None,
+            )
         }
     }
 
@@ -960,45 +1036,63 @@ impl<TSrc> ChainInfoQuery<TSrc> {
         request_id: RequestId,
         response: impl Iterator<Item = impl AsRef<[u8]>>,
     ) -> (WarpSync<TSrc>, Option<Error>) {
-        let desired_block_hash = self.header.hash(self.block_number_bytes);
-
-        match self.in_progress_requests.remove(request_id.0) {
+        match (
+            self.in_progress_requests.remove(request_id.0),
+            &mut self.phase,
+        ) {
             (
-                _,
-                RequestDetail::RuntimeCallMerkleProof {
-                    block_hash,
-                    function_name,
-                    parameter_vectored,
+                (
+                    _,
+                    RequestDetail::RuntimeCallMerkleProof {
+                        block_hash,
+                        function_name,
+                        parameter_vectored,
+                    },
+                ),
+                Phase::PostVerification {
+                    ref header,
+                    ref mut babeapi_current_epoch_response,
+                    ..
                 },
-            ) if block_hash == desired_block_hash
+            ) if block_hash == header.hash(self.block_number_bytes)
                 && function_name == "BabeApi_current_epoch"
                 && parameter_vectored.is_empty() =>
             {
-                self.babeapi_current_epoch_response =
+                *babeapi_current_epoch_response =
                     Some(response.map(|e| e.as_ref().to_vec()).collect());
             }
             (
-                _,
-                RequestDetail::RuntimeCallMerkleProof {
-                    block_hash,
-                    function_name,
-                    parameter_vectored,
+                (
+                    _,
+                    RequestDetail::RuntimeCallMerkleProof {
+                        block_hash,
+                        function_name,
+                        parameter_vectored,
+                    },
+                ),
+                Phase::PostVerification {
+                    ref header,
+                    ref mut babeapi_next_epoch_response,
+                    ..
                 },
-            ) if block_hash == desired_block_hash
+            ) if block_hash == header.hash(self.block_number_bytes)
                 && function_name == "BabeApi_next_epoch"
                 && parameter_vectored.is_empty() =>
             {
-                self.babeapi_next_epoch_response =
+                *babeapi_next_epoch_response =
                     Some(response.map(|e| e.as_ref().to_vec()).collect());
             }
-            (_, RequestDetail::RuntimeCallMerkleProof { .. }) => {
+            ((_, RequestDetail::RuntimeCallMerkleProof { .. }), _) => {
                 return (
                     WarpSync::InProgress(InProgressWarpSync::ChainInfoQuery(self)),
                     None,
                 )
             }
-            (_, RequestDetail::RuntimeParametersGet { .. })
-            | (_, RequestDetail::WarpSyncRequest { .. }) => panic!(),
+            (
+                (_, RequestDetail::RuntimeParametersGet { .. })
+                | (_, RequestDetail::WarpSyncRequest { .. }),
+                _,
+            ) => panic!(),
         }
 
         self.try_advance()
