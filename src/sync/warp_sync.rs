@@ -67,6 +67,7 @@ use crate::{
     },
     finality::grandpa::warp_sync,
     header::{self, Header, HeaderRef},
+    trie::proof_verify,
 };
 
 use alloc::{string::String, vec::Vec};
@@ -943,7 +944,8 @@ impl<TSrc> GrandpaWarpSyncRequest<TSrc> {
 pub struct ChainInfoQuery<TSrc> {
     state: PostVerificationState<TSrc>,
     in_progress_requests: slab::Slab<(SourceId, RequestDetail)>,
-    runtime: Option<HostVmPrototype>,
+    // TODO: use struct
+    runtime: Option<(HostVmPrototype, Option<Vec<u8>>, Option<Vec<u8>>)>,
     babeapi_current_epoch_response: Option<Vec<Vec<u8>>>,
     babeapi_next_epoch_response: Option<Vec<Vec<u8>>>,
 }
@@ -1134,25 +1136,147 @@ impl<TSrc> ChainInfoQuery<TSrc> {
             }
         };
 
+        self.runtime = Some((
+            runtime,
+            Some(code),
+            heap_pages.map(|hp| hp.as_ref().to_vec()),
+        ));
+
+        self.try_advance()
+    }
+
+    fn try_advance(mut self) -> (WarpSync<TSrc>, Option<Error>) {
+        if self.runtime.is_none()
+            || self.babeapi_current_epoch_response.is_none()
+            || self.babeapi_next_epoch_response.is_none()
+        {
+            return (
+                WarpSync::InProgress(InProgressWarpSync::ChainInfoQuery(self)),
+                None,
+            );
+        }
+
+        let (runtime, finalized_storage_code, finalized_storage_heap_pages) =
+            self.runtime.take().unwrap();
+        let babeapi_current_epoch_response = self.babeapi_current_epoch_response.take().unwrap();
+        let babeapi_next_epoch_response = self.babeapi_next_epoch_response.take().unwrap();
+
         match self.state.start_chain_information.as_ref().consensus {
             ChainInformationConsensusRef::Babe { .. } => {
-                let babe_current_epoch_query =
+                let mut babe_current_epoch_query =
                     babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
                         runtime,
                         epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch,
                     });
 
-                let (warp_sync, error) = WarpSync::from_babe_fetch_epoch_query(
-                    babe_current_epoch_query,
-                    None,
-                    self.state,
-                    PostRuntimeDownloadState {
-                        finalized_storage_code: Some(code),
-                        finalized_storage_heap_pages: heap_pages.map(|hp| hp.as_ref().to_vec()),
-                    },
-                );
+                let (current_epoch, runtime) = loop {
+                    match babe_current_epoch_query {
+                        babe_fetch_epoch::Query::StorageGet(get) => {
+                            let value = match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
+                                requested_key: &get.key_as_vec(), // TODO: allocating vec
+                                trie_root_hash: &self.state.header.state_root,
+                                proof: babeapi_current_epoch_response.iter().map(|v| &v[..]),
+                            }) {
+                                Ok(v) => v,
+                                Err(err) => todo!(), // TODO:
+                            };
 
-                (warp_sync, error)
+                            babe_current_epoch_query = get.inject_value(value.map(iter::once));
+                        },
+                        babe_fetch_epoch::Query::NextKey(nk) => todo!(), // TODO:
+                        babe_fetch_epoch::Query::StorageRoot(root) => {
+                            babe_current_epoch_query = root.resume(&self.state.header.state_root);
+                        },
+                        babe_fetch_epoch::Query::Finished { result: Ok(result), virtual_machine } => break (result, virtual_machine),
+                        babe_fetch_epoch::Query::Finished { result: Err(_), virtual_machine } => todo!(), // TODO:
+                    }
+                };
+
+                let mut babe_next_epoch_query =
+                    babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
+                        runtime,
+                        epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::NextEpoch,
+                    });
+
+                let (next_epoch, runtime) = loop {
+                    match babe_next_epoch_query {
+                        babe_fetch_epoch::Query::StorageGet(get) => {
+                            let value = match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
+                                requested_key: &get.key_as_vec(), // TODO: allocating vec
+                                trie_root_hash: &self.state.header.state_root,
+                                proof: babeapi_next_epoch_response.iter().map(|v| &v[..]),
+                            }) {
+                                Ok(v) => v,
+                                Err(err) => todo!(), // TODO:
+                            };
+
+                            babe_next_epoch_query = get.inject_value(value.map(iter::once));
+                        },
+                        babe_fetch_epoch::Query::NextKey(nk) => todo!(), // TODO:
+                        babe_fetch_epoch::Query::StorageRoot(root) => {
+                            babe_next_epoch_query = root.resume(&self.state.header.state_root);
+                        },
+                        babe_fetch_epoch::Query::Finished { result: Ok(result), virtual_machine } => break (result, virtual_machine),
+                        babe_fetch_epoch::Query::Finished { result: Err(_), virtual_machine } => todo!(), // TODO:
+                    }
+                };
+
+                // The number of slots per epoch is never modified once the chain is running,
+                // and as such is copied from the original chain information.
+                let slots_per_epoch = match self.state.start_chain_information.as_ref().consensus {
+                    ChainInformationConsensusRef::Babe {
+                        slots_per_epoch, ..
+                    } => slots_per_epoch,
+                    _ => unreachable!(),
+                };
+
+                // Build a `ChainInformation` using the parameters found in the runtime.
+                // It is possible, however, that the runtime produces parameters that aren't
+                // coherent. For example the runtime could give "current" and "next" Babe
+                // epochs that don't follow each other.
+                let chain_information =
+                    match ValidChainInformation::try_from(ChainInformation {
+                        finalized_block_header: self.state.header,
+                        finality: self.state.chain_information_finality,
+                        consensus: ChainInformationConsensus::Babe {
+                            finalized_block_epoch_information: Some(current_epoch),
+                            finalized_next_epoch_transition: next_epoch,
+                            slots_per_epoch,
+                        },
+                    }) {
+                        Ok(ci) => ci,
+                        Err(err) => {
+                            return (
+                                WarpSync::InProgress(
+                                    InProgressWarpSync::warp_sync_request_from_next_source(
+                                        self.state.sources,
+                                        PreVerificationState {
+                                            start_chain_information: self.state
+                                                .start_chain_information,
+                                            block_number_bytes: self.state.block_number_bytes,
+                                        },
+                                        None,
+                                    ),
+                                ),
+                                Some(Error::InvalidChain(err)),
+                            )
+                        }
+                    };
+
+                return (
+                    WarpSync::Finished(Success {
+                        chain_information,
+                        finalized_runtime: runtime,
+                        finalized_storage_code,
+                        finalized_storage_heap_pages,
+                        sources: self.state
+                            .sources
+                            .drain()
+                            .map(|source| source.user_data)
+                            .collect(),
+                    }),
+                    None,
+                );
             }
             ChainInformationConsensusRef::Aura { .. } |  // TODO: https://github.com/paritytech/smoldot/issues/933
             ChainInformationConsensusRef::Unknown => {
@@ -1216,11 +1340,7 @@ impl<TSrc> ChainInfoQuery<TSrc> {
             (_, RequestDetail::RuntimeParametersGet { .. }) => panic!(),
         }
 
-        // TODO:
-        (
-            WarpSync::InProgress(InProgressWarpSync::ChainInfoQuery(self)),
-            None,
-        )
+        self.try_advance()
     }
 }
 
