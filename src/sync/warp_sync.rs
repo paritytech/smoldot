@@ -590,6 +590,10 @@ pub struct ChainInfoQuery<TSrc> {
 }
 
 enum Phase {
+    PreVerification {
+        source_id: SourceId,
+        previous_verifier_values: Option<(Header, ChainInformationFinality)>,
+    },
     PostVerification {
         header: Header,
         chain_information_finality: ChainInformationFinality,
@@ -607,6 +611,18 @@ impl<TSrc> ChainInfoQuery<TSrc> {
         match &self.phase {
             Phase::PostVerification { header, .. } => header.into(),
             _ => panic!(), // TODO: remove this function altogether, it's weird
+        }
+    }
+
+    /// The source to make a GrandPa warp sync request to.
+    // TODO: weird function, remove
+    pub fn current_source(&self) -> (SourceId, &TSrc) {
+        match &self.phase {
+            Phase::PreVerification { source_id, .. } => {
+                debug_assert!(self.sources.contains(source_id.0));
+                (*source_id, &self.sources[source_id.0].user_data)
+            }
+            _ => panic!(),
         }
     }
 
@@ -650,6 +666,45 @@ impl<TSrc> ChainInfoQuery<TSrc> {
     pub fn desired_requests(
         &'_ self,
     ) -> impl Iterator<Item = (SourceId, &'_ TSrc, RequestDetail)> + '_ {
+        let warp_sync_request = if let Phase::PreVerification {
+            source_id,
+            previous_verifier_values,
+        } = &self.phase
+        {
+            let start_block_hash = match previous_verifier_values.as_ref() {
+                Some((header, _)) => header.hash(self.block_number_bytes),
+                None => self
+                    .start_chain_information
+                    .as_ref()
+                    .finalized_block_header
+                    .hash(self.block_number_bytes),
+            };
+
+            if !self.in_progress_requests.iter().any(|(_, (src_id, rq))| {
+                src_id == source_id
+                    && match rq {
+                        RequestDetail::WarpSyncRequest { block_hash }
+                            if *block_hash == start_block_hash =>
+                        {
+                            true
+                        }
+                        _ => false,
+                    }
+            }) {
+                Some((
+                    *source_id,
+                    &self.sources[source_id.0].user_data,
+                    RequestDetail::WarpSyncRequest {
+                        block_hash: start_block_hash,
+                    },
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let runtime_parameters_get = if let Phase::PostVerification {
             header,
             chain_information_finality,
@@ -724,8 +779,9 @@ impl<TSrc> ChainInfoQuery<TSrc> {
             None
         };
 
-        runtime_parameters_get
+        warp_sync_request
             .into_iter()
+            .chain(runtime_parameters_get.into_iter())
             .chain(babe_current_epoch.into_iter())
             .chain(babe_next_epoch.into_iter())
     }
@@ -1105,7 +1161,100 @@ impl<TSrc> ChainInfoQuery<TSrc> {
         fragments: Vec<WarpSyncFragment>,
         final_set_of_fragments: bool,
     ) -> InProgressWarpSync<TSrc> {
-        todo!()
+        match (
+            self.in_progress_requests.remove(request_id.0),
+            &mut self.phase,
+        ) {
+            (
+                (rq_source_id, RequestDetail::WarpSyncRequest { block_hash }),
+                Phase::PreVerification {
+                    source_id,
+                    previous_verifier_values,
+                },
+            ) if rq_source_id == *source_id => {
+                // TODO: check block_hash
+                self.sources[rq_source_id.0].already_tried = true;
+
+                let mut verifier = match &previous_verifier_values {
+                    Some((_, chain_information_finality)) => warp_sync::Verifier::new(
+                        chain_information_finality.into(),
+                        self.block_number_bytes,
+                        fragments,
+                        final_set_of_fragments,
+                    ),
+                    None => warp_sync::Verifier::new(
+                        self.start_chain_information.as_ref().finality,
+                        self.block_number_bytes,
+                        fragments,
+                        final_set_of_fragments,
+                    ),
+                };
+
+                // TODO: restore feature where fragments are verified one by one through public API
+                loop {
+                    match verifier.next() {
+                        Ok(warp_sync::Next::NotFinished(next_verifier)) => {
+                            verifier = next_verifier;
+                        }
+                        Ok(warp_sync::Next::EmptyProof) => {
+                            self.phase = Phase::PostVerification {
+                                babeapi_current_epoch_response: None,
+                                babeapi_next_epoch_response: None,
+                                runtime: None,
+                                header: self
+                                    .start_chain_information
+                                    .as_ref()
+                                    .finalized_block_header
+                                    .into(),
+                                chain_information_finality: self
+                                    .start_chain_information
+                                    .as_ref()
+                                    .finality
+                                    .into(),
+                                warp_sync_source_id: rq_source_id,
+                            };
+                            break;
+                        }
+                        Ok(warp_sync::Next::Success {
+                            scale_encoded_header,
+                            chain_information_finality,
+                        }) => {
+                            // As the verification of the fragment has succeeded, we are sure that the header
+                            // is valid and can decode it.
+                            let header: Header =
+                                header::decode(&scale_encoded_header, self.block_number_bytes)
+                                    .unwrap()
+                                    .into();
+
+                            if final_set_of_fragments {
+                                self.phase = Phase::PostVerification {
+                                    babeapi_current_epoch_response: None,
+                                    babeapi_next_epoch_response: None,
+                                    runtime: None,
+                                    header,
+                                    chain_information_finality,
+                                    warp_sync_source_id: rq_source_id,
+                                };
+                            } else {
+                                *previous_verifier_values =
+                                    Some((header, chain_information_finality));
+                            }
+
+                            break;
+                        }
+                        Err(error) => {
+                            todo!() // TODO:
+                        }
+                    }
+                }
+
+                InProgressWarpSync::ChainInfoQuery(self)
+            }
+            ((_, RequestDetail::WarpSyncRequest { .. }), _) => {
+                InProgressWarpSync::ChainInfoQuery(self)
+            }
+            ((_, _), _) => panic!(),
+        }
     }
 }
 
@@ -1119,17 +1268,21 @@ pub struct WaitingForSources<TSrc> {
 
 impl<TSrc> WaitingForSources<TSrc> {
     /// Add a source to the list of sources.
-    pub fn add_source(mut self, user_data: TSrc) -> GrandpaWarpSyncRequest<TSrc> {
+    pub fn add_source(mut self, user_data: TSrc) -> ChainInfoQuery<TSrc> {
         let source_id = SourceId(self.sources.insert(Source {
             user_data,
             already_tried: false,
         }));
 
-        GrandpaWarpSyncRequest {
-            source_id,
+        ChainInfoQuery {
+            phase: Phase::PreVerification {
+                source_id,
+                previous_verifier_values: self.previous_verifier_values,
+            },
             sources: self.sources,
-            state: self.state,
-            previous_verifier_values: self.previous_verifier_values,
+            block_number_bytes: self.state.block_number_bytes,
+            in_progress_requests: slab::Slab::new(),
+            start_chain_information: self.state.start_chain_information,
         }
     }
 
