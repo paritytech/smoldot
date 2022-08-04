@@ -273,6 +273,18 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                     )),
                 }
             }
+        } else if let Phase::PreVerification {
+            downloaded_proof: downloaded_proof @ Some(_),
+            ..
+        } = &mut self.phase
+        {
+            // We make sure to not leave invalid source IDs in the state of `self`.
+            // While it is a waste of bandwidth to completely remove a proof that has already
+            // been downloaded if the source disconnects, it is in practice not something that is
+            // supposed to happen.
+            if downloaded_proof.as_ref().unwrap().0 == to_remove {
+                *downloaded_proof = None;
+            }
         }
 
         removed
@@ -833,15 +845,22 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             (
                 (rq_source_id, RequestDetail::WarpSyncRequest { block_hash }),
                 Phase::PreVerification {
-                    downloaded_proof,
-                    previous_verifier_values,
+                    downloaded_proof, ..
                 },
             ) => {
+                // Ignore downloads from sources that are "banned".
+                match downloaded_proof {
+                    Some((src_id, ..)) if self.sources[src_id.0].already_tried => return,
+                    _ => {}
+                }
+
                 // TODO: check block_hash ^
                 self.sources[rq_source_id.0].already_tried = true;
                 *downloaded_proof = Some((rq_source_id, fragments, final_set_of_fragments));
             }
-            ((_, RequestDetail::WarpSyncRequest { .. }), _) => {},
+            ((_, RequestDetail::WarpSyncRequest { .. }), _) => {
+                // Uninteresting download. We simply ignore the response.
+            }
             ((_, _), _) => panic!(),
         }
     }
