@@ -572,7 +572,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         user_data
     }
 
-    pub fn run(mut self) -> (WarpSync<TSrc, TRq>, Option<Error>) {
+    pub fn run(mut self) -> ProcessOne<TSrc, TRq> {
         if let Phase::PostVerification {
             header,
             chain_information_finality,
@@ -580,237 +580,22 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             runtime: runtime @ Some(_),
             babeapi_current_epoch_response: babeapi_current_epoch_response @ Some(_),
             babeapi_next_epoch_response: babeapi_next_epoch_response @ Some(_),
-        } = &mut self.phase
+        } = &self.phase
         {
-            let (finalized_storage_code, finalized_storage_heap_pages) = runtime.take().unwrap();
-            let babeapi_current_epoch_response = babeapi_current_epoch_response.take().unwrap();
-            let babeapi_next_epoch_response = babeapi_next_epoch_response.take().unwrap();
+            return ProcessOne::BuildChainInformation(BuildChainInformation { inner: self });
+        }
 
-            let finalized_storage_code = match finalized_storage_code {
-                Some(code) => code,
-                None => {
-                    todo!()
-                    /*return (
-                        todo!(), // TODO:
-                        Some(Error::MissingCode),
-                    );*/
-                }
-            };
-
-            let decoded_heap_pages = match executor::storage_heap_pages_to_value(
-                finalized_storage_heap_pages.as_ref().map(|p| p.as_ref()),
-            ) {
-                Ok(hp) => hp,
-                Err(err) => {
-                    todo!()
-                    /*return (
-                        todo!(), // TODO:
-                        Some(Error::InvalidHeapPages(err)),
-                    );*/
-                }
-            };
-
-            let runtime = match HostVmPrototype::new(host::Config {
-                module: &finalized_storage_code,
-                heap_pages: decoded_heap_pages,
-                exec_hint: ExecHint::CompileAheadOfTime, // TODO: make configurable
-                allow_unresolved_imports: false,         // TODO: make configurable
-            }) {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    todo!()
-                    /*return (
-                        todo!(), // TODO:
-                        Some(Error::NewRuntime(error)),
-                    );*/
-                }
-            };
-
-            match self.start_chain_information.as_ref().consensus {
-                ChainInformationConsensusRef::Babe { .. } => {
-                    let mut babe_current_epoch_query =
-                        babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
-                            runtime,
-                            epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch,
-                        });
-
-                    let (current_epoch, runtime) = loop {
-                        match babe_current_epoch_query {
-                            babe_fetch_epoch::Query::StorageGet(get) => {
-                                let value = match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-                                    requested_key: &get.key_as_vec(), // TODO: allocating vec
-                                    trie_root_hash: &header.state_root,
-                                    proof: babeapi_current_epoch_response.iter().map(|v| &v[..]),
-                                }) {
-                                    Ok(v) => v,
-                                    Err(err) => todo!(), // TODO:
-                                };
-
-                                babe_current_epoch_query = get.inject_value(value.map(iter::once));
-                            },
-                            babe_fetch_epoch::Query::NextKey(nk) => todo!(), // TODO:
-                            babe_fetch_epoch::Query::StorageRoot(root) => {
-                                babe_current_epoch_query = root.resume(&header.state_root);
-                            },
-                            babe_fetch_epoch::Query::Finished { result: Ok(result), virtual_machine } => break (result, virtual_machine),
-                            babe_fetch_epoch::Query::Finished { result: Err(_), virtual_machine } => todo!(), // TODO:
-                        }
-                    };
-
-                    let mut babe_next_epoch_query =
-                        babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
-                            runtime,
-                            epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::NextEpoch,
-                        });
-
-                    let (next_epoch, runtime) = loop {
-                        match babe_next_epoch_query {
-                            babe_fetch_epoch::Query::StorageGet(get) => {
-                                let value = match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-                                    requested_key: &get.key_as_vec(), // TODO: allocating vec
-                                    trie_root_hash: &header.state_root,
-                                    proof: babeapi_next_epoch_response.iter().map(|v| &v[..]),
-                                }) {
-                                    Ok(v) => v,
-                                    Err(err) => todo!(), // TODO:
-                                };
-
-                                babe_next_epoch_query = get.inject_value(value.map(iter::once));
-                            },
-                            babe_fetch_epoch::Query::NextKey(nk) => todo!(), // TODO:
-                            babe_fetch_epoch::Query::StorageRoot(root) => {
-                                babe_next_epoch_query = root.resume(&header.state_root);
-                            },
-                            babe_fetch_epoch::Query::Finished { result: Ok(result), virtual_machine } => break (result, virtual_machine),
-                            babe_fetch_epoch::Query::Finished { result: Err(_), virtual_machine } => todo!(), // TODO:
-                        }
-                    };
-
-                    // The number of slots per epoch is never modified once the chain is running,
-                    // and as such is copied from the original chain information.
-                    let slots_per_epoch = match self.start_chain_information.as_ref().consensus {
-                        ChainInformationConsensusRef::Babe {
-                            slots_per_epoch, ..
-                        } => slots_per_epoch,
-                        _ => unreachable!(),
-                    };
-
-                    // Build a `ChainInformation` using the parameters found in the runtime.
-                    // It is possible, however, that the runtime produces parameters that aren't
-                    // coherent. For example the runtime could give "current" and "next" Babe
-                    // epochs that don't follow each other.
-                    let chain_information =
-                        match ValidChainInformation::try_from(ChainInformation {
-                            finalized_block_header: header.clone(),
-                            finality: chain_information_finality.clone(),
-                            consensus: ChainInformationConsensus::Babe {
-                                finalized_block_epoch_information: Some(current_epoch),
-                                finalized_next_epoch_transition: next_epoch,
-                                slots_per_epoch,
-                            },
-                        }) {
-                            Ok(ci) => ci,
-                            Err(err) => {
-                                todo!() // TODO:
-                            }
-                        };
-
-                    return (
-                        WarpSync::Finished(Success {
-                            chain_information,
-                            finalized_runtime: runtime,
-                            finalized_storage_code: Some(finalized_storage_code),
-                            finalized_storage_heap_pages,
-                            sources: self
-                                .sources
-                                .drain()
-                                .map(|source| source.user_data)
-                                .collect(),
-                            in_progress_requests: mem::take(&mut self
-                                .in_progress_requests)
-                                .into_iter()
-                                .map(|(id, (src_id, user_data, detail))| (src_id, RequestId(id), user_data, detail))
-                                .collect(),
-                        }),
-                        None,
-                    );
-                }
-                ChainInformationConsensusRef::Aura { .. } |  // TODO: https://github.com/paritytech/smoldot/issues/933
-                ChainInformationConsensusRef::Unknown => {
-                    (
-                        todo!(), // TODO:
-                        Some(Error::UnknownConsensus),
-                    )
-                }
-            }
-        } else if let Phase::PendingVerify {
+        if let Phase::PendingVerify {
             previous_verifier_values,
             verifier,
             final_set_of_fragments,
             downloaded_source,
-        } = &mut self.phase
+        } = &self.phase
         {
-            // TODO: restore feature where fragments are verified one by one through public API
-            loop {
-                match verifier.take().unwrap().next() {
-                    Ok(warp_sync::Next::NotFinished(next_verifier)) => {
-                        *verifier = Some(next_verifier);
-                    }
-                    Ok(warp_sync::Next::EmptyProof) => {
-                        self.phase = Phase::PostVerification {
-                            babeapi_current_epoch_response: None,
-                            babeapi_next_epoch_response: None,
-                            runtime: None,
-                            header: self
-                                .start_chain_information
-                                .as_ref()
-                                .finalized_block_header
-                                .into(),
-                            chain_information_finality: self
-                                .start_chain_information
-                                .as_ref()
-                                .finality
-                                .into(),
-                            warp_sync_source_id: *downloaded_source,
-                        };
-                        break;
-                    }
-                    Ok(warp_sync::Next::Success {
-                        scale_encoded_header,
-                        chain_information_finality,
-                    }) => {
-                        // As the verification of the fragment has succeeded, we are sure that the header
-                        // is valid and can decode it.
-                        let header: Header =
-                            header::decode(&scale_encoded_header, self.block_number_bytes)
-                                .unwrap()
-                                .into();
-
-                        if *final_set_of_fragments {
-                            self.phase = Phase::PostVerification {
-                                babeapi_current_epoch_response: None,
-                                babeapi_next_epoch_response: None,
-                                runtime: None,
-                                header,
-                                chain_information_finality,
-                                warp_sync_source_id: *downloaded_source,
-                            };
-                        } else {
-                            *previous_verifier_values = Some((header, chain_information_finality));
-                        }
-
-                        break;
-                    }
-                    Err(error) => {
-                        todo!() // TODO:
-                    }
-                }
-            }
-
-            (WarpSync::InProgress(self), None)
-        } else {
-            (WarpSync::InProgress(self), None)
+            return ProcessOne::VerifyWarpSyncFragment(VerifyWarpSyncFragment { inner: self });
         }
+
+        ProcessOne::Idle(self)
     }
 
     pub fn runtime_call_merkle_proof_success(
@@ -977,3 +762,270 @@ pub enum RequestDetail {
 /// Identifier for a request in the warp sync state machine.
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct RequestId(usize);
+
+pub enum ProcessOne<TSrc, TRq> {
+    Idle(InProgressWarpSync<TSrc, TRq>),
+    VerifyWarpSyncFragment(VerifyWarpSyncFragment<TSrc, TRq>),
+    BuildChainInformation(BuildChainInformation<TSrc, TRq>),
+}
+
+pub struct VerifyWarpSyncFragment<TSrc, TRq> {
+    inner: InProgressWarpSync<TSrc, TRq>,
+}
+
+impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
+    pub fn verify(mut self) -> (WarpSync<TSrc, TRq>, Option<Error>) {
+        if let Phase::PendingVerify {
+            previous_verifier_values,
+            verifier,
+            final_set_of_fragments,
+            downloaded_source,
+        } = &mut self.inner.phase
+        {
+            // TODO: restore feature where fragments are verified one by one through public API
+            loop {
+                match verifier.take().unwrap().next() {
+                    Ok(warp_sync::Next::NotFinished(next_verifier)) => {
+                        *verifier = Some(next_verifier);
+                    }
+                    Ok(warp_sync::Next::EmptyProof) => {
+                        self.inner.phase = Phase::PostVerification {
+                            babeapi_current_epoch_response: None,
+                            babeapi_next_epoch_response: None,
+                            runtime: None,
+                            header: self
+                                .inner
+                                .start_chain_information
+                                .as_ref()
+                                .finalized_block_header
+                                .into(),
+                            chain_information_finality: self
+                                .inner
+                                .start_chain_information
+                                .as_ref()
+                                .finality
+                                .into(),
+                            warp_sync_source_id: *downloaded_source,
+                        };
+                        break;
+                    }
+                    Ok(warp_sync::Next::Success {
+                        scale_encoded_header,
+                        chain_information_finality,
+                    }) => {
+                        // As the verification of the fragment has succeeded, we are sure that the header
+                        // is valid and can decode it.
+                        let header: Header =
+                            header::decode(&scale_encoded_header, self.inner.block_number_bytes)
+                                .unwrap()
+                                .into();
+
+                        if *final_set_of_fragments {
+                            self.inner.phase = Phase::PostVerification {
+                                babeapi_current_epoch_response: None,
+                                babeapi_next_epoch_response: None,
+                                runtime: None,
+                                header,
+                                chain_information_finality,
+                                warp_sync_source_id: *downloaded_source,
+                            };
+                        } else {
+                            *previous_verifier_values = Some((header, chain_information_finality));
+                        }
+
+                        break;
+                    }
+                    Err(error) => {
+                        todo!() // TODO:
+                    }
+                }
+            }
+
+            (WarpSync::InProgress(self.inner), None)
+        } else {
+            unreachable!()
+        }
+    }
+}
+
+pub struct BuildChainInformation<TSrc, TRq> {
+    inner: InProgressWarpSync<TSrc, TRq>,
+}
+
+impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
+    pub fn verify(mut self) -> (WarpSync<TSrc, TRq>, Option<Error>) {
+        if let Phase::PostVerification {
+            header,
+            chain_information_finality,
+            warp_sync_source_id,
+            runtime: runtime @ Some(_),
+            babeapi_current_epoch_response: babeapi_current_epoch_response @ Some(_),
+            babeapi_next_epoch_response: babeapi_next_epoch_response @ Some(_),
+        } = &mut self.inner.phase
+        {
+            let (finalized_storage_code, finalized_storage_heap_pages) = runtime.take().unwrap();
+            let babeapi_current_epoch_response = babeapi_current_epoch_response.take().unwrap();
+            let babeapi_next_epoch_response = babeapi_next_epoch_response.take().unwrap();
+
+            let finalized_storage_code = match finalized_storage_code {
+                Some(code) => code,
+                None => {
+                    todo!()
+                    /*return (
+                        todo!(), // TODO:
+                        Some(Error::MissingCode),
+                    );*/
+                }
+            };
+
+            let decoded_heap_pages = match executor::storage_heap_pages_to_value(
+                finalized_storage_heap_pages.as_ref().map(|p| p.as_ref()),
+            ) {
+                Ok(hp) => hp,
+                Err(err) => {
+                    todo!()
+                    /*return (
+                        todo!(), // TODO:
+                        Some(Error::InvalidHeapPages(err)),
+                    );*/
+                }
+            };
+
+            let runtime = match HostVmPrototype::new(host::Config {
+                module: &finalized_storage_code,
+                heap_pages: decoded_heap_pages,
+                exec_hint: ExecHint::CompileAheadOfTime, // TODO: make configurable
+                allow_unresolved_imports: false,         // TODO: make configurable
+            }) {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    todo!()
+                    /*return (
+                        todo!(), // TODO:
+                        Some(Error::NewRuntime(error)),
+                    );*/
+                }
+            };
+
+            match self.inner.start_chain_information.as_ref().consensus {
+                ChainInformationConsensusRef::Babe { .. } => {
+                    let mut babe_current_epoch_query =
+                        babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
+                            runtime,
+                            epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch,
+                        });
+
+                    let (current_epoch, runtime) = loop {
+                        match babe_current_epoch_query {
+                            babe_fetch_epoch::Query::StorageGet(get) => {
+                                let value = match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
+                                    requested_key: &get.key_as_vec(), // TODO: allocating vec
+                                    trie_root_hash: &header.state_root,
+                                    proof: babeapi_current_epoch_response.iter().map(|v| &v[..]),
+                                }) {
+                                    Ok(v) => v,
+                                    Err(err) => todo!(), // TODO:
+                                };
+
+                                babe_current_epoch_query = get.inject_value(value.map(iter::once));
+                            },
+                            babe_fetch_epoch::Query::NextKey(nk) => todo!(), // TODO:
+                            babe_fetch_epoch::Query::StorageRoot(root) => {
+                                babe_current_epoch_query = root.resume(&header.state_root);
+                            },
+                            babe_fetch_epoch::Query::Finished { result: Ok(result), virtual_machine } => break (result, virtual_machine),
+                            babe_fetch_epoch::Query::Finished { result: Err(_), virtual_machine } => todo!(), // TODO:
+                        }
+                    };
+
+                    let mut babe_next_epoch_query =
+                        babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
+                            runtime,
+                            epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::NextEpoch,
+                        });
+
+                    let (next_epoch, runtime) = loop {
+                        match babe_next_epoch_query {
+                            babe_fetch_epoch::Query::StorageGet(get) => {
+                                let value = match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
+                                    requested_key: &get.key_as_vec(), // TODO: allocating vec
+                                    trie_root_hash: &header.state_root,
+                                    proof: babeapi_next_epoch_response.iter().map(|v| &v[..]),
+                                }) {
+                                    Ok(v) => v,
+                                    Err(err) => todo!(), // TODO:
+                                };
+
+                                babe_next_epoch_query = get.inject_value(value.map(iter::once));
+                            },
+                            babe_fetch_epoch::Query::NextKey(nk) => todo!(), // TODO:
+                            babe_fetch_epoch::Query::StorageRoot(root) => {
+                                babe_next_epoch_query = root.resume(&header.state_root);
+                            },
+                            babe_fetch_epoch::Query::Finished { result: Ok(result), virtual_machine } => break (result, virtual_machine),
+                            babe_fetch_epoch::Query::Finished { result: Err(_), virtual_machine } => todo!(), // TODO:
+                        }
+                    };
+
+                    // The number of slots per epoch is never modified once the chain is running,
+                    // and as such is copied from the original chain information.
+                    let slots_per_epoch = match self.inner.start_chain_information.as_ref().consensus {
+                        ChainInformationConsensusRef::Babe {
+                            slots_per_epoch, ..
+                        } => slots_per_epoch,
+                        _ => unreachable!(),
+                    };
+
+                    // Build a `ChainInformation` using the parameters found in the runtime.
+                    // It is possible, however, that the runtime produces parameters that aren't
+                    // coherent. For example the runtime could give "current" and "next" Babe
+                    // epochs that don't follow each other.
+                    let chain_information =
+                        match ValidChainInformation::try_from(ChainInformation {
+                            finalized_block_header: header.clone(),
+                            finality: chain_information_finality.clone(),
+                            consensus: ChainInformationConsensus::Babe {
+                                finalized_block_epoch_information: Some(current_epoch),
+                                finalized_next_epoch_transition: next_epoch,
+                                slots_per_epoch,
+                            },
+                        }) {
+                            Ok(ci) => ci,
+                            Err(err) => {
+                                todo!() // TODO:
+                            }
+                        };
+
+                    return (
+                        WarpSync::Finished(Success {
+                            chain_information,
+                            finalized_runtime: runtime,
+                            finalized_storage_code: Some(finalized_storage_code),
+                            finalized_storage_heap_pages,
+                            sources: self.inner
+                                .sources
+                                .drain()
+                                .map(|source| source.user_data)
+                                .collect(),
+                            in_progress_requests: mem::take(&mut self.inner
+                                .in_progress_requests)
+                                .into_iter()
+                                .map(|(id, (src_id, user_data, detail))| (src_id, RequestId(id), user_data, detail))
+                                .collect(),
+                        }),
+                        None,
+                    );
+                }
+                ChainInformationConsensusRef::Aura { .. } |  // TODO: https://github.com/paritytech/smoldot/issues/933
+                ChainInformationConsensusRef::Unknown => {
+                    (
+                        todo!(), // TODO:
+                        Some(Error::UnknownConsensus),
+                    )
+                }
+            }
+        } else {
+            unreachable!()
+        }
+    }
+}
