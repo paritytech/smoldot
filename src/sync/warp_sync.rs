@@ -617,27 +617,6 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         user_data
     }
 
-    /// Start processing one CPU operation.
-    ///
-    /// This function takes ownership of `self` and yields it back after the operation is finished.
-    pub fn process_one(self) -> ProcessOne<TSrc, TRq> {
-        if let Phase::PostVerification {
-            runtime: Some(_),
-            babeapi_current_epoch_response: Some(_),
-            babeapi_next_epoch_response: Some(_),
-            ..
-        } = &self.phase
-        {
-            return ProcessOne::BuildChainInformation(BuildChainInformation { inner: self });
-        }
-
-        if let Phase::PendingVerify { .. } = &self.phase {
-            return ProcessOne::VerifyWarpSyncFragment(VerifyWarpSyncFragment { inner: self });
-        }
-
-        ProcessOne::Idle(self)
-    }
-
     /// Injects a successful response and removes the given request from the state machine. Returns
     /// the user data that was associated to it.
     ///
@@ -784,6 +763,28 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             ((_, _, _), _) => panic!(),
         }
     }
+
+    /// Start processing one CPU operation.
+    ///
+    /// This function takes ownership of `self` and yields it back after the operation is finished.
+    pub fn process_one(self) -> ProcessOne<TSrc, TRq> {
+        if let Phase::PostVerification {
+            runtime: Some(_),
+            babeapi_current_epoch_response: Some(_),
+            babeapi_next_epoch_response: Some(_),
+            ..
+        } = &self.phase
+        {
+            return ProcessOne::BuildChainInformation(BuildChainInformation { inner: self });
+        }
+
+        if let Phase::PendingVerify { .. } = &self.phase {
+            return ProcessOne::VerifyWarpSyncFragment(VerifyWarpSyncFragment { inner: self });
+        }
+
+        ProcessOne::Idle(self)
+    }
+
 }
 
 #[derive(Debug, Copy, Clone)]
