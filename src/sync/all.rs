@@ -40,7 +40,7 @@ use crate::{
 
 use alloc::{borrow::Cow, vec, vec::Vec};
 use core::{
-    cmp, iter, mem,
+    cmp, iter, marker, mem,
     num::{NonZeroU32, NonZeroU64},
     ops,
     time::Duration,
@@ -1053,33 +1053,40 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn process_one(mut self) -> ProcessOne<TRq, TSrc, TBl> {
         match self.inner {
             AllSyncInner::GrandpaWarpSync { inner } => {
-                // TODO: errors not reported to upper layer
-                let outcome = match inner.process_one() {
-                    warp_sync::ProcessOne::Idle(inner) => warp_sync::WarpSync::InProgress(inner),
-                    warp_sync::ProcessOne::VerifyWarpSyncFragment(inner) => inner.verify().0,
-                    warp_sync::ProcessOne::BuildChainInformation(inner) => inner.build().0,
-                };
-
-                match outcome {
-                    warp_sync::WarpSync::InProgress(inner) => {
+                match inner.process_one() {
+                    warp_sync::ProcessOne::Idle(inner) => {
                         self.inner = AllSyncInner::GrandpaWarpSync { inner };
                         ProcessOne::AllSync(self)
                     }
-                    warp_sync::WarpSync::Finished(success) => {
-                        let (
-                            new_inner,
-                            finalized_block_runtime,
-                            finalized_storage_code,
-                            finalized_storage_heap_pages,
-                        ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
-                        self.inner = AllSyncInner::AllForks(new_inner);
-                        ProcessOne::WarpSyncFinished {
-                            sync: self,
-                            finalized_block_runtime,
-                            finalized_storage_code,
-                            finalized_storage_heap_pages,
-                        }
+                    warp_sync::ProcessOne::VerifyWarpSyncFragment(inner) => {
+                        ProcessOne::VerifyWarpSyncFragment(WarpSyncFragmentVerify {
+                            inner,
+                            shared: self.shared,
+                            marker: marker::PhantomData,
+                        })
                     }
+                    warp_sync::ProcessOne::BuildChainInformation(inner) => match inner.build().0 {
+                        // TODO: errors not reported to upper layer
+                        warp_sync::WarpSync::InProgress(inner) => {
+                            self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                            ProcessOne::AllSync(self)
+                        }
+                        warp_sync::WarpSync::Finished(success) => {
+                            let (
+                                new_inner,
+                                finalized_block_runtime,
+                                finalized_storage_code,
+                                finalized_storage_heap_pages,
+                            ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
+                            self.inner = AllSyncInner::AllForks(new_inner);
+                            ProcessOne::WarpSyncFinished {
+                                sync: self,
+                                finalized_block_runtime,
+                                finalized_storage_code,
+                                finalized_storage_heap_pages,
+                            }
+                        }
+                    },
                 }
             }
             AllSyncInner::AllForks(sync) => match sync.process_one() {
@@ -2225,39 +2232,40 @@ pub enum FinalityProofVerifyOutcome<TBl> {
 }
 
 pub struct WarpSyncFragmentVerify<TRq, TSrc, TBl> {
-    inner: AllSync<TRq, TSrc, TBl>,
+    inner: warp_sync::VerifyWarpSyncFragment<
+        GrandpaWarpSyncSourceExtra<TSrc>,
+        GrandpaWarpSyncRequestExtra<TRq>,
+    >,
+    shared: Shared<TRq>,
+    marker: marker::PhantomData<Vec<TBl>>,
 }
 
 impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
     /// Returns the identifier and user data of the source that has sent the fragment to be
     /// verified.
     pub fn proof_sender(&self) -> (SourceId, &TSrc) {
-        // TODO: restore this feature
-        let sender = match &self.inner.inner {
-            _ => unreachable!(),
-        };
-
-        //(sender.1.outer_source_id, &sender.1.user_data)
+        let (_, ud) = self.inner.proof_sender();
+        (ud.outer_source_id, &ud.user_data)
     }
 
     /// Perform the verification.
     pub fn perform(
-        mut self,
+        self,
     ) -> (
         AllSync<TRq, TSrc, TBl>,
         Result<(), warp_sync::FragmentError>,
     ) {
-        // TODO: restore this feature
-        let (next_grandpa_warp_sync, error) =
-            match mem::replace(&mut self.inner.inner, AllSyncInner::Poisoned) {
-                _ => unreachable!(),
-            };
+        let (next_grandpa_warp_sync, error) = self.inner.verify();
 
-        self.inner.inner = AllSyncInner::GrandpaWarpSync {
-            inner: next_grandpa_warp_sync,
-        };
-
-        (self.inner, error)
+        (
+            AllSync {
+                inner: AllSyncInner::GrandpaWarpSync {
+                    inner: next_grandpa_warp_sync,
+                },
+                shared: self.shared,
+            },
+            error.map_or(Ok(()), Result::Err),
+        )
     }
 }
 

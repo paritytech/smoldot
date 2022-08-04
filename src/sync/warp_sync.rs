@@ -766,8 +766,22 @@ pub struct VerifyWarpSyncFragment<TSrc, TRq> {
 }
 
 impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
+    pub fn proof_sender(&self) -> (SourceId, &TSrc) {
+        if let Phase::PendingVerify {
+            downloaded_source, ..
+        } = &self.inner.phase
+        {
+            (
+                *downloaded_source,
+                &self.inner.sources[downloaded_source.0].user_data,
+            )
+        } else {
+            unreachable!()
+        }
+    }
+
     // TODO: does this API make sense?
-    pub fn verify(mut self) -> (WarpSync<TSrc, TRq>, Option<FragmentError>) {
+    pub fn verify(mut self) -> (InProgressWarpSync<TSrc, TRq>, Option<FragmentError>) {
         if let Phase::PendingVerify {
             previous_verifier_values,
             verifier,
@@ -832,12 +846,12 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                         self.inner.phase = Phase::DownloadFragments {
                             previous_verifier_values: previous_verifier_values.take(),
                         };
-                        return (WarpSync::InProgress(self.inner), Some(error));
+                        return (self.inner, Some(error));
                     }
                 }
             }
 
-            (WarpSync::InProgress(self.inner), None)
+            (self.inner, None)
         } else {
             unreachable!()
         }
