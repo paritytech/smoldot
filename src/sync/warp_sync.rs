@@ -623,7 +623,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     /// # Panic
     ///
     /// Panics if the [`RequestId`] is invalid.
-    /// Panics if the [`RequestId`] doesn't correspond to a runtime merkle call proof request.
+    /// Panics if the [`RequestId`] doesn't correspond to a runtime Merkle call proof request.
     ///
     pub fn runtime_call_merkle_proof_success(
         &mut self,

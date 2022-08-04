@@ -1520,7 +1520,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Inject a response to a previously-emitted call proof request.
     ///
     /// On success, must contain the encoded Merkle proof. See the
-    /// (`trie`)[crate::trie::proof_verify] module for a description of the format of Merkle
+    /// [`trie`](crate::trie::proof_verify) module for a description of the format of Merkle
     /// proofs.
     ///
     /// # Panic
