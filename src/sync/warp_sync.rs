@@ -309,6 +309,9 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             previous_verifier_values,
         } = &self.phase
         {
+            // TODO: it feels like a hack to try again sources that have failed in the past
+            let all_sources_already_tried = self.sources.iter().all(|(_, s)| s.already_tried);
+
             let start_block_hash = match previous_verifier_values.as_ref() {
                 Some((header, _)) => header.hash(self.block_number_bytes),
                 None => self
@@ -332,7 +335,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             {
                 either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
                     // TODO: also filter by source finalized block? so that we don't request from sources below us
-                    if !src.already_tried {
+                    if all_sources_already_tried || !src.already_tried {
                         Some((
                             SourceId(src_id),
                             &src.user_data,
