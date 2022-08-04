@@ -676,7 +676,18 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     previous_verifier_values,
                 },
             ) => {
-                // TODO: check block_hash ^
+                let desired_block_hash = match previous_verifier_values.as_ref() {
+                    Some((header, _)) => header.hash(self.block_number_bytes),
+                    None => self
+                        .start_chain_information
+                        .as_ref()
+                        .finalized_block_header
+                        .hash(self.block_number_bytes),
+                };
+                if desired_block_hash != block_hash {
+                    return user_data;
+                }
+
                 // Ignore downloads from sources that are "banned".
                 if self.sources[rq_source_id.0].already_tried {
                     return user_data;
