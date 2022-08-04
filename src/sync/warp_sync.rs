@@ -265,6 +265,14 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         }))
     }
 
+    /// Removes a source from the list of sources. In addition to the user data associated to this
+    /// source, also returns a list of requests that were in progress concerning this source. These
+    /// requests are now considered obsolete.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`SourceId`] is invalid.
+    ///
     pub fn remove_source(
         &'_ mut self,
         to_remove: SourceId,
@@ -318,6 +326,11 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         (removed, obsolete_requests.into_iter())
     }
 
+    /// Returns a list of requests that should be started in order to drive the warp syncing
+    /// process to completion.
+    ///
+    /// Once a request that matches a desired request is added through
+    /// [`InProgressWarpSync::add_request`], it is no longer returned by this function.
     pub fn desired_requests(
         &'_ self,
     ) -> impl Iterator<Item = (SourceId, &'_ TSrc, DesiredRequest)> + '_ {
@@ -489,7 +502,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     /// Inserts a new request in the data structure.
     ///
     /// > **Note**: The request doesn't necessarily have to match a request returned by
-    /// >           [`ChainInfoQuery::desired_requests`].
+    /// >           [`InProgressWarpSync::desired_requests`].
     ///
     /// # Panic
     ///
@@ -556,6 +569,14 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         }
     }
 
+    /// Injects a successful response and removes the given request from the state machine. Returns
+    /// the user data that was associated to it.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    /// Panics if the [`RequestId`] doesn't correspond to a runtime parameters get request.
+    ///
     pub fn runtime_parameters_get_success(
         &mut self,
         id: RequestId,
@@ -596,6 +617,9 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         user_data
     }
 
+    /// Start processing one CPU operation.
+    ///
+    /// This function takes ownership of `self` and yields it back after the operation is finished.
     pub fn process_one(self) -> ProcessOne<TSrc, TRq> {
         if let Phase::PostVerification {
             runtime: Some(_),
@@ -614,6 +638,14 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         ProcessOne::Idle(self)
     }
 
+    /// Injects a successful response and removes the given request from the state machine. Returns
+    /// the user data that was associated to it.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    /// Panics if the [`RequestId`] doesn't correspond to a runtime merkle call proof request.
+    ///
     pub fn runtime_call_merkle_proof_success(
         &mut self,
         request_id: RequestId,
@@ -678,7 +710,14 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         }
     }
 
-    /// Submit a GrandPa warp sync successful response.
+    /// Injects a successful response and removes the given request from the state machine. Returns
+    /// the user data that was associated to it.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    /// Panics if the [`RequestId`] doesn't correspond to a warp sync request.
+    ///
     pub fn warp_sync_request_success(
         &mut self,
         request_id: RequestId,
