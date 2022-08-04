@@ -908,7 +908,9 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                             warp_sync_source_id: *downloaded_source,
                         };
                     } else {
-                        *previous_verifier_values = Some((header, chain_information_finality));
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((header, chain_information_finality)),
+                        };
                     }
                 }
                 Err(error) => {
