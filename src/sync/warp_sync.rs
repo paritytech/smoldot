@@ -91,6 +91,11 @@ pub enum Error {
     InvalidChain(chain_information::ValidityError),
     /// Chain uses an unrecognized consensus mechanism.
     UnknownConsensus,
+    /// Failed to verify call proof.
+    InvalidCallProof(proof_verify::Error),
+    /// Warp sync requires fetching the key that follows another one. This isn't implemented in
+    /// smoldot.
+    NextKeyUnimplemented,
 }
 
 /// The configuration for [`warp_sync()`].
@@ -874,11 +879,13 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             let finalized_storage_code = match finalized_storage_code {
                 Some(code) => code,
                 None => {
-                    todo!()
-                    /*return (
-                        todo!(), // TODO:
-                        Some(Error::MissingCode),
-                    );*/
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
                 }
             };
 
@@ -887,11 +894,16 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             ) {
                 Ok(hp) => hp,
                 Err(err) => {
-                    todo!()
-                    /*return (
-                        todo!(), // TODO:
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (
+                        WarpSync::InProgress(self.inner),
                         Some(Error::InvalidHeapPages(err)),
-                    );*/
+                    );
                 }
             };
 
@@ -903,11 +915,16 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             }) {
                 Ok(runtime) => runtime,
                 Err(error) => {
-                    todo!()
-                    /*return (
-                        todo!(), // TODO:
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (
+                        WarpSync::InProgress(self.inner),
                         Some(Error::NewRuntime(error)),
-                    );*/
+                    );
                 }
             };
 
@@ -928,17 +945,50 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                     proof: babeapi_current_epoch_response.iter().map(|v| &v[..]),
                                 }) {
                                     Ok(v) => v,
-                                    Err(err) => todo!(), // TODO:
+                                    Err(err) => {
+                                        self.inner.phase = Phase::DownloadFragments {
+                                            previous_verifier_values: Some((
+                                                header.clone(),
+                                                chain_information_finality.clone(),
+                                            )),
+                                        };
+                                        return (
+                                            WarpSync::InProgress(self.inner),
+                                            Some(Error::InvalidCallProof(err)),
+                                        );
+                                    }
                                 };
 
                                 babe_current_epoch_query = get.inject_value(value.map(iter::once));
                             },
-                            babe_fetch_epoch::Query::NextKey(nk) => todo!(), // TODO:
+                            babe_fetch_epoch::Query::NextKey(_) => {
+                                // TODO: implement
+                                self.inner.phase = Phase::DownloadFragments {
+                                    previous_verifier_values: Some((
+                                        header.clone(),
+                                        chain_information_finality.clone(),
+                                    )),
+                                };
+                                return (
+                                    WarpSync::InProgress(self.inner),
+                                    Some(Error::NextKeyUnimplemented),
+                                );}
                             babe_fetch_epoch::Query::StorageRoot(root) => {
                                 babe_current_epoch_query = root.resume(&header.state_root);
                             },
                             babe_fetch_epoch::Query::Finished { result: Ok(result), virtual_machine } => break (result, virtual_machine),
-                            babe_fetch_epoch::Query::Finished { result: Err(_), virtual_machine } => todo!(), // TODO:
+                            babe_fetch_epoch::Query::Finished { result: Err(err), .. } => {
+                                self.inner.phase = Phase::DownloadFragments {
+                                    previous_verifier_values: Some((
+                                        header.clone(),
+                                        chain_information_finality.clone(),
+                                    )),
+                                };
+                                return (
+                                    WarpSync::InProgress(self.inner),
+                                    Some(Error::BabeFetchEpoch(err)),
+                                );
+                            }
                         }
                     };
 
@@ -957,17 +1007,51 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                                     proof: babeapi_next_epoch_response.iter().map(|v| &v[..]),
                                 }) {
                                     Ok(v) => v,
-                                    Err(err) => todo!(), // TODO:
+                                    Err(err) => {
+                                        self.inner.phase = Phase::DownloadFragments {
+                                            previous_verifier_values: Some((
+                                                header.clone(),
+                                                chain_information_finality.clone(),
+                                            )),
+                                        };
+                                        return (
+                                            WarpSync::InProgress(self.inner),
+                                            Some(Error::InvalidCallProof(err)),
+                                        );
+                                    }
                                 };
 
                                 babe_next_epoch_query = get.inject_value(value.map(iter::once));
                             },
-                            babe_fetch_epoch::Query::NextKey(nk) => todo!(), // TODO:
+                            babe_fetch_epoch::Query::NextKey(_) => {
+                                // TODO: implement
+                                self.inner.phase = Phase::DownloadFragments {
+                                    previous_verifier_values: Some((
+                                        header.clone(),
+                                        chain_information_finality.clone(),
+                                    )),
+                                };
+                                return (
+                                    WarpSync::InProgress(self.inner),
+                                    Some(Error::NextKeyUnimplemented),
+                                );
+                            }
                             babe_fetch_epoch::Query::StorageRoot(root) => {
                                 babe_next_epoch_query = root.resume(&header.state_root);
                             },
                             babe_fetch_epoch::Query::Finished { result: Ok(result), virtual_machine } => break (result, virtual_machine),
-                            babe_fetch_epoch::Query::Finished { result: Err(_), virtual_machine } => todo!(), // TODO:
+                            babe_fetch_epoch::Query::Finished { result: Err(err), .. } => {
+                                self.inner.phase = Phase::DownloadFragments {
+                                    previous_verifier_values: Some((
+                                        header.clone(),
+                                        chain_information_finality.clone(),
+                                    )),
+                                };
+                                return (
+                                    WarpSync::InProgress(self.inner),
+                                    Some(Error::BabeFetchEpoch(err)),
+                                );
+                            }
                         }
                     };
 
@@ -996,7 +1080,16 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                         }) {
                             Ok(ci) => ci,
                             Err(err) => {
-                                todo!() // TODO:
+                                self.inner.phase = Phase::DownloadFragments {
+                                    previous_verifier_values: Some((
+                                        header.clone(),
+                                        chain_information_finality.clone(),
+                                    )),
+                                };
+                                return (
+                                    WarpSync::InProgress(self.inner),
+                                    Some(Error::InvalidChain(err)),
+                                );
                             }
                         };
 
@@ -1022,10 +1115,17 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                 }
                 ChainInformationConsensusRef::Aura { .. } |  // TODO: https://github.com/paritytech/smoldot/issues/933
                 ChainInformationConsensusRef::Unknown => {
-                    (
-                        todo!(), // TODO:
+                    // TODO: detect this at warp sync initialization
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (
+                        WarpSync::InProgress(self.inner),
                         Some(Error::UnknownConsensus),
-                    )
+                    );
                 }
             }
         } else {
