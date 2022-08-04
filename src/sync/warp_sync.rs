@@ -48,11 +48,13 @@
 //! of type `TSrc` associated to it. The content of this "user data" is at the discretion of the
 //! API user.
 //!
-//! The [`InProgressWarpSync`] enum must be examined in order to determine how to make the warp
-//! syncing process.
+//! Similarly, at any given moment, this state machine holds a list of requests that concern these
+//! sources. Use [`InProgressWarpSync::desired_requires`] to determine which requests will be
+//! useful to the progress of the warp syncing.
 //!
-//! At the end of the process, a [`Success`] is returned and can be used to kick-off another
-//! syncing phase.
+//! Use [`InProgressWarpSync::process_one`] in order to run verifications of the payloads that have
+//! previously been downloaded.
+//!
 
 use crate::{
     chain::chain_information::{
