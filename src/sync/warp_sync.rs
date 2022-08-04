@@ -215,8 +215,8 @@ enum Phase {
         header: Header,
         chain_information_finality: ChainInformationFinality,
         warp_sync_source_id: SourceId,
-        // TODO: use struct instead
-        runtime: Option<(HostVmPrototype, Option<Vec<u8>>, Option<Vec<u8>>)>,
+        // TODO: use struct instead?
+        runtime: Option<(Option<Vec<u8>>, Option<Vec<u8>>)>,
         babeapi_current_epoch_response: Option<Vec<Vec<u8>>>,
         babeapi_next_epoch_response: Option<Vec<Vec<u8>>>,
     },
@@ -464,8 +464,6 @@ impl<TSrc> InProgressWarpSync<TSrc> {
         id: RequestId,
         code: Option<impl AsRef<[u8]>>,
         heap_pages: Option<impl AsRef<[u8]>>,
-        exec_hint: ExecHint,
-        allow_unresolved_imports: bool,
     ) {
         match (self.in_progress_requests.remove(id.0), &self.phase) {
             (
@@ -483,53 +481,13 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             ) => panic!(),
         }
 
-        let code = match code {
-            Some(code) => code.as_ref().to_vec(),
-            None => {
-                todo!()
-                /*return (
-                    todo!(), // TODO:
-                    Some(Error::MissingCode),
-                );*/
-            }
-        };
-
-        let decoded_heap_pages =
-            match executor::storage_heap_pages_to_value(heap_pages.as_ref().map(|p| p.as_ref())) {
-                Ok(hp) => hp,
-                Err(err) => {
-                    todo!()
-                    /*return (
-                        todo!(), // TODO:
-                        Some(Error::InvalidHeapPages(err)),
-                    );*/
-                }
-            };
-
-        let runtime = match HostVmPrototype::new(host::Config {
-            module: &code,
-            heap_pages: decoded_heap_pages,
-            exec_hint,
-            allow_unresolved_imports,
-        }) {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                todo!()
-                /*return (
-                    todo!(), // TODO:
-                    Some(Error::NewRuntime(error)),
-                );*/
-            }
-        };
-
         if let Phase::PostVerification {
             runtime: ref mut runtime_store,
             ..
         } = self.phase
         {
             *runtime_store = Some((
-                runtime,
-                Some(code),
+                code.map(|c| c.as_ref().to_vec()),
                 heap_pages.map(|hp| hp.as_ref().to_vec()),
             ));
         } else {
@@ -555,10 +513,49 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                 return (WarpSync::InProgress(self), None);
             }
 
-            let (runtime, finalized_storage_code, finalized_storage_heap_pages) =
-                runtime.take().unwrap();
+            let (finalized_storage_code, finalized_storage_heap_pages) = runtime.take().unwrap();
             let babeapi_current_epoch_response = babeapi_current_epoch_response.take().unwrap();
             let babeapi_next_epoch_response = babeapi_next_epoch_response.take().unwrap();
+
+            let finalized_storage_code = match finalized_storage_code {
+                Some(code) => code,
+                None => {
+                    todo!()
+                    /*return (
+                        todo!(), // TODO:
+                        Some(Error::MissingCode),
+                    );*/
+                }
+            };
+
+            let decoded_heap_pages = match executor::storage_heap_pages_to_value(
+                finalized_storage_heap_pages.as_ref().map(|p| p.as_ref()),
+            ) {
+                Ok(hp) => hp,
+                Err(err) => {
+                    todo!()
+                    /*return (
+                        todo!(), // TODO:
+                        Some(Error::InvalidHeapPages(err)),
+                    );*/
+                }
+            };
+
+            let runtime = match HostVmPrototype::new(host::Config {
+                module: &finalized_storage_code,
+                heap_pages: decoded_heap_pages,
+                exec_hint: ExecHint::CompileAheadOfTime, // TODO: make configurable
+                allow_unresolved_imports: false,         // TODO: make configurable
+            }) {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    todo!()
+                    /*return (
+                        todo!(), // TODO:
+                        Some(Error::NewRuntime(error)),
+                    );*/
+                }
+            };
 
             match self.start_chain_information.as_ref().consensus {
                 ChainInformationConsensusRef::Babe { .. } => {
@@ -653,7 +650,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                         WarpSync::Finished(Success {
                             chain_information,
                             finalized_runtime: runtime,
-                            finalized_storage_code,
+                            finalized_storage_code: Some(finalized_storage_code),
                             finalized_storage_heap_pages,
                             sources: self
                                 .sources

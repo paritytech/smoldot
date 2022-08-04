@@ -1450,18 +1450,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let heap_pages = response.next().unwrap();
                 assert!(response.next().is_none());
 
-                // We use an `ExecHint` that assumes that the runtime will continue being used
-                // after the end of the warp syncing. This might be the case, since we provide
-                // the runtime to the API user. The API user might then immediately throw away
-                // this runtime, but we don't care enough about this possibility to optimize
-                // this.
-                // TODO: make `allow_unresolved_imports` configurable
                 sync.set_virtual_machine_params(
                     request_id,
                     code,
                     heap_pages,
-                    ExecHint::CompileAheadOfTime,
-                    false,
                 );
 
                 self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
