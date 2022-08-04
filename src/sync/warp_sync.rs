@@ -845,7 +845,7 @@ pub struct BuildChainInformation<TSrc, TRq> {
 }
 
 impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
-    pub fn verify(mut self) -> (WarpSync<TSrc, TRq>, Option<Error>) {
+    pub fn build(mut self) -> (WarpSync<TSrc, TRq>, Option<Error>) {
         if let Phase::PostVerification {
             header,
             chain_information_finality,

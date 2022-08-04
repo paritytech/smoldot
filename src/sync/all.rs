@@ -1058,7 +1058,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         (warp_sync::WarpSync::InProgress(inner), None)
                     }
                     warp_sync::ProcessOne::VerifyWarpSyncFragment(inner) => inner.verify(),
-                    warp_sync::ProcessOne::BuildChainInformation(inner) => inner.verify(),
+                    warp_sync::ProcessOne::BuildChainInformation(inner) => inner.build(),
                 };
 
                 match outcome {
