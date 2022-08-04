@@ -132,6 +132,7 @@ pub fn warp_sync<TSrc>(
         in_progress_requests: slab::Slab::with_capacity(config.requests_capacity),
         phase: Phase::PreVerification {
             previous_verifier_values: None,
+            downloaded_proof: None,
         },
     })
 }
@@ -210,6 +211,7 @@ pub struct InProgressWarpSync<TSrc> {
 enum Phase {
     PreVerification {
         previous_verifier_values: Option<(Header, ChainInformationFinality)>,
+        downloaded_proof: Option<(SourceId, Vec<WarpSyncFragment>, bool)>,
     },
     PostVerification {
         header: Header,
@@ -264,6 +266,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
         {
             if to_remove == *warp_sync_source_id {
                 self.phase = Phase::PreVerification {
+                    downloaded_proof: None,
                     previous_verifier_values: Some((
                         header.clone(),
                         chain_information_finality.clone(),
@@ -280,6 +283,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
     ) -> impl Iterator<Item = (SourceId, &'_ TSrc, DesiredRequest)> + '_ {
         let warp_sync_request = if let Phase::PreVerification {
             previous_verifier_values,
+            downloaded_proof,
         } = &self.phase
         {
             let start_block_hash = match previous_verifier_values.as_ref() {
@@ -291,17 +295,18 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                     .hash(self.block_number_bytes),
             };
 
-            if !self
-                .in_progress_requests
-                .iter()
-                .any(|(_, (_, rq))| match rq {
-                    RequestDetail::WarpSyncRequest { block_hash }
-                        if *block_hash == start_block_hash =>
-                    {
-                        true
-                    }
-                    _ => false,
-                })
+            if downloaded_proof.is_none()
+                && !self
+                    .in_progress_requests
+                    .iter()
+                    .any(|(_, (_, rq))| match rq {
+                        RequestDetail::WarpSyncRequest { block_hash }
+                            if *block_hash == start_block_hash =>
+                        {
+                            true
+                        }
+                        _ => false,
+                    })
             {
                 either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
                     // TODO: also filter by source finalized block? so that we don't request from sources below us
@@ -440,6 +445,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                 },
             ) if source_id == *warp_sync_source_id => {
                 self.phase = Phase::PreVerification {
+                    downloaded_proof: None,
                     previous_verifier_values: Some((
                         header.clone(),
                         chain_information_finality.clone(),
@@ -674,6 +680,87 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                     )
                 }
             }
+        } else if let Phase::PreVerification {
+            previous_verifier_values,
+            downloaded_proof: downloaded_proof @ Some(_),
+        } = &mut self.phase
+        {
+            let (rq_source_id, fragments, final_set_of_fragments) =
+                downloaded_proof.take().unwrap();
+
+            let mut verifier = match &previous_verifier_values {
+                Some((_, chain_information_finality)) => warp_sync::Verifier::new(
+                    chain_information_finality.into(),
+                    self.block_number_bytes,
+                    fragments,
+                    final_set_of_fragments,
+                ),
+                None => warp_sync::Verifier::new(
+                    self.start_chain_information.as_ref().finality,
+                    self.block_number_bytes,
+                    fragments,
+                    final_set_of_fragments,
+                ),
+            };
+
+            // TODO: restore feature where fragments are verified one by one through public API
+            loop {
+                match verifier.next() {
+                    Ok(warp_sync::Next::NotFinished(next_verifier)) => {
+                        verifier = next_verifier;
+                    }
+                    Ok(warp_sync::Next::EmptyProof) => {
+                        self.phase = Phase::PostVerification {
+                            babeapi_current_epoch_response: None,
+                            babeapi_next_epoch_response: None,
+                            runtime: None,
+                            header: self
+                                .start_chain_information
+                                .as_ref()
+                                .finalized_block_header
+                                .into(),
+                            chain_information_finality: self
+                                .start_chain_information
+                                .as_ref()
+                                .finality
+                                .into(),
+                            warp_sync_source_id: rq_source_id,
+                        };
+                        break;
+                    }
+                    Ok(warp_sync::Next::Success {
+                        scale_encoded_header,
+                        chain_information_finality,
+                    }) => {
+                        // As the verification of the fragment has succeeded, we are sure that the header
+                        // is valid and can decode it.
+                        let header: Header =
+                            header::decode(&scale_encoded_header, self.block_number_bytes)
+                                .unwrap()
+                                .into();
+
+                        if final_set_of_fragments {
+                            self.phase = Phase::PostVerification {
+                                babeapi_current_epoch_response: None,
+                                babeapi_next_epoch_response: None,
+                                runtime: None,
+                                header,
+                                chain_information_finality,
+                                warp_sync_source_id: rq_source_id,
+                            };
+                        } else {
+                            *previous_verifier_values = Some((header, chain_information_finality));
+                        }
+
+                        break;
+                    }
+                    Err(error) => {
+                        todo!() // TODO:
+                    }
+                }
+            }
+
+            (WarpSync::InProgress(self), None)
         } else {
             (WarpSync::InProgress(self), None)
         }
@@ -753,85 +840,13 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             (
                 (rq_source_id, RequestDetail::WarpSyncRequest { block_hash }),
                 Phase::PreVerification {
+                    downloaded_proof,
                     previous_verifier_values,
                 },
             ) => {
                 // TODO: check block_hash ^
                 self.sources[rq_source_id.0].already_tried = true;
-
-                let mut verifier = match &previous_verifier_values {
-                    Some((_, chain_information_finality)) => warp_sync::Verifier::new(
-                        chain_information_finality.into(),
-                        self.block_number_bytes,
-                        fragments,
-                        final_set_of_fragments,
-                    ),
-                    None => warp_sync::Verifier::new(
-                        self.start_chain_information.as_ref().finality,
-                        self.block_number_bytes,
-                        fragments,
-                        final_set_of_fragments,
-                    ),
-                };
-
-                // TODO: restore feature where fragments are verified one by one through public API
-                loop {
-                    match verifier.next() {
-                        Ok(warp_sync::Next::NotFinished(next_verifier)) => {
-                            verifier = next_verifier;
-                        }
-                        Ok(warp_sync::Next::EmptyProof) => {
-                            self.phase = Phase::PostVerification {
-                                babeapi_current_epoch_response: None,
-                                babeapi_next_epoch_response: None,
-                                runtime: None,
-                                header: self
-                                    .start_chain_information
-                                    .as_ref()
-                                    .finalized_block_header
-                                    .into(),
-                                chain_information_finality: self
-                                    .start_chain_information
-                                    .as_ref()
-                                    .finality
-                                    .into(),
-                                warp_sync_source_id: rq_source_id,
-                            };
-                            break;
-                        }
-                        Ok(warp_sync::Next::Success {
-                            scale_encoded_header,
-                            chain_information_finality,
-                        }) => {
-                            // As the verification of the fragment has succeeded, we are sure that the header
-                            // is valid and can decode it.
-                            let header: Header =
-                                header::decode(&scale_encoded_header, self.block_number_bytes)
-                                    .unwrap()
-                                    .into();
-
-                            if final_set_of_fragments {
-                                self.phase = Phase::PostVerification {
-                                    babeapi_current_epoch_response: None,
-                                    babeapi_next_epoch_response: None,
-                                    runtime: None,
-                                    header,
-                                    chain_information_finality,
-                                    warp_sync_source_id: rq_source_id,
-                                };
-                            } else {
-                                *previous_verifier_values =
-                                    Some((header, chain_information_finality));
-                            }
-
-                            break;
-                        }
-                        Err(error) => {
-                            todo!() // TODO:
-                        }
-                    }
-                }
-
+                *downloaded_proof = Some((rq_source_id, fragments, final_set_of_fragments));
                 self
             }
             ((_, RequestDetail::WarpSyncRequest { .. }), _) => self,
