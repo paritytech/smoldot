@@ -213,7 +213,10 @@ enum Phase {
     },
     PendingVerify {
         previous_verifier_values: Option<(Header, ChainInformationFinality)>,
-        downloaded_proof: (SourceId, Vec<WarpSyncFragment>, bool),
+        downloaded_source: SourceId,
+        final_set_of_fragments: bool,
+        /// Always `Some`.
+        verifier: Option<warp_sync::Verifier>,
     },
     PostVerification {
         header: Header,
@@ -275,15 +278,16 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                 }
             }
         } else if let Phase::PendingVerify {
-            downloaded_proof,
             previous_verifier_values,
+            downloaded_source,
+            ..
         } = &mut self.phase
         {
             // We make sure to not leave invalid source IDs in the state of `self`.
             // While it is a waste of bandwidth to completely remove a proof that has already
             // been downloaded if the source disconnects, it is in practice not something that is
             // supposed to happen.
-            if downloaded_proof.0 == to_remove {
+            if *downloaded_source == to_remove {
                 self.phase = Phase::DownloadFragments {
                     previous_verifier_values: previous_verifier_values.take(),
                 }
@@ -741,29 +745,16 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             }
         } else if let Phase::PendingVerify {
             previous_verifier_values,
-            downloaded_proof: (rq_source_id, fragments, final_set_of_fragments),
+            verifier,
+            final_set_of_fragments,
+            downloaded_source,
         } = &mut self.phase
         {
-            let mut verifier = match &previous_verifier_values {
-                Some((_, chain_information_finality)) => warp_sync::Verifier::new(
-                    chain_information_finality.into(),
-                    self.block_number_bytes,
-                    mem::take(fragments),
-                    *final_set_of_fragments,
-                ),
-                None => warp_sync::Verifier::new(
-                    self.start_chain_information.as_ref().finality,
-                    self.block_number_bytes,
-                    mem::take(fragments),
-                    *final_set_of_fragments,
-                ),
-            };
-
             // TODO: restore feature where fragments are verified one by one through public API
             loop {
-                match verifier.next() {
+                match verifier.take().unwrap().next() {
                     Ok(warp_sync::Next::NotFinished(next_verifier)) => {
-                        verifier = next_verifier;
+                        *verifier = Some(next_verifier);
                     }
                     Ok(warp_sync::Next::EmptyProof) => {
                         self.phase = Phase::PostVerification {
@@ -780,7 +771,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                                 .as_ref()
                                 .finality
                                 .into(),
-                            warp_sync_source_id: *rq_source_id,
+                            warp_sync_source_id: *downloaded_source,
                         };
                         break;
                     }
@@ -802,7 +793,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                                 runtime: None,
                                 header,
                                 chain_information_finality,
-                                warp_sync_source_id: *rq_source_id,
+                                warp_sync_source_id: *downloaded_source,
                             };
                         } else {
                             *previous_verifier_values = Some((header, chain_information_finality));
@@ -910,10 +901,29 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                 }
 
                 self.sources[rq_source_id.0].already_tried = true;
+
+                let verifier = match &previous_verifier_values {
+                    Some((_, chain_information_finality)) => warp_sync::Verifier::new(
+                        chain_information_finality.into(),
+                        self.block_number_bytes,
+                        fragments,
+                        final_set_of_fragments,
+                    ),
+                    None => warp_sync::Verifier::new(
+                        self.start_chain_information.as_ref().finality,
+                        self.block_number_bytes,
+                        fragments,
+                        final_set_of_fragments,
+                    ),
+                };
+
                 self.phase = Phase::PendingVerify {
                     previous_verifier_values: previous_verifier_values.take(),
-                    downloaded_proof: (rq_source_id, fragments, final_set_of_fragments),
+                    final_set_of_fragments,
+                    downloaded_source: rq_source_id,
+                    verifier: Some(verifier),
                 };
+
                 user_data
             }
             ((_, user_data, RequestDetail::WarpSyncRequest { .. }), _) => {
