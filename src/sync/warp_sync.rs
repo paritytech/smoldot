@@ -163,6 +163,9 @@ pub struct Success<TSrc> {
 
     /// The list of sources that were added to the state machine.
     pub sources: Vec<TSrc>,
+
+    /// The list of requests that were added to the state machine.
+    pub in_progress_requests: Vec<(SourceId, RequestId, RequestDetail)>,
 }
 
 /// The warp sync state machine.
@@ -617,6 +620,11 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                                 .drain()
                                 .map(|source| source.user_data)
                                 .collect(),
+                            in_progress_requests: self
+                                .in_progress_requests
+                                .iter()
+                                .map(|(id, (src_id, detail))| (*src_id, RequestId(id), detail.clone()))
+                                .collect(),
                         }),
                         None,
                     );
@@ -803,6 +811,7 @@ struct Source<TSrc> {
     already_tried: bool,
 }
 
+#[derive(Debug, Clone)]
 pub enum DesiredRequest {
     WarpSyncRequest {
         block_hash: [u8; 32],
@@ -818,6 +827,7 @@ pub enum DesiredRequest {
     },
 }
 
+#[derive(Debug, Clone)]
 pub enum RequestDetail {
     WarpSyncRequest {
         block_hash: [u8; 32],

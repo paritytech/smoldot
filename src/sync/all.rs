@@ -2499,6 +2499,59 @@ impl<TRq> Shared<TRq> {
             .iter()
             .all(|(_, s)| matches!(s, SourceMapping::GrandpaWarpSync(_))));
 
+        // TODO: O(n2)
+        for (source_id, inner_id, detail) in grandpa.in_progress_requests {
+            let (_, self_request) = self
+                .requests
+                .iter_mut()
+                .find(|(_, rq)| match rq {
+                    RequestMapping::WarpSync(id, _) if *id == inner_id => true,
+                    _ => false,
+                })
+                .unwrap();
+
+            // TODO: DRY
+            let detail = match detail {
+                warp_sync::RequestDetail::WarpSyncRequest { block_hash } => {
+                    RequestDetail::GrandpaWarpSync {
+                        sync_start_block_hash: block_hash,
+                    }
+                }
+                warp_sync::RequestDetail::RuntimeParametersGet { block_hash } => {
+                    RequestDetail::StorageGet {
+                        block_hash,
+                        state_trie_root: [0; 32], // TODO: wrong /!\ needs more refactoring to remove the field entirely
+                        keys: vec![b":code".to_vec(), b":heappages".to_vec()],
+                    }
+                }
+                warp_sync::RequestDetail::RuntimeCallMerkleProof {
+                    block_hash,
+                    function_name,
+                    parameter_vectored,
+                } => RequestDetail::RuntimeCallMerkleProof {
+                    block_hash,
+                    function_name,
+                    parameter_vectored,
+                },
+            };
+
+            let (source_id, _) = self
+                .sources
+                .iter()
+                .find(|(_, s)| match s {
+                    SourceMapping::GrandpaWarpSync(s) if *s == source_id => true,
+                    _ => false,
+                })
+                .unwrap();
+
+            match mem::replace(self_request, RequestMapping::Poisoned) {
+                RequestMapping::WarpSync(_, user_data) => {
+                    *self_request = RequestMapping::Inline(SourceId(source_id), detail, user_data)
+                }
+                _ => unreachable!(),
+            };
+        }
+
         for source in grandpa.sources {
             let source_user_data = AllForksSourceExtra {
                 user_data: source.user_data,
@@ -2521,20 +2574,14 @@ impl<TRq> Shared<TRq> {
             self.sources[source.outer_source_id.0] = SourceMapping::AllForks(updated_source_id);
         }
 
-        // TODO: convert requests
-        /*for (_, request) in self.requests.iter_mut() {
-            match request {
-                RequestMapping::WarpSync(_, user_data) => {
-                    *request = RequestMapping::Inline(_, _, user_data)
-                }
-                _ => {}
-            }
-        }*/
-
         debug_assert!(self
             .sources
             .iter()
             .all(|(_, s)| matches!(s, SourceMapping::AllForks(_))));
+        debug_assert!(self
+            .requests
+            .iter()
+            .all(|(_, s)| matches!(s, RequestMapping::AllForks(..) | RequestMapping::Inline(..))));
 
         (
             all_forks,
@@ -2551,6 +2598,7 @@ enum RequestMapping<TRq> {
     AllForks(all_forks::RequestId),
     Optimistic(optimistic::RequestId),
     WarpSync(warp_sync::RequestId, TRq), // TODO: move TRq to warp sync state machine
+    Poisoned,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
