@@ -265,7 +265,10 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         }))
     }
 
-    pub fn remove_source(&mut self, to_remove: SourceId) -> TSrc {
+    pub fn remove_source(
+        &'_ mut self,
+        to_remove: SourceId,
+    ) -> (TSrc, impl Iterator<Item = (RequestId, TRq)> + '_) {
         debug_assert!(self.sources.contains(to_remove.0));
         let removed = self.sources.remove(to_remove.0).user_data;
 
@@ -301,7 +304,18 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             }
         }
 
-        removed
+        let obsolete_requests_indices = self
+            .in_progress_requests
+            .iter()
+            .filter_map(|(id, (src, _, _))| if *src == to_remove { Some(id) } else { None })
+            .collect::<Vec<_>>();
+        let mut obsolete_requests = Vec::with_capacity(obsolete_requests_indices.len());
+        for index in obsolete_requests_indices {
+            let (_, user_data, _) = self.in_progress_requests.remove(index);
+            obsolete_requests.push((RequestId(index), user_data));
+        }
+
+        (removed, obsolete_requests.into_iter())
     }
 
     pub fn desired_requests(

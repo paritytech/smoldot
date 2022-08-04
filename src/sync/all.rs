@@ -486,8 +486,33 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 AllSyncInner::GrandpaWarpSync { inner },
                 SourceMapping::GrandpaWarpSync(source_id),
             ) => {
-                let user_data = inner.remove_source(source_id);
-                (user_data.user_data, Vec::new().into_iter()) // TODO: properly return requests
+                let (user_data, requests) = inner.remove_source(source_id);
+                let requests = requests
+                    .map(|(_inner_request_id, request_inner_user_data)| {
+                        debug_assert!(self
+                            .shared
+                            .requests
+                            .contains(request_inner_user_data.outer_request_id.0));
+                        let _removed = self
+                            .shared
+                            .requests
+                            .remove(request_inner_user_data.outer_request_id.0);
+                        debug_assert!(matches!(
+                            _removed,
+                            RequestMapping::WarpSync(_inner_request_id)
+                        ));
+
+                        (
+                            request_inner_user_data.outer_request_id,
+                            request_inner_user_data.user_data,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter();
+
+                // TODO: also handle the "inline" requests
+
+                (user_data.user_data, requests)
             }
 
             (AllSyncInner::Poisoned, _) => unreachable!(),
