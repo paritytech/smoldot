@@ -784,7 +784,6 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
 
         ProcessOne::Idle(self)
     }
-
 }
 
 #[derive(Debug, Copy, Clone)]

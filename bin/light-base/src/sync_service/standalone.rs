@@ -510,7 +510,9 @@ impl<TPlat: Platform> Task<TPlat> {
                 );
 
                 let (block_request, abort) = future::abortable(block_request);
-                let request_id = self.sync.add_request(source_id, request_detail.into(), abort);
+                let request_id = self
+                    .sync
+                    .add_request(source_id, request_detail.into(), abort);
 
                 self.pending_block_requests
                     .push(async move { (request_id, block_request.await) }.boxed());
@@ -533,7 +535,9 @@ impl<TPlat: Platform> Task<TPlat> {
                 );
 
                 let (grandpa_request, abort) = future::abortable(grandpa_request);
-                let request_id = self.sync.add_request(source_id, request_detail.into(), abort);
+                let request_id = self
+                    .sync
+                    .add_request(source_id, request_detail.into(), abort);
 
                 self.pending_grandpa_requests
                     .push(async move { (request_id, grandpa_request.await) }.boxed());
@@ -579,7 +583,9 @@ impl<TPlat: Platform> Task<TPlat> {
                 };
 
                 let (storage_request, abort) = future::abortable(storage_request);
-                let request_id = self.sync.add_request(source_id, request_detail.into(), abort);
+                let request_id = self
+                    .sync
+                    .add_request(source_id, request_detail.into(), abort);
 
                 self.pending_storage_requests
                     .push(async move { (request_id, storage_request.await) }.boxed());
@@ -616,7 +622,9 @@ impl<TPlat: Platform> Task<TPlat> {
                 };
 
                 let (call_proof_request, abort) = future::abortable(call_proof_request);
-                let request_id = self.sync.add_request(source_id, request_detail.into(), abort);
+                let request_id = self
+                    .sync
+                    .add_request(source_id, request_detail.into(), abort);
 
                 self.pending_call_proof_requests
                     .push(async move { (request_id, call_proof_request.await) }.boxed());
