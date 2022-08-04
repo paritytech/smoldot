@@ -478,8 +478,14 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         )
     }
 
-    /// Injects a failure to retrieve the parameters.
-    pub fn inject_error(&mut self, id: RequestId) -> TRq {
+    /// Removes the given request from the state machine. Returns the user data that was associated
+    /// to it.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] is invalid.
+    ///
+    pub fn fail_request(&mut self, id: RequestId) -> TRq {
         match (self.in_progress_requests.remove(id.0), &mut self.phase) {
             ((source_id, user_data, RequestDetail::WarpSyncRequest { .. }), _) => {
                 // TODO: check that block hash matches starting point? ^
@@ -521,9 +527,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         }
     }
 
-    /// Set the code and heap pages from storage using the keys `:code` and `:heappages`
-    /// respectively. Also allows setting an execution hint for the virtual machine.
-    pub fn set_virtual_machine_params(
+    pub fn runtime_parameters_get_success(
         &mut self,
         id: RequestId,
         code: Option<impl AsRef<[u8]>>,
@@ -885,7 +889,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     }
 
     /// Submit a GrandPa warp sync successful response.
-    pub fn handle_response_ok(
+    pub fn warp_sync_request_success(
         &mut self,
         request_id: RequestId,
         fragments: Vec<WarpSyncFragment>,

@@ -1403,9 +1403,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 RequestMapping::WarpSync(request_id),
             ) => {
                 let user_data = if let Some((fragments, is_finished)) = response {
-                    grandpa.handle_response_ok(request_id, fragments, is_finished)
+                    grandpa.warp_sync_request_success(request_id, fragments, is_finished)
                 } else {
-                    grandpa.inject_error(request_id)
+                    grandpa.fail_request(request_id)
                 };
 
                 (user_data.user_data, ResponseOutcome::Queued)
@@ -1454,7 +1454,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let heap_pages = response.next().unwrap();
                 assert!(response.next().is_none());
 
-                let user_data = sync.set_virtual_machine_params(request_id, code, heap_pages);
+                let user_data = sync.runtime_parameters_get_success(request_id, code, heap_pages);
 
                 self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
                 (user_data.user_data, ResponseOutcome::Queued)
@@ -1464,7 +1464,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 Err(_),
                 RequestMapping::WarpSync(request_id),
             ) => {
-                let user_data = sync.inject_error(request_id).user_data;
+                let user_data = sync.fail_request(request_id).user_data;
                 // TODO: notify user of the problem
                 self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
                 (user_data, ResponseOutcome::Queued)
@@ -1519,7 +1519,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 Err(_),
                 RequestMapping::WarpSync(request_id),
             ) => {
-                let user_data = sync.inject_error(request_id);
+                let user_data = sync.fail_request(request_id);
                 // TODO: notify user of the problem
                 self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
                 (user_data.user_data, ResponseOutcome::Queued)
