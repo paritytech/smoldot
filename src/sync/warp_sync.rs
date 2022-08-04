@@ -789,65 +789,59 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
             downloaded_source,
         } = &mut self.inner.phase
         {
-            // TODO: restore feature where fragments are verified one by one through public API
-            loop {
-                match verifier.take().unwrap().next() {
-                    Ok(warp_sync::Next::NotFinished(next_verifier)) => {
-                        *verifier = Some(next_verifier);
-                    }
-                    Ok(warp_sync::Next::EmptyProof) => {
+            match verifier.take().unwrap().next() {
+                Ok(warp_sync::Next::NotFinished(next_verifier)) => {
+                    *verifier = Some(next_verifier);
+                }
+                Ok(warp_sync::Next::EmptyProof) => {
+                    self.inner.phase = Phase::PostVerification {
+                        babeapi_current_epoch_response: None,
+                        babeapi_next_epoch_response: None,
+                        runtime: None,
+                        header: self
+                            .inner
+                            .start_chain_information
+                            .as_ref()
+                            .finalized_block_header
+                            .into(),
+                        chain_information_finality: self
+                            .inner
+                            .start_chain_information
+                            .as_ref()
+                            .finality
+                            .into(),
+                        warp_sync_source_id: *downloaded_source,
+                    };
+                }
+                Ok(warp_sync::Next::Success {
+                    scale_encoded_header,
+                    chain_information_finality,
+                }) => {
+                    // As the verification of the fragment has succeeded, we are sure that the header
+                    // is valid and can decode it.
+                    let header: Header =
+                        header::decode(&scale_encoded_header, self.inner.block_number_bytes)
+                            .unwrap()
+                            .into();
+
+                    if *final_set_of_fragments {
                         self.inner.phase = Phase::PostVerification {
                             babeapi_current_epoch_response: None,
                             babeapi_next_epoch_response: None,
                             runtime: None,
-                            header: self
-                                .inner
-                                .start_chain_information
-                                .as_ref()
-                                .finalized_block_header
-                                .into(),
-                            chain_information_finality: self
-                                .inner
-                                .start_chain_information
-                                .as_ref()
-                                .finality
-                                .into(),
+                            header,
+                            chain_information_finality,
                             warp_sync_source_id: *downloaded_source,
                         };
-                        break;
+                    } else {
+                        *previous_verifier_values = Some((header, chain_information_finality));
                     }
-                    Ok(warp_sync::Next::Success {
-                        scale_encoded_header,
-                        chain_information_finality,
-                    }) => {
-                        // As the verification of the fragment has succeeded, we are sure that the header
-                        // is valid and can decode it.
-                        let header: Header =
-                            header::decode(&scale_encoded_header, self.inner.block_number_bytes)
-                                .unwrap()
-                                .into();
-
-                        if *final_set_of_fragments {
-                            self.inner.phase = Phase::PostVerification {
-                                babeapi_current_epoch_response: None,
-                                babeapi_next_epoch_response: None,
-                                runtime: None,
-                                header,
-                                chain_information_finality,
-                                warp_sync_source_id: *downloaded_source,
-                            };
-                        } else {
-                            *previous_verifier_values = Some((header, chain_information_finality));
-                        }
-
-                        break;
-                    }
-                    Err(error) => {
-                        self.inner.phase = Phase::DownloadFragments {
-                            previous_verifier_values: previous_verifier_values.take(),
-                        };
-                        return (self.inner, Some(error));
-                    }
+                }
+                Err(error) => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: previous_verifier_values.take(),
+                    };
+                    return (self.inner, Some(error));
                 }
             }
 
