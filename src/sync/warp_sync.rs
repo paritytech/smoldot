@@ -343,75 +343,114 @@ impl<TSrc> InProgressWarpSync<TSrc> {
 
         let runtime_parameters_get = if let Phase::PostVerification {
             header,
-            chain_information_finality,
             warp_sync_source_id,
-            runtime,
-            babeapi_current_epoch_response,
-            babeapi_next_epoch_response,
+            ..
         } = &self.phase
         {
             if !self.in_progress_requests.iter().any(|(_, rq)| {
-            rq.0 == *warp_sync_source_id && matches!(rq.1, RequestDetail::RuntimeParametersGet { block_hash: b } if b == header.hash(self.block_number_bytes))
-        }) {
-            Some((
-                *warp_sync_source_id,
-                &self.sources[warp_sync_source_id.0].user_data,
-                DesiredRequest::RuntimeParametersGet {
-                    block_hash: header.hash(self.block_number_bytes),
-                    state_trie_root: header.state_root,
-                },
-            ))
-        } else {
-            None
-        }
+                rq.0 == *warp_sync_source_id
+                    && match rq.1 {
+                        RequestDetail::RuntimeParametersGet { block_hash: b }
+                            if b == header.hash(self.block_number_bytes) =>
+                        {
+                            true
+                        }
+                        _ => false,
+                    }
+            }) {
+                Some((
+                    *warp_sync_source_id,
+                    &self.sources[warp_sync_source_id.0].user_data,
+                    DesiredRequest::RuntimeParametersGet {
+                        block_hash: header.hash(self.block_number_bytes),
+                        state_trie_root: header.state_root,
+                    },
+                ))
+            } else {
+                None
+            }
         } else {
             None
         };
 
         let babe_current_epoch = if let Phase::PostVerification {
             header,
-            chain_information_finality,
             warp_sync_source_id,
-            runtime,
             babeapi_current_epoch_response,
-            babeapi_next_epoch_response,
+            ..
         } = &self.phase
         {
-            if babeapi_current_epoch_response.is_none() && !self.in_progress_requests.iter().any(|(_, rq)| {
-            rq.0 == *warp_sync_source_id && matches!(rq.1, RequestDetail::RuntimeCallMerkleProof { block_hash: b, function_name: ref f,  parameter_vectored: ref p } if b == header.hash(self.block_number_bytes) && f == "BabeApi_current_epoch" && p.is_empty())
-        }) {Some((
-            *warp_sync_source_id,
-            &self.sources[warp_sync_source_id.0].user_data,
-            DesiredRequest::RuntimeCallMerkleProof {
-                block_hash: header.hash(self.block_number_bytes),
-                function_name: "BabeApi_current_epoch".into(), // TODO: consider Cow<'static, str> instead of String
-                parameter_vectored: Vec::new(),
-            },
-        )) } else { None }
+            if babeapi_current_epoch_response.is_none()
+                && !self.in_progress_requests.iter().any(|(_, rq)| {
+                    rq.0 == *warp_sync_source_id
+                        && match rq.1 {
+                            RequestDetail::RuntimeCallMerkleProof {
+                                block_hash: b,
+                                function_name: ref f,
+                                parameter_vectored: ref p,
+                            } if b == header.hash(self.block_number_bytes)
+                                && f == "BabeApi_current_epoch"
+                                && p.is_empty() =>
+                            {
+                                true
+                            }
+                            _ => false,
+                        }
+                })
+            {
+                Some((
+                    *warp_sync_source_id,
+                    &self.sources[warp_sync_source_id.0].user_data,
+                    DesiredRequest::RuntimeCallMerkleProof {
+                        block_hash: header.hash(self.block_number_bytes),
+                        function_name: "BabeApi_current_epoch".into(), // TODO: consider Cow<'static, str> instead of String
+                        parameter_vectored: Vec::new(),
+                    },
+                ))
+            } else {
+                None
+            }
         } else {
             None
         };
 
         let babe_next_epoch = if let Phase::PostVerification {
             header,
-            chain_information_finality,
             warp_sync_source_id,
-            runtime,
-            babeapi_current_epoch_response,
             babeapi_next_epoch_response,
+            ..
         } = &self.phase
         {
-            if babeapi_next_epoch_response.is_none() && !self.in_progress_requests.iter().any(|(_, rq)| {
-                rq.0 == *warp_sync_source_id && matches!(rq.1, RequestDetail::RuntimeCallMerkleProof { block_hash: b, function_name: ref f,  parameter_vectored: ref p } if b == header.hash(self.block_number_bytes) && f == "BabeApi_next_epoch" && p.is_empty())
-            }) {Some((
-                *warp_sync_source_id,
-                &self.sources[warp_sync_source_id.0].user_data,
-                DesiredRequest::RuntimeCallMerkleProof {
-                    block_hash: header.hash(self.block_number_bytes),
-                    function_name: "BabeApi_next_epoch".into(), // TODO: consider Cow<'static, str> instead of String
-                    parameter_vectored: Vec::new(),
-                },
-            )) } else { None }
+            if babeapi_next_epoch_response.is_none()
+                && !self.in_progress_requests.iter().any(|(_, rq)| {
+                    rq.0 == *warp_sync_source_id
+                        && match rq.1 {
+                            RequestDetail::RuntimeCallMerkleProof {
+                                block_hash: b,
+                                function_name: ref f,
+                                parameter_vectored: ref p,
+                            } if b == header.hash(self.block_number_bytes)
+                                && f == "BabeApi_next_epoch"
+                                && p.is_empty() =>
+                            {
+                                true
+                            }
+                            _ => false,
+                        }
+                })
+            {
+                Some((
+                    *warp_sync_source_id,
+                    &self.sources[warp_sync_source_id.0].user_data,
+                    DesiredRequest::RuntimeCallMerkleProof {
+                        block_hash: header.hash(self.block_number_bytes),
+                        function_name: "BabeApi_next_epoch".into(), // TODO: consider Cow<'static, str> instead of String
+                        parameter_vectored: Vec::new(),
+                    },
+                ))
+            } else {
+                None
+            }
         } else {
             None
         };
