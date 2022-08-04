@@ -56,7 +56,7 @@
 
 use crate::{
     chain::chain_information::{
-        self, babe_fetch_epoch, BabeEpochInformation, ChainInformation, ChainInformationConsensus,
+        self, babe_fetch_epoch, ChainInformation, ChainInformationConsensus,
         ChainInformationConsensusRef, ChainInformationFinality, ChainInformationFinalityRef,
         ValidChainInformation, ValidChainInformationRef,
     },
@@ -66,11 +66,11 @@ use crate::{
         vm::ExecHint,
     },
     finality::grandpa::warp_sync,
-    header::{self, Header, HeaderRef},
+    header::{self, Header},
     trie::proof_verify,
 };
 
-use alloc::{borrow::Cow, string::String, vec::Vec};
+use alloc::{borrow::Cow, vec::Vec};
 use core::{iter, mem, ops};
 
 pub use warp_sync::{Error as FragmentError, WarpSyncFragment};
@@ -866,10 +866,10 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
         if let Phase::PostVerification {
             header,
             chain_information_finality,
-            warp_sync_source_id,
             runtime: runtime @ Some(_),
             babeapi_current_epoch_response: babeapi_current_epoch_response @ Some(_),
             babeapi_next_epoch_response: babeapi_next_epoch_response @ Some(_),
+            ..
         } = &mut self.inner.phase
         {
             let (finalized_storage_code, finalized_storage_heap_pages) = runtime.take().unwrap();

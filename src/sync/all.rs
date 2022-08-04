@@ -32,7 +32,7 @@
 
 use crate::{
     chain::{blocks_tree, chain_information},
-    executor::{host, storage_diff, vm::ExecHint},
+    executor::{host, storage_diff},
     header,
     sync::{all_forks, optimistic, warp_sync},
     verify,
@@ -778,7 +778,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     )
                 });
 
-                either::Right(either::Left(iter))
+                either::Right(iter)
             }
             AllSyncInner::GrandpaWarpSync { inner } => {
                 let iter = inner
@@ -818,7 +818,6 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 either::Left(either::Left(iter))
             }
-            AllSyncInner::GrandpaWarpSync { .. } => either::Right(either::Right(iter::empty())),
             AllSyncInner::Poisoned => unreachable!(),
         }
     }
