@@ -507,18 +507,11 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             header,
             chain_information_finality,
             warp_sync_source_id,
-            runtime,
-            babeapi_current_epoch_response,
-            babeapi_next_epoch_response,
+            runtime: runtime @ Some(_),
+            babeapi_current_epoch_response: babeapi_current_epoch_response @ Some(_),
+            babeapi_next_epoch_response: babeapi_next_epoch_response @ Some(_),
         } = &mut self.phase
         {
-            if runtime.is_none()
-                || babeapi_current_epoch_response.is_none()
-                || babeapi_next_epoch_response.is_none()
-            {
-                return (WarpSync::InProgress(self), None);
-            }
-
             let (finalized_storage_code, finalized_storage_heap_pages) = runtime.take().unwrap();
             let babeapi_current_epoch_response = babeapi_current_epoch_response.take().unwrap();
             let babeapi_next_epoch_response = babeapi_next_epoch_response.take().unwrap();
