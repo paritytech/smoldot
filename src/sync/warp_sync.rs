@@ -49,7 +49,7 @@
 //! API user.
 //!
 //! Similarly, at any given moment, this state machine holds a list of requests that concern these
-//! sources. Use [`InProgressWarpSync::desired_requires`] to determine which requests will be
+//! sources. Use [`InProgressWarpSync::desired_requests`] to determine which requests will be
 //! useful to the progress of the warp syncing.
 //!
 //! Use [`InProgressWarpSync::process_one`] in order to run verifications of the payloads that have
