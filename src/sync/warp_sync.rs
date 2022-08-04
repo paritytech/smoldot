@@ -821,11 +821,11 @@ impl<TSrc> InProgressWarpSync<TSrc> {
 
     /// Submit a GrandPa warp sync successful response.
     pub fn handle_response_ok(
-        mut self,
+        &mut self,
         request_id: RequestId,
         fragments: Vec<WarpSyncFragment>,
         final_set_of_fragments: bool,
-    ) -> InProgressWarpSync<TSrc> {
+    ) {
         match (
             self.in_progress_requests.remove(request_id.0),
             &mut self.phase,
@@ -840,9 +840,8 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                 // TODO: check block_hash ^
                 self.sources[rq_source_id.0].already_tried = true;
                 *downloaded_proof = Some((rq_source_id, fragments, final_set_of_fragments));
-                self
             }
-            ((_, RequestDetail::WarpSyncRequest { .. }), _) => self,
+            ((_, RequestDetail::WarpSyncRequest { .. }), _) => {},
             ((_, _), _) => panic!(),
         }
     }

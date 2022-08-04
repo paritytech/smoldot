@@ -1385,20 +1385,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         debug_assert!(self.shared.requests.contains(request_id.0));
         let request = self.shared.requests.remove(request_id.0);
 
-        match (
-            mem::replace(&mut self.inner, AllSyncInner::Poisoned),
-            request,
-        ) {
+        match (&mut self.inner, request) {
             (
-                AllSyncInner::GrandpaWarpSync { inner: mut grandpa },
+                AllSyncInner::GrandpaWarpSync { inner: grandpa },
                 RequestMapping::WarpSync(request_id, user_data),
             ) => {
                 if let Some((fragments, is_finished)) = response {
-                    let updated_grandpa =
-                        grandpa.handle_response_ok(request_id, fragments, is_finished);
-                    self.inner = AllSyncInner::GrandpaWarpSync {
-                        inner: updated_grandpa,
-                    };
+                    grandpa.handle_response_ok(request_id, fragments, is_finished);
                 } else {
                     grandpa.inject_error(request_id);
                 }
@@ -1407,9 +1400,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             }
 
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
-            (other, RequestMapping::Inline(_, _, user_data)) => {
-                self.inner = other;
-                (user_data, ResponseOutcome::Queued) // TODO: no
+            (_, RequestMapping::Inline(_, _, user_data)) => {
+                (user_data, ResponseOutcome::Queued) // TODO: no, not queued
             }
 
             _ => todo!(), // TODO: handle other variants
@@ -1450,11 +1442,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let heap_pages = response.next().unwrap();
                 assert!(response.next().is_none());
 
-                sync.set_virtual_machine_params(
-                    request_id,
-                    code,
-                    heap_pages,
-                );
+                sync.set_virtual_machine_params(request_id, code, heap_pages);
 
                 self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
                 (user_data, ResponseOutcome::Queued)
