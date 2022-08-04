@@ -91,7 +91,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
   // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
   const wsParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
 
-  const webRTCParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/udp\/(.*?)\/(x-webrtc)\/(.*?)\/$/);
+  const webRTCParsed = config.address.match(/^\/(ip4|ip6)\/(.*?)\/udp\/(.*?)\/x-webrtc\/(.*?)\/$/);
 
   if (wsParsed != null) {
       let connection: WebSocket;
@@ -141,8 +141,8 @@ function trustedBase64Decode(base64: string): Uint8Array {
   } else if (webRTCParsed != null) {
     let pc: RTCPeerConnection;
 
-    const proto = webRTCParsed[4];
-    if (proto == 'x-webrtc' && forbidWebRTC) {
+    const targetPort = webRTCParsed[3];
+    if (forbidWebRTC || targetPort == '0') {
         throw new ConnectionError('Connection type not allowed');
     }
 
@@ -158,17 +158,20 @@ function trustedBase64Decode(base64: string): Uint8Array {
       }
     };
 
-    // Create a new data channel. This will trigger a new negotiation (see
+    // Create a new data channel with id=1. This will trigger a new negotiation (see
     // `negotiationneeded` handler below).
     const dataChannel = pc.createDataChannel("data", { id: 1 });
 
     // When a new negotion is triggered, set both local and remote descriptions.
     pc.onnegotiationneeded = async (_event) => {
-      // Create a new offer and set it as local description.
-        var sdpOffer = (await pc.createOffer()).sdp!;
+        // Create a new offer and set it as local description.
+        const sdpOffer = (await pc.createOffer()).sdp!;
         await pc.setLocalDescription({ type: 'offer', sdp: sdpOffer });
 
         console.log("LOCAL OFFER: " + pc.localDescription!.sdp);
+
+        const ipVersion = webRTCParsed[1] == 'ip4'? '4' : '6';
+        const targetIp = webRTCParsed[2];
 
         // Note that the trailing line feed is important, as otherwise Chrome
         // fails to parse the payload.
@@ -197,7 +200,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
             // The `<fmt>` component must always be `pc-datachannel` for WebRTC.
             // The rest of the SDP payload adds attributes to this specific media stream.
             // RFCs: 8839, 8866, 8841
-            "m=application " + targetPort + " " + (protocol == 'tcp' ? "TCP" : "UDP") + "/DTLS/SCTP webrtc-datachannel" + "\n" +
+            "m=application " + targetPort + " " + "UDP/DTLS/SCTP webrtc-datachannel" + "\n" +
             // Indicates the IP address of the remote.
             // Note that "IN" means "Internet".
             "c=IN IP" + ipVersion + " " + targetIp + "\n" +
@@ -239,7 +242,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
             // The maximum SCTP user message size (in bytes) (RFC8841)
             "a=max-message-size:100000" + "\n" +
             // A transport address for a candidate that can be used for connectivity checks (RFC8839).
-            "a=candidate:1 1 " + (protocol == 'tcp' ? "TCP" : "UDP") + " 2113667327 " + targetIp + " " + targetPort + " typ host" + "\n";
+            "a=candidate:1 1 UDP 2113667327 " + targetIp + " " + targetPort + " typ host" + "\n";
 
         await pc.setRemoteDescription({ type: "answer", sdp: remoteSdp });
 
@@ -248,6 +251,8 @@ function trustedBase64Decode(base64: string): Uint8Array {
 
     dataChannel.onopen = () => {
         console.log(`'${dataChannel.label}' opened`);
+
+        // TODO: noise handshake
     };
 
     dataChannel.onerror = (error) => {
@@ -265,16 +270,32 @@ function trustedBase64Decode(base64: string): Uint8Array {
     return {
       close: (): void => {
           pc.onconnectionstatechange = null;
-          pc.onmessage = null;
-          pc.onerror = null;
           pc.close();
       },
 
-      send: (data: Uint8Array): void => {
-          connection.send(data);
+      send: (_data: Uint8Array): void => {
+          // pc.send(data);
       },
 
-      openOutSubstream: () => { throw new Error('Wrong connection type') }
+      openOutSubstream: () => {
+        var dataChannel = pc.createDataChannel("data");
+
+        dataChannel.onopen = () => {
+            console.log(`'${dataChannel.label}' opened`);
+        };
+
+        dataChannel.onerror = (error) => {
+            console.log(`'${dataChannel.label}' errored: ${error}`);
+        };
+
+        dataChannel.onclose = () => {
+            console.log(`'${dataChannel.label}' closed`);
+        };
+
+        dataChannel.onmessage = (m) => {
+            console.log(`new message on '${dataChannel.label}': '${m.data}'`);
+        }
+      }
     };
   } else {
       throw new ConnectionError('Unrecognized multiaddr format');
