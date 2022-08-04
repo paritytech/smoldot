@@ -1395,17 +1395,19 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             request,
         ) {
             (
-                AllSyncInner::GrandpaWarpSync { inner: grandpa },
+                AllSyncInner::GrandpaWarpSync { inner: mut grandpa },
                 RequestMapping::WarpSync(request_id, user_data),
             ) => {
-                let updated_grandpa = if let Some((fragments, is_finished)) = response {
-                    grandpa.handle_response_ok(request_id, fragments, is_finished)
+                if let Some((fragments, is_finished)) = response {
+                    let updated_grandpa =
+                        grandpa.handle_response_ok(request_id, fragments, is_finished);
+                    self.inner = AllSyncInner::GrandpaWarpSync {
+                        inner: updated_grandpa,
+                    };
                 } else {
-                    grandpa.inject_error(request_id)
-                };
-                self.inner = AllSyncInner::GrandpaWarpSync {
-                    inner: updated_grandpa,
-                };
+                    grandpa.inject_error(request_id);
+                }
+
                 (user_data, ResponseOutcome::Queued)
             }
 
@@ -1471,13 +1473,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 (user_data, ResponseOutcome::Queued)
             }
             (
-                AllSyncInner::GrandpaWarpSync { inner: sync },
+                AllSyncInner::GrandpaWarpSync { inner: mut sync },
                 Err(_),
                 RequestMapping::WarpSync(request_id, user_data),
             ) => {
-                let inner = sync.inject_error(request_id);
+                sync.inject_error(request_id);
                 // TODO: notify user of the problem
-                self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
                 (user_data, ResponseOutcome::Queued)
             }
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
@@ -1526,13 +1528,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 (user_data, ResponseOutcome::Queued)
             }
             (
-                AllSyncInner::GrandpaWarpSync { inner: sync },
+                AllSyncInner::GrandpaWarpSync { inner: mut sync },
                 Err(_),
                 RequestMapping::WarpSync(request_id, user_data),
             ) => {
-                let inner = sync.inject_error(request_id);
+                sync.inject_error(request_id);
                 // TODO: notify user of the problem
-                self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
                 (user_data, ResponseOutcome::Queued)
             }
             // Only the GrandPa warp syncing ever starts call proof requests.

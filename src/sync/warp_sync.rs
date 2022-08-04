@@ -411,10 +411,41 @@ impl<TSrc> InProgressWarpSync<TSrc> {
     }
 
     /// Injects a failure to retrieve the parameters.
-    pub fn inject_error(mut self, id: RequestId) -> InProgressWarpSync<TSrc> {
-        self.in_progress_requests.remove(id.0);
-
-        todo!()
+    pub fn inject_error(&mut self, id: RequestId) {
+        match (self.in_progress_requests.remove(id.0), &mut self.phase) {
+            ((source_id, RequestDetail::WarpSyncRequest { .. }), _) => {
+                // TODO: check that block hash matches starting point? ^
+                self.sources[source_id.0].already_tried = true;
+            }
+            (
+                (
+                    source_id,
+                    RequestDetail::RuntimeCallMerkleProof { .. }
+                    | RequestDetail::RuntimeParametersGet { .. },
+                ),
+                Phase::PostVerification {
+                    header,
+                    chain_information_finality,
+                    warp_sync_source_id,
+                    ..
+                },
+            ) if source_id == *warp_sync_source_id => {
+                self.phase = Phase::PreVerification {
+                    previous_verifier_values: Some((
+                        header.clone(),
+                        chain_information_finality.clone(),
+                    )),
+                }
+            }
+            (
+                (
+                    _,
+                    RequestDetail::RuntimeCallMerkleProof { .. }
+                    | RequestDetail::RuntimeParametersGet { .. },
+                ),
+                _,
+            ) => {}
+        }
     }
 
     /// Set the code and heap pages from storage using the keys `:code` and `:heappages`
