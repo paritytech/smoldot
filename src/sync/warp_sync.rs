@@ -295,7 +295,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
     ) -> impl Iterator<Item = (SourceId, &'_ TSrc, DesiredRequest)> + '_ {
         let warp_sync_request = if let Phase::PreVerification {
             previous_verifier_values,
-            downloaded_proof,
+            downloaded_proof: None,
         } = &self.phase
         {
             let start_block_hash = match previous_verifier_values.as_ref() {
@@ -307,18 +307,17 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                     .hash(self.block_number_bytes),
             };
 
-            if downloaded_proof.is_none()
-                && !self
-                    .in_progress_requests
-                    .iter()
-                    .any(|(_, (_, rq))| match rq {
-                        RequestDetail::WarpSyncRequest { block_hash }
-                            if *block_hash == start_block_hash =>
-                        {
-                            true
-                        }
-                        _ => false,
-                    })
+            if !self
+                .in_progress_requests
+                .iter()
+                .any(|(_, (_, rq))| match rq {
+                    RequestDetail::WarpSyncRequest { block_hash }
+                        if *block_hash == start_block_hash =>
+                    {
+                        true
+                    }
+                    _ => false,
+                })
             {
                 either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
                     // TODO: also filter by source finalized block? so that we don't request from sources below us
@@ -376,28 +375,26 @@ impl<TSrc> InProgressWarpSync<TSrc> {
         let babe_current_epoch = if let Phase::PostVerification {
             header,
             warp_sync_source_id,
-            babeapi_current_epoch_response,
+            babeapi_current_epoch_response: None,
             ..
         } = &self.phase
         {
-            if babeapi_current_epoch_response.is_none()
-                && !self.in_progress_requests.iter().any(|(_, rq)| {
-                    rq.0 == *warp_sync_source_id
-                        && match rq.1 {
-                            RequestDetail::RuntimeCallMerkleProof {
-                                block_hash: b,
-                                function_name: ref f,
-                                parameter_vectored: ref p,
-                            } if b == header.hash(self.block_number_bytes)
-                                && f == "BabeApi_current_epoch"
-                                && p.is_empty() =>
-                            {
-                                true
-                            }
-                            _ => false,
+            if !self.in_progress_requests.iter().any(|(_, rq)| {
+                rq.0 == *warp_sync_source_id
+                    && match rq.1 {
+                        RequestDetail::RuntimeCallMerkleProof {
+                            block_hash: b,
+                            function_name: ref f,
+                            parameter_vectored: ref p,
+                        } if b == header.hash(self.block_number_bytes)
+                            && f == "BabeApi_current_epoch"
+                            && p.is_empty() =>
+                        {
+                            true
                         }
-                })
-            {
+                        _ => false,
+                    }
+            }) {
                 Some((
                     *warp_sync_source_id,
                     &self.sources[warp_sync_source_id.0].user_data,
@@ -417,28 +414,26 @@ impl<TSrc> InProgressWarpSync<TSrc> {
         let babe_next_epoch = if let Phase::PostVerification {
             header,
             warp_sync_source_id,
-            babeapi_next_epoch_response,
+            babeapi_next_epoch_response: None,
             ..
         } = &self.phase
         {
-            if babeapi_next_epoch_response.is_none()
-                && !self.in_progress_requests.iter().any(|(_, rq)| {
-                    rq.0 == *warp_sync_source_id
-                        && match rq.1 {
-                            RequestDetail::RuntimeCallMerkleProof {
-                                block_hash: b,
-                                function_name: ref f,
-                                parameter_vectored: ref p,
-                            } if b == header.hash(self.block_number_bytes)
-                                && f == "BabeApi_next_epoch"
-                                && p.is_empty() =>
-                            {
-                                true
-                            }
-                            _ => false,
+            if !self.in_progress_requests.iter().any(|(_, rq)| {
+                rq.0 == *warp_sync_source_id
+                    && match rq.1 {
+                        RequestDetail::RuntimeCallMerkleProof {
+                            block_hash: b,
+                            function_name: ref f,
+                            parameter_vectored: ref p,
+                        } if b == header.hash(self.block_number_bytes)
+                            && f == "BabeApi_next_epoch"
+                            && p.is_empty() =>
+                        {
+                            true
                         }
-                })
-            {
+                        _ => false,
+                    }
+            }) {
                 Some((
                     *warp_sync_source_id,
                     &self.sources[warp_sync_source_id.0].user_data,
