@@ -151,6 +151,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     start_chain_information: config.chain_information,
                     block_number_bytes: config.block_number_bytes,
                     sources_capacity: config.sources_capacity,
+                    requests_capacity: config.sources_capacity, // TODO: ?! add as config?
                 }) {
                     Ok(inner) => AllSyncInner::GrandpaWarpSync { inner },
                     Err((chain_information, warp_sync::WarpSyncInitError::NotGrandpa)) => {

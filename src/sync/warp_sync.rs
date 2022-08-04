@@ -104,6 +104,9 @@ pub struct Config {
 
     /// The initial capacity of the list of sources.
     pub sources_capacity: usize,
+
+    /// The initial capacity of the list of requests.
+    pub requests_capacity: usize,
 }
 
 /// Initializes the warp sync state machine.
@@ -126,7 +129,7 @@ pub fn warp_sync<TSrc>(
         start_chain_information: config.start_chain_information,
         block_number_bytes: config.block_number_bytes,
         sources: slab::Slab::with_capacity(config.sources_capacity),
-        in_progress_requests: slab::Slab::with_capacity(config.sources_capacity), // TODO: requests_capacity?
+        in_progress_requests: slab::Slab::with_capacity(config.requests_capacity),
         phase: Phase::PreVerification {
             previous_verifier_values: None,
         },
