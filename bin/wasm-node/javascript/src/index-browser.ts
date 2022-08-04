@@ -150,10 +150,10 @@ function trustedBase64Decode(base64: string): Uint8Array {
     pc = new RTCPeerConnection();
 
     pc.onconnectionstatechange = (_event) => {
+      console.log(`conn state: ${pc.connectionState}`);
       switch(pc.connectionState) {
         case "connected":
-          config.onOpen({ type: 'multi-stream', peerId: new Uint8Array([0]) });
-        case "disconnected":
+        case "closed":
           config.onConnectionClose("");
       }
     };
@@ -253,6 +253,8 @@ function trustedBase64Decode(base64: string): Uint8Array {
         console.log(`'${dataChannel.label}' opened`);
 
         // TODO: noise handshake
+        const peerId = "";
+        config.onOpen({ type: 'multi-stream', peerId: trustedBase64Decode(peerId) });
     };
 
     dataChannel.onerror = (error) => {
@@ -267,14 +269,32 @@ function trustedBase64Decode(base64: string): Uint8Array {
         console.log(`new message on '${dataChannel.label}': '${m.data}'`);
     }
 
+    let dataChannels = new Map<number, RTCDataChannel>();
+
     return {
-      close: (): void => {
+      close: (streamId: number): void => {
+        if (streamId == null) {
           pc.onconnectionstatechange = null;
+          pc.onnegotiationneeded = null;
           pc.close();
+        } else {
+          let dc = dataChannels.get(streamId);
+          if (dc != null) {
+            dc.close();
+          } else {
+            console.log(`Data channel ${streamId} not found`);
+          }
+        }
       },
 
-      send: (_data: Uint8Array): void => {
-          // pc.send(data);
+
+      send: (data: Uint8Array, streamId: number): void => {
+        let dc = dataChannels.get(streamId);
+        if (dc != null) {
+          dc.send(data);
+        } else {
+          console.log(`Data channel ${streamId} not found`);
+        }
       },
 
       openOutSubstream: () => {
@@ -295,6 +315,8 @@ function trustedBase64Decode(base64: string): Uint8Array {
         dataChannel.onmessage = (m) => {
             console.log(`new message on '${dataChannel.label}': '${m.data}'`);
         }
+
+        dataChannels.set(dataChannel.id, dataChannel);
       }
     };
   } else {
