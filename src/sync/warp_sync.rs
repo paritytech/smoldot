@@ -227,7 +227,11 @@ impl<TSrc> InProgressWarpSync<TSrc> {
 
     /// Returns the chain information that is considered verified.
     pub fn as_chain_information(&self) -> ValidChainInformationRef {
-        // TODO: not correct
+        // Note: after verifying a warp sync fragment, we are certain that the header targeted by
+        // this fragment is indeed part of the chain. However, this is not enough in order to
+        // produce a full chain information struct. Such struct can only be produced after the
+        // entire warp syncing has succeeded. If if it still in progress, all we can return is
+        // the starting point.
         (&self.start_chain_information).into()
     }
 
