@@ -1053,20 +1053,19 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn process_one(mut self) -> ProcessOne<TRq, TSrc, TBl> {
         match self.inner {
             AllSyncInner::GrandpaWarpSync { inner } => {
+                // TODO: errors not reported to upper layer
                 let outcome = match inner.process_one() {
-                    warp_sync::ProcessOne::Idle(inner) => {
-                        (warp_sync::WarpSync::InProgress(inner), None)
-                    }
-                    warp_sync::ProcessOne::VerifyWarpSyncFragment(inner) => inner.verify(),
-                    warp_sync::ProcessOne::BuildChainInformation(inner) => inner.build(),
+                    warp_sync::ProcessOne::Idle(inner) => warp_sync::WarpSync::InProgress(inner),
+                    warp_sync::ProcessOne::VerifyWarpSyncFragment(inner) => inner.verify().0,
+                    warp_sync::ProcessOne::BuildChainInformation(inner) => inner.build().0,
                 };
 
                 match outcome {
-                    (warp_sync::WarpSync::InProgress(inner), _) => {
+                    warp_sync::WarpSync::InProgress(inner) => {
                         self.inner = AllSyncInner::GrandpaWarpSync { inner };
                         ProcessOne::AllSync(self)
                     }
-                    (warp_sync::WarpSync::Finished(success), _) => {
+                    warp_sync::WarpSync::Finished(success) => {
                         let (
                             new_inner,
                             finalized_block_runtime,

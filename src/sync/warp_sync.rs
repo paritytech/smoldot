@@ -766,7 +766,8 @@ pub struct VerifyWarpSyncFragment<TSrc, TRq> {
 }
 
 impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
-    pub fn verify(mut self) -> (WarpSync<TSrc, TRq>, Option<Error>) {
+    // TODO: does this API make sense?
+    pub fn verify(mut self) -> (WarpSync<TSrc, TRq>, Option<FragmentError>) {
         if let Phase::PendingVerify {
             previous_verifier_values,
             verifier,
@@ -828,7 +829,10 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                         break;
                     }
                     Err(error) => {
-                        todo!() // TODO:
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: previous_verifier_values.take(),
+                        };
+                        return (WarpSync::InProgress(self.inner), Some(error));
                     }
                 }
             }
