@@ -533,10 +533,6 @@ impl SyncBackground {
                             | all::ResponseOutcome::NotFinalizedChain { .. }
                             | all::ResponseOutcome::AllAlreadyInChain { .. } => {
                             }
-                            all::ResponseOutcome::WarpSyncError { .. } |
-                            all::ResponseOutcome::WarpSyncFinished { .. } => {
-                                unreachable!()
-                            }
                         }
                     }
                 },
@@ -802,7 +798,7 @@ impl SyncBackground {
                             // Locally-authored blocks source.
                             match (request_details, &self.authored_block) {
                                 (
-                                    all::RequestDetail::BlocksRequest {
+                                    all::DesiredRequest::BlocksRequest {
                                         first_block_hash: None,
                                         first_block_height,
                                         ..
@@ -810,7 +806,7 @@ impl SyncBackground {
                                     Some((authored_height, _, _, _)),
                                 ) if first_block_height == authored_height => true,
                                 (
-                                    all::RequestDetail::BlocksRequest {
+                                    all::DesiredRequest::BlocksRequest {
                                         first_block_hash: Some(first_block_hash),
                                         first_block_height,
                                         ..
@@ -834,7 +830,7 @@ impl SyncBackground {
             request_info.num_blocks_clamp(NonZeroU64::new(64).unwrap());
 
             match request_info {
-                all::RequestDetail::BlocksRequest { .. }
+                all::DesiredRequest::BlocksRequest { .. }
                     if source_id == self.block_author_sync_source =>
                 {
                     tracing::debug!("queue-locally-authored-block-for-import");
@@ -847,7 +843,7 @@ impl SyncBackground {
                     // Create a request that is immediately answered right below.
                     let request_id = self.sync.add_request(
                         source_id,
-                        request_info,
+                        request_info.into(),
                         future::AbortHandle::new_pair().0, // Temporary dummy.
                     );
 
@@ -863,7 +859,7 @@ impl SyncBackground {
                     );
                 }
 
-                all::RequestDetail::BlocksRequest {
+                all::DesiredRequest::BlocksRequest {
                     first_block_hash,
                     first_block_height,
                     ascending,
@@ -905,16 +901,14 @@ impl SyncBackground {
                     );
 
                     let (request, abort) = future::abortable(request);
-                    let request_id = self
-                        .sync
-                        .add_request(source_id, request_info.clone(), abort);
+                    let request_id = self.sync.add_request(source_id, request_info.into(), abort);
 
                     self.block_requests_finished
                         .push(request.map(move |r| (request_id, r)).boxed());
                 }
-                all::RequestDetail::GrandpaWarpSync { .. }
-                | all::RequestDetail::StorageGet { .. }
-                | all::RequestDetail::RuntimeCallMerkleProof { .. } => {
+                all::DesiredRequest::GrandpaWarpSync { .. }
+                | all::DesiredRequest::StorageGet { .. }
+                | all::DesiredRequest::RuntimeCallMerkleProof { .. } => {
                     // Not used in "full" mode.
                     unreachable!()
                 }
@@ -938,7 +932,9 @@ impl SyncBackground {
                     self.sync = idle;
                     break;
                 }
-                all::ProcessOne::VerifyWarpSyncFragment(_) => unreachable!(),
+                all::ProcessOne::VerifyWarpSyncFragment(_)
+                | all::ProcessOne::WarpSyncError { .. }
+                | all::ProcessOne::WarpSyncFinished { .. } => unreachable!(),
                 all::ProcessOne::VerifyBodyHeader(verify) => {
                     let hash_to_verify = verify.hash();
                     let height_to_verify = verify.height();

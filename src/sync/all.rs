@@ -754,7 +754,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// called in order for the request to actually be marked as started.
     pub fn desired_requests(
         &'_ self,
-    ) -> impl Iterator<Item = (SourceId, &'_ TSrc, RequestDetail)> + '_ {
+    ) -> impl Iterator<Item = (SourceId, &'_ TSrc, DesiredRequest)> + '_ {
         match &self.inner {
             AllSyncInner::AllForks(sync) => {
                 let iter = sync.desired_requests().map(
@@ -786,14 +786,14 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     .map(move |(_, src_user_data, rq_detail)| {
                         let detail = match rq_detail {
                             warp_sync::DesiredRequest::WarpSyncRequest { block_hash } => {
-                                RequestDetail::GrandpaWarpSync {
+                                DesiredRequest::GrandpaWarpSync {
                                     sync_start_block_hash: block_hash,
                                 }
                             }
                             warp_sync::DesiredRequest::RuntimeParametersGet {
                                 block_hash,
                                 state_trie_root,
-                            } => RequestDetail::StorageGet {
+                            } => DesiredRequest::StorageGet {
                                 block_hash,
                                 state_trie_root,
                                 keys: vec![b":code".to_vec(), b":heappages".to_vec()],
@@ -802,7 +802,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                                 block_hash,
                                 function_name,
                                 parameter_vectored,
-                            } => RequestDetail::RuntimeCallMerkleProof {
+                            } => DesiredRequest::RuntimeCallMerkleProof {
                                 block_hash,
                                 function_name,
                                 parameter_vectored,
@@ -936,11 +936,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             }
             (
                 AllSyncInner::GrandpaWarpSync { inner },
-                RequestDetail::StorageGet {
-                    block_hash,
-                    state_trie_root,
-                    keys,
-                },
+                RequestDetail::StorageGet { block_hash, keys },
             ) if keys == &[&b":code"[..], &b":heappages"[..]] => {
                 let inner_source_id = match self.shared.sources.get(source_id.0).unwrap() {
                     SourceMapping::GrandpaWarpSync(inner_source_id) => *inner_source_id,
@@ -1603,7 +1599,7 @@ impl<TRq, TSrc, TBl> ops::IndexMut<SourceId> for AllSync<TRq, TSrc, TBl> {
 /// See [`AllSync::desired_requests`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
-pub enum RequestDetail {
+pub enum DesiredRequest {
     /// Requesting blocks from the source is requested.
     BlocksRequest {
         /// Height of the first block to request.
@@ -1642,8 +1638,78 @@ pub enum RequestDetail {
         /// Hash of the block whose storage is requested.
         block_hash: [u8; 32],
         /// Merkle value of the root of the storage trie of the block.
-        // TODO: it is awkward to pass this to value to add_request as it's redundant with block_hash
         state_trie_root: [u8; 32],
+        /// Keys whose values is requested.
+        keys: Vec<Vec<u8>>,
+    },
+
+    /// Sending a call proof query is requested.
+    RuntimeCallMerkleProof {
+        /// Hash of the block whose call is made against.
+        block_hash: [u8; 32],
+        /// Name of the function to be called.
+        function_name: String,
+        /// Concatenated SCALE-encoded parameters to provide to the call.
+        parameter_vectored: Vec<u8>,
+    },
+}
+
+impl DesiredRequest {
+    /// Caps the number of blocks to request to `max`.
+    pub fn num_blocks_clamp(&mut self, max: NonZeroU64) {
+        if let DesiredRequest::BlocksRequest { num_blocks, .. } = self {
+            *num_blocks = NonZeroU64::new(cmp::min(num_blocks.get(), max.get())).unwrap();
+        }
+    }
+
+    /// Caps the number of blocks to request to `max`.
+    pub fn with_num_blocks_clamp(mut self, max: NonZeroU64) -> Self {
+        self.num_blocks_clamp(max);
+        self
+    }
+}
+
+/// See [`AllSync::desired_requests`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
+pub enum RequestDetail {
+    /// Requesting blocks from the source is requested.
+    BlocksRequest {
+        /// Height of the first block to request.
+        first_block_height: u64,
+        /// Hash of the first block to request. `None` if not known.
+        first_block_hash: Option<[u8; 32]>,
+        /// `True` if the `first_block_hash` is the response should contain blocks in an
+        /// increasing number, starting from `first_block_hash` with the lowest number. If `false`,
+        /// the blocks should be in decreasing number, with `first_block_hash` as the highest
+        /// number.
+        ascending: bool,
+        /// Number of blocks the request should return.
+        ///
+        /// Note that this is only an indication, and the source is free to give fewer blocks
+        /// than requested.
+        ///
+        /// This might be equal to `u64::max_value()` in case no upper bound is required. The API
+        /// user is responsible for clamping this value to a reasonable limit.
+        num_blocks: NonZeroU64,
+        /// `True` if headers should be included in the response.
+        request_headers: bool,
+        /// `True` if bodies should be included in the response.
+        request_bodies: bool,
+        /// `True` if the justification should be included in the response, if any.
+        request_justification: bool,
+    },
+
+    /// Sending a Grandpa warp sync request is requested.
+    GrandpaWarpSync {
+        /// Hash of the known finalized block. Starting point of the request.
+        sync_start_block_hash: [u8; 32],
+    },
+
+    /// Sending a storage query is requested.
+    StorageGet {
+        /// Hash of the block whose storage is requested.
+        block_hash: [u8; 32],
         /// Keys whose values is requested.
         keys: Vec<Vec<u8>>,
     },
@@ -1671,6 +1737,47 @@ impl RequestDetail {
     pub fn with_num_blocks_clamp(mut self, max: NonZeroU64) -> Self {
         self.num_blocks_clamp(max);
         self
+    }
+}
+
+impl From<DesiredRequest> for RequestDetail {
+    fn from(rq: DesiredRequest) -> RequestDetail {
+        match rq {
+            DesiredRequest::BlocksRequest {
+                first_block_height,
+                first_block_hash,
+                ascending,
+                num_blocks,
+                request_headers,
+                request_bodies,
+                request_justification,
+            } => RequestDetail::BlocksRequest {
+                first_block_height,
+                first_block_hash,
+                ascending,
+                num_blocks,
+                request_headers,
+                request_bodies,
+                request_justification,
+            },
+            DesiredRequest::GrandpaWarpSync {
+                sync_start_block_hash,
+            } => RequestDetail::GrandpaWarpSync {
+                sync_start_block_hash,
+            },
+            DesiredRequest::StorageGet {
+                block_hash, keys, ..
+            } => RequestDetail::StorageGet { block_hash, keys },
+            DesiredRequest::RuntimeCallMerkleProof {
+                block_hash,
+                function_name,
+                parameter_vectored,
+            } => RequestDetail::RuntimeCallMerkleProof {
+                block_hash,
+                function_name,
+                parameter_vectored,
+            },
+        }
     }
 }
 
@@ -2519,7 +2626,6 @@ impl<TRq> Shared<TRq> {
                 warp_sync::RequestDetail::RuntimeParametersGet { block_hash } => {
                     RequestDetail::StorageGet {
                         block_hash,
-                        state_trie_root: [0; 32], // TODO: wrong /!\ needs more refactoring to remove the field entirely
                         keys: vec![b":code".to_vec(), b":heappages".to_vec()],
                     }
                 }
@@ -2606,8 +2712,8 @@ enum SourceMapping {
 fn all_forks_request_convert(
     rq_params: all_forks::RequestParams,
     full_node: bool,
-) -> RequestDetail {
-    RequestDetail::BlocksRequest {
+) -> DesiredRequest {
+    DesiredRequest::BlocksRequest {
         ascending: false, // Hardcoded based on the logic of the all-forks syncing.
         first_block_hash: Some(rq_params.first_block_hash),
         first_block_height: rq_params.first_block_height,
@@ -2621,8 +2727,8 @@ fn all_forks_request_convert(
 fn optimistic_request_convert(
     rq_params: optimistic::RequestDetail,
     full_node: bool,
-) -> RequestDetail {
-    RequestDetail::BlocksRequest {
+) -> DesiredRequest {
+    DesiredRequest::BlocksRequest {
         ascending: true, // Hardcoded based on the logic of the optimistic syncing.
         first_block_hash: None,
         first_block_height: rq_params.block_height.get(),

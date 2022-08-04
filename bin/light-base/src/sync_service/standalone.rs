@@ -471,7 +471,7 @@ impl<TPlat: Platform> Task<TPlat> {
         request_detail.num_blocks_clamp(NonZeroU64::new(64).unwrap());
 
         match request_detail {
-            all::RequestDetail::BlocksRequest {
+            all::DesiredRequest::BlocksRequest {
                 first_block_hash,
                 first_block_height,
                 ascending,
@@ -510,13 +510,13 @@ impl<TPlat: Platform> Task<TPlat> {
                 );
 
                 let (block_request, abort) = future::abortable(block_request);
-                let request_id = self.sync.add_request(source_id, request_detail, abort);
+                let request_id = self.sync.add_request(source_id, request_detail.into(), abort);
 
                 self.pending_block_requests
                     .push(async move { (request_id, block_request.await) }.boxed());
             }
 
-            all::RequestDetail::GrandpaWarpSync {
+            all::DesiredRequest::GrandpaWarpSync {
                 sync_start_block_hash,
             } => {
                 let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
@@ -533,13 +533,13 @@ impl<TPlat: Platform> Task<TPlat> {
                 );
 
                 let (grandpa_request, abort) = future::abortable(grandpa_request);
-                let request_id = self.sync.add_request(source_id, request_detail, abort);
+                let request_id = self.sync.add_request(source_id, request_detail.into(), abort);
 
                 self.pending_grandpa_requests
                     .push(async move { (request_id, grandpa_request.await) }.boxed());
             }
 
-            all::RequestDetail::StorageGet {
+            all::DesiredRequest::StorageGet {
                 block_hash,
                 state_trie_root,
                 ref keys,
@@ -579,13 +579,13 @@ impl<TPlat: Platform> Task<TPlat> {
                 };
 
                 let (storage_request, abort) = future::abortable(storage_request);
-                let request_id = self.sync.add_request(source_id, request_detail, abort);
+                let request_id = self.sync.add_request(source_id, request_detail.into(), abort);
 
                 self.pending_storage_requests
                     .push(async move { (request_id, storage_request.await) }.boxed());
             }
 
-            all::RequestDetail::RuntimeCallMerkleProof {
+            all::DesiredRequest::RuntimeCallMerkleProof {
                 block_hash,
                 ref function_name,
                 ref parameter_vectored,
@@ -616,7 +616,7 @@ impl<TPlat: Platform> Task<TPlat> {
                 };
 
                 let (call_proof_request, abort) = future::abortable(call_proof_request);
-                let request_id = self.sync.add_request(source_id, request_detail, abort);
+                let request_id = self.sync.add_request(source_id, request_detail.into(), abort);
 
                 self.pending_call_proof_requests
                     .push(async move { (request_id, call_proof_request.await) }.boxed());
