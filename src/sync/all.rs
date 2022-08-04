@@ -1049,7 +1049,27 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// [`AllSync`] is yielded back at the end of this process.
     pub fn process_one(mut self) -> ProcessOne<TRq, TSrc, TBl> {
         match self.inner {
-            AllSyncInner::GrandpaWarpSync { .. } => ProcessOne::AllSync(self),
+            AllSyncInner::GrandpaWarpSync { inner } => match inner.run() {
+                (warp_sync::WarpSync::InProgress(inner), _) => {
+                    self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                    ProcessOne::AllSync(self)
+                }
+                (warp_sync::WarpSync::Finished(success), _) => {
+                    let (
+                        new_inner,
+                        finalized_block_runtime,
+                        finalized_storage_code,
+                        finalized_storage_heap_pages,
+                    ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
+                    self.inner = AllSyncInner::AllForks(new_inner);
+                    ProcessOne::WarpSyncFinished {
+                        sync: self,
+                        finalized_block_runtime,
+                        finalized_storage_code,
+                        finalized_storage_heap_pages,
+                    }
+                }
+            },
             AllSyncInner::AllForks(sync) => match sync.process_one() {
                 all_forks::ProcessOne::AllSync { sync } => {
                     self.inner = AllSyncInner::AllForks(sync);
@@ -1423,7 +1443,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             request,
         ) {
             (
-                AllSyncInner::GrandpaWarpSync { inner: sync },
+                AllSyncInner::GrandpaWarpSync { inner: mut sync },
                 Ok(mut response),
                 RequestMapping::WarpSync(request_id, user_data),
             ) => {
@@ -1439,7 +1459,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 // this runtime, but we don't care enough about this possibility to optimize
                 // this.
                 // TODO: make `allow_unresolved_imports` configurable
-                let outcome = sync.set_virtual_machine_params(
+                sync.set_virtual_machine_params(
                     request_id,
                     code,
                     heap_pages,
@@ -1447,33 +1467,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     false,
                 );
 
-                let outcome = match outcome {
-                    (warp_sync::WarpSync::InProgress(inner), None) => {
-                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                        ResponseOutcome::Queued
-                    }
-                    (warp_sync::WarpSync::InProgress(inner), Some(error)) => {
-                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                        ResponseOutcome::WarpSyncError { error }
-                    }
-                    (warp_sync::WarpSync::Finished(success), None) => {
-                        let (
-                            all_forks,
-                            finalized_block_runtime,
-                            finalized_storage_code,
-                            finalized_storage_heap_pages,
-                        ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
-                        self.inner = AllSyncInner::AllForks(all_forks);
-                        ResponseOutcome::WarpSyncFinished {
-                            finalized_block_runtime,
-                            finalized_storage_code,
-                            finalized_storage_heap_pages,
-                        }
-                    }
-                    (warp_sync::WarpSync::Finished(_), Some(_)) => unreachable!(),
-                };
-
-                (user_data, outcome)
+                self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
+                (user_data, ResponseOutcome::Queued)
             }
             (
                 AllSyncInner::GrandpaWarpSync { inner: sync },
@@ -1522,37 +1517,13 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             request,
         ) {
             (
-                AllSyncInner::GrandpaWarpSync { inner: sync },
+                AllSyncInner::GrandpaWarpSync { inner: mut sync },
                 Ok(response),
                 RequestMapping::WarpSync(request_id, user_data),
             ) => {
-                let outcome = match sync.runtime_call_merkle_proof_success(request_id, response) {
-                    (warp_sync::WarpSync::InProgress(inner), None) => {
-                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                        ResponseOutcome::Queued
-                    }
-                    (warp_sync::WarpSync::InProgress(inner), Some(error)) => {
-                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                        ResponseOutcome::WarpSyncError { error }
-                    }
-                    (warp_sync::WarpSync::Finished(success), None) => {
-                        let (
-                            all_forks,
-                            finalized_block_runtime,
-                            finalized_storage_code,
-                            finalized_storage_heap_pages,
-                        ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
-                        self.inner = AllSyncInner::AllForks(all_forks);
-                        ResponseOutcome::WarpSyncFinished {
-                            finalized_block_runtime,
-                            finalized_storage_code,
-                            finalized_storage_heap_pages,
-                        }
-                    }
-                    (warp_sync::WarpSync::Finished(_), Some(_)) => unreachable!(),
-                };
-
-                (user_data, outcome)
+                sync.runtime_call_merkle_proof_success(request_id, response);
+                self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
+                (user_data, ResponseOutcome::Queued)
             }
             (
                 AllSyncInner::GrandpaWarpSync { inner: sync },
@@ -1812,6 +1783,31 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
     /// No block ready to be processed.
     AllSync(AllSync<TRq, TSrc, TBl>),
 
+    /// Content of the response is erroneous in the context of warp syncing.
+    WarpSyncError {
+        sync: AllSync<TRq, TSrc, TBl>,
+
+        /// Error that happened.
+        error: warp_sync::Error,
+    },
+
+    /// Response has made it possible to finish warp syncing.
+    WarpSyncFinished {
+        sync: AllSync<TRq, TSrc, TBl>,
+
+        /// Runtime of the newly finalized block.
+        ///
+        /// > **Note**: Use methods such as [`AllSync::finalized_block_header`] to know which
+        /// >           block this runtime corresponds to.
+        finalized_block_runtime: host::HostVmPrototype,
+
+        /// Storage value at the `:code` key of the finalized block.
+        finalized_storage_code: Option<Vec<u8>>,
+
+        /// Storage value at the `:heappages` key of the finalized block.
+        finalized_storage_heap_pages: Option<Vec<u8>>,
+    },
+
     /// Ready to start verifying a header.
     VerifyHeader(HeaderVerify<TRq, TSrc, TBl>),
 
@@ -1832,27 +1828,6 @@ pub enum ResponseOutcome {
 
     /// Content of the response has been queued and will be processed later.
     Queued,
-
-    /// Content of the response is erroneous in the context of warp syncing.
-    WarpSyncError {
-        /// Error that happened.
-        error: warp_sync::Error,
-    },
-
-    /// Response has made it possible to finish warp syncing.
-    WarpSyncFinished {
-        /// Runtime of the newly finalized block.
-        ///
-        /// > **Note**: Use methods such as [`AllSync::finalized_block_header`] to know which
-        /// >           block this runtime corresponds to.
-        finalized_block_runtime: host::HostVmPrototype,
-
-        /// Storage value at the `:code` key of the finalized block.
-        finalized_storage_code: Option<Vec<u8>>,
-
-        /// Storage value at the `:heappages` key of the finalized block.
-        finalized_storage_heap_pages: Option<Vec<u8>>,
-    },
 
     /// Source has given blocks that aren't part of the finalized chain.
     ///

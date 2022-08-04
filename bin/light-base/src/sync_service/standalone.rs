@@ -346,42 +346,6 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
             | all::ResponseOutcome::Queued
             | all::ResponseOutcome::NotFinalizedChain { .. }
             | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
-            all::ResponseOutcome::WarpSyncError { error } => {
-                log::warn!(
-                    target: &task.log_target,
-                    "Error during GrandPa warp syncing: {}",
-                    error
-                );
-            }
-            all::ResponseOutcome::WarpSyncFinished {
-                finalized_block_runtime,
-                finalized_storage_code,
-                finalized_storage_heap_pages,
-            } => {
-                let finalized_header = task.sync.finalized_block_header();
-                log::info!(
-                    target: &task.log_target,
-                    "GrandPa warp sync finished to #{} ({})",
-                    finalized_header.number,
-                    HashDisplay(&finalized_header.hash(task.sync.block_number_bytes()))
-                );
-
-                task.warp_sync_taking_long_time_warning =
-                    future::Either::Right(future::pending()).fuse();
-
-                debug_assert!(task.known_finalized_runtime.is_none());
-                task.known_finalized_runtime = Some(FinalizedBlockRuntime {
-                    virtual_machine: finalized_block_runtime,
-                    storage_code: finalized_storage_code,
-                    storage_heap_pages: finalized_storage_heap_pages,
-                });
-
-                task.network_up_to_date_finalized = false;
-                task.network_up_to_date_best = false;
-                // Since there is a gap in the blocks, all active notifications to all blocks
-                // must be cleared.
-                task.all_notifications.clear();
-            }
         }
     }
 }
@@ -674,6 +638,51 @@ impl<TPlat: Platform> Task<TPlat> {
                 // Nothing to do. Queue is empty.
                 self.sync = sync;
                 return (self, false);
+            }
+
+            all::ProcessOne::WarpSyncError { sync, error } => {
+                self.sync = sync;
+                log::warn!(
+                    target: &self.log_target,
+                    "Error during GrandPa warp syncing: {}",
+                    error
+                );
+                return (self, true);
+            }
+
+            all::ProcessOne::WarpSyncFinished {
+                sync,
+                finalized_block_runtime,
+                finalized_storage_code,
+                finalized_storage_heap_pages,
+            } => {
+                self.sync = sync;
+
+                let finalized_header = self.sync.finalized_block_header();
+                log::info!(
+                    target: &self.log_target,
+                    "GrandPa warp sync finished to #{} ({})",
+                    finalized_header.number,
+                    HashDisplay(&finalized_header.hash(self.sync.block_number_bytes()))
+                );
+
+                self.warp_sync_taking_long_time_warning =
+                    future::Either::Right(future::pending()).fuse();
+
+                debug_assert!(self.known_finalized_runtime.is_none());
+                self.known_finalized_runtime = Some(FinalizedBlockRuntime {
+                    virtual_machine: finalized_block_runtime,
+                    storage_code: finalized_storage_code,
+                    storage_heap_pages: finalized_storage_heap_pages,
+                });
+
+                self.network_up_to_date_finalized = false;
+                self.network_up_to_date_best = false;
+                // Since there is a gap in the blocks, all active notifications to all blocks
+                // must be cleared.
+                self.all_notifications.clear();
+
+                return (self, true);
             }
 
             all::ProcessOne::VerifyWarpSyncFragment(verify) => {

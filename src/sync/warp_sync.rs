@@ -417,21 +417,19 @@ impl<TSrc> InProgressWarpSync<TSrc> {
     /// Set the code and heap pages from storage using the keys `:code` and `:heappages`
     /// respectively. Also allows setting an execution hint for the virtual machine.
     pub fn set_virtual_machine_params(
-        mut self,
+        &mut self,
         id: RequestId,
         code: Option<impl AsRef<[u8]>>,
         heap_pages: Option<impl AsRef<[u8]>>,
         exec_hint: ExecHint,
         allow_unresolved_imports: bool,
-    ) -> (WarpSync<TSrc>, Option<Error>) {
+    ) {
         match (self.in_progress_requests.remove(id.0), &self.phase) {
             (
                 (_, RequestDetail::RuntimeParametersGet { block_hash }),
                 Phase::PostVerification { header, .. },
             ) if block_hash == header.hash(self.block_number_bytes) => {}
-            ((_, RequestDetail::RuntimeParametersGet { .. }), _) => {
-                return (WarpSync::InProgress(self), None)
-            }
+            ((_, RequestDetail::RuntimeParametersGet { .. }), _) => return,
             (
                 (
                     _,
@@ -445,10 +443,11 @@ impl<TSrc> InProgressWarpSync<TSrc> {
         let code = match code {
             Some(code) => code.as_ref().to_vec(),
             None => {
-                return (
+                todo!()
+                /*return (
                     todo!(), // TODO:
                     Some(Error::MissingCode),
-                );
+                );*/
             }
         };
 
@@ -456,10 +455,11 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             match executor::storage_heap_pages_to_value(heap_pages.as_ref().map(|p| p.as_ref())) {
                 Ok(hp) => hp,
                 Err(err) => {
-                    return (
+                    todo!()
+                    /*return (
                         todo!(), // TODO:
                         Some(Error::InvalidHeapPages(err)),
-                    );
+                    );*/
                 }
             };
 
@@ -471,10 +471,11 @@ impl<TSrc> InProgressWarpSync<TSrc> {
         }) {
             Ok(runtime) => runtime,
             Err(error) => {
-                return (
+                todo!()
+                /*return (
                     todo!(), // TODO:
                     Some(Error::NewRuntime(error)),
-                );
+                );*/
             }
         };
 
@@ -492,11 +493,9 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             // This is checked at the beginning of this function.
             unreachable!()
         }
-
-        self.try_advance()
     }
 
-    fn try_advance(mut self) -> (WarpSync<TSrc>, Option<Error>) {
+    pub fn run(mut self) -> (WarpSync<TSrc>, Option<Error>) {
         if let Phase::PostVerification {
             header,
             chain_information_finality,
@@ -636,10 +635,10 @@ impl<TSrc> InProgressWarpSync<TSrc> {
     }
 
     pub fn runtime_call_merkle_proof_success(
-        mut self,
+        &mut self,
         request_id: RequestId,
         response: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) -> (WarpSync<TSrc>, Option<Error>) {
+    ) {
         match (
             self.in_progress_requests.remove(request_id.0),
             &mut self.phase,
@@ -686,17 +685,13 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                 *babeapi_next_epoch_response =
                     Some(response.map(|e| e.as_ref().to_vec()).collect());
             }
-            ((_, RequestDetail::RuntimeCallMerkleProof { .. }), _) => {
-                return (WarpSync::InProgress(self), None)
-            }
+            ((_, RequestDetail::RuntimeCallMerkleProof { .. }), _) => return,
             (
                 (_, RequestDetail::RuntimeParametersGet { .. })
                 | (_, RequestDetail::WarpSyncRequest { .. }),
                 _,
             ) => panic!(),
         }
-
-        self.try_advance()
     }
 
     /// Submit a GrandPa warp sync successful response.
