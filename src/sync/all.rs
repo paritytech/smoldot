@@ -922,12 +922,16 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 let inner_request_id = inner.add_request(
                     inner_source_id,
+                    GrandpaWarpSyncRequestExtra {
+                        outer_request_id,
+                        user_data,
+                    },
                     warp_sync::RequestDetail::WarpSyncRequest {
                         block_hash: *sync_start_block_hash,
                     },
                 );
 
-                request_mapping_entry.insert(RequestMapping::WarpSync(inner_request_id, user_data));
+                request_mapping_entry.insert(RequestMapping::WarpSync(inner_request_id));
                 return outer_request_id;
             }
             (
@@ -948,12 +952,16 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 let inner_request_id = inner.add_request(
                     inner_source_id,
+                    GrandpaWarpSyncRequestExtra {
+                        outer_request_id,
+                        user_data,
+                    },
                     warp_sync::RequestDetail::RuntimeParametersGet {
                         block_hash: *block_hash,
                     },
                 );
 
-                request_mapping_entry.insert(RequestMapping::WarpSync(inner_request_id, user_data));
+                request_mapping_entry.insert(RequestMapping::WarpSync(inner_request_id));
                 return outer_request_id;
             }
             (
@@ -974,6 +982,10 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 let inner_request_id = inner.add_request(
                     inner_source_id,
+                    GrandpaWarpSyncRequestExtra {
+                        outer_request_id,
+                        user_data,
+                    },
                     warp_sync::RequestDetail::RuntimeCallMerkleProof {
                         block_hash: *block_hash,
                         function_name: function_name.clone(), // TODO: don't clone
@@ -981,7 +993,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     },
                 );
 
-                request_mapping_entry.insert(RequestMapping::WarpSync(inner_request_id, user_data));
+                request_mapping_entry.insert(RequestMapping::WarpSync(inner_request_id));
                 return outer_request_id;
             }
             (AllSyncInner::AllForks { .. }, _) => {}
@@ -1388,15 +1400,15 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         match (&mut self.inner, request) {
             (
                 AllSyncInner::GrandpaWarpSync { inner: grandpa },
-                RequestMapping::WarpSync(request_id, user_data),
+                RequestMapping::WarpSync(request_id),
             ) => {
-                if let Some((fragments, is_finished)) = response {
-                    grandpa.handle_response_ok(request_id, fragments, is_finished);
+                let user_data = if let Some((fragments, is_finished)) = response {
+                    grandpa.handle_response_ok(request_id, fragments, is_finished)
                 } else {
-                    grandpa.inject_error(request_id);
-                }
+                    grandpa.inject_error(request_id)
+                };
 
-                (user_data, ResponseOutcome::Queued)
+                (user_data.user_data, ResponseOutcome::Queued)
             }
 
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
@@ -1434,7 +1446,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             (
                 AllSyncInner::GrandpaWarpSync { inner: mut sync },
                 Ok(mut response),
-                RequestMapping::WarpSync(request_id, user_data),
+                RequestMapping::WarpSync(request_id),
             ) => {
                 // In this state, we expect the response to be one value for `:code` and one for
                 // `:heappages`. As documented, we panic if the number of items isn't 2.
@@ -1442,17 +1454,17 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let heap_pages = response.next().unwrap();
                 assert!(response.next().is_none());
 
-                sync.set_virtual_machine_params(request_id, code, heap_pages);
+                let user_data = sync.set_virtual_machine_params(request_id, code, heap_pages);
 
                 self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
-                (user_data, ResponseOutcome::Queued)
+                (user_data.user_data, ResponseOutcome::Queued)
             }
             (
                 AllSyncInner::GrandpaWarpSync { inner: mut sync },
                 Err(_),
-                RequestMapping::WarpSync(request_id, user_data),
+                RequestMapping::WarpSync(request_id),
             ) => {
-                sync.inject_error(request_id);
+                let user_data = sync.inject_error(request_id).user_data;
                 // TODO: notify user of the problem
                 self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
                 (user_data, ResponseOutcome::Queued)
@@ -1496,21 +1508,21 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
             (
                 AllSyncInner::GrandpaWarpSync { inner: mut sync },
                 Ok(response),
-                RequestMapping::WarpSync(request_id, user_data),
+                RequestMapping::WarpSync(request_id),
             ) => {
-                sync.runtime_call_merkle_proof_success(request_id, response);
+                let user_data = sync.runtime_call_merkle_proof_success(request_id, response);
                 self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
-                (user_data, ResponseOutcome::Queued)
+                (user_data.user_data, ResponseOutcome::Queued)
             }
             (
                 AllSyncInner::GrandpaWarpSync { inner: mut sync },
                 Err(_),
-                RequestMapping::WarpSync(request_id, user_data),
+                RequestMapping::WarpSync(request_id),
             ) => {
-                sync.inject_error(request_id);
+                let user_data = sync.inject_error(request_id);
                 // TODO: notify user of the problem
                 self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
-                (user_data, ResponseOutcome::Queued)
+                (user_data.user_data, ResponseOutcome::Queued)
             }
             // Only the GrandPa warp syncing ever starts call proof requests.
             (other, _, RequestMapping::Inline(_, _, user_data)) => {
@@ -2382,7 +2394,10 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
 
 enum AllSyncInner<TRq, TSrc, TBl> {
     GrandpaWarpSync {
-        inner: warp_sync::InProgressWarpSync<GrandpaWarpSyncSourceExtra<TSrc>>,
+        inner: warp_sync::InProgressWarpSync<
+            GrandpaWarpSyncSourceExtra<TSrc>,
+            GrandpaWarpSyncRequestExtra<TRq>,
+        >,
     },
     Optimistic {
         inner: optimistic::OptimisticSync<
@@ -2426,6 +2441,11 @@ struct GrandpaWarpSyncSourceExtra<TSrc> {
     best_block_hash: [u8; 32],
 }
 
+struct GrandpaWarpSyncRequestExtra<TRq> {
+    outer_request_id: RequestId,
+    user_data: TRq,
+}
+
 struct Shared<TRq> {
     sources: slab::Slab<SourceMapping>,
     requests: slab::Slab<RequestMapping<TRq>>,
@@ -2452,7 +2472,10 @@ impl<TRq> Shared<TRq> {
     /// strategy.
     fn transition_grandpa_warp_sync_all_forks<TSrc, TBl>(
         &mut self,
-        grandpa: warp_sync::Success<GrandpaWarpSyncSourceExtra<TSrc>>,
+        grandpa: warp_sync::Success<
+            GrandpaWarpSyncSourceExtra<TSrc>,
+            GrandpaWarpSyncRequestExtra<TRq>,
+        >,
     ) -> (
         all_forks::AllForksSync<Option<TBl>, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
         host::HostVmPrototype,
@@ -2476,17 +2499,16 @@ impl<TRq> Shared<TRq> {
             .iter()
             .all(|(_, s)| matches!(s, SourceMapping::GrandpaWarpSync(_))));
 
-        // TODO: O(n2)
-        for (source_id, inner_id, detail) in grandpa.in_progress_requests {
-            let (_, self_request) = self
-                .requests
-                .iter_mut()
-                .find(|(_, rq)| match rq {
-                    RequestMapping::WarpSync(id, _) if *id == inner_id => true,
-                    _ => false,
-                })
-                .unwrap();
-
+        for (
+            source_id,
+            _,
+            GrandpaWarpSyncRequestExtra {
+                outer_request_id,
+                user_data,
+            },
+            detail,
+        ) in grandpa.in_progress_requests
+        {
             // TODO: DRY
             let detail = match detail {
                 warp_sync::RequestDetail::WarpSyncRequest { block_hash } => {
@@ -2512,6 +2534,7 @@ impl<TRq> Shared<TRq> {
                 },
             };
 
+            // TODO: O(n2)
             let (source_id, _) = self
                 .sources
                 .iter()
@@ -2521,12 +2544,8 @@ impl<TRq> Shared<TRq> {
                 })
                 .unwrap();
 
-            match mem::replace(self_request, RequestMapping::Poisoned) {
-                RequestMapping::WarpSync(_, user_data) => {
-                    *self_request = RequestMapping::Inline(SourceId(source_id), detail, user_data)
-                }
-                _ => unreachable!(),
-            };
+            self.requests[outer_request_id.0] =
+                RequestMapping::Inline(SourceId(source_id), detail, user_data);
         }
 
         for source in grandpa.sources {
@@ -2574,8 +2593,7 @@ enum RequestMapping<TRq> {
     Inline(SourceId, RequestDetail, TRq),
     AllForks(all_forks::RequestId),
     Optimistic(optimistic::RequestId),
-    WarpSync(warp_sync::RequestId, TRq), // TODO: move TRq to warp sync state machine
-    Poisoned,
+    WarpSync(warp_sync::RequestId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

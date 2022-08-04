@@ -71,7 +71,7 @@ use crate::{
 };
 
 use alloc::{string::String, vec::Vec};
-use core::{iter, ops};
+use core::{iter, mem, ops};
 
 pub use warp_sync::{Error as FragmentError, WarpSyncFragment};
 
@@ -112,9 +112,9 @@ pub struct Config {
 /// Initializes the warp sync state machine.
 ///
 /// On error, returns the [`ValidChainInformation`] that was provided in the configuration.
-pub fn warp_sync<TSrc>(
+pub fn warp_sync<TSrc, TRq>(
     config: Config,
-) -> Result<InProgressWarpSync<TSrc>, (ValidChainInformation, WarpSyncInitError)> {
+) -> Result<InProgressWarpSync<TSrc, TRq>, (ValidChainInformation, WarpSyncInitError)> {
     match config.start_chain_information.as_ref().finality {
         ChainInformationFinalityRef::Grandpa { .. } => {}
         _ => {
@@ -151,7 +151,7 @@ pub enum WarpSyncInitError {
 pub struct SourceId(usize);
 
 /// The result of a successful warp sync.
-pub struct Success<TSrc> {
+pub struct Success<TSrc, TRq> {
     /// The synced chain information.
     pub chain_information: ValidChainInformation,
 
@@ -169,19 +169,19 @@ pub struct Success<TSrc> {
     pub sources: Vec<TSrc>,
 
     /// The list of requests that were added to the state machine.
-    pub in_progress_requests: Vec<(SourceId, RequestId, RequestDetail)>,
+    pub in_progress_requests: Vec<(SourceId, RequestId, TRq, RequestDetail)>,
 }
 
 /// The warp sync state machine.
 #[derive(derive_more::From)]
-pub enum WarpSync<TSrc> {
+pub enum WarpSync<TSrc, TRq> {
     /// Warp syncing is over.
-    Finished(Success<TSrc>),
+    Finished(Success<TSrc, TRq>),
     /// Warp syncing is in progress,
-    InProgress(InProgressWarpSync<TSrc>),
+    InProgress(InProgressWarpSync<TSrc, TRq>),
 }
 
-impl<TSrc> ops::Index<SourceId> for InProgressWarpSync<TSrc> {
+impl<TSrc, TRq> ops::Index<SourceId> for InProgressWarpSync<TSrc, TRq> {
     type Output = TSrc;
 
     #[track_caller]
@@ -191,7 +191,7 @@ impl<TSrc> ops::Index<SourceId> for InProgressWarpSync<TSrc> {
     }
 }
 
-impl<TSrc> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc> {
+impl<TSrc, TRq> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc, TRq> {
     #[track_caller]
     fn index_mut(&mut self, source_id: SourceId) -> &mut TSrc {
         debug_assert!(self.sources.contains(source_id.0));
@@ -200,12 +200,12 @@ impl<TSrc> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc> {
 }
 
 /// Warp syncing process now obtaining the chain information.
-pub struct InProgressWarpSync<TSrc> {
+pub struct InProgressWarpSync<TSrc, TRq> {
     phase: Phase,
     start_chain_information: ValidChainInformation,
     block_number_bytes: usize,
     sources: slab::Slab<Source<TSrc>>,
-    in_progress_requests: slab::Slab<(SourceId, RequestDetail)>,
+    in_progress_requests: slab::Slab<(SourceId, TRq, RequestDetail)>,
 }
 
 enum Phase {
@@ -224,7 +224,7 @@ enum Phase {
     },
 }
 
-impl<TSrc> InProgressWarpSync<TSrc> {
+impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     /// Returns the value that was initially passed in [`Config::block_number_bytes`].
     pub fn block_number_bytes(&self) -> usize {
         self.block_number_bytes
@@ -310,7 +310,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             if !self
                 .in_progress_requests
                 .iter()
-                .any(|(_, (_, rq))| match rq {
+                .any(|(_, (_, _, rq))| match rq {
                     RequestDetail::WarpSyncRequest { block_hash }
                         if *block_hash == start_block_hash =>
                     {
@@ -348,7 +348,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
         {
             if !self.in_progress_requests.iter().any(|(_, rq)| {
                 rq.0 == *warp_sync_source_id
-                    && match rq.1 {
+                    && match rq.2 {
                         RequestDetail::RuntimeParametersGet { block_hash: b }
                             if b == header.hash(self.block_number_bytes) =>
                         {
@@ -381,7 +381,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
         {
             if !self.in_progress_requests.iter().any(|(_, rq)| {
                 rq.0 == *warp_sync_source_id
-                    && match rq.1 {
+                    && match rq.2 {
                         RequestDetail::RuntimeCallMerkleProof {
                             block_hash: b,
                             function_name: ref f,
@@ -420,7 +420,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
         {
             if !self.in_progress_requests.iter().any(|(_, rq)| {
                 rq.0 == *warp_sync_source_id
-                    && match rq.1 {
+                    && match rq.2 {
                         RequestDetail::RuntimeCallMerkleProof {
                             block_hash: b,
                             function_name: ref f,
@@ -465,21 +465,31 @@ impl<TSrc> InProgressWarpSync<TSrc> {
     ///
     /// Panics if the [`SourceId`] is out of range.
     ///
-    pub fn add_request(&mut self, source_id: SourceId, detail: RequestDetail) -> RequestId {
+    pub fn add_request(
+        &mut self,
+        source_id: SourceId,
+        user_data: TRq,
+        detail: RequestDetail,
+    ) -> RequestId {
         assert!(self.sources.contains(source_id.0));
-        RequestId(self.in_progress_requests.insert((source_id, detail)))
+        RequestId(
+            self.in_progress_requests
+                .insert((source_id, user_data, detail)),
+        )
     }
 
     /// Injects a failure to retrieve the parameters.
-    pub fn inject_error(&mut self, id: RequestId) {
+    pub fn inject_error(&mut self, id: RequestId) -> TRq {
         match (self.in_progress_requests.remove(id.0), &mut self.phase) {
-            ((source_id, RequestDetail::WarpSyncRequest { .. }), _) => {
+            ((source_id, user_data, RequestDetail::WarpSyncRequest { .. }), _) => {
                 // TODO: check that block hash matches starting point? ^
                 self.sources[source_id.0].already_tried = true;
+                user_data
             }
             (
                 (
                     source_id,
+                    user_data,
                     RequestDetail::RuntimeCallMerkleProof { .. }
                     | RequestDetail::RuntimeParametersGet { .. },
                 ),
@@ -496,16 +506,18 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                         header.clone(),
                         chain_information_finality.clone(),
                     )),
-                }
+                };
+                user_data
             }
             (
                 (
                     _,
+                    user_data,
                     RequestDetail::RuntimeCallMerkleProof { .. }
                     | RequestDetail::RuntimeParametersGet { .. },
                 ),
                 _,
-            ) => {}
+            ) => user_data,
         }
     }
 
@@ -516,22 +528,23 @@ impl<TSrc> InProgressWarpSync<TSrc> {
         id: RequestId,
         code: Option<impl AsRef<[u8]>>,
         heap_pages: Option<impl AsRef<[u8]>>,
-    ) {
-        match (self.in_progress_requests.remove(id.0), &self.phase) {
+    ) -> TRq {
+        let user_data = match (self.in_progress_requests.remove(id.0), &self.phase) {
             (
-                (_, RequestDetail::RuntimeParametersGet { block_hash }),
+                (_, user_data, RequestDetail::RuntimeParametersGet { block_hash }),
                 Phase::PostVerification { header, .. },
-            ) if block_hash == header.hash(self.block_number_bytes) => {}
-            ((_, RequestDetail::RuntimeParametersGet { .. }), _) => return,
+            ) if block_hash == header.hash(self.block_number_bytes) => user_data,
+            ((_, user_data, RequestDetail::RuntimeParametersGet { .. }), _) => return user_data,
             (
                 (
+                    _,
                     _,
                     RequestDetail::RuntimeCallMerkleProof { .. }
                     | RequestDetail::WarpSyncRequest { .. },
                 ),
                 _,
             ) => panic!(),
-        }
+        };
 
         if let Phase::PostVerification {
             runtime: ref mut runtime_store,
@@ -546,9 +559,11 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             // This is checked at the beginning of this function.
             unreachable!()
         }
+
+        user_data
     }
 
-    pub fn run(mut self) -> (WarpSync<TSrc>, Option<Error>) {
+    pub fn run(mut self) -> (WarpSync<TSrc, TRq>, Option<Error>) {
         if let Phase::PostVerification {
             header,
             chain_information_finality,
@@ -702,10 +717,10 @@ impl<TSrc> InProgressWarpSync<TSrc> {
                                 .drain()
                                 .map(|source| source.user_data)
                                 .collect(),
-                            in_progress_requests: self
-                                .in_progress_requests
-                                .iter()
-                                .map(|(id, (src_id, detail))| (*src_id, RequestId(id), detail.clone()))
+                            in_progress_requests: mem::take(&mut self
+                                .in_progress_requests)
+                                .into_iter()
+                                .map(|(id, (src_id, user_data, detail))| (src_id, RequestId(id), user_data, detail))
                                 .collect(),
                         }),
                         None,
@@ -809,7 +824,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
         &mut self,
         request_id: RequestId,
         response: impl Iterator<Item = impl AsRef<[u8]>>,
-    ) {
+    ) -> TRq {
         match (
             self.in_progress_requests.remove(request_id.0),
             &mut self.phase,
@@ -817,6 +832,7 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             (
                 (
                     _,
+                    user_data,
                     RequestDetail::RuntimeCallMerkleProof {
                         block_hash,
                         function_name,
@@ -834,10 +850,12 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             {
                 *babeapi_current_epoch_response =
                     Some(response.map(|e| e.as_ref().to_vec()).collect());
+                user_data
             }
             (
                 (
                     _,
+                    user_data,
                     RequestDetail::RuntimeCallMerkleProof {
                         block_hash,
                         function_name,
@@ -855,11 +873,12 @@ impl<TSrc> InProgressWarpSync<TSrc> {
             {
                 *babeapi_next_epoch_response =
                     Some(response.map(|e| e.as_ref().to_vec()).collect());
+                user_data
             }
-            ((_, RequestDetail::RuntimeCallMerkleProof { .. }), _) => return,
+            ((_, user_data, RequestDetail::RuntimeCallMerkleProof { .. }), _) => return user_data,
             (
-                (_, RequestDetail::RuntimeParametersGet { .. })
-                | (_, RequestDetail::WarpSyncRequest { .. }),
+                (_, _, RequestDetail::RuntimeParametersGet { .. })
+                | (_, _, RequestDetail::WarpSyncRequest { .. }),
                 _,
             ) => panic!(),
         }
@@ -871,31 +890,33 @@ impl<TSrc> InProgressWarpSync<TSrc> {
         request_id: RequestId,
         fragments: Vec<WarpSyncFragment>,
         final_set_of_fragments: bool,
-    ) {
+    ) -> TRq {
         match (
             self.in_progress_requests.remove(request_id.0),
             &mut self.phase,
         ) {
             (
-                (rq_source_id, RequestDetail::WarpSyncRequest { block_hash }),
+                (rq_source_id, user_data, RequestDetail::WarpSyncRequest { block_hash }),
                 Phase::PreVerification {
                     downloaded_proof, ..
                 },
             ) => {
                 // Ignore downloads from sources that are "banned".
                 match downloaded_proof {
-                    Some((src_id, ..)) if self.sources[src_id.0].already_tried => return,
+                    Some((src_id, ..)) if self.sources[src_id.0].already_tried => return user_data,
                     _ => {}
                 }
 
                 // TODO: check block_hash ^
                 self.sources[rq_source_id.0].already_tried = true;
                 *downloaded_proof = Some((rq_source_id, fragments, final_set_of_fragments));
+                user_data
             }
-            ((_, RequestDetail::WarpSyncRequest { .. }), _) => {
+            ((_, user_data, RequestDetail::WarpSyncRequest { .. }), _) => {
                 // Uninteresting download. We simply ignore the response.
+                user_data
             }
-            ((_, _), _) => panic!(),
+            ((_, _, _), _) => panic!(),
         }
     }
 }
