@@ -1053,7 +1053,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn process_one(mut self) -> ProcessOne<TRq, TSrc, TBl> {
         match self.inner {
             AllSyncInner::GrandpaWarpSync { inner } => {
-                let outcome = match inner.run() {
+                let outcome = match inner.process_one() {
                     warp_sync::ProcessOne::Idle(inner) => {
                         (warp_sync::WarpSync::InProgress(inner), None)
                     }

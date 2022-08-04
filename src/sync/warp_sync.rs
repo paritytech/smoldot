@@ -572,26 +572,18 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         user_data
     }
 
-    pub fn run(mut self) -> ProcessOne<TSrc, TRq> {
+    pub fn process_one(self) -> ProcessOne<TSrc, TRq> {
         if let Phase::PostVerification {
-            header,
-            chain_information_finality,
-            warp_sync_source_id,
-            runtime: runtime @ Some(_),
-            babeapi_current_epoch_response: babeapi_current_epoch_response @ Some(_),
-            babeapi_next_epoch_response: babeapi_next_epoch_response @ Some(_),
+            runtime: Some(_),
+            babeapi_current_epoch_response: Some(_),
+            babeapi_next_epoch_response: Some(_),
+            ..
         } = &self.phase
         {
             return ProcessOne::BuildChainInformation(BuildChainInformation { inner: self });
         }
 
-        if let Phase::PendingVerify {
-            previous_verifier_values,
-            verifier,
-            final_set_of_fragments,
-            downloaded_source,
-        } = &self.phase
-        {
+        if let Phase::PendingVerify { .. } = &self.phase {
             return ProcessOne::VerifyWarpSyncFragment(VerifyWarpSyncFragment { inner: self });
         }
 
