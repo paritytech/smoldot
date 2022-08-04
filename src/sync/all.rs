@@ -38,7 +38,7 @@ use crate::{
     verify,
 };
 
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{borrow::Cow, vec, vec::Vec};
 use core::{
     cmp, iter, mem,
     num::{NonZeroU32, NonZeroU64},
@@ -1648,9 +1648,9 @@ pub enum DesiredRequest {
         /// Hash of the block whose call is made against.
         block_hash: [u8; 32],
         /// Name of the function to be called.
-        function_name: String,
+        function_name: Cow<'static, str>,
         /// Concatenated SCALE-encoded parameters to provide to the call.
-        parameter_vectored: Vec<u8>,
+        parameter_vectored: Cow<'static, [u8]>,
     },
 }
 
@@ -1719,9 +1719,9 @@ pub enum RequestDetail {
         /// Hash of the block whose call is made against.
         block_hash: [u8; 32],
         /// Name of the function to be called.
-        function_name: String,
+        function_name: Cow<'static, str>,
         /// Concatenated SCALE-encoded parameters to provide to the call.
-        parameter_vectored: Vec<u8>,
+        parameter_vectored: Cow<'static, [u8]>,
     },
 }
 

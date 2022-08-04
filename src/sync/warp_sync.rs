@@ -70,7 +70,7 @@ use crate::{
     trie::proof_verify,
 };
 
-use alloc::{string::String, vec::Vec};
+use alloc::{borrow::Cow, string::String, vec::Vec};
 use core::{iter, mem, ops};
 
 pub use warp_sync::{Error as FragmentError, WarpSyncFragment};
@@ -400,8 +400,8 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     &self.sources[warp_sync_source_id.0].user_data,
                     DesiredRequest::RuntimeCallMerkleProof {
                         block_hash: header.hash(self.block_number_bytes),
-                        function_name: "BabeApi_current_epoch".into(), // TODO: consider Cow<'static, str> instead of String
-                        parameter_vectored: Vec::new(),
+                        function_name: "BabeApi_current_epoch".into(),
+                        parameter_vectored: Cow::Borrowed(&[]),
                     },
                 ))
             } else {
@@ -439,8 +439,8 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     &self.sources[warp_sync_source_id.0].user_data,
                     DesiredRequest::RuntimeCallMerkleProof {
                         block_hash: header.hash(self.block_number_bytes),
-                        function_name: "BabeApi_next_epoch".into(), // TODO: consider Cow<'static, str> instead of String
-                        parameter_vectored: Vec::new(),
+                        function_name: "BabeApi_next_epoch".into(),
+                        parameter_vectored: Cow::Borrowed(&[]),
                     },
                 ))
             } else {
@@ -944,8 +944,8 @@ pub enum DesiredRequest {
     },
     RuntimeCallMerkleProof {
         block_hash: [u8; 32],
-        function_name: String,
-        parameter_vectored: Vec<u8>,
+        function_name: Cow<'static, str>,
+        parameter_vectored: Cow<'static, [u8]>,
     },
 }
 
@@ -959,8 +959,8 @@ pub enum RequestDetail {
     },
     RuntimeCallMerkleProof {
         block_hash: [u8; 32],
-        function_name: String,
-        parameter_vectored: Vec<u8>,
+        function_name: Cow<'static, str>,
+        parameter_vectored: Cow<'static, [u8]>,
     },
 }
 
