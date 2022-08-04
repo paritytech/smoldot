@@ -251,26 +251,28 @@ impl<TSrc> InProgressWarpSync<TSrc> {
         }))
     }
 
-    pub fn remove_source(mut self, to_remove: SourceId) -> (TSrc, InProgressWarpSync<TSrc>) {
+    pub fn remove_source(&mut self, to_remove: SourceId) -> TSrc {
         debug_assert!(self.sources.contains(to_remove.0));
         let removed = self.sources.remove(to_remove.0).user_data;
 
         if let Phase::PostVerification {
             warp_sync_source_id,
+            header,
+            chain_information_finality,
             ..
         } = &self.phase
         {
             if to_remove == *warp_sync_source_id {
-                (
-                    removed,
-                    todo!(), // TODO:
-                )
-            } else {
-                (removed, self)
+                self.phase = Phase::PreVerification {
+                    previous_verifier_values: Some((
+                        header.clone(),
+                        chain_information_finality.clone(),
+                    )),
+                }
             }
-        } else {
-            (removed, self)
         }
+
+        removed
     }
 
     pub fn desired_requests(

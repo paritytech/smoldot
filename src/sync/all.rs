@@ -482,17 +482,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 (user_data.user_data, requests)
             }
-            (AllSyncInner::GrandpaWarpSync { .. }, SourceMapping::GrandpaWarpSync(source_id)) => {
-                let sync = match mem::replace(&mut self.inner, AllSyncInner::Poisoned) {
-                    AllSyncInner::GrandpaWarpSync { inner: sync } => sync,
-                    _ => unreachable!(),
-                };
-
-                let (user_data, grandpa_warp_sync) = sync.remove_source(source_id);
-                self.inner = AllSyncInner::GrandpaWarpSync {
-                    inner: grandpa_warp_sync,
-                };
-
+            (
+                AllSyncInner::GrandpaWarpSync { inner },
+                SourceMapping::GrandpaWarpSync(source_id),
+            ) => {
+                let user_data = inner.remove_source(source_id);
                 (user_data.user_data, Vec::new().into_iter()) // TODO: properly return requests
             }
 
