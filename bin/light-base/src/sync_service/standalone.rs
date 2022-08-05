@@ -29,6 +29,7 @@ use smoldot::{
 };
 use std::{
     collections::{HashMap, HashSet},
+    iter,
     marker::PhantomData,
     num::{NonZeroU32, NonZeroU64},
     sync::Arc,
@@ -81,6 +82,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
         pending_block_requests: stream::FuturesUnordered::new(),
         pending_grandpa_requests: stream::FuturesUnordered::new(),
         pending_storage_requests: stream::FuturesUnordered::new(),
+        pending_call_proof_requests: stream::FuturesUnordered::new(),
         warp_sync_taking_long_time_warning: future::Either::Left(TPlat::sleep(
             Duration::from_secs(15),
         ))
@@ -277,13 +279,32 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
 
             (request_id, result) = task.pending_storage_requests.select_next_some() => {
                 // A storage request has been finished.
-                // `result` is an error if the block request got cancelled by the sync state
-                // machine.
+                // `result` is an error if the request got cancelled by the sync state machine.
                 if let Ok(result) = result {
                     // Inject the result of the request into the sync state machine.
                     task.sync.storage_get_response(
                         request_id,
                         result.map(|list| list.into_iter()),
+                    ).1
+
+                } else {
+                    // The sync state machine has emitted a `Action::Cancel` earlier, and is
+                    // thus no longer interested in the response.
+                    continue;
+                }
+            },
+
+            (request_id, result) = task.pending_call_proof_requests.select_next_some() => {
+                // A call proof request has been finished.
+                // `result` is an error if the request got cancelled by the sync state machine.
+                if let Ok(result) = result {
+                    // Inject the result of the request into the sync state machine.
+                    task.sync.call_proof_response(
+                        request_id,
+                        match result {
+                            Ok(ref r) => Ok(r.decode().into_iter()),
+                            Err(err) => Err(err),
+                        }
                     ).1
 
                 } else {
@@ -325,42 +346,6 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
             | all::ResponseOutcome::Queued
             | all::ResponseOutcome::NotFinalizedChain { .. }
             | all::ResponseOutcome::AllAlreadyInChain { .. } => {}
-            all::ResponseOutcome::WarpSyncError { error } => {
-                log::warn!(
-                    target: &task.log_target,
-                    "Error during GrandPa warp syncing: {}",
-                    error
-                );
-            }
-            all::ResponseOutcome::WarpSyncFinished {
-                finalized_block_runtime,
-                finalized_storage_code,
-                finalized_storage_heap_pages,
-            } => {
-                let finalized_header = task.sync.finalized_block_header();
-                log::info!(
-                    target: &task.log_target,
-                    "GrandPa warp sync finished to #{} ({})",
-                    finalized_header.number,
-                    HashDisplay(&finalized_header.hash(task.sync.block_number_bytes()))
-                );
-
-                task.warp_sync_taking_long_time_warning =
-                    future::Either::Right(future::pending()).fuse();
-
-                debug_assert!(task.known_finalized_runtime.is_none());
-                task.known_finalized_runtime = Some(FinalizedBlockRuntime {
-                    virtual_machine: finalized_block_runtime,
-                    storage_code: finalized_storage_code,
-                    storage_heap_pages: finalized_storage_heap_pages,
-                });
-
-                task.network_up_to_date_finalized = false;
-                task.network_up_to_date_best = false;
-                // Since there is a gap in the blocks, all active notifications to all blocks
-                // must be cleared.
-                task.all_notifications.clear();
-            }
         }
     }
 }
@@ -446,6 +431,17 @@ struct Task<TPlat: Platform> {
         >,
     >,
 
+    /// List of call proof requests currently in progress.
+    pending_call_proof_requests: stream::FuturesUnordered<
+        future::BoxFuture<
+            'static,
+            (
+                all::RequestId,
+                Result<Result<network::service::EncodedMerkleProof, ()>, future::Aborted>,
+            ),
+        >,
+    >,
+
     platform: PhantomData<fn() -> TPlat>,
 }
 
@@ -475,7 +471,7 @@ impl<TPlat: Platform> Task<TPlat> {
         request_detail.num_blocks_clamp(NonZeroU64::new(64).unwrap());
 
         match request_detail {
-            all::RequestDetail::BlocksRequest {
+            all::DesiredRequest::BlocksRequest {
                 first_block_hash,
                 first_block_height,
                 ascending,
@@ -514,13 +510,15 @@ impl<TPlat: Platform> Task<TPlat> {
                 );
 
                 let (block_request, abort) = future::abortable(block_request);
-                let request_id = self.sync.add_request(source_id, request_detail, abort);
+                let request_id = self
+                    .sync
+                    .add_request(source_id, request_detail.into(), abort);
 
                 self.pending_block_requests
                     .push(async move { (request_id, block_request.await) }.boxed());
             }
 
-            all::RequestDetail::GrandpaWarpSync {
+            all::DesiredRequest::GrandpaWarpSync {
                 sync_start_block_hash,
             } => {
                 let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
@@ -537,13 +535,15 @@ impl<TPlat: Platform> Task<TPlat> {
                 );
 
                 let (grandpa_request, abort) = future::abortable(grandpa_request);
-                let request_id = self.sync.add_request(source_id, request_detail, abort);
+                let request_id = self
+                    .sync
+                    .add_request(source_id, request_detail.into(), abort);
 
                 self.pending_grandpa_requests
                     .push(async move { (request_id, grandpa_request.await) }.boxed());
             }
 
-            all::RequestDetail::StorageGet {
+            all::DesiredRequest::StorageGet {
                 block_hash,
                 state_trie_root,
                 ref keys,
@@ -583,10 +583,51 @@ impl<TPlat: Platform> Task<TPlat> {
                 };
 
                 let (storage_request, abort) = future::abortable(storage_request);
-                let request_id = self.sync.add_request(source_id, request_detail, abort);
+                let request_id = self
+                    .sync
+                    .add_request(source_id, request_detail.into(), abort);
 
                 self.pending_storage_requests
                     .push(async move { (request_id, storage_request.await) }.boxed());
+            }
+
+            all::DesiredRequest::RuntimeCallMerkleProof {
+                block_hash,
+                ref function_name,
+                ref parameter_vectored,
+            } => {
+                let peer_id = self.sync[source_id].0.clone(); // TODO: why does this require cloning? weird borrow chk issue
+                let network_service = self.network_service.clone();
+                let network_chain_index = self.network_chain_index;
+                // TODO: all this copying is done because of lifetime requirements in NetworkService::call_proof_request; maybe check if it can be avoided
+                let parameter_vectored = parameter_vectored.clone();
+                let function_name = function_name.clone();
+
+                let call_proof_request = async move {
+                    let rq = network_service.call_proof_request(
+                        network_chain_index,
+                        peer_id,
+                        network::protocol::CallProofRequestConfig {
+                            block_hash,
+                            method: &function_name,
+                            parameter_vectored: iter::once(parameter_vectored),
+                        },
+                        Duration::from_secs(16),
+                    );
+
+                    match rq.await {
+                        Ok(p) => Ok(p),
+                        Err(_) => Err(()),
+                    }
+                };
+
+                let (call_proof_request, abort) = future::abortable(call_proof_request);
+                let request_id = self
+                    .sync
+                    .add_request(source_id, request_detail.into(), abort);
+
+                self.pending_call_proof_requests
+                    .push(async move { (request_id, call_proof_request.await) }.boxed());
             }
         }
 
@@ -605,6 +646,51 @@ impl<TPlat: Platform> Task<TPlat> {
                 // Nothing to do. Queue is empty.
                 self.sync = sync;
                 return (self, false);
+            }
+
+            all::ProcessOne::WarpSyncError { sync, error } => {
+                self.sync = sync;
+                log::warn!(
+                    target: &self.log_target,
+                    "Error during GrandPa warp syncing: {}",
+                    error
+                );
+                return (self, true);
+            }
+
+            all::ProcessOne::WarpSyncFinished {
+                sync,
+                finalized_block_runtime,
+                finalized_storage_code,
+                finalized_storage_heap_pages,
+            } => {
+                self.sync = sync;
+
+                let finalized_header = self.sync.finalized_block_header();
+                log::info!(
+                    target: &self.log_target,
+                    "GrandPa warp sync finished to #{} ({})",
+                    finalized_header.number,
+                    HashDisplay(&finalized_header.hash(self.sync.block_number_bytes()))
+                );
+
+                self.warp_sync_taking_long_time_warning =
+                    future::Either::Right(future::pending()).fuse();
+
+                debug_assert!(self.known_finalized_runtime.is_none());
+                self.known_finalized_runtime = Some(FinalizedBlockRuntime {
+                    virtual_machine: finalized_block_runtime,
+                    storage_code: finalized_storage_code,
+                    storage_heap_pages: finalized_storage_heap_pages,
+                });
+
+                self.network_up_to_date_finalized = false;
+                self.network_up_to_date_best = false;
+                // Since there is a gap in the blocks, all active notifications to all blocks
+                // must be cleared.
+                self.all_notifications.clear();
+
+                return (self, true);
             }
 
             all::ProcessOne::VerifyWarpSyncFragment(verify) => {
