@@ -725,11 +725,6 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     return user_data;
                 }
 
-                // Ignore downloads from sources that are "banned".
-                if self.sources[rq_source_id.0].already_tried {
-                    return user_data;
-                }
-
                 self.sources[rq_source_id.0].already_tried = true;
 
                 let verifier = match &previous_verifier_values {
