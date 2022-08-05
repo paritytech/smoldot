@@ -58,7 +58,7 @@
 
 use crate::{
     chain::chain_information::{
-        self, babe_fetch_epoch, ChainInformation, ChainInformationConsensus,
+        self, aura_config, babe_fetch_epoch, ChainInformation, ChainInformationConsensus,
         ChainInformationConsensusRef, ChainInformationFinality, ChainInformationFinalityRef,
         ValidChainInformation, ValidChainInformationRef,
     },
@@ -73,7 +73,7 @@ use crate::{
 };
 
 use alloc::{borrow::Cow, vec::Vec};
-use core::{iter, mem, ops};
+use core::{iter, mem, num::NonZeroU64, ops};
 
 pub use warp_sync::{Error as FragmentError, WarpSyncFragment};
 
@@ -84,7 +84,9 @@ pub enum Error {
     MissingCode,
     #[display(fmt = "Invalid heap pages value: {}", _0)]
     InvalidHeapPages(executor::InvalidHeapPagesError),
-    #[display(fmt = "Error during Babe epoch information: {}", _0)]
+    #[display(fmt = "Error during Aura information fetch: {}", _0)]
+    AuraParamsFetch(aura_config::FromVmPrototypeError),
+    #[display(fmt = "Error during Babe epoch information fetch: {}", _0)]
     BabeFetchEpoch(babe_fetch_epoch::Error),
     #[display(fmt = "Error initializing downloaded runtime: {}", _0)]
     NewRuntime(NewErr),
@@ -1111,15 +1113,22 @@ pub struct BuildChainInformation<TSrc, TRq> {
 
 impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
     pub fn build(mut self) -> (WarpSync<TSrc, TRq>, Option<Error>) {
-        if let Phase::PostVerification {
-            header,
-            chain_information_finality,
-            runtime: runtime @ Some(_),
-            babeapi_current_epoch_response: babeapi_current_epoch_response @ Some(_),
-            babeapi_next_epoch_response: babeapi_next_epoch_response @ Some(_),
-            ..
-        } = &mut self.inner.phase
-        {
+        // TODO: this function implementation could get a lot of cleanups
+
+        if let (
+            Phase::PostVerification {
+                header,
+                chain_information_finality,
+                runtime: runtime @ Some(_),
+                babeapi_current_epoch_response: babeapi_current_epoch_response @ Some(_),
+                babeapi_next_epoch_response: babeapi_next_epoch_response @ Some(_),
+                ..
+            },
+            ChainInformationConsensusRef::Babe { .. },
+        ) = (
+            &mut self.inner.phase,
+            self.inner.start_chain_information.as_ref().consensus,
+        ) {
             let (finalized_storage_code, finalized_storage_heap_pages) = runtime.take().unwrap();
             let babeapi_current_epoch_response = babeapi_current_epoch_response.take().unwrap();
             let babeapi_next_epoch_response = babeapi_next_epoch_response.take().unwrap();
@@ -1334,6 +1343,361 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     finalized_block_epoch_information: Some(current_epoch),
                     finalized_next_epoch_transition: next_epoch,
                     slots_per_epoch,
+                },
+            }) {
+                Ok(ci) => ci,
+                Err(err) => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (
+                        WarpSync::InProgress(self.inner),
+                        Some(Error::InvalidChain(err)),
+                    );
+                }
+            };
+
+            return (
+                WarpSync::Finished(Success {
+                    chain_information,
+                    finalized_runtime: runtime,
+                    finalized_storage_code: Some(finalized_storage_code),
+                    finalized_storage_heap_pages,
+                    sources: self
+                        .inner
+                        .sources
+                        .drain()
+                        .map(|source| source.user_data)
+                        .collect(),
+                    in_progress_requests: mem::take(&mut self.inner.in_progress_requests)
+                        .into_iter()
+                        .map(|(id, (src_id, user_data, detail))| {
+                            (src_id, RequestId(id), user_data, detail)
+                        })
+                        .collect(),
+                }),
+                None,
+            );
+        } else if let (
+            Phase::PostVerification {
+                header,
+                chain_information_finality,
+                runtime: runtime @ Some(_),
+                aura_authorities_response: aura_authorities_response @ Some(_),
+                aura_slot_duration_response: aura_slot_duration_response @ Some(_),
+                ..
+            },
+            ChainInformationConsensusRef::Aura { .. },
+        ) = (
+            &mut self.inner.phase,
+            self.inner.start_chain_information.as_ref().consensus,
+        ) {
+            let (finalized_storage_code, finalized_storage_heap_pages) = runtime.take().unwrap();
+            let aura_authorities_response = aura_authorities_response.take().unwrap();
+            let aura_slot_duration_response = aura_slot_duration_response.take().unwrap();
+
+            let finalized_storage_code = match finalized_storage_code {
+                Some(code) => code,
+                None => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (WarpSync::InProgress(self.inner), Some(Error::MissingCode));
+                }
+            };
+
+            let decoded_heap_pages = match executor::storage_heap_pages_to_value(
+                finalized_storage_heap_pages.as_ref().map(|p| p.as_ref()),
+            ) {
+                Ok(hp) => hp,
+                Err(err) => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (
+                        WarpSync::InProgress(self.inner),
+                        Some(Error::InvalidHeapPages(err)),
+                    );
+                }
+            };
+
+            let runtime = match HostVmPrototype::new(host::Config {
+                module: &finalized_storage_code,
+                heap_pages: decoded_heap_pages,
+                exec_hint: ExecHint::CompileAheadOfTime, // TODO: make configurable
+                allow_unresolved_imports: false,         // TODO: make configurable
+            }) {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (
+                        WarpSync::InProgress(self.inner),
+                        Some(Error::NewRuntime(error)),
+                    );
+                }
+            };
+
+            let mut vm: host::HostVm = match runtime.run_no_param("AuraApi_slot_duration") {
+                Ok(vm) => vm.into(),
+                Err((err, _)) => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (
+                        WarpSync::InProgress(self.inner),
+                        Some(Error::AuraParamsFetch(
+                            aura_config::FromVmPrototypeError::VmStart(err),
+                        )),
+                    );
+                }
+            };
+
+            let (slot_duration, runtime) = loop {
+                match vm {
+                    host::HostVm::ReadyToRun(r) => vm = r.run(),
+                    host::HostVm::Finished(finished) => {
+                        let convert_attempt = <[u8; 8]>::try_from(finished.value().as_ref());
+                        let vm_prototype = finished.into_prototype();
+
+                        let slot_duration = match convert_attempt {
+                            Ok(val) => match NonZeroU64::new(u64::from_le_bytes(val)) {
+                                Some(val) => val,
+                                None => {
+                                    return (
+                                        WarpSync::InProgress(self.inner),
+                                        Some(Error::AuraParamsFetch(
+                                            aura_config::FromVmPrototypeError::BadSlotDuration,
+                                        )),
+                                    );
+                                }
+                            },
+                            Err(_) => {
+                                self.inner.phase = Phase::DownloadFragments {
+                                    previous_verifier_values: Some((
+                                        header.clone(),
+                                        chain_information_finality.clone(),
+                                    )),
+                                };
+                                return (
+                                    WarpSync::InProgress(self.inner),
+                                    Some(Error::AuraParamsFetch(
+                                        aura_config::FromVmPrototypeError::BadSlotDuration,
+                                    )),
+                                );
+                            }
+                        };
+
+                        break (slot_duration, vm_prototype);
+                    }
+                    host::HostVm::Error { .. } => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::AuraParamsFetch(
+                                aura_config::FromVmPrototypeError::Trapped,
+                            )),
+                        );
+                    }
+
+                    host::HostVm::ExternalStorageGet(req) => {
+                        let value =
+                            match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
+                                requested_key: req.key().as_ref(),
+                                trie_root_hash: &header.state_root,
+                                proof: aura_slot_duration_response.iter().map(|v| &v[..]),
+                            }) {
+                                Ok(v) => v,
+                                Err(err) => {
+                                    self.inner.phase = Phase::DownloadFragments {
+                                        previous_verifier_values: Some((
+                                            header.clone(),
+                                            chain_information_finality.clone(),
+                                        )),
+                                    };
+                                    return (
+                                        WarpSync::InProgress(self.inner),
+                                        Some(Error::InvalidCallProof(err)),
+                                    );
+                                }
+                            };
+
+                        vm = req.resume_full_value(value);
+                    }
+
+                    host::HostVm::GetMaxLogLevel(resume) => {
+                        vm = resume.resume(0); // Off
+                    }
+                    host::HostVm::LogEmit(req) => vm = req.resume(),
+
+                    _ => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::AuraParamsFetch(
+                                aura_config::FromVmPrototypeError::HostFunctionNotAllowed,
+                            )),
+                        );
+                    }
+                }
+            };
+
+            let mut vm: host::HostVm = match runtime.run_no_param("AuraApi_authorities") {
+                Ok(vm) => vm.into(),
+                Err((err, _)) => {
+                    self.inner.phase = Phase::DownloadFragments {
+                        previous_verifier_values: Some((
+                            header.clone(),
+                            chain_information_finality.clone(),
+                        )),
+                    };
+                    return (
+                        WarpSync::InProgress(self.inner),
+                        Some(Error::AuraParamsFetch(
+                            aura_config::FromVmPrototypeError::VmStart(err),
+                        )),
+                    );
+                }
+            };
+
+            let (authorities_list, runtime) = loop {
+                match vm {
+                    host::HostVm::ReadyToRun(r) => vm = r.run(),
+                    host::HostVm::Finished(finished) => {
+                        let authorities_list = match header::AuraAuthoritiesIter::decode(
+                            finished.value().as_ref(),
+                        ) {
+                            Ok(iter) => {
+                                Ok(iter.map(header::AuraAuthority::from).collect::<Vec<_>>())
+                            }
+                            Err(_) => {
+                                self.inner.phase = Phase::DownloadFragments {
+                                    previous_verifier_values: Some((
+                                        header.clone(),
+                                        chain_information_finality.clone(),
+                                    )),
+                                };
+                                return (
+                                        WarpSync::InProgress(self.inner),
+                                        Some(Error::AuraParamsFetch(aura_config::FromVmPrototypeError::AuthoritiesListDecodeError)),
+                                    );
+                            }
+                        };
+
+                        match authorities_list {
+                            Ok(l) => break (l, finished.into_prototype()),
+                            Err(err) => {
+                                self.inner.phase = Phase::DownloadFragments {
+                                    previous_verifier_values: Some((
+                                        header.clone(),
+                                        chain_information_finality.clone(),
+                                    )),
+                                };
+                                return (
+                                    WarpSync::InProgress(self.inner),
+                                    Some(Error::InvalidCallProof(err)),
+                                );
+                            }
+                        }
+                    }
+                    host::HostVm::Error { .. } => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::AuraParamsFetch(
+                                aura_config::FromVmPrototypeError::Trapped,
+                            )),
+                        );
+                    }
+
+                    host::HostVm::ExternalStorageGet(req) => {
+                        let value =
+                            match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
+                                requested_key: req.key().as_ref(),
+                                trie_root_hash: &header.state_root,
+                                proof: aura_authorities_response.iter().map(|v| &v[..]),
+                            }) {
+                                Ok(v) => v,
+                                Err(err) => {
+                                    self.inner.phase = Phase::DownloadFragments {
+                                        previous_verifier_values: Some((
+                                            header.clone(),
+                                            chain_information_finality.clone(),
+                                        )),
+                                    };
+                                    return (
+                                        WarpSync::InProgress(self.inner),
+                                        Some(Error::InvalidCallProof(err)),
+                                    );
+                                }
+                            };
+
+                        vm = req.resume_full_value(value);
+                    }
+
+                    host::HostVm::GetMaxLogLevel(resume) => {
+                        vm = resume.resume(0); // Off
+                    }
+                    host::HostVm::LogEmit(req) => vm = req.resume(),
+
+                    _ => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::AuraParamsFetch(
+                                aura_config::FromVmPrototypeError::HostFunctionNotAllowed,
+                            )),
+                        );
+                    }
+                }
+            };
+
+            // Build a `ChainInformation` using the parameters found in the runtime.
+            // It is possible, however, that the runtime produces parameters that aren't
+            // coherent. For example the runtime could give "current" and "next" Babe
+            // epochs that don't follow each other.
+            let chain_information = match ValidChainInformation::try_from(ChainInformation {
+                finalized_block_header: header.clone(),
+                finality: chain_information_finality.clone(),
+                consensus: ChainInformationConsensus::Aura {
+                    finalized_authorities_list: authorities_list,
+                    slot_duration,
                 },
             }) {
                 Ok(ci) => ci,
