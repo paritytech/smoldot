@@ -433,31 +433,38 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             ..
         } = &self.phase
         {
-            if !self.in_progress_requests.iter().any(|(_, rq)| {
-                rq.0 == *warp_sync_source_id
-                    && match rq.2 {
-                        RequestDetail::RuntimeCallMerkleProof {
-                            block_hash: b,
-                            function_name: ref f,
-                            parameter_vectored: ref p,
-                        } if b == header.hash(self.block_number_bytes)
-                            && f == "BabeApi_current_epoch"
-                            && p.is_empty() =>
-                        {
-                            true
+            if matches!(
+                self.start_chain_information.as_ref().consensus,
+                ChainInformationConsensusRef::Babe { .. }
+            ) {
+                if !self.in_progress_requests.iter().any(|(_, rq)| {
+                    rq.0 == *warp_sync_source_id
+                        && match rq.2 {
+                            RequestDetail::RuntimeCallMerkleProof {
+                                block_hash: b,
+                                function_name: ref f,
+                                parameter_vectored: ref p,
+                            } if b == header.hash(self.block_number_bytes)
+                                && f == "BabeApi_current_epoch"
+                                && p.is_empty() =>
+                            {
+                                true
+                            }
+                            _ => false,
                         }
-                        _ => false,
-                    }
-            }) {
-                Some((
-                    *warp_sync_source_id,
-                    &self.sources[warp_sync_source_id.0].user_data,
-                    DesiredRequest::RuntimeCallMerkleProof {
-                        block_hash: header.hash(self.block_number_bytes),
-                        function_name: "BabeApi_current_epoch".into(),
-                        parameter_vectored: Cow::Borrowed(&[]),
-                    },
-                ))
+                }) {
+                    Some((
+                        *warp_sync_source_id,
+                        &self.sources[warp_sync_source_id.0].user_data,
+                        DesiredRequest::RuntimeCallMerkleProof {
+                            block_hash: header.hash(self.block_number_bytes),
+                            function_name: "BabeApi_current_epoch".into(),
+                            parameter_vectored: Cow::Borrowed(&[]),
+                        },
+                    ))
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -472,31 +479,38 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             ..
         } = &self.phase
         {
-            if !self.in_progress_requests.iter().any(|(_, rq)| {
-                rq.0 == *warp_sync_source_id
-                    && match rq.2 {
-                        RequestDetail::RuntimeCallMerkleProof {
-                            block_hash: b,
-                            function_name: ref f,
-                            parameter_vectored: ref p,
-                        } if b == header.hash(self.block_number_bytes)
-                            && f == "BabeApi_next_epoch"
-                            && p.is_empty() =>
-                        {
-                            true
+            if matches!(
+                self.start_chain_information.as_ref().consensus,
+                ChainInformationConsensusRef::Babe { .. }
+            ) {
+                if !self.in_progress_requests.iter().any(|(_, rq)| {
+                    rq.0 == *warp_sync_source_id
+                        && match rq.2 {
+                            RequestDetail::RuntimeCallMerkleProof {
+                                block_hash: b,
+                                function_name: ref f,
+                                parameter_vectored: ref p,
+                            } if b == header.hash(self.block_number_bytes)
+                                && f == "BabeApi_next_epoch"
+                                && p.is_empty() =>
+                            {
+                                true
+                            }
+                            _ => false,
                         }
-                        _ => false,
-                    }
-            }) {
-                Some((
-                    *warp_sync_source_id,
-                    &self.sources[warp_sync_source_id.0].user_data,
-                    DesiredRequest::RuntimeCallMerkleProof {
-                        block_hash: header.hash(self.block_number_bytes),
-                        function_name: "BabeApi_next_epoch".into(),
-                        parameter_vectored: Cow::Borrowed(&[]),
-                    },
-                ))
+                }) {
+                    Some((
+                        *warp_sync_source_id,
+                        &self.sources[warp_sync_source_id.0].user_data,
+                        DesiredRequest::RuntimeCallMerkleProof {
+                            block_hash: header.hash(self.block_number_bytes),
+                            function_name: "BabeApi_next_epoch".into(),
+                            parameter_vectored: Cow::Borrowed(&[]),
+                        },
+                    ))
+                } else {
+                    None
+                }
             } else {
                 None
             }
