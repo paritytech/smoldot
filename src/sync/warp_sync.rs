@@ -244,6 +244,8 @@ enum Phase {
         runtime: Option<(Option<Vec<u8>>, Option<Vec<u8>>)>,
         babeapi_current_epoch_response: Option<Vec<Vec<u8>>>,
         babeapi_next_epoch_response: Option<Vec<Vec<u8>>>,
+        aura_authorities_response: Option<Vec<Vec<u8>>>,
+        aura_slot_duration_response: Option<Vec<Vec<u8>>>,
     },
 }
 
@@ -518,10 +520,104 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             None
         };
 
+        let aura_authorities = if let Phase::PostVerification {
+            header,
+            warp_sync_source_id,
+            aura_authorities_response: None,
+            ..
+        } = &self.phase
+        {
+            if matches!(
+                self.start_chain_information.as_ref().consensus,
+                ChainInformationConsensusRef::Aura { .. }
+            ) {
+                if !self.in_progress_requests.iter().any(|(_, rq)| {
+                    rq.0 == *warp_sync_source_id
+                        && match rq.2 {
+                            RequestDetail::RuntimeCallMerkleProof {
+                                block_hash: b,
+                                function_name: ref f,
+                                parameter_vectored: ref p,
+                            } if b == header.hash(self.block_number_bytes)
+                                && f == "AuraApi_authorities"
+                                && p.is_empty() =>
+                            {
+                                true
+                            }
+                            _ => false,
+                        }
+                }) {
+                    Some((
+                        *warp_sync_source_id,
+                        &self.sources[warp_sync_source_id.0].user_data,
+                        DesiredRequest::RuntimeCallMerkleProof {
+                            block_hash: header.hash(self.block_number_bytes),
+                            function_name: "AuraApi_authorities".into(),
+                            parameter_vectored: Cow::Borrowed(&[]),
+                        },
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let aura_slot_duration = if let Phase::PostVerification {
+            header,
+            warp_sync_source_id,
+            aura_slot_duration_response: None,
+            ..
+        } = &self.phase
+        {
+            if matches!(
+                self.start_chain_information.as_ref().consensus,
+                ChainInformationConsensusRef::Aura { .. }
+            ) {
+                if !self.in_progress_requests.iter().any(|(_, rq)| {
+                    rq.0 == *warp_sync_source_id
+                        && match rq.2 {
+                            RequestDetail::RuntimeCallMerkleProof {
+                                block_hash: b,
+                                function_name: ref f,
+                                parameter_vectored: ref p,
+                            } if b == header.hash(self.block_number_bytes)
+                                && f == "AuraApi_slot_duration"
+                                && p.is_empty() =>
+                            {
+                                true
+                            }
+                            _ => false,
+                        }
+                }) {
+                    Some((
+                        *warp_sync_source_id,
+                        &self.sources[warp_sync_source_id.0].user_data,
+                        DesiredRequest::RuntimeCallMerkleProof {
+                            block_hash: header.hash(self.block_number_bytes),
+                            function_name: "AuraApi_slot_duration".into(),
+                            parameter_vectored: Cow::Borrowed(&[]),
+                        },
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         warp_sync_request
             .chain(runtime_parameters_get.into_iter())
             .chain(babe_current_epoch.into_iter())
             .chain(babe_next_epoch.into_iter())
+            .chain(aura_authorities.into_iter())
+            .chain(aura_slot_duration.into_iter())
     }
 
     /// Inserts a new request in the data structure.
@@ -702,6 +798,51 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                 && parameter_vectored.is_empty() =>
             {
                 *babeapi_next_epoch_response =
+                    Some(response.map(|e| e.as_ref().to_vec()).collect());
+                user_data
+            }
+            (
+                (
+                    _,
+                    user_data,
+                    RequestDetail::RuntimeCallMerkleProof {
+                        block_hash,
+                        function_name,
+                        parameter_vectored,
+                    },
+                ),
+                Phase::PostVerification {
+                    ref header,
+                    ref mut aura_authorities_response,
+                    ..
+                },
+            ) if block_hash == header.hash(self.block_number_bytes)
+                && function_name == "AuraApi_authorities"
+                && parameter_vectored.is_empty() =>
+            {
+                *aura_authorities_response = Some(response.map(|e| e.as_ref().to_vec()).collect());
+                user_data
+            }
+            (
+                (
+                    _,
+                    user_data,
+                    RequestDetail::RuntimeCallMerkleProof {
+                        block_hash,
+                        function_name,
+                        parameter_vectored,
+                    },
+                ),
+                Phase::PostVerification {
+                    ref header,
+                    ref mut aura_slot_duration_response,
+                    ..
+                },
+            ) if block_hash == header.hash(self.block_number_bytes)
+                && function_name == "AuraApi_slot_duration"
+                && parameter_vectored.is_empty() =>
+            {
+                *aura_slot_duration_response =
                     Some(response.map(|e| e.as_ref().to_vec()).collect());
                 user_data
             }
@@ -891,6 +1032,8 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                     self.inner.phase = Phase::PostVerification {
                         babeapi_current_epoch_response: None,
                         babeapi_next_epoch_response: None,
+                        aura_authorities_response: None,
+                        aura_slot_duration_response: None,
                         runtime: None,
                         header: self
                             .inner
@@ -922,6 +1065,8 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
                         self.inner.phase = Phase::PostVerification {
                             babeapi_current_epoch_response: None,
                             babeapi_next_epoch_response: None,
+                            aura_authorities_response: None,
+                            aura_slot_duration_response: None,
                             runtime: None,
                             header,
                             chain_information_finality,
