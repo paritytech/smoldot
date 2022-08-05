@@ -133,8 +133,7 @@ pub fn warp_sync<TSrc, TRq>(
     }
 
     match config.start_chain_information.as_ref().consensus {
-        ChainInformationConsensusRef::Babe { .. } => {}
-        ChainInformationConsensusRef::Aura { .. } |  // TODO: https://github.com/paritytech/smoldot/issues/933
+        ChainInformationConsensusRef::Babe { .. } | ChainInformationConsensusRef::Aura { .. } => {}
         ChainInformationConsensusRef::Unknown => {
             return Err((
                 config.start_chain_information,
