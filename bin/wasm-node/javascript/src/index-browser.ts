@@ -151,9 +151,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
 
     pc.onconnectionstatechange = (_event) => {
       console.log(`conn state: ${pc.connectionState}`);
-      switch(pc.connectionState) {
-        case "connected":
-        case "closed":
+      if (pc.connectionState == "closed") {
           config.onConnectionClose("");
       }
     };
@@ -172,16 +170,19 @@ function trustedBase64Decode(base64: string): Uint8Array {
 
         const ipVersion = webRTCParsed[1] == 'ip4'? '4' : '6';
         const targetIp = webRTCParsed[2];
+        const ufrag = webRTCParsed[5];
+        let fingerprint = "";
+        for(i=0;i<=ufrag.length;i+=2) {
+          fingerprint += ufrag[i] + ufrag[i+1] + ":";
+        }
 
         // Note that the trailing line feed is important, as otherwise Chrome
         // fails to parse the payload.
         const remoteSdp =
-            // Version of the SDP protocol. Always 0. (RFC8866)
-            "v=0" + "\n" +
             // Identifies the creator of the SDP document. We are allowed to use dummy values
             // (`-` and `0.0.0.0`) to remain anonymous, which we do. Note that "IN" means
             // "Internet". (RFC8866)
-            "o=- " + (Date.now() / 1000).toFixed() + " 0 IN IP" + ipVersion  + " " + targetIp + "\n" +
+            "o=- 0 0 IN IP" + ipVersion  + " " + targetIp + "\n" +
             // Name for the session. We are allowed to pass a dummy `-`. (RFC8866)
             "s=-" + "\n" +
             // Start and end of the validity of the session. `0 0` means that the session never
@@ -211,25 +212,12 @@ function trustedBase64Decode(base64: string): Uint8Array {
             // ICE username and password, which are used for establishing and
             // maintaining the ICE connection. (RFC8839)
             // MUST match ones used by the answerer (server).
-            "a=ice-ufrag:aIGX" + "\n" +
-            "a=ice-pwd:ndajecaXt6vPIt6VYcUL8wpW" + "\n" +
+            "a=ice-ufrag:" + ufrag + "\n" +
+            "a=ice-pwd:" + ufrag + "\n" +
             // Fingerprint of the certificate that the server will use during the TLS
             // handshake. (RFC8122)
-            // As explained at the top-level documentation, we use a hardcoded certificate.
             // MUST be derived from the certificate used by the answerer (server).
-            // TODO: proper certificate and fingerprint
-            "a=fingerprint:sha-256 AC:D1:E5:33:EC:27:1F:CD:E0:27:59:47:F4:D6:2A:2B:23:31:FF:10:C9:DD:E0:29:8E:B7:B3:99:B4:BF:F6:0B" + "\n" +
-
-            // "TLS ID" uniquely identifies a TLS association.
-            // The ICE protocol uses a "TLS ID" system to indicate whether a fresh DTLS connection
-            // must be reopened in case of ICE renegotiation. Considering that ICE renegotiations
-            // never happen in our use case, we can simply put a random value and not care about
-            // it. Note however that the TLS ID in the answer must be present if and only if the
-            // offer contains one. (RFC8842)
-            // TODO: is it true that renegotiations never happen? what about a connection closing?
-            // TODO: right now browsers don't send it "a=tls-id:" + genRandomPayload(120) + "\n" +
-            // "tls-id" attribute MUST be present in the initial offer and respective answer (RFC8839).
-
+            "a=fingerprint:sha-256 " + fingerprint  + "\n" +
             // Indicates that the remote DTLS server will only listen for incoming
             // connections. (RFC5763)
             // The answerer (server) MUST not be located behind a NAT (RFC6135).
@@ -242,7 +230,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
             // The maximum SCTP user message size (in bytes) (RFC8841)
             "a=max-message-size:100000" + "\n" +
             // A transport address for a candidate that can be used for connectivity checks (RFC8839).
-            "a=candidate:1 1 UDP 2113667327 " + targetIp + " " + targetPort + " typ host" + "\n";
+            "a=candidate:1 1 UDP 1 " + targetIp + " " + targetPort + " typ host" + "\n";
 
         await pc.setRemoteDescription({ type: "answer", sdp: remoteSdp });
 
