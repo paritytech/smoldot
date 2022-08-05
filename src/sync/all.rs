@@ -2372,6 +2372,9 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
     /// Fetching the key of the finalized block storage that follows a given one is required in
     /// order to continue.
     FinalizedStorageNextKey(StorageNextKey<TRq, TSrc, TBl>),
+
+    /// Compiling a runtime is required in order to continue.
+    RuntimeCompilation(RuntimeCompilation<TRq, TSrc, TBl>),
 }
 
 /// Error that can happen when verifying a block body.
@@ -2449,6 +2452,13 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
             }
             optimistic::BlockVerification::FinalizedStorageNextKey(inner) => {
                 BlockVerification::FinalizedStorageNextKey(StorageNextKey {
+                    inner,
+                    shared,
+                    user_data,
+                })
+            }
+            optimistic::BlockVerification::RuntimeCompilation(inner) => {
+                BlockVerification::RuntimeCompilation(RuntimeCompilation {
                     inner,
                     shared,
                     user_data,
@@ -2536,6 +2546,26 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
     ///
     pub fn inject_key(self, key: Option<impl AsRef<[u8]>>) -> BlockVerification<TRq, TSrc, TBl> {
         let inner = self.inner.inject_key(key);
+        BlockVerification::from_inner(inner, self.shared, self.user_data)
+    }
+}
+
+/// Compiling a new runtime is necessary as part of the verification.
+#[must_use]
+pub struct RuntimeCompilation<TRq, TSrc, TBl> {
+    inner: optimistic::RuntimeCompilation<
+        OptimisticRequestExtra<TRq>,
+        OptimisticSourceExtra<TSrc>,
+        TBl,
+    >,
+    shared: Shared<TRq>,
+    user_data: TBl,
+}
+
+impl<TRq, TSrc, TBl> RuntimeCompilation<TRq, TSrc, TBl> {
+    /// Builds the runtime.
+    pub fn build(self) -> BlockVerification<TRq, TSrc, TBl> {
+        let inner = self.inner.build();
         BlockVerification::from_inner(inner, self.shared, self.user_data)
     }
 }
