@@ -929,12 +929,24 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     ///
     /// This function takes ownership of `self` and yields it back after the operation is finished.
     pub fn process_one(self) -> ProcessOne<TSrc, TRq> {
-        if let Phase::PostVerification {
-            runtime: Some(_),
-            babeapi_current_epoch_response: Some(_),
-            babeapi_next_epoch_response: Some(_),
-            ..
-        } = &self.phase
+        if let (
+            Phase::PostVerification {
+                runtime: Some(_),
+                babeapi_current_epoch_response: Some(_),
+                babeapi_next_epoch_response: Some(_),
+                ..
+            },
+            ChainInformationConsensusRef::Babe { .. },
+        )
+        | (
+            Phase::PostVerification {
+                runtime: Some(_),
+                aura_authorities_response: Some(_),
+                aura_slot_duration_response: Some(_),
+                ..
+            },
+            ChainInformationConsensusRef::Aura { .. },
+        ) = (&self.phase, self.start_chain_information.as_ref().consensus)
         {
             return ProcessOne::BuildChainInformation(BuildChainInformation { inner: self });
         }
