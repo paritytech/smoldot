@@ -268,6 +268,16 @@ impl ChainSpec {
         }
     }
 
+    /// Returns a list of hashes of block headers that should always be considered as invalid.
+    pub fn bad_blocks_hashes(&'_ self) -> impl Iterator<Item = &'_ [u8; 32]> + '_ {
+        self.client_spec
+            .bad_blocks
+            .as_ref()
+            .into_iter()
+            .flat_map(|l| l.iter())
+            .map(|h| &h.0)
+    }
+
     /// Returns the list of bootnode addresses found in the chain spec.
     ///
     /// Bootnode addresses that have failed to be parsed are returned as well in the form of

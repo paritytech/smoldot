@@ -950,6 +950,7 @@ impl SyncBackground {
                     let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
 
                     let mut verify = verify.start(unix_time, ());
+                    // TODO: check this block against the chain spec's badBlocks
                     loop {
                         match verify {
                             all::BlockVerification::Error {
