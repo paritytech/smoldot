@@ -91,8 +91,6 @@ pub enum Error {
     /// Parameters produced by the runtime are incoherent.
     #[display(fmt = "Parameters produced by the runtime are incoherent: {}", _0)]
     InvalidChain(chain_information::ValidityError),
-    /// Chain uses an unrecognized consensus mechanism.
-    UnknownConsensus,
     /// Failed to verify call proof.
     InvalidCallProof(proof_verify::Error),
     /// Warp sync requires fetching the key that follows another one. This isn't implemented in
@@ -132,6 +130,17 @@ pub fn warp_sync<TSrc, TRq>(
         }
     }
 
+    match config.start_chain_information.as_ref().consensus {
+        ChainInformationConsensusRef::Babe { .. } => {}
+        ChainInformationConsensusRef::Aura { .. } |  // TODO: https://github.com/paritytech/smoldot/issues/933
+        ChainInformationConsensusRef::Unknown => {
+            return Err((
+                config.start_chain_information,
+                WarpSyncInitError::UnknownConsensus,
+            ))
+        }
+    }
+
     Ok(InProgressWarpSync {
         start_chain_information: config.start_chain_information,
         block_number_bytes: config.block_number_bytes,
@@ -148,6 +157,8 @@ pub fn warp_sync<TSrc, TRq>(
 pub enum WarpSyncInitError {
     /// Chain doesn't use the Grandpa finality algorithm.
     NotGrandpa,
+    /// Chain uses an unrecognized consensus mechanism.
+    UnknownConsensus,
 }
 
 /// Identifier for a source in the [`WarpSync`].
@@ -994,194 +1005,168 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                 }
             };
 
-            match self.inner.start_chain_information.as_ref().consensus {
-                ChainInformationConsensusRef::Babe { .. } => {
-                    let mut babe_current_epoch_query =
-                        babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
-                            runtime,
-                            epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch,
-                        });
+            let mut babe_current_epoch_query =
+                babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
+                    runtime,
+                    epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch,
+                });
 
-                    let (current_epoch, runtime) = loop {
-                        match babe_current_epoch_query {
-                            babe_fetch_epoch::Query::StorageGet(get) => {
-                                let value = match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-                                    requested_key: &get.key_as_vec(), // TODO: allocating vec
-                                    trie_root_hash: &header.state_root,
-                                    proof: babeapi_current_epoch_response.iter().map(|v| &v[..]),
-                                }) {
-                                    Ok(v) => v,
-                                    Err(err) => {
-                                        self.inner.phase = Phase::DownloadFragments {
-                                            previous_verifier_values: Some((
-                                                header.clone(),
-                                                chain_information_finality.clone(),
-                                            )),
-                                        };
-                                        return (
-                                            WarpSync::InProgress(self.inner),
-                                            Some(Error::InvalidCallProof(err)),
-                                        );
-                                    }
-                                };
+            let (current_epoch, runtime) = loop {
+                match babe_current_epoch_query {
+                    babe_fetch_epoch::Query::StorageGet(get) => {
+                        let value =
+                            match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
+                                requested_key: &get.key_as_vec(), // TODO: allocating vec
+                                trie_root_hash: &header.state_root,
+                                proof: babeapi_current_epoch_response.iter().map(|v| &v[..]),
+                            }) {
+                                Ok(v) => v,
+                                Err(err) => {
+                                    self.inner.phase = Phase::DownloadFragments {
+                                        previous_verifier_values: Some((
+                                            header.clone(),
+                                            chain_information_finality.clone(),
+                                        )),
+                                    };
+                                    return (
+                                        WarpSync::InProgress(self.inner),
+                                        Some(Error::InvalidCallProof(err)),
+                                    );
+                                }
+                            };
 
-                                babe_current_epoch_query = get.inject_value(value.map(iter::once));
-                            },
-                            babe_fetch_epoch::Query::NextKey(_) => {
-                                // TODO: implement
-                                self.inner.phase = Phase::DownloadFragments {
-                                    previous_verifier_values: Some((
-                                        header.clone(),
-                                        chain_information_finality.clone(),
-                                    )),
-                                };
-                                return (
-                                    WarpSync::InProgress(self.inner),
-                                    Some(Error::NextKeyUnimplemented),
-                                );}
-                            babe_fetch_epoch::Query::StorageRoot(root) => {
-                                babe_current_epoch_query = root.resume(&header.state_root);
-                            },
-                            babe_fetch_epoch::Query::Finished { result: Ok(result), virtual_machine } => break (result, virtual_machine),
-                            babe_fetch_epoch::Query::Finished { result: Err(err), .. } => {
-                                self.inner.phase = Phase::DownloadFragments {
-                                    previous_verifier_values: Some((
-                                        header.clone(),
-                                        chain_information_finality.clone(),
-                                    )),
-                                };
-                                return (
-                                    WarpSync::InProgress(self.inner),
-                                    Some(Error::BabeFetchEpoch(err)),
-                                );
-                            }
-                        }
-                    };
-
-                    let mut babe_next_epoch_query =
-                        babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
-                            runtime,
-                            epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::NextEpoch,
-                        });
-
-                    let (next_epoch, runtime) = loop {
-                        match babe_next_epoch_query {
-                            babe_fetch_epoch::Query::StorageGet(get) => {
-                                let value = match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-                                    requested_key: &get.key_as_vec(), // TODO: allocating vec
-                                    trie_root_hash: &header.state_root,
-                                    proof: babeapi_next_epoch_response.iter().map(|v| &v[..]),
-                                }) {
-                                    Ok(v) => v,
-                                    Err(err) => {
-                                        self.inner.phase = Phase::DownloadFragments {
-                                            previous_verifier_values: Some((
-                                                header.clone(),
-                                                chain_information_finality.clone(),
-                                            )),
-                                        };
-                                        return (
-                                            WarpSync::InProgress(self.inner),
-                                            Some(Error::InvalidCallProof(err)),
-                                        );
-                                    }
-                                };
-
-                                babe_next_epoch_query = get.inject_value(value.map(iter::once));
-                            },
-                            babe_fetch_epoch::Query::NextKey(_) => {
-                                // TODO: implement
-                                self.inner.phase = Phase::DownloadFragments {
-                                    previous_verifier_values: Some((
-                                        header.clone(),
-                                        chain_information_finality.clone(),
-                                    )),
-                                };
-                                return (
-                                    WarpSync::InProgress(self.inner),
-                                    Some(Error::NextKeyUnimplemented),
-                                );
-                            }
-                            babe_fetch_epoch::Query::StorageRoot(root) => {
-                                babe_next_epoch_query = root.resume(&header.state_root);
-                            },
-                            babe_fetch_epoch::Query::Finished { result: Ok(result), virtual_machine } => break (result, virtual_machine),
-                            babe_fetch_epoch::Query::Finished { result: Err(err), .. } => {
-                                self.inner.phase = Phase::DownloadFragments {
-                                    previous_verifier_values: Some((
-                                        header.clone(),
-                                        chain_information_finality.clone(),
-                                    )),
-                                };
-                                return (
-                                    WarpSync::InProgress(self.inner),
-                                    Some(Error::BabeFetchEpoch(err)),
-                                );
-                            }
-                        }
-                    };
-
-                    // The number of slots per epoch is never modified once the chain is running,
-                    // and as such is copied from the original chain information.
-                    let slots_per_epoch = match self.inner.start_chain_information.as_ref().consensus {
-                        ChainInformationConsensusRef::Babe {
-                            slots_per_epoch, ..
-                        } => slots_per_epoch,
-                        _ => unreachable!(),
-                    };
-
-                    // Build a `ChainInformation` using the parameters found in the runtime.
-                    // It is possible, however, that the runtime produces parameters that aren't
-                    // coherent. For example the runtime could give "current" and "next" Babe
-                    // epochs that don't follow each other.
-                    let chain_information =
-                        match ValidChainInformation::try_from(ChainInformation {
-                            finalized_block_header: header.clone(),
-                            finality: chain_information_finality.clone(),
-                            consensus: ChainInformationConsensus::Babe {
-                                finalized_block_epoch_information: Some(current_epoch),
-                                finalized_next_epoch_transition: next_epoch,
-                                slots_per_epoch,
-                            },
-                        }) {
-                            Ok(ci) => ci,
-                            Err(err) => {
-                                self.inner.phase = Phase::DownloadFragments {
-                                    previous_verifier_values: Some((
-                                        header.clone(),
-                                        chain_information_finality.clone(),
-                                    )),
-                                };
-                                return (
-                                    WarpSync::InProgress(self.inner),
-                                    Some(Error::InvalidChain(err)),
-                                );
-                            }
+                        babe_current_epoch_query = get.inject_value(value.map(iter::once));
+                    }
+                    babe_fetch_epoch::Query::NextKey(_) => {
+                        // TODO: implement
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
                         };
-
-                    return (
-                        WarpSync::Finished(Success {
-                            chain_information,
-                            finalized_runtime: runtime,
-                            finalized_storage_code: Some(finalized_storage_code),
-                            finalized_storage_heap_pages,
-                            sources: self.inner
-                                .sources
-                                .drain()
-                                .map(|source| source.user_data)
-                                .collect(),
-                            in_progress_requests: mem::take(&mut self.inner
-                                .in_progress_requests)
-                                .into_iter()
-                                .map(|(id, (src_id, user_data, detail))| (src_id, RequestId(id), user_data, detail))
-                                .collect(),
-                        }),
-                        None,
-                    );
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::NextKeyUnimplemented),
+                        );
+                    }
+                    babe_fetch_epoch::Query::StorageRoot(root) => {
+                        babe_current_epoch_query = root.resume(&header.state_root);
+                    }
+                    babe_fetch_epoch::Query::Finished {
+                        result: Ok(result),
+                        virtual_machine,
+                    } => break (result, virtual_machine),
+                    babe_fetch_epoch::Query::Finished {
+                        result: Err(err), ..
+                    } => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::BabeFetchEpoch(err)),
+                        );
+                    }
                 }
-                ChainInformationConsensusRef::Aura { .. } |  // TODO: https://github.com/paritytech/smoldot/issues/933
-                ChainInformationConsensusRef::Unknown => {
-                    // TODO: detect this at warp sync initialization
+            };
+
+            let mut babe_next_epoch_query =
+                babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
+                    runtime,
+                    epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::NextEpoch,
+                });
+
+            let (next_epoch, runtime) = loop {
+                match babe_next_epoch_query {
+                    babe_fetch_epoch::Query::StorageGet(get) => {
+                        let value =
+                            match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
+                                requested_key: &get.key_as_vec(), // TODO: allocating vec
+                                trie_root_hash: &header.state_root,
+                                proof: babeapi_next_epoch_response.iter().map(|v| &v[..]),
+                            }) {
+                                Ok(v) => v,
+                                Err(err) => {
+                                    self.inner.phase = Phase::DownloadFragments {
+                                        previous_verifier_values: Some((
+                                            header.clone(),
+                                            chain_information_finality.clone(),
+                                        )),
+                                    };
+                                    return (
+                                        WarpSync::InProgress(self.inner),
+                                        Some(Error::InvalidCallProof(err)),
+                                    );
+                                }
+                            };
+
+                        babe_next_epoch_query = get.inject_value(value.map(iter::once));
+                    }
+                    babe_fetch_epoch::Query::NextKey(_) => {
+                        // TODO: implement
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::NextKeyUnimplemented),
+                        );
+                    }
+                    babe_fetch_epoch::Query::StorageRoot(root) => {
+                        babe_next_epoch_query = root.resume(&header.state_root);
+                    }
+                    babe_fetch_epoch::Query::Finished {
+                        result: Ok(result),
+                        virtual_machine,
+                    } => break (result, virtual_machine),
+                    babe_fetch_epoch::Query::Finished {
+                        result: Err(err), ..
+                    } => {
+                        self.inner.phase = Phase::DownloadFragments {
+                            previous_verifier_values: Some((
+                                header.clone(),
+                                chain_information_finality.clone(),
+                            )),
+                        };
+                        return (
+                            WarpSync::InProgress(self.inner),
+                            Some(Error::BabeFetchEpoch(err)),
+                        );
+                    }
+                }
+            };
+
+            // The number of slots per epoch is never modified once the chain is running,
+            // and as such is copied from the original chain information.
+            let slots_per_epoch = match self.inner.start_chain_information.as_ref().consensus {
+                ChainInformationConsensusRef::Babe {
+                    slots_per_epoch, ..
+                } => slots_per_epoch,
+                _ => unreachable!(),
+            };
+
+            // Build a `ChainInformation` using the parameters found in the runtime.
+            // It is possible, however, that the runtime produces parameters that aren't
+            // coherent. For example the runtime could give "current" and "next" Babe
+            // epochs that don't follow each other.
+            let chain_information = match ValidChainInformation::try_from(ChainInformation {
+                finalized_block_header: header.clone(),
+                finality: chain_information_finality.clone(),
+                consensus: ChainInformationConsensus::Babe {
+                    finalized_block_epoch_information: Some(current_epoch),
+                    finalized_next_epoch_transition: next_epoch,
+                    slots_per_epoch,
+                },
+            }) {
+                Ok(ci) => ci,
+                Err(err) => {
                     self.inner.phase = Phase::DownloadFragments {
                         previous_verifier_values: Some((
                             header.clone(),
@@ -1190,10 +1175,32 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     };
                     return (
                         WarpSync::InProgress(self.inner),
-                        Some(Error::UnknownConsensus),
+                        Some(Error::InvalidChain(err)),
                     );
                 }
-            }
+            };
+
+            return (
+                WarpSync::Finished(Success {
+                    chain_information,
+                    finalized_runtime: runtime,
+                    finalized_storage_code: Some(finalized_storage_code),
+                    finalized_storage_heap_pages,
+                    sources: self
+                        .inner
+                        .sources
+                        .drain()
+                        .map(|source| source.user_data)
+                        .collect(),
+                    in_progress_requests: mem::take(&mut self.inner.in_progress_requests)
+                        .into_iter()
+                        .map(|(id, (src_id, user_data, detail))| {
+                            (src_id, RequestId(id), user_data, detail)
+                        })
+                        .collect(),
+                }),
+                None,
+            );
         } else {
             unreachable!()
         }

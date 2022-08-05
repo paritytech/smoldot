@@ -154,7 +154,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     requests_capacity: config.sources_capacity, // TODO: ?! add as config?
                 }) {
                     Ok(inner) => AllSyncInner::GrandpaWarpSync { inner },
-                    Err((chain_information, warp_sync::WarpSyncInitError::NotGrandpa)) => {
+                    Err((
+                        chain_information,
+                        warp_sync::WarpSyncInitError::NotGrandpa
+                        | warp_sync::WarpSyncInitError::UnknownConsensus,
+                    )) => {
                         // On error, `warp_sync` returns back the chain information that was
                         // provided in its configuration.
                         AllSyncInner::Optimistic {
