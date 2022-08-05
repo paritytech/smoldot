@@ -729,6 +729,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                             .as_ref()
                             .finalized_block_header
                             .hash(chain_spec.block_number_bytes().into());
+                        let has_bad_blocks = chain_spec.bad_blocks_hashes().count() != 0;
 
                         let running_chain = start_services(
                             log_name.clone(),
@@ -774,6 +775,15 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                                 running_chain.network_identity,
                                 HashDisplay(&starting_block_hash),
                                 starting_block_number
+                            );
+                        }
+
+                        // TODO: remove after https://github.com/paritytech/smoldot/issues/2584
+                        if has_bad_blocks {
+                            log::warn!(
+                                target: "smoldot",
+                                "Chain {} has bad blocks in its chain specification. Bad blocks \
+                                are not implemented in the light client", log_name
                             );
                         }
 
