@@ -154,7 +154,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     requests_capacity: config.sources_capacity, // TODO: ?! add as config?
                 }) {
                     Ok(inner) => AllSyncInner::GrandpaWarpSync { inner },
-                    Err((chain_information, warp_sync::WarpSyncInitError::NotGrandpa)) => {
+                    Err((
+                        chain_information,
+                        warp_sync::WarpSyncInitError::NotGrandpa
+                        | warp_sync::WarpSyncInitError::UnknownConsensus,
+                    )) => {
                         // On error, `warp_sync` returns back the chain information that was
                         // provided in its configuration.
                         AllSyncInner::Optimistic {
@@ -2669,7 +2673,6 @@ impl<TRq> Shared<TRq> {
             max_requests_per_block: self.max_requests_per_block,
             allow_unknown_consensus_engines: self.allow_unknown_consensus_engines,
             full: false,
-            banned_blocks: iter::empty(), // TODO: not implemented, should be passed by config after the optimistic sync supports banned blocks too
         });
 
         debug_assert!(self
