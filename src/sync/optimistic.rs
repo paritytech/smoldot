@@ -1003,6 +1003,9 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
     /// Fetching the key of the finalized block storage that follows a given one is required in
     /// order to continue.
     FinalizedStorageNextKey(StorageNextKey<TRq, TSrc, TBl>),
+
+    /// Compiling a runtime is required in order to continue.
+    RuntimeCompilation(RuntimeCompilation<TRq, TSrc, TBl>),
 }
 
 enum Inner<TBl> {
@@ -1171,8 +1174,10 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
 
                 Inner::Step2(blocks_tree::BodyVerifyStep2::RuntimeCompilation(c)) => {
                     // The underlying verification process requires compiling a runtime code.
-                    inner = Inner::Step2(c.build());
-                    continue 'verif_steps;
+                    break BlockVerification::RuntimeCompilation(RuntimeCompilation {
+                        inner: c,
+                        shared,
+                    });
                 }
 
                 // The three variants below correspond to problems during the verification.
@@ -1519,6 +1524,21 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
                 })
             }
         }
+    }
+}
+
+/// Compiling a new runtime is necessary as part of the verification.
+#[must_use]
+pub struct RuntimeCompilation<TRq, TSrc, TBl> {
+    inner: blocks_tree::RuntimeCompilation<Block<TBl>>,
+    shared: BlockVerificationShared<TRq, TSrc, TBl>,
+}
+
+impl<TRq, TSrc, TBl> RuntimeCompilation<TRq, TSrc, TBl> {
+    /// Builds the runtime.
+    pub fn build(self) -> BlockVerification<TRq, TSrc, TBl> {
+        let inner = self.inner.build();
+        BlockVerification::from(Inner::Step2(inner), self.shared)
     }
 }
 

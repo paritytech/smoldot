@@ -1093,6 +1093,9 @@ impl SyncBackground {
                                     .map(|(k, _)| k);
                                 verify = req.inject_keys_ordered(keys);
                             }
+                            all::BlockVerification::RuntimeCompilation(rt) => {
+                                verify = rt.build();
+                            }
                         }
                     }
                 }
