@@ -19,7 +19,7 @@
 
 import { Client, ClientOptions, start as innerStart } from './client.js'
 import { Connection, ConnectionError, ConnectionConfig } from './instance/instance.js';
-import pako from 'pako';
+import { inflate } from 'pako';
 
 export {
   AddChainError,
@@ -46,7 +46,7 @@ export function start(options?: ClientOptions): Client {
 
   return innerStart(options, {
     base64DecodeAndZlibInflate: (input) => {
-        return Promise.resolve(pako.inflate(trustedBase64Decode(input)))
+        return Promise.resolve(inflate(trustedBase64Decode(input)))
     },
     performanceNow: () => {
       return performance.now()
