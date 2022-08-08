@@ -365,6 +365,9 @@ where
     }
 
     /// Adds a new multi-stream connection to the collection.
+    ///
+    /// Note that no [`Event::HandshakeFinished`] event will be generated. The connection is
+    /// immediately considered as fully established.
     pub fn insert_multi_stream<TSubId>(
         &mut self,
         now: TNow,
@@ -387,7 +390,7 @@ where
         let _previous_value = self.connections.insert(
             connection_id,
             Connection {
-                state: InnerConnectionState::Handshaking,
+                state: InnerConnectionState::Established,
                 user_data,
             },
         );
@@ -1582,7 +1585,7 @@ enum CoordinatorToConnectionInner<TNow> {
 pub enum Event<TConn> {
     /// Handshake of the given connection has completed.
     ///
-    /// This event can only happen once per connection.
+    /// This event can only happen once per connection and only for single-stream connections.
     HandshakeFinished {
         /// Identifier of the connection whose handshake is finished.
         id: ConnectionId,
