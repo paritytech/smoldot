@@ -35,12 +35,12 @@
   },
   "dependencies": {
     "pako": "^2.0.4",
-    "websocket": "^1.0.32"
+    "ws": "^8.8.1"
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
     "@types/pako": "^2.0.0",
-    "@types/websocket": "^1.0.4",
+    "@types/ws": "^8.5.3",
     "ava": "^4.0.0",
     "dtslint": "^4.0.6",
     "rimraf": "^3.0.2",
