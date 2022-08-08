@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.28 - 2022-08-08
+
 ### Changed
 
 - The GRANDPA warp sync algorithm now downloads Merkle proofs of all the necessary storage items at once, rather than one by one sequentially. This removes approximately 11 networking round-trips and thus significantly reduces the time the warp syncing takes. ([#2578](https://github.com/paritytech/smoldot/pull/2578))
