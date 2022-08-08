@@ -2,12 +2,18 @@
 
 ## Unreleased
 
+## 0.6.28 - 2022-08-08
+
 ### Changed
 
 - The GRANDPA warp sync algorithm now downloads Merkle proofs of all the necessary storage items at once, rather than one by one sequentially. This removes approximately 11 networking round-trips and thus significantly reduces the time the warp syncing takes. ([#2578](https://github.com/paritytech/smoldot/pull/2578))
 - The GRANDPA warp sync algorithm now works on AURA-based chains. It previously only worked for chains that are using BABE. Note that GRANDPA warp sync is irrelevant for parachains. ([#2581](https://github.com/paritytech/smoldot/pull/2581))
 - The GRANDPA warp sync implementation has been considerably refactored. It is possible that unintended changes in behaviour have accidentally been introduced. ([#2578](https://github.com/paritytech/smoldot/pull/2578))
 - A warning is now printed if the `badBlocks` field in a chain specification is not empty. Bad blocks are not supported by the smoldot light client. ([#2585](https://github.com/paritytech/smoldot/pull/2585))
+
+### Fix
+
+- Fix WebSockets not working in the CommonJS bindings for NodeJS due to a problematic import. ([#2589](https://github.com/paritytech/smoldot/pull/2589)).
 
 ## 0.6.27 - 2022-07-29
 
