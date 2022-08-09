@@ -203,26 +203,27 @@ pub(super) async fn start_parachain<TPlat: Platform>(
             while let Some(update) = async_tree.try_advance_output() {
                 match update {
                     async_tree::OutputUpdate::Finalized {
-                        async_op_user_data: new_parahead,
-                        former_finalized_async_op_user_data: former_parahead,
+                        async_op_user_data: new_finalized_parahead,
+                        former_finalized_async_op_user_data: former_finalized_parahead,
                         pruned_blocks,
                         ..
-                    } if *new_parahead != former_parahead => {
-                        debug_assert!(new_parahead.is_some());
+                    } if *new_finalized_parahead != former_finalized_parahead => {
+                        debug_assert!(new_finalized_parahead.is_some());
 
                         // If this is the first time (in this loop) a finalized parahead is known,
                         // any `SubscribeAll` message that has been answered beforehand was
                         // answered in a dummy way with a potentially obsolete finalized header.
                         // For this reason, we reset all subscriptions to force all subscribers to
                         // re-subscribe.
-                        if former_parahead.is_none() {
+                        if former_finalized_parahead.is_none() {
                             all_subscriptions.clear();
                         }
 
-                        let hash =
-                            header::hash_from_scale_encoded_header(new_parahead.as_ref().unwrap());
+                        let hash = header::hash_from_scale_encoded_header(
+                            new_finalized_parahead.as_ref().unwrap(),
+                        );
 
-                        obsolete_finalized_parahead = new_parahead.clone().unwrap();
+                        obsolete_finalized_parahead = new_finalized_parahead.clone().unwrap();
 
                         if let Ok(header) =
                             header::decode(&obsolete_finalized_parahead, block_number_bytes)
