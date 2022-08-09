@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix sometimes erroneously reporting a very old `parent_hash` (usually the genesis block hash) in `chainHead_unstable_follow` when following a parachain. ([#2602](https://github.com/paritytech/smoldot/pull/2602))
+- After smoldot has downloaded the runtime of an old parachain block, it would sometimes erroneously consider that this runtime hasn't changed since then. This would lead to issues such as `state_getRuntimeVersion` and `state_subscribeRuntimeVersion` returning information about an old runtime, or `state_getMetadata` or `state_call` using an old runtime. ([#2602](https://github.com/paritytech/smoldot/pull/2602))
+
 ## 0.6.28 - 2022-08-08
 
 ### Changed
@@ -11,7 +16,7 @@
 - The GRANDPA warp sync implementation has been considerably refactored. It is possible that unintended changes in behaviour have accidentally been introduced. ([#2578](https://github.com/paritytech/smoldot/pull/2578))
 - A warning is now printed if the `badBlocks` field in a chain specification is not empty. Bad blocks are not supported by the smoldot light client. ([#2585](https://github.com/paritytech/smoldot/pull/2585))
 
-### Fix
+### Fixed
 
 - Fix WebSockets not working in the CommonJS bindings for NodeJS due to a problematic import. ([#2589](https://github.com/paritytech/smoldot/pull/2589)).
 
