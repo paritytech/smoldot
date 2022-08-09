@@ -192,6 +192,9 @@ impl<TPlat: Platform> SyncService<TPlat> {
     /// If `runtime_interest` is `false`, then [`SubscribeAll::finalized_block_runtime`] will
     /// always be `None`. Since the runtime can only be provided to one call to this function,
     /// only one subscriber should use `runtime_interest` equal to `true`.
+    ///
+    /// While this function is asynchronous, it is guaranteed to finish relatively quickly. Only
+    /// CPU operations are performed.
     pub async fn subscribe_all(&self, buffer_size: usize, runtime_interest: bool) -> SubscribeAll {
         let (send_back, rx) = oneshot::channel();
 
