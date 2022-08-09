@@ -205,6 +205,11 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         ..
                     } if *new_parahead != former_parahead => {
                         debug_assert!(new_parahead.is_some());
+
+                        if former_parahead.is_none() {
+                            all_subscriptions.clear();
+                        }
+
                         let hash =
                             header::hash_from_scale_encoded_header(new_parahead.as_ref().unwrap());
 
