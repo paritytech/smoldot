@@ -211,7 +211,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         debug_assert!(new_parahead.is_some());
 
                         // If this is the first time (in this loop) a finalized parahead is known,
-                        // any `SuscribeAll` message that has been answered beforehand was
+                        // any `SubscribeAll` message that has been answered beforehand was
                         // answered in a dummy way with a potentially obsolete finalized header.
                         // For this reason, we reset all subscriptions to force all subscribers to
                         // re-subscribe.
