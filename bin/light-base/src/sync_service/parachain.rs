@@ -98,13 +98,18 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         // sync service. Once inside, their corresponding parahead is fetched. Once the parahead
         // is fetched, this parahead is reported to our subscriptions.
         //
-        // Each block in the tree has an associated parahead behind an `Option`. This `Option`
-        // always contains `Some`, unless the relay chain finalized block hasn't had its parahead
-        // fetched yet.
+        // The root of the tree is a "virtual" block. It can be thought as the parent of the relay
+        // chain finalized block, but is there even if the relay chain finalized block is block 0.
+        //
+        // All block in the tree has an associated parahead behind an `Option`. This `Option`
+        // always contains `Some`, except for the "virtual" root block for which it is `None`.
+        //
+        // If the output finalized block has a parahead equal to `None`, it therefore means that
+        // no finalized parahead is known yet.
         //
         // The set of blocks in this tree whose parahead hasn't been fetched yet is the same as
         // the set of blocks that is maintained pinned on the runtime service. Blocks are unpinned
-        // when their parahead fetching succeeds.
+        // when their parahead fetching succeeds or when they are removed from the tree.
         let mut async_tree = {
             let mut async_tree =
                 async_tree::AsyncTree::<TPlat::Instant, [u8; 32], _>::new(async_tree::Config {
