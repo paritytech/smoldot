@@ -61,10 +61,6 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         .finalized_block_header
         .scale_encoding_vec(block_number_bytes);
 
-    // Hash of the best parachain that has been reported to the output.
-    let mut best_parahead_hash =
-        header::hash_from_scale_encoded_header(&obsolete_finalized_parahead);
-
     // State machine that tracks the list of parachain network sources and their known blocks.
     let mut sync_sources = sources::AllForksSources::<(PeerId, protocol::Role)>::new(
         40,
@@ -94,6 +90,10 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                 &relay_chain_subscribe_all.finalized_block_scale_encoded_header
             ))
         );
+
+        // Hash of the best parachain that has been reported to the subscriptions.
+        // `None` if and only if no finalized parahead is known yet.
+        let mut reported_best_parahead_hash = None;
 
         // Tree of relay chain blocks. Blocks are inserted when received from the relay chain
         // sync service. Once inside, their corresponding parahead is fetched. Once the parahead
@@ -157,6 +157,12 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         let mut wakeup_deadline = future::Either::Right(future::pending());
 
         loop {
+            // Internal state check.
+            debug_assert_eq!(
+                reported_best_parahead_hash.is_some(),
+                async_tree.finalized_async_user_data().is_some()
+            );
+
             // Start fetching paraheads of new blocks whose parahead needs to be fetched.
             while in_progress_paraheads.len() < 4 {
                 match async_tree.next_necessary_async_op(&TPlat::now()) {
@@ -254,7 +260,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                 header::hash_from_scale_encoded_header(parahead.as_ref().unwrap())
                             })
                             .unwrap_or(hash);
-                        best_parahead_hash = best_block_hash;
+                        reported_best_parahead_hash = Some(best_block_hash);
 
                         // Elements in `all_subscriptions` are removed one by one and
                         // inserted back if the channel is still open.
@@ -287,8 +293,8 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                 .unwrap_or(&finalized_parahead),
                         );
 
-                        if parahash != best_parahead_hash {
-                            best_parahead_hash = parahash;
+                        if reported_best_parahead_hash.as_ref() != Some(&parahash) {
+                            reported_best_parahead_hash = Some(parahash);
 
                             log::debug!(
                                 target: &log_target,
@@ -339,8 +345,10 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             // While the parablock has already been reported, it is possible that
                             // it becomes the new best block while it wasn't before, in which
                             // case we should send a notification.
-                            if is_new_best && parahash != best_parahead_hash {
-                                best_parahead_hash = parahash;
+                            if is_new_best
+                                && reported_best_parahead_hash.as_ref() != Some(&parahash)
+                            {
+                                reported_best_parahead_hash = Some(parahash);
 
                                 log::debug!(
                                     target: &log_target,
@@ -370,7 +378,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         );
 
                         if is_new_best {
-                            best_parahead_hash = parahash;
+                            reported_best_parahead_hash = Some(parahash);
                         }
 
                         let parent_hash = header::hash_from_scale_encoded_header(
