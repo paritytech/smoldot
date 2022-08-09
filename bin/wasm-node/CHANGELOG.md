@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.29 - 2022-08-09
+
 ### Fixed
 
 - Fix sometimes erroneously reporting a very old `parent_hash` (usually the genesis block hash) in `chainHead_unstable_follow` when following a parachain. ([#2602](https://github.com/paritytech/smoldot/pull/2602))
