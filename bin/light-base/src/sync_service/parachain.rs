@@ -52,22 +52,23 @@ pub(super) async fn start_parachain<TPlat: Platform>(
     // Necessary for the `select!` loop below.
     let mut from_network_service = from_network_service.fuse();
 
-    // Last good known parachain header of a relay chain finalized block.
+    // Last-known finalized parachain header. Can be very old and obsolete.
     // Updated after we successfully fetch the parahead of a relay chain finalized block, and left
     // untouched if the fetch fails.
     // Initialized to the parachain genesis block header.
-    let mut finalized_parahead = chain_information
+    let mut obsolete_finalized_parahead = chain_information
         .as_ref()
         .finalized_block_header
         .scale_encoding_vec(block_number_bytes);
 
     // Hash of the best parachain that has been reported to the output.
-    let mut best_parahead_hash = header::hash_from_scale_encoded_header(&finalized_parahead);
+    let mut best_parahead_hash =
+        header::hash_from_scale_encoded_header(&obsolete_finalized_parahead);
 
     // State machine that tracks the list of parachain network sources and their known blocks.
     let mut sync_sources = sources::AllForksSources::<(PeerId, protocol::Role)>::new(
         40,
-        header::decode(&finalized_parahead, block_number_bytes)
+        header::decode(&obsolete_finalized_parahead, block_number_bytes)
             .unwrap()
             .number,
     );
@@ -213,9 +214,10 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         let hash =
                             header::hash_from_scale_encoded_header(new_parahead.as_ref().unwrap());
 
-                        finalized_parahead = new_parahead.clone().unwrap();
+                        obsolete_finalized_parahead = new_parahead.clone().unwrap();
 
-                        if let Ok(header) = header::decode(&finalized_parahead, block_number_bytes)
+                        if let Ok(header) =
+                            header::decode(&obsolete_finalized_parahead, block_number_bytes)
                         {
                             sync_sources.set_finalized_block_height(header.number);
                             // TODO: what about an `else`? does sync_sources leak if the block can't be decoded?
@@ -266,7 +268,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             async_tree
                                 .best_block_index()
                                 .map(|(_, b)| b.as_ref().unwrap())
-                                .unwrap_or(&finalized_parahead),
+                                .unwrap_or(&obsolete_finalized_parahead),
                         );
 
                         if parahash != best_parahead_hash {
@@ -304,7 +306,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         // past. This covers situations where the parahead is identical to the
                         // relay chain's parent's parahead, but also situations where multiple
                         // sibling relay chain blocks have the same parahead.
-                        if finalized_parahead == scale_encoded_header
+                        if obsolete_finalized_parahead == scale_encoded_header
                             || async_tree
                                 .input_iter_unordered()
                                 .filter(|item| item.id != block_index)
@@ -359,7 +361,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                         .unwrap()
                                 })
                                 .or_else(|| async_tree.finalized_async_user_data().as_ref())
-                                .unwrap_or(&finalized_parahead),
+                                .unwrap_or(&obsolete_finalized_parahead),
                         );
 
                         // Elements in `all_subscriptions` are removed one by one and
@@ -501,7 +503,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         ToBackground::SubscribeAll { send_back, buffer_size, .. } => {
                             let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
                             let _ = send_back.send(super::SubscribeAll {
-                                finalized_block_scale_encoded_header: finalized_parahead.clone(),
+                                finalized_block_scale_encoded_header: obsolete_finalized_parahead.clone(),
                                 finalized_block_runtime: None,
                                 non_finalized_blocks_ancestry_order: async_tree.input_iter_unordered().filter_map(|block| {
                                     // `async_op_user_data` is `Some` only if this block has
@@ -511,7 +513,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                     let parent_hash = async_tree.parent(block.id)
                                         .map(|idx| header::hash_from_scale_encoded_header(&async_tree.block_async_user_data(idx).unwrap().as_ref().unwrap()))
                                         .or_else(|| async_tree.finalized_async_user_data().as_ref().map(header::hash_from_scale_encoded_header))
-                                        .unwrap_or(header::hash_from_scale_encoded_header(&finalized_parahead));
+                                        .unwrap_or(header::hash_from_scale_encoded_header(&obsolete_finalized_parahead));
 
                                     Some(super::BlockNotification {
                                         is_new_best: block.is_output_best,
