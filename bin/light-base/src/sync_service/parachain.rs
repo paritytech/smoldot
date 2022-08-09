@@ -107,6 +107,9 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         //
         // If the output finalized block has a parahead equal to `None`, it therefore means that
         // no finalized parahead is known yet.
+        // Note that, when it is the case, `SubscribeAll` messages from the frontend are still
+        // answered with a single finalized block set to `obsolete_finalized_parahead`. Once a
+        // finalized parahead is known, it is important to reset all subscriptions.
         //
         // The set of blocks in this tree whose parahead hasn't been fetched yet is the same as
         // the set of blocks that is maintained pinned on the runtime service. Blocks are unpinned
@@ -207,6 +210,11 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     } if *new_parahead != former_parahead => {
                         debug_assert!(new_parahead.is_some());
 
+                        // If this is the first time (in this loop) a finalized parahead is known,
+                        // any `SuscribeAll` message that has been answered beforehand was
+                        // answered in a dummy way with a potentially obsolete finalized header.
+                        // For this reason, we reset all subscriptions to force all subscribers to
+                        // re-subscribe.
                         if former_parahead.is_none() {
                             all_subscriptions.clear();
                         }
@@ -501,28 +509,47 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             let _ = send_back.send(val);
                         },
                         ToBackground::SubscribeAll { send_back, buffer_size, .. } => {
+                            // There are two possibilities here: either we know of any recent
+                            // finalized parahead, or we don't. In case where we don't know of
+                            // any finalized parahead yet, we report a single obsolete finalized
+                            // parahead, which is `obsolete_finalized_parahead`. The rest of this
+                            // module makes sure that no other block is reported to subscriptions
+                            // as long as this is the case, and that subscriptions are reset once
+                            // the first known finalized parahead is known.
                             let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
-                            let _ = send_back.send(super::SubscribeAll {
-                                finalized_block_scale_encoded_header: obsolete_finalized_parahead.clone(),
-                                finalized_block_runtime: None,
-                                non_finalized_blocks_ancestry_order: async_tree.input_iter_unordered().filter_map(|block| {
-                                    // `async_op_user_data` is `Some` only if this block has
-                                    // already been reported on the output. In order to maintain
-                                    // consistency, only these blocks should be reported.
-                                    let parahead = block.async_op_user_data?.as_ref().unwrap();
-                                    let parent_hash = async_tree.parent(block.id)
-                                        .map(|idx| header::hash_from_scale_encoded_header(&async_tree.block_async_user_data(idx).unwrap().as_ref().unwrap()))
-                                        .or_else(|| async_tree.finalized_async_user_data().as_ref().map(header::hash_from_scale_encoded_header))
-                                        .unwrap_or(header::hash_from_scale_encoded_header(&obsolete_finalized_parahead));
 
-                                    Some(super::BlockNotification {
-                                        is_new_best: block.is_output_best,
-                                        scale_encoded_header: parahead.clone(),
-                                        parent_hash,
-                                    })
-                                }).collect(),
-                                new_blocks,
-                            });
+                            if let Some(finalized_parahead) = async_tree.finalized_async_user_data() {
+                                // Finalized parahead is known.
+                                let _ = send_back.send(super::SubscribeAll {
+                                    finalized_block_scale_encoded_header: finalized_parahead.clone(),
+                                    finalized_block_runtime: None,
+                                    non_finalized_blocks_ancestry_order: async_tree.input_iter_unordered().filter_map(|block| {
+                                        // `async_op_user_data` is `Some` only if this block has
+                                        // already been reported on the output. In order to
+                                        // maintain consistency, only these blocks should be
+                                        // reported.
+                                        let parahead = block.async_op_user_data?.as_ref().unwrap();
+                                        let parent_hash = async_tree.parent(block.id)
+                                            .map(|idx| header::hash_from_scale_encoded_header(&async_tree.block_async_user_data(idx).unwrap().as_ref().unwrap()))
+                                            .unwrap_or_else(|| header::hash_from_scale_encoded_header(&finalized_parahead));
+
+                                        Some(super::BlockNotification {
+                                            is_new_best: block.is_output_best,
+                                            scale_encoded_header: parahead.clone(),
+                                            parent_hash,
+                                        })
+                                    }).collect(),
+                                    new_blocks,
+                                });
+                            } else {
+                                // No known finalized parahead.
+                                let _ = send_back.send(super::SubscribeAll {
+                                    finalized_block_scale_encoded_header: obsolete_finalized_parahead.clone(),
+                                    finalized_block_runtime: None,
+                                    non_finalized_blocks_ancestry_order: Vec::new(),
+                                    new_blocks,
+                                });
+                            }
 
                             all_subscriptions.push(tx);
                         }
