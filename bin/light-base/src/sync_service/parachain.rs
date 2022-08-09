@@ -310,11 +310,18 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             header::hash_from_scale_encoded_header(&scale_encoded_header);
                         let block_index = block.index;
 
+                        // Do not report anything to subscriptions if no finalized parahead is
+                        // known yet.
+                        let finalized_parahead = match async_tree.finalized_async_user_data() {
+                            Some(p) => p,
+                            None => continue,
+                        };
+
                         // Do not report the new block if it has already been reported in the
                         // past. This covers situations where the parahead is identical to the
                         // relay chain's parent's parahead, but also situations where multiple
                         // sibling relay chain blocks have the same parahead.
-                        if obsolete_finalized_parahead == scale_encoded_header
+                        if *finalized_parahead == scale_encoded_header
                             || async_tree
                                 .input_iter_unordered()
                                 .filter(|item| item.id != block_index)
@@ -368,8 +375,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                         .as_ref()
                                         .unwrap()
                                 })
-                                .or_else(|| async_tree.finalized_async_user_data().as_ref())
-                                .unwrap_or(&obsolete_finalized_parahead),
+                                .unwrap_or(&finalized_parahead),
                         );
 
                         // Elements in `all_subscriptions` are removed one by one and
