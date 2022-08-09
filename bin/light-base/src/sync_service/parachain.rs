@@ -515,6 +515,8 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             let _ = send_back.send(val);
                         },
                         ToBackground::SubscribeAll { send_back, buffer_size, .. } => {
+                            let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
+
                             // There are two possibilities here: either we know of any recent
                             // finalized parahead, or we don't. In case where we don't know of
                             // any finalized parahead yet, we report a single obsolete finalized
@@ -522,8 +524,6 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             // module makes sure that no other block is reported to subscriptions
                             // as long as this is the case, and that subscriptions are reset once
                             // the first known finalized parahead is known.
-                            let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
-
                             if let Some(finalized_parahead) = async_tree.finalized_async_user_data() {
                                 // Finalized parahead is known.
                                 let _ = send_back.send(super::SubscribeAll {
