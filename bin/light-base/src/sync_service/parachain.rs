@@ -489,6 +489,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             // same thing as whether its relay chain is at the head of the chain.
                             // Note that there is no ordering guarantee of any kind w.r.t.
                             // block subscriptions notifications.
+                            // TODO: that's not exactly true, we might not have fetched any parahead yet
                             let val = relay_chain_sync.is_near_head_of_chain_heuristic().await;
                             let _ = send_back.send(val);
                         },
