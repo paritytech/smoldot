@@ -270,13 +270,20 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     }
                     async_tree::OutputUpdate::Finalized { .. }
                     | async_tree::OutputUpdate::BestBlockChanged { .. } => {
+                        // Do not report anything to subscriptions if no finalized parahead is
+                        // known yet.
+                        let finalized_parahead = match async_tree.finalized_async_user_data() {
+                            Some(p) => p,
+                            None => continue,
+                        };
+
                         // Calculate hash of the parablock corresponding to the new best relay
                         // chain block.
                         let parahash = header::hash_from_scale_encoded_header(
                             async_tree
                                 .best_block_index()
                                 .map(|(_, b)| b.as_ref().unwrap())
-                                .unwrap_or(&obsolete_finalized_parahead),
+                                .unwrap_or(&finalized_parahead),
                         );
 
                         if parahash != best_parahead_hash {
