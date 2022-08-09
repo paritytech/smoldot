@@ -521,14 +521,21 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
                     match foreground_message {
                         ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
-                            // Since there is a mapping between relay chain blocks and parachain
-                            // blocks, whether a parachain is at the head of the chain is the
-                            // same thing as whether its relay chain is at the head of the chain.
-                            // Note that there is no ordering guarantee of any kind w.r.t.
-                            // block subscriptions notifications.
-                            // TODO: that's not exactly true, we might not have fetched any parahead yet
-                            let val = relay_chain_sync.is_near_head_of_chain_heuristic().await;
-                            let _ = send_back.send(val);
+                            if async_tree.finalized_async_user_data().is_some() {
+                                // Since there is a mapping between relay chain blocks and
+                                // parachain blocks, whether a parachain is at the head of the
+                                // chain is the same thing as whether its relay chain is at the
+                                // head of the chain.
+                                // Note that there is no ordering guarantee of any kind w.r.t.
+                                // block subscriptions notifications.
+                                let val = relay_chain_sync.is_near_head_of_chain_heuristic().await;
+                                let _ = send_back.send(val);
+                            } else {
+                                // If no finalized parahead is known yet, we might be very close
+                                // to the head but also maybe very very far away. We lean on the
+                                // cautious side and always return `false`.
+                                let _ = send_back.send(false);
+                            }
                         },
                         ToBackground::SubscribeAll { send_back, buffer_size, .. } => {
                             let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
