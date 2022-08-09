@@ -100,22 +100,31 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             (proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]) :
             (proto + "://" + wsParsed[2] + ":" + wsParsed[3]);
 
-        connection = {
-            ty: 'websocket',
-            socket: new WebSocket(url)
-        };
-        connection.socket.binaryType = 'arraybuffer';
-
-        connection.socket.onopen = () => {
+        const socket = new WebSocket(url);
+        socket.binaryType = 'arraybuffer';
+        socket.onopen = () => {
             config.onOpen({ type: 'single-stream' });
         };
-        connection.socket.onclose = (event) => {
+        socket.onclose = (event) => {
             const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
             config.onConnectionClose(message);
+            socket.onopen = () => { };
+            socket.onclose = () => { };
+            socket.onmessage = () => { };
+            socket.onerror = () => { };
         };
-        connection.socket.onmessage = (msg) => {
+        socket.onerror = (event) => {
+            config.onConnectionClose(event.message);
+            socket.onopen = () => { };
+            socket.onclose = () => { };
+            socket.onmessage = () => { };
+            socket.onerror = () => { };
+        };
+        socket.onmessage = (msg) => {
             config.onMessage(new Uint8Array(msg.data as ArrayBuffer));
         };
+
+        connection = { ty: 'websocket', socket };
 
     } else if (tcpParsed != null) {
         // `net` module will be missing when we're not in NodeJS.
