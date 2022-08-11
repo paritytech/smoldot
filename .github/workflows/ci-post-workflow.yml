@@ -20,7 +20,7 @@ jobs:
     if: ${{ github.event.workflow_run.event == 'pull_request' }}
     steps:
       # TODO: use download-artifact action
-      - uses: actions/github-script@v3.1.0
+      - uses: actions/github-script@v6.1.0
         with:
           script: |
             var artifacts = await github.actions.listWorkflowRunArtifacts({
@@ -43,14 +43,14 @@ jobs:
       - id: twiggy-diff
         # This step is purely meant to turn the diff into an GitHub action output that can be picked up by the further steps.
         # This code has been found here: https://github.community/t/set-output-truncates-multiline-strings/16852/16
-        uses: actions/github-script@v4
+        uses: actions/github-script@v6.1.0
         with:
           script: |
             const fs = require('fs');
             return fs.readFileSync('./twiggy-diff', 'utf8').toString();
           result-encoding: string
       - id: pr-num
-        uses: actions/github-script@v4
+        uses: actions/github-script@v6.1.0
         # This step grabs the pull request number from the artifacts to know where to comment.
         # This pull request number is untrusted and could be malicious. However the harm that
         # could be done is very limited (spammy comments), and so this is not considered a
