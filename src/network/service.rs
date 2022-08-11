@@ -1071,6 +1071,10 @@ where
                     // When `num_peer_connections` != 1 we don't care about this event.
                 }
 
+                peers::Event::StartShutdown { .. } => {
+                    // TODO:
+                }
+
                 peers::Event::Shutdown {
                     peer:
                         peers::ShutdownPeer::Established {

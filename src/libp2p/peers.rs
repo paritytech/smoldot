@@ -64,7 +64,7 @@ use rand::{Rng as _, SeedableRng as _};
 pub use collection::{
     ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionToCoordinator,
     CoordinatorToConnection, InboundError, MultiStreamConnectionTask, NotificationProtocolConfig,
-    NotificationsInClosedErr, NotificationsOutErr, ReadWrite, RequestError,
+    NotificationsInClosedErr, NotificationsOutErr, ReadWrite, RequestError, ShutdownCause,
     SingleStreamConnectionTask, SubstreamId,
 };
 
@@ -411,8 +411,7 @@ where
                     });
                 }
 
-                collection::Event::StartShutdown { id, .. } => {
-                    // TODO: report the shutdown reason in the API; should be done after https://github.com/paritytech/smoldot/issues/2370
+                collection::Event::StartShutdown { id, reason } => {
                     // TODO: this is O(n)
                     for (_, item) in &mut self.desired_out_notifications {
                         if let Some((_, connection_id, _)) = item.as_ref() {
@@ -421,6 +420,46 @@ where
                             }
                         }
                     }
+
+                    let connection_state = self.inner.connection_state(id);
+                    debug_assert!(connection_state.shutting_down);
+
+                    let peer = if let Some(peer_index) = self.inner[id].peer_index {
+                        let peer_id = self.peers[peer_index].peer_id.clone();
+
+                        if connection_state.established {
+                            let num_peer_connections = {
+                                let num = self
+                                    .connections_by_peer
+                                    .range(
+                                        (peer_index, collection::ConnectionId::min_value())
+                                            ..=(peer_index, collection::ConnectionId::max_value()),
+                                    )
+                                    .filter(|(_, connection_id)| {
+                                        // Note that connections that are shutting down are still counted,
+                                        // as we report the disconnected event only at the end of the
+                                        // shutdown.
+                                        self.inner.connection_state(*connection_id).established
+                                    })
+                                    .count();
+                                u32::try_from(num).unwrap()
+                            };
+
+                            ShutdownPeer::Established {
+                                peer_id,
+                                num_peer_connections,
+                            }
+                        } else {
+                            ShutdownPeer::OutgoingHandshake {
+                                expected_peer_id: peer_id,
+                            }
+                        }
+                    } else {
+                        debug_assert!(!connection_state.established);
+                        ShutdownPeer::IngoingHandshake
+                    };
+
+                    return Some(Event::StartShutdown { peer, reason });
                 }
 
                 collection::Event::Shutdown {
@@ -1505,6 +1544,14 @@ pub enum Event<TConn> {
         num_peer_connections: NonZeroU32,
     },
 
+    StartShutdown {
+        /// State of the connection and identity of the remote.
+        peer: ShutdownPeer,
+
+        /// Reason for the shutdown.
+        reason: ShutdownCause,
+    },
+
     /// A connection has stopped.
     Shutdown {
         /// State of the connection and identity of the remote.
@@ -1647,7 +1694,7 @@ pub enum Event<TConn> {
     },
 }
 
-/// See [`Event::Shutdown`].
+/// See [`Event::StartShutdown`] and [`Event::Shutdown`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShutdownPeer {
     /// Connection was fully established.
