@@ -1071,7 +1071,7 @@ where
                     // When `num_peer_connections` != 1 we don't care about this event.
                 }
 
-                peers::Event::Disconnected {
+                peers::Event::Shutdown {
                     peer_id,
                     num_peer_connections,
                     user_data: address,
@@ -1107,7 +1107,7 @@ where
                         chain_indices,
                     });
                 }
-                peers::Event::Disconnected {
+                peers::Event::Shutdown {
                     peer_id,
                     user_data: address,
                     ..

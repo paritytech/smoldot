@@ -466,7 +466,7 @@ where
 
                     // Only produce a `Disconnected` event if connection wasn't handshaking.
                     if was_established {
-                        return Some(Event::Disconnected {
+                        return Some(Event::Shutdown {
                             num_peer_connections,
                             peer_id,
                             user_data,
@@ -1498,7 +1498,7 @@ pub enum Event<TConn> {
     },
 
     /// A connection has stopped.
-    Disconnected {
+    Shutdown {
         /// Identity of the peer on the other side of the connection.
         peer_id: PeerId,
 
