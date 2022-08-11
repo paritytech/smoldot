@@ -324,27 +324,31 @@ where
                     let actual_peer_index = self.peer_index_or_insert(&peer_id);
                     let peer_id = self.peers[actual_peer_index].peer_id.clone();
 
-                    if let Some(expected_peer_index) = self.inner[connection_id].peer_index {
-                        if expected_peer_index != actual_peer_index {
-                            let _was_in = self
-                                .connections_by_peer
-                                .remove(&(expected_peer_index, connection_id));
-                            debug_assert!(_was_in);
+                    let expected_peer_id =
+                        if let Some(expected_peer_index) = self.inner[connection_id].peer_index {
+                            if expected_peer_index != actual_peer_index {
+                                let _was_in = self
+                                    .connections_by_peer
+                                    .remove(&(expected_peer_index, connection_id));
+                                debug_assert!(_was_in);
+                                let _inserted = self
+                                    .connections_by_peer
+                                    .insert((actual_peer_index, connection_id));
+                                debug_assert!(_inserted);
+                                self.inner[connection_id].peer_index = Some(actual_peer_index);
+
+                                // TODO: report some kind of error on the outer API layers?
+                            }
+
+                            Some(self.peers[actual_peer_index].peer_id.clone())
+                        } else {
                             let _inserted = self
                                 .connections_by_peer
                                 .insert((actual_peer_index, connection_id));
                             debug_assert!(_inserted);
                             self.inner[connection_id].peer_index = Some(actual_peer_index);
-
-                            // TODO: report some kind of error on the outer API layers?
-                        }
-                    } else {
-                        let _inserted = self
-                            .connections_by_peer
-                            .insert((actual_peer_index, connection_id));
-                        debug_assert!(_inserted);
-                        self.inner[connection_id].peer_index = Some(actual_peer_index);
-                    }
+                            None
+                        };
 
                     let num_peer_connections = {
                         let num = self
@@ -400,9 +404,10 @@ where
                         }
                     }
 
-                    return Some(Event::Connected {
+                    return Some(Event::HandshakeFinished {
                         num_peer_connections,
                         peer_id,
+                        expected_peer_id,
                     });
                 }
 
@@ -806,8 +811,8 @@ where
     /// [`PeerId`] will no longer be part of the return value of
     /// [`Peers::unfulfilled_desired_peers`].
     ///
-    /// No [`Event::Connected`] will be generated. Calling this function implicitly acts as if
-    /// this event was generated.
+    /// No [`Event::HandshakeFinished`] will be generated. Calling this function implicitly acts
+    /// as if this event had been implicitly generated.
     pub fn add_multi_stream_outgoing_connection<TSubId>(
         &mut self,
         now: TNow,
@@ -1214,8 +1219,8 @@ where
     ///
     /// A [`Event::Response`] event will later be generated containing the result of the request.
     ///
-    /// It is invalid to start a request on a peer before an [`Event::Connected`] has been
-    /// generated, or after a [`Event::Disconnected`] has been generated where
+    /// It is invalid to start a request on a peer before an [`Event::HandshakeFinished`] event
+    /// has been generated, or after a [`Event::Disconnected`] has been generated where
     /// [`Event::Disconnected::num_peer_connections`] is 0.
     ///
     /// Returns a newly-allocated identifier for this request.
@@ -1474,10 +1479,18 @@ enum OutRequestIdInner {
 // TODO: in principle we could return `&PeerId` instead of `PeerId` most of the time, but this causes many borrow checker issues in the upper layer and I'm not motivated enough to deal with that
 #[derive(Debug)]
 pub enum Event<TConn> {
-    /// Established a new connection to the given peer.
-    Connected {
+    /// Connection has finished its handshake.
+    ///
+    /// Only generated for single-stream connections. The handshake of multi-stream connections is
+    /// considered to be already finished.
+    HandshakeFinished {
         /// Identity of the peer on the other side of the connection.
         peer_id: PeerId,
+
+        /// Identity of the peer that was expected to be reached.
+        ///
+        /// Always `Some` for outgoing connections and always `None` for incoming connections.
+        expected_peer_id: Option<PeerId>,
 
         /// Number of other established connections with the same peer, including the one that
         /// has just been established.
