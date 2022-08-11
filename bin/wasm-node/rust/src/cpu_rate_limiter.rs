@@ -66,7 +66,7 @@ impl<T: Future> Future for CpuRateLimiter<T> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let mut this = self.project();
 
-        // Note that `crate::times::Delay` is a `FusedFuture`, making it ok to call `poll` even
+        // Note that `crate::timers::Delay` is a `FusedFuture`, making it ok to call `poll` even
         // if it is possible for the `Delay` to already be resolved.
         // We add a small zero-cost shim to ensure at compile time that this is indeed the case.
         fn enforce_fused<T: futures::future::FusedFuture>(_: &T) {}
