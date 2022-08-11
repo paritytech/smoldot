@@ -361,6 +361,7 @@ where
                                 // Note that connections that are shutting down are still counted,
                                 // as we report the disconnected event only at the end of the
                                 // shutdown.
+                                // TODO: reconsider
                                 self.inner.connection_state(*connection_id).established
                             })
                             .count();
@@ -439,6 +440,7 @@ where
                                         // Note that connections that are shutting down are still counted,
                                         // as we report the disconnected event only at the end of the
                                         // shutdown.
+                                        // TODO: reconsider
                                         self.inner.connection_state(*connection_id).established
                                     })
                                     .count();
@@ -493,6 +495,7 @@ where
                                 // Note that connections that are shutting down are still counted,
                                 // as we report the disconnected event only at the end of the
                                 // shutdown.
+                                // TODO: reconsider
                                 self.inner.connection_state(*connection_id).established
                             })
                             .count();
