@@ -41,8 +41,8 @@ pub struct CpuRateLimiter<T> {
 
 impl<T> CpuRateLimiter<T> {
     /// Wraps around `inner`. The `rate_limit` represents the upper bound, where
-    /// `u32::max_value()` represents "one CPU". For example passing `rate_limit / 2` represents
-    /// "`50%` of one CPU".
+    /// `u32::max_value()` represents "one CPU". For example passing `u32::max_value() / 2`
+    /// represents "`50%` of one CPU".
     pub fn new(inner: T, rate_limit: u32) -> Self {
         let max_divided_by_rate_limit_minus_one =
             (f64::from(u32::max_value()) / f64::from(rate_limit)) - 1.0;
