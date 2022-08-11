@@ -1099,9 +1099,9 @@ where
 
                     // Update the k-buckets.
                     let address = &self.inner[connection_id];
-                    // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
                     for chain in &mut self.chains {
                         if let Some(mut entry) = chain.kbuckets.entry(&peer_id).into_occupied() {
+                            // TODO: this doesn't seem right
                             entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
                             entry.get_mut().set_disconnected(&address);
                         }
@@ -1121,20 +1121,38 @@ where
                     peer: peers::ShutdownPeer::Established { peer_id, .. },
                     ..
                 } => {
-                    let address = &self.inner[connection_id];
-
                     // Update the k-buckets.
-                    // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
+                    let address = &self.inner[connection_id];
                     for chain in &mut self.chains {
                         if let Some(mut entry) = chain.kbuckets.entry(&peer_id).into_occupied() {
+                            // TODO: this doesn't seem right
                             entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
                             entry.get_mut().set_disconnected(&address);
                         }
                     }
                 }
-                peers::Event::StartShutdown { .. } => {
-                    // TODO:
+                peers::Event::StartShutdown {
+                    connection_id,
+                    peer:
+                        peers::ShutdownPeer::OutgoingHandshake {
+                            expected_peer_id, ..
+                        },
+                    ..
+                } => {
+                    // Update the k-buckets.
+                    let address = &self.inner[connection_id];
+                    for chain in &mut self.chains {
+                        if let Some(mut entry) =
+                            chain.kbuckets.entry(&expected_peer_id).into_occupied()
+                        {
+                            entry.get_mut().set_disconnected(&address);
+                        }
+                    }
                 }
+                peers::Event::StartShutdown {
+                    peer: peers::ShutdownPeer::IngoingHandshake,
+                    ..
+                } => {}
 
                 // Insubstantial error for diagnostic purposes.
                 peers::Event::InboundError { peer_id, error, .. } => {
