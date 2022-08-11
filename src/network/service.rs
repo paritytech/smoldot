@@ -1062,7 +1062,7 @@ where
             match inner_event {
                 peers::Event::HandshakeFinished {
                     peer_id,
-                    num_peer_connections,
+                    num_healthy_peer_connections: num_peer_connections,
                     ..
                 } if num_peer_connections.get() == 1 => {
                     break Some(Event::Connected(peer_id));
@@ -1071,10 +1071,18 @@ where
                     // When `num_peer_connections` != 1 we don't care about this event.
                 }
 
-                peers::Event::Disconnected {
-                    peer_id,
-                    num_peer_connections,
-                    user_data: address,
+                peers::Event::Shutdown { .. } => {
+                    // TODO:
+                }
+
+                peers::Event::StartShutdown {
+                    connection_id,
+                    peer:
+                        peers::ShutdownPeer::Established {
+                            peer_id,
+                            num_healthy_peer_connections: num_peer_connections,
+                        },
+                    ..
                 } if num_peer_connections == 0 => {
                     // TODO: O(n)
                     let chain_indices = self
@@ -1090,9 +1098,10 @@ where
                     }
 
                     // Update the k-buckets.
-                    // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
+                    let address = &self.inner[connection_id];
                     for chain in &mut self.chains {
                         if let Some(mut entry) = chain.kbuckets.entry(&peer_id).into_occupied() {
+                            // TODO: this doesn't seem right
                             entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
                             entry.get_mut().set_disconnected(&address);
                         }
@@ -1107,20 +1116,43 @@ where
                         chain_indices,
                     });
                 }
-                peers::Event::Disconnected {
-                    peer_id,
-                    user_data: address,
+                peers::Event::StartShutdown {
+                    connection_id,
+                    peer: peers::ShutdownPeer::Established { peer_id, .. },
                     ..
                 } => {
                     // Update the k-buckets.
-                    // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
+                    let address = &self.inner[connection_id];
                     for chain in &mut self.chains {
                         if let Some(mut entry) = chain.kbuckets.entry(&peer_id).into_occupied() {
+                            // TODO: this doesn't seem right
                             entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
                             entry.get_mut().set_disconnected(&address);
                         }
                     }
                 }
+                peers::Event::StartShutdown {
+                    connection_id,
+                    peer:
+                        peers::ShutdownPeer::OutgoingHandshake {
+                            expected_peer_id, ..
+                        },
+                    ..
+                } => {
+                    // Update the k-buckets.
+                    let address = &self.inner[connection_id];
+                    for chain in &mut self.chains {
+                        if let Some(mut entry) =
+                            chain.kbuckets.entry(&expected_peer_id).into_occupied()
+                        {
+                            entry.get_mut().set_disconnected(&address);
+                        }
+                    }
+                }
+                peers::Event::StartShutdown {
+                    peer: peers::ShutdownPeer::IngoingHandshake,
+                    ..
+                } => {}
 
                 // Insubstantial error for diagnostic purposes.
                 peers::Event::InboundError { peer_id, error, .. } => {
