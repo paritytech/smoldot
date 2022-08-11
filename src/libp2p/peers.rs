@@ -1231,8 +1231,8 @@ where
     /// A [`Event::Response`] event will later be generated containing the result of the request.
     ///
     /// It is invalid to start a request on a peer before an [`Event::HandshakeFinished`] event
-    /// has been generated, or after a [`Event::Disconnected`] has been generated where
-    /// [`Event::Disconnected::num_peer_connections`] is 0.
+    /// has been generated, or after a [`Event::StartShutdown`] event has been generated where
+    /// [`ShutdownPeer::Established::num_healthy_peer_connections`] is 0.
     ///
     /// Returns a newly-allocated identifier for this request.
     ///
