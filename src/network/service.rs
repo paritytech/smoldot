@@ -1071,17 +1071,18 @@ where
                     // When `num_peer_connections` != 1 we don't care about this event.
                 }
 
-                peers::Event::StartShutdown { .. } => {
+                peers::Event::Shutdown { .. } => {
                     // TODO:
                 }
 
-                peers::Event::Shutdown {
+                peers::Event::StartShutdown {
+                    connection_id,
                     peer:
                         peers::ShutdownPeer::Established {
                             peer_id,
                             num_healthy_peer_connections: num_peer_connections,
                         },
-                    user_data: address,
+                    ..
                 } if num_peer_connections == 0 => {
                     // TODO: O(n)
                     let chain_indices = self
@@ -1097,6 +1098,7 @@ where
                     }
 
                     // Update the k-buckets.
+                    let address = &self.inner[connection_id];
                     // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
                     for chain in &mut self.chains {
                         if let Some(mut entry) = chain.kbuckets.entry(&peer_id).into_occupied() {
@@ -1114,11 +1116,13 @@ where
                         chain_indices,
                     });
                 }
-                peers::Event::Shutdown {
+                peers::Event::StartShutdown {
+                    connection_id,
                     peer: peers::ShutdownPeer::Established { peer_id, .. },
-                    user_data: address,
                     ..
                 } => {
+                    let address = &self.inner[connection_id];
+
                     // Update the k-buckets.
                     // TODO: `Disconnected` is only generated for connections that weren't handshaking, so this is not correct
                     for chain in &mut self.chains {
@@ -1128,7 +1132,7 @@ where
                         }
                     }
                 }
-                peers::Event::Shutdown { .. } => {
+                peers::Event::StartShutdown { .. } => {
                     // TODO:
                 }
 

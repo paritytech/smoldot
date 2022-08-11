@@ -455,7 +455,11 @@ where
                         ShutdownPeer::IngoingHandshake
                     };
 
-                    return Some(Event::StartShutdown { peer, reason });
+                    return Some(Event::StartShutdown {
+                        connection_id: id,
+                        peer,
+                        reason,
+                    });
                 }
 
                 collection::Event::Shutdown {
@@ -1539,6 +1543,9 @@ pub enum Event<TConn> {
     },
 
     StartShutdown {
+        /// Identifier of the connection that has started shutting down.
+        connection_id: ConnectionId,
+
         /// State of the connection and identity of the remote.
         peer: ShutdownPeer,
 
