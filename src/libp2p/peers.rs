@@ -1489,7 +1489,7 @@ pub enum Event<TConn> {
 
         /// Identity of the peer that was expected to be reached.
         ///
-        /// Always `Some` for outgoing connections and always `None` for ingoing connections.
+        /// Always `Some` for outgoing connections and always `None` for incoming connections.
         expected_peer_id: Option<PeerId>,
 
         /// Number of other established connections with the same peer, including the one that
