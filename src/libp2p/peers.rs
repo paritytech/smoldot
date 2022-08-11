@@ -350,7 +350,7 @@ where
                             None
                         };
 
-                    let num_peer_connections = {
+                    let num_healthy_peer_connections = {
                         let num = self
                             .connections_by_peer
                             .range(
@@ -358,11 +358,8 @@ where
                                     ..=(actual_peer_index, collection::ConnectionId::max_value()),
                             )
                             .filter(|(_, connection_id)| {
-                                // Note that connections that are shutting down are still counted,
-                                // as we report the disconnected event only at the end of the
-                                // shutdown.
-                                // TODO: reconsider
-                                self.inner.connection_state(*connection_id).established
+                                let state = self.inner.connection_state(*connection_id);
+                                state.established && !state.shutting_down
                             })
                             .count();
                         NonZeroU32::new(u32::try_from(num).unwrap()).unwrap()
@@ -370,7 +367,7 @@ where
 
                     // If there isn't any other connection with this peer yet, check the desired
                     // substreams and open them.
-                    if num_peer_connections.get() == 1 {
+                    if num_healthy_peer_connections.get() == 1 {
                         let notification_protocols_indices = self
                             .peers_notifications_out
                             .range(
@@ -406,7 +403,7 @@ where
                     }
 
                     return Some(Event::HandshakeFinished {
-                        num_peer_connections,
+                        num_healthy_peer_connections,
                         peer_id,
                         expected_peer_id,
                     });
@@ -429,7 +426,7 @@ where
                         let peer_id = self.peers[peer_index].peer_id.clone();
 
                         if connection_state.established {
-                            let num_peer_connections = {
+                            let num_healthy_peer_connections = {
                                 let num = self
                                     .connections_by_peer
                                     .range(
@@ -437,11 +434,8 @@ where
                                             ..=(peer_index, collection::ConnectionId::max_value()),
                                     )
                                     .filter(|(_, connection_id)| {
-                                        // Note that connections that are shutting down are still counted,
-                                        // as we report the disconnected event only at the end of the
-                                        // shutdown.
-                                        // TODO: reconsider
-                                        self.inner.connection_state(*connection_id).established
+                                        let state = self.inner.connection_state(*connection_id);
+                                        state.established && !state.shutting_down
                                     })
                                     .count();
                                 u32::try_from(num).unwrap()
@@ -449,7 +443,7 @@ where
 
                             ShutdownPeer::Established {
                                 peer_id,
-                                num_peer_connections,
+                                num_healthy_peer_connections,
                             }
                         } else {
                             ShutdownPeer::OutgoingHandshake {
@@ -484,7 +478,7 @@ where
 
                     let peer_id = self.peers[expected_peer_index].peer_id.clone();
 
-                    let num_peer_connections = {
+                    let num_healthy_peer_connections = {
                         let num = self
                             .connections_by_peer
                             .range(
@@ -492,11 +486,8 @@ where
                                     ..=(expected_peer_index, collection::ConnectionId::max_value()),
                             )
                             .filter(|(_, connection_id)| {
-                                // Note that connections that are shutting down are still counted,
-                                // as we report the disconnected event only at the end of the
-                                // shutdown.
-                                // TODO: reconsider
-                                self.inner.connection_state(*connection_id).established
+                                let state = self.inner.connection_state(*connection_id);
+                                state.established && !state.shutting_down
                             })
                             .count();
                         u32::try_from(num).unwrap()
@@ -509,7 +500,7 @@ where
                     return Some(Event::Shutdown {
                         peer: if was_established {
                             ShutdownPeer::Established {
-                                num_peer_connections,
+                                num_healthy_peer_connections,
                                 peer_id,
                             }
                         } else {
@@ -1542,9 +1533,9 @@ pub enum Event<TConn> {
         /// Always `Some` for outgoing connections and always `None` for incoming connections.
         expected_peer_id: Option<PeerId>,
 
-        /// Number of other established connections with the same peer, including the one that
-        /// has just been established.
-        num_peer_connections: NonZeroU32,
+        /// Number of established not-shutting-down connections with the same peer, including the
+        /// one that has just been established.
+        num_healthy_peer_connections: NonZeroU32,
     },
 
     StartShutdown {
@@ -1705,9 +1696,9 @@ pub enum ShutdownPeer {
         /// Identity of the peer on the other side of the connection.
         peer_id: PeerId,
 
-        /// Number of other established connections with the same peer remaining after the
-        /// disconnection.
-        num_peer_connections: u32,
+        /// Number of other established not-shutting-down connections with the same peer remaining
+        /// after the disconnection.
+        num_healthy_peer_connections: u32,
     },
 
     /// Connection was still handshaking and was ingoing.

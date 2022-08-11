@@ -1062,7 +1062,7 @@ where
             match inner_event {
                 peers::Event::HandshakeFinished {
                     peer_id,
-                    num_peer_connections,
+                    num_healthy_peer_connections: num_peer_connections,
                     ..
                 } if num_peer_connections.get() == 1 => {
                     break Some(Event::Connected(peer_id));
@@ -1079,7 +1079,7 @@ where
                     peer:
                         peers::ShutdownPeer::Established {
                             peer_id,
-                            num_peer_connections,
+                            num_healthy_peer_connections: num_peer_connections,
                         },
                     user_data: address,
                 } if num_peer_connections == 0 => {
