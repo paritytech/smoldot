@@ -1654,7 +1654,7 @@ pub enum ShutdownPeer {
         num_healthy_peer_connections: u32,
     },
 
-    /// Connection was still handshaking and was ingoing.
+    /// Connection was still handshaking and was incoming.
     IngoingHandshake,
 
     /// Connection was still handshaking and was outgoing.
