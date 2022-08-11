@@ -1060,14 +1060,14 @@ where
             };
 
             match inner_event {
-                peers::Event::Connected {
+                peers::Event::HandshakeFinished {
                     peer_id,
                     num_peer_connections,
                     ..
                 } if num_peer_connections.get() == 1 => {
                     break Some(Event::Connected(peer_id));
                 }
-                peers::Event::Connected { .. } => {
+                peers::Event::HandshakeFinished { .. } => {
                     // When `num_peer_connections` != 1 we don't care about this event.
                 }
 
