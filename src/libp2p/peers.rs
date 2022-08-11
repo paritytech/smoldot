@@ -811,8 +811,8 @@ where
     /// [`PeerId`] will no longer be part of the return value of
     /// [`Peers::unfulfilled_desired_peers`].
     ///
-    /// No [`Event::Connected`] will be generated. Calling this function implicitly acts as if
-    /// this event was generated.
+    /// No [`Event::HandshakeFinished`] will be generated. Calling this function implicitly acts
+    /// as if this event had been implicitly generated.
     pub fn add_multi_stream_outgoing_connection<TSubId>(
         &mut self,
         now: TNow,
@@ -1219,8 +1219,8 @@ where
     ///
     /// A [`Event::Response`] event will later be generated containing the result of the request.
     ///
-    /// It is invalid to start a request on a peer before an [`Event::Connected`] has been
-    /// generated, or after a [`Event::Disconnected`] has been generated where
+    /// It is invalid to start a request on a peer before an [`Event::HandshakeFinished`] event
+    /// has been generated, or after a [`Event::Disconnected`] has been generated where
     /// [`Event::Disconnected::num_peer_connections`] is 0.
     ///
     /// Returns a newly-allocated identifier for this request.
