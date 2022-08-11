@@ -464,14 +464,19 @@ where
 
                     self.fake_out_requests_to_report.extend(fake_out_requests);
 
-                    // Only produce a `Disconnected` event if connection wasn't handshaking.
-                    if was_established {
-                        return Some(Event::Shutdown {
-                            num_peer_connections,
-                            peer_id,
-                            user_data,
-                        });
-                    }
+                    return Some(Event::Shutdown {
+                        peer: if was_established {
+                            ShutdownPeer::Established {
+                                num_peer_connections,
+                                peer_id,
+                            }
+                        } else {
+                            ShutdownPeer::OutgoingHandshake {
+                                expected_peer_id: peer_id,
+                            }
+                        },
+                        user_data,
+                    });
                 }
 
                 collection::Event::Shutdown {
@@ -479,13 +484,16 @@ where
                         Connection {
                             peer_index: None,
                             fake_out_requests,
-                            ..
+                            user_data,
                         },
                     ..
                 } => {
                     // Connection was incoming but its handshake wasn't finished yet.
-                    // The shutdown isn't reported.
                     debug_assert!(fake_out_requests.is_empty());
+                    return Some(Event::Shutdown {
+                        peer: ShutdownPeer::IngoingHandshake,
+                        user_data,
+                    });
                 }
 
                 collection::Event::InboundError {
@@ -1499,12 +1507,8 @@ pub enum Event<TConn> {
 
     /// A connection has stopped.
     Shutdown {
-        /// Identity of the peer on the other side of the connection.
-        peer_id: PeerId,
-
-        /// Number of other established connections with the same peer remaining after the
-        /// disconnection.
-        num_peer_connections: u32,
+        /// State of the connection and identity of the remote.
+        peer: ShutdownPeer,
 
         /// User data that was associated to this connection.
         // TODO: ?!
@@ -1640,6 +1644,29 @@ pub enum Event<TConn> {
         notifications_protocol_index: usize,
         /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
         outcome: Result<(), NotificationsInClosedErr>,
+    },
+}
+
+/// See [`Event::Shutdown`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShutdownPeer {
+    /// Connection was fully established.
+    Established {
+        /// Identity of the peer on the other side of the connection.
+        peer_id: PeerId,
+
+        /// Number of other established connections with the same peer remaining after the
+        /// disconnection.
+        num_peer_connections: u32,
+    },
+
+    /// Connection was still handshaking and was ingoing.
+    IngoingHandshake,
+
+    /// Connection was still handshaking and was outgoing.
+    OutgoingHandshake {
+        /// Identity of the peer that was expected to be reached after the handshake.
+        expected_peer_id: PeerId,
     },
 }
 

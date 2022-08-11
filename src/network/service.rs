@@ -1072,8 +1072,11 @@ where
                 }
 
                 peers::Event::Shutdown {
-                    peer_id,
-                    num_peer_connections,
+                    peer:
+                        peers::ShutdownPeer::Established {
+                            peer_id,
+                            num_peer_connections,
+                        },
                     user_data: address,
                 } if num_peer_connections == 0 => {
                     // TODO: O(n)
@@ -1108,7 +1111,7 @@ where
                     });
                 }
                 peers::Event::Shutdown {
-                    peer_id,
+                    peer: peers::ShutdownPeer::Established { peer_id, .. },
                     user_data: address,
                     ..
                 } => {
@@ -1120,6 +1123,9 @@ where
                             entry.get_mut().set_disconnected(&address);
                         }
                     }
+                }
+                peers::Event::Shutdown { .. } => {
+                    // TODO:
                 }
 
                 // Insubstantial error for diagnostic purposes.
