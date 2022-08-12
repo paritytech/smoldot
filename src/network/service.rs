@@ -873,6 +873,7 @@ where
                                         NonZeroUsize::new(e.num_references.get() + 1).unwrap();
                                     e
                                 }
+                                // TODO: is it possible that we're already connected to this peer? since we call set_disconnected() when we disconnect, we would geta panic
                                 hashbrown::hash_map::Entry::Vacant(e) => e.insert(KBucketsPeer {
                                     num_references: NonZeroUsize::new(1).unwrap(),
                                     addresses: addresses::Addresses::with_capacity(
@@ -1347,6 +1348,7 @@ where
                         // Update the k-buckets to mark the peer as connected.
                         // Note that this is done after having made sure that the handshake
                         // was correct.
+                        // TODO: should we not insert the entry in the k-buckets as well? seems important for incoming connections
                         if let Some(mut entry) = self.chains[chain_index]
                             .kbuckets
                             .entry(&peer_id)
