@@ -158,6 +158,9 @@ pub struct ChainNetwork<TNow> {
     /// See [`Config::max_addresses_per_peer`].
     max_addresses_per_peer: NonZeroUsize,
 
+    /// Contains an entry for each peer present in at least one k-bucket of a chain.
+    kbuckets_peers: hashbrown::HashMap<PeerId, KBucketsPeer, SipHasherBuild>,
+
     /// Tuples of `(peer_id, chain_index)` that have been reported as open to the API user.
     ///
     /// This is a subset of the block announce notification protocol substreams that are open.
@@ -213,11 +216,22 @@ struct Chain<TNow> {
     ///
     /// Used in order to hold the list of peers that are known to be part of this chain.
     ///
-    /// A peer is marked as "connected" in the k-buckets when a block announces substream is open,
-    /// and disconnected when it is closed.
+    /// A peer is marked as "connected" in the k-buckets when a block announces substream is open
+    /// and that the remote's handshake is valid (i.e. can be parsed and containing a correct
+    /// genesis hash), and disconnected when it is closed or that the remote's handshake isn't
+    /// satisfactory.
+    kbuckets: kademlia::kbuckets::KBuckets<PeerId, (), TNow, 20>,
+}
+
+struct KBucketsPeer {
+    /// Number of k-buckets containing this peer. Used to know when to remove this entry.
+    num_references: NonZeroUsize,
+
+    /// List of addresses known for this peer, and whether we are currently connected to each of
+    /// them.
     ///
-    /// For each peer, a list of addresses is hold. This list must never become empty.
-    kbuckets: kademlia::kbuckets::KBuckets<PeerId, addresses::Addresses, TNow, 20>,
+    /// Must never be empty.
+    addresses: addresses::Addresses,
 }
 
 enum InRequestTy {
@@ -368,6 +382,10 @@ where
             }),
             open_chains: hashbrown::HashSet::with_capacity_and_hasher(
                 config.peers_capacity * chains.len(),
+                SipHasherBuild::new(randomness.gen()),
+            ),
+            kbuckets_peers: hashbrown::HashMap::with_capacity_and_hasher(
+                config.peers_capacity,
                 SipHasherBuild::new(randomness.gen()),
             ),
             num_pending_per_peer: hashbrown::HashMap::with_capacity_and_hasher(
@@ -825,23 +843,63 @@ where
                 continue;
             }
 
-            // TODO: also insert addresses in kbuckets of other chains? a bit unclear
-            if let Ok(mut kbuckets_addrs) = kbuckets.entry(&peer_id).or_insert(
-                addresses::Addresses::with_capacity(self.max_addresses_per_peer.get()),
-                now,
-                kademlia::kbuckets::PeerState::Disconnected,
-            ) {
-                for to_insert in discovered_addrs {
-                    if kbuckets_addrs.get_mut().len() >= self.max_addresses_per_peer.get() {
-                        continue;
-                    }
+            let kbuckets_peer = match kbuckets.entry(&peer_id) {
+                kademlia::kbuckets::Entry::LocalKey => return, // TODO: return some diagnostic?
+                kademlia::kbuckets::Entry::Vacant(entry) => {
+                    match entry.insert((), now, kademlia::kbuckets::PeerState::Disconnected) {
+                        Ok((_, removed_entry)) => {
+                            // `removed_entry` is the peer that was removed the k-buckets as the
+                            // result of the new insertion. Purge it from `self.kbuckets_peers`
+                            // if necessary.
+                            if let Some((removed_peer_id, _)) = removed_entry {
+                                match self.kbuckets_peers.entry(removed_peer_id) {
+                                    hashbrown::hash_map::Entry::Occupied(e)
+                                        if e.get().num_references.get() == 1 =>
+                                    {
+                                        e.remove();
+                                    }
+                                    hashbrown::hash_map::Entry::Occupied(e) => {
+                                        let num_refs = &mut e.into_mut().num_references;
+                                        *num_refs = NonZeroUsize::new(num_refs.get() - 1).unwrap();
+                                    }
+                                    hashbrown::hash_map::Entry::Vacant(_) => unreachable!(),
+                                }
+                            }
 
-                    kbuckets_addrs.get_mut().insert_discovered(to_insert);
+                            match self.kbuckets_peers.entry(peer_id) {
+                                hashbrown::hash_map::Entry::Occupied(e) => {
+                                    let e = e.into_mut();
+                                    e.num_references =
+                                        NonZeroUsize::new(e.num_references.get() + 1).unwrap();
+                                    e
+                                }
+                                // TODO: is it possible that we're already connected to this peer? since we call set_disconnected() when we disconnect, we would geta panic
+                                hashbrown::hash_map::Entry::Vacant(e) => e.insert(KBucketsPeer {
+                                    num_references: NonZeroUsize::new(1).unwrap(),
+                                    addresses: addresses::Addresses::with_capacity(
+                                        self.max_addresses_per_peer.get(),
+                                    ),
+                                }),
+                            }
+                        }
+                        Err(kademlia::kbuckets::InsertError::Full) => return, // TODO: return some diagnostic?
+                    }
+                }
+                kademlia::kbuckets::Entry::Occupied(_) => {
+                    self.kbuckets_peers.get_mut(&peer_id).unwrap()
+                }
+            };
+
+            for to_insert in discovered_addrs {
+                if kbuckets_peer.addresses.len() >= self.max_addresses_per_peer.get() {
+                    continue;
                 }
 
-                // List of addresses must never be empty.
-                debug_assert!(!kbuckets_addrs.get_mut().is_empty());
+                kbuckets_peer.addresses.insert_discovered(to_insert);
             }
+
+            // List of addresses must never be empty.
+            debug_assert!(!kbuckets_peer.addresses.is_empty());
         }
     }
 
@@ -857,9 +915,12 @@ where
     ) -> impl Iterator<Item = (&'_ PeerId, impl Iterator<Item = &'_ multiaddr::Multiaddr>)> + '_
     {
         let kbuckets = &self.chains[chain_index].kbuckets;
-        kbuckets
-            .iter_ordered()
-            .map(|(peer_id, addresses)| (peer_id, addresses.iter()))
+        kbuckets.iter_ordered().map(move |(peer_id, _)| {
+            (
+                peer_id,
+                self.kbuckets_peers.get(peer_id).unwrap().addresses.iter(),
+            )
+        })
     }
 
     /// After calling [`ChainNetwork::next_start_connect`], notifies the [`ChainNetwork`] of the
@@ -896,11 +957,10 @@ where
         }
 
         // Update the list of addresses.
-        // TODO: O(n)
-        for chain in &mut self.chains {
-            if let Some(addrs) = chain.kbuckets.get_mut(expected_peer_id) {
-                addrs.set_connected(multiaddr);
-            }
+        // TODO: what if address already present? is it possible?
+        if let Some(KBucketsPeer { addresses, .. }) = self.kbuckets_peers.get_mut(expected_peer_id)
+        {
+            addresses.set_connected(multiaddr);
         }
 
         self.pending_ids.remove(id.0);
@@ -953,11 +1013,10 @@ where
         }
 
         // Update the list of addresses.
-        // TODO: O(n)
-        for chain in &mut self.chains {
-            if let Some(addrs) = chain.kbuckets.get_mut(expected_peer_id) {
-                addrs.set_connected(multiaddr);
-            }
+        // TODO: what if address already present? is it possible?
+        if let Some(KBucketsPeer { addresses, .. }) = self.kbuckets_peers.get_mut(expected_peer_id)
+        {
+            addresses.set_connected(multiaddr);
         }
 
         self.pending_ids.remove(id.0);
@@ -1008,25 +1067,21 @@ where
         let (expected_peer_id, _, _) = self.pending_ids.remove(id.0);
 
         // Updates the addresses book.
-        // TODO: O(n)
-        for chain in &mut self.chains {
-            if let Some(addrs) = chain.kbuckets.get_mut(&expected_peer_id) {
-                if is_unreachable {
-                    // Do not remove last remaining address, in order to prevent the addresses
-                    // list from ever becoming empty.
-                    debug_assert!(!addrs.is_empty());
-                    if addrs.len() <= 1 {
-                        continue;
-                    }
-
-                    addrs.remove(&multiaddr);
-                } else {
-                    addrs.set_disconnected(&multiaddr);
-
-                    // Shuffle the known addresses, otherwise the same address might get picked
-                    // again.
-                    addrs.shuffle();
+        if let Some(KBucketsPeer { addresses, .. }) = self.kbuckets_peers.get_mut(&expected_peer_id)
+        {
+            if is_unreachable {
+                // Do not remove last remaining address, in order to prevent the addresses
+                // list from ever becoming empty.
+                debug_assert!(!addresses.is_empty());
+                if addresses.len() > 1 {
+                    addresses.remove(&multiaddr);
                 }
+            } else {
+                addresses.set_disconnected(&multiaddr);
+
+                // Shuffle the known addresses, otherwise the same address might get picked
+                // again.
+                addresses.shuffle();
             }
         }
 
@@ -1099,12 +1154,10 @@ where
 
                     // Update the k-buckets.
                     let address = &self.inner[connection_id];
-                    for chain in &mut self.chains {
-                        if let Some(mut entry) = chain.kbuckets.entry(&peer_id).into_occupied() {
-                            // TODO: this doesn't seem right
-                            entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
-                            entry.get_mut().set_disconnected(&address);
-                        }
+                    if let Some(KBucketsPeer { addresses, .. }) =
+                        self.kbuckets_peers.get_mut(&peer_id)
+                    {
+                        addresses.set_disconnected(&address);
                     }
 
                     for idx in &chain_indices {
@@ -1123,12 +1176,10 @@ where
                 } => {
                     // Update the k-buckets.
                     let address = &self.inner[connection_id];
-                    for chain in &mut self.chains {
-                        if let Some(mut entry) = chain.kbuckets.entry(&peer_id).into_occupied() {
-                            // TODO: this doesn't seem right
-                            entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
-                            entry.get_mut().set_disconnected(&address);
-                        }
+                    if let Some(KBucketsPeer { addresses, .. }) =
+                        self.kbuckets_peers.get_mut(&peer_id)
+                    {
+                        addresses.set_disconnected(&address);
                     }
                 }
                 peers::Event::StartShutdown {
@@ -1141,12 +1192,10 @@ where
                 } => {
                     // Update the k-buckets.
                     let address = &self.inner[connection_id];
-                    for chain in &mut self.chains {
-                        if let Some(mut entry) =
-                            chain.kbuckets.entry(&expected_peer_id).into_occupied()
-                        {
-                            entry.get_mut().set_disconnected(&address);
-                        }
+                    if let Some(KBucketsPeer { addresses, .. }) =
+                        self.kbuckets_peers.get_mut(&expected_peer_id)
+                    {
+                        addresses.set_disconnected(&address);
                     }
                 }
                 peers::Event::StartShutdown {
@@ -1296,7 +1345,10 @@ where
                             });
                         }
 
-                        // Update the k-buckets.
+                        // Update the k-buckets to mark the peer as connected.
+                        // Note that this is done after having made sure that the handshake
+                        // was correct.
+                        // TODO: should we not insert the entry in the k-buckets as well? seems important for incoming connections
                         if let Some(mut entry) = self.chains[chain_index]
                             .kbuckets
                             .entry(&peer_id)
@@ -1573,6 +1625,9 @@ where
                                 .entry(&peer_id)
                                 .into_occupied()
                             {
+                                // Note that the state might have already be `Disconnected`, which
+                                // can happen for example in case of a problem in the handshake
+                                // sent back by the remote.
                                 entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
                             }
 
@@ -1949,7 +2004,15 @@ where
                 .kbuckets
                 .closest_entries(&random_peer_id)
                 // TODO: instead of filtering by connectd only, connect to nodes if not connected
-                .find(|(_, addresses)| addresses.iter_connected().count() != 0)
+                .find(|(peer_id, _)| {
+                    self.kbuckets_peers
+                        .get(peer_id)
+                        .unwrap()
+                        .addresses
+                        .iter_connected()
+                        .count()
+                        != 0
+                })
                 .map(|(peer_id, _)| peer_id.clone());
             peer_id
         };
@@ -2067,19 +2130,18 @@ where
                     .iter_mut()
                     .flat_map(|chain| chain.kbuckets.iter_mut_ordered())
                     .find(|(p, _)| **p == *entry.key())
-                    .and_then(|(_, addrs)| addrs.addr_to_pending());
+                    .and_then(|(peer_id, _)| {
+                        self.kbuckets_peers
+                            .get_mut(peer_id)
+                            .unwrap()
+                            .addresses
+                            .addr_to_pending()
+                    });
                 match potential {
                     Some(a) => a.clone(),
                     None => continue,
                 }
             };
-
-            // TODO: O(n)
-            for chain in &mut self.chains {
-                if let Some(_) = chain.kbuckets.get_mut(entry.key()) {
-                    // TODO: mark address as pending
-                }
-            }
 
             let now = now();
             let pending_id = PendingId(self.pending_ids.insert((
