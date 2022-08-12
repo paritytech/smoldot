@@ -2141,13 +2141,6 @@ where
                 }
             };
 
-            // TODO: O(n)
-            for chain in &mut self.chains {
-                if let Some(_) = chain.kbuckets.get_mut(entry.key()) {
-                    // TODO: mark address as pending
-                }
-            }
-
             let now = now();
             let pending_id = PendingId(self.pending_ids.insert((
                 entry.key().clone(),
