@@ -32,7 +32,7 @@
 
 use crate::{
     chain::{blocks_tree, chain_information},
-    executor::{host, storage_diff},
+    executor::{host, storage_diff, vm::ExecHint},
     header,
     sync::{all_forks, optimistic, warp_sync},
     verify,
@@ -1093,28 +1093,31 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             marker: marker::PhantomData,
                         })
                     }
-                    warp_sync::ProcessOne::BuildChainInformation(inner) => match inner.build().0 {
-                        // TODO: errors not reported to upper layer
-                        warp_sync::WarpSync::InProgress(inner) => {
-                            self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                            ProcessOne::AllSync(self)
-                        }
-                        warp_sync::WarpSync::Finished(success) => {
-                            let (
-                                new_inner,
-                                finalized_block_runtime,
-                                finalized_storage_code,
-                                finalized_storage_heap_pages,
-                            ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
-                            self.inner = AllSyncInner::AllForks(new_inner);
-                            ProcessOne::WarpSyncFinished {
-                                sync: self,
-                                finalized_block_runtime,
-                                finalized_storage_code,
-                                finalized_storage_heap_pages,
+                    warp_sync::ProcessOne::BuildChainInformation(inner) => {
+                        // TODO: make these parameters configurable
+                        match inner.build(ExecHint::CompileAheadOfTime, false).0 {
+                            // TODO: errors not reported to upper layer
+                            warp_sync::WarpSync::InProgress(inner) => {
+                                self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                                ProcessOne::AllSync(self)
+                            }
+                            warp_sync::WarpSync::Finished(success) => {
+                                let (
+                                    new_inner,
+                                    finalized_block_runtime,
+                                    finalized_storage_code,
+                                    finalized_storage_heap_pages,
+                                ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
+                                self.inner = AllSyncInner::AllForks(new_inner);
+                                ProcessOne::WarpSyncFinished {
+                                    sync: self,
+                                    finalized_block_runtime,
+                                    finalized_storage_code,
+                                    finalized_storage_heap_pages,
+                                }
                             }
                         }
-                    },
+                    }
                 }
             }
             AllSyncInner::AllForks(sync) => match sync.process_one() {
