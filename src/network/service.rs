@@ -828,22 +828,30 @@ where
             }
 
             // TODO: also insert addresses in kbuckets of other chains? a bit unclear
-            if let Ok(mut kbuckets_addrs) = kbuckets.entry(&peer_id).or_insert(
-                addresses::Addresses::with_capacity(self.max_addresses_per_peer.get()),
-                now,
-                kademlia::kbuckets::PeerState::Disconnected,
-            ) {
-                for to_insert in discovered_addrs {
-                    if kbuckets_addrs.get_mut().len() >= self.max_addresses_per_peer.get() {
-                        continue;
-                    }
+            let mut kbuckets_entry = match kbuckets.entry(&peer_id) {
+                kademlia::kbuckets::Entry::LocalKey => return, // TODO: return some diagnostic?
+                kademlia::kbuckets::Entry::Vacant(entry) => match entry.insert(
+                    addresses::Addresses::with_capacity(self.max_addresses_per_peer.get()),
+                    now,
+                    kademlia::kbuckets::PeerState::Disconnected,
+                ) {
+                    Ok((entry, Some(removed_entry))) => entry,
+                    Ok((entry, None)) => entry,
+                    Err(kademlia::kbuckets::InsertError::Full) => return, // TODO: return some diagnostic?
+                },
+                kademlia::kbuckets::Entry::Occupied(e) => e,
+            };
 
-                    kbuckets_addrs.get_mut().insert_discovered(to_insert);
+            for to_insert in discovered_addrs {
+                if kbuckets_entry.get_mut().len() >= self.max_addresses_per_peer.get() {
+                    continue;
                 }
 
-                // List of addresses must never be empty.
-                debug_assert!(!kbuckets_addrs.get_mut().is_empty());
+                kbuckets_entry.get_mut().insert_discovered(to_insert);
             }
+
+            // List of addresses must never be empty.
+            debug_assert!(!kbuckets_entry.get_mut().is_empty());
         }
     }
 
