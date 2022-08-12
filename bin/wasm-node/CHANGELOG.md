@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fix panic that occured when connecting to a peer, then discovering it through the background discovery process, then disconnecting from it. ([#2616](https://github.com/paritytech/smoldot/pull/2616))
 - Fix circular dependency between JavaScript modules. ([#2614](https://github.com/paritytech/smoldot/pull/2614))
 
 ## 0.6.29 - 2022-08-09
