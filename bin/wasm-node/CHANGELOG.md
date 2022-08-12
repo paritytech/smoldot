@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix circular dependency between JavaScript modules.
+
 ## 0.6.29 - 2022-08-09
 
 ### Fixed
