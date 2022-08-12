@@ -481,6 +481,12 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                 relay_chain_subscribe_all.new_blocks.unpin_block(hash).await;
                             }
                         },
+                        Err(ParaheadError::ObsoleteSubscription) => {
+                            // The relay chain runtime service has some kind of gap or issue and
+                            // has discarded the runtime.
+                            // Jump to the outer loop to recreate the channel.
+                            break;
+                        }
                         Err(error) => {
                             // Several chains initially didn't support parachains, and have later
                             // been upgraded to support them. Similarly, the parachain might not
@@ -675,9 +681,16 @@ async fn parahead<TPlat: Platform>(
 ) -> Result<Vec<u8>, ParaheadError> {
     // For each relay chain block, call `ParachainHost_persisted_validation_data` in
     // order to know where the parachains are.
-    let precall = relay_chain_sync
+    let precall = match relay_chain_sync
         .pinned_block_runtime_lock(subscription_id, block_hash)
-        .await;
+        .await
+    {
+        Ok(p) => p,
+        Err(runtime_service::PinnedBlockRuntimeLockError::ObsoleteSubscription) => {
+            return Err(ParaheadError::ObsoleteSubscription)
+        }
+    };
+
     let (runtime_call_lock, virtual_machine) = precall
         .start(
             para::PERSISTED_VALIDATION_FUNCTION_NAME,
@@ -781,6 +794,8 @@ enum ParaheadError {
     InvalidRuntimeOutput(para::Error),
     /// Fetching following keys is not supported by call proofs.
     NextKeyForbidden,
+    /// Runtime service subscription is no longer valid.
+    ObsoleteSubscription,
 }
 
 impl ParaheadError {
@@ -794,6 +809,7 @@ impl ParaheadError {
             ParaheadError::NoCore => false,
             ParaheadError::InvalidRuntimeOutput(_) => false,
             ParaheadError::NextKeyForbidden => false,
+            ParaheadError::ObsoleteSubscription => false,
         }
     }
 }
