@@ -21,12 +21,23 @@
 //! of that object with the Wasm instance.
 
 import * as buffer from './buffer.js';
-import * as compat from '../compat/index.js';
-import * as connection from './connection.js';
 import type { SmoldotWasmInstance } from './bindings.js';
 
 export interface Config {
     instance?: SmoldotWasmInstance,
+
+    /**
+     * Returns the number of milliseconds since an arbitrary epoch.
+     */
+    performanceNow: () => number,
+
+    /**
+     * Tries to open a new connection using the given configuration.
+     *
+     * @see Connection
+     * @throws ConnectionError If the multiaddress couldn't be parsed or contains an invalid protocol.
+     */
+    connect(config: ConnectionConfig): Connection;
     
     /**
      * Closure to call when the Wasm instance calls `panic`.
@@ -39,16 +50,138 @@ export interface Config {
     jsonRpcCallback: (response: string, chainId: number) => void,
     databaseContentCallback: (data: string, chainId: number) => void,
     currentTaskCallback?: (taskName: string | null) => void,
-    forbidTcp: boolean,
-    forbidWs: boolean,
-    forbidNonLocalWs: boolean,
-    forbidWss: boolean,
 }
 
-export default function (config: Config): { imports: compat.WasmModuleImports, killAll: () => void } {
+/**
+ * Connection to a remote node.
+ *
+ * At any time, a connection can be in one of the three following states:
+ *
+ * - `Opening` (initial state)
+ * - `Open`
+ * - `Closed`
+ *
+ * When in the `Opening` or `Open` state, the connection can transition to the `Closed` state
+ * if the remote closes the connection or refuses the connection altogether. When that
+ * happens, `config.onClosed` is called. Once in the `Closed` state, the connection cannot
+ * transition back to another state.
+ *
+ * Initially in the `Opening` state, the connection can transition to the `Open` state if the
+ * remote accepts the connection. When that happens, `config.onOpen` is called.
+ *
+ * When in the `Open` state, the connection can receive messages. When a message is received,
+ * `config.onMessage` is called.
+ *
+ * @see connect
+ */
+ export interface Connection {
+    /**
+     * Transitions the connection or one of its substreams to the `Closed` state.
+     *
+     * If the connection is of type "single-stream", the whole connection must be shut down.
+     * If the connection is of type "multi-stream", a `streamId` can be provided, in which case
+     * only the given substream is shut down.
+     *
+     * The `config.onClose` or `config.onStreamClose` callbacks are **not** called.
+     *
+     * The transition is performed in the background.
+     * If the whole connection is to be shut down, none of the callbacks passed to the `Config`
+     * must be called again. If only a substream is shut down, the `onStreamClose` and `onMessage`
+     * callbacks must not be called again with that substream.
+     */
+    close(streamId?: number): void;
+
+    /**
+     * Queues data to be sent on the given connection.
+     *
+     * The connection must currently be in the `Open` state.
+     *
+     * The `streamId` must be provided if and only if the connection is of type "multi-stream".
+     * It indicates which substream to send the data on.
+     */
+    send(data: Uint8Array, streamId?: number): void;
+
+    /**
+     * Start opening an additional outbound substream on the given connection.
+     *
+     * The state of the connection must be `Open`. This function must only be called for
+     * connections of type "multi-stream".
+     *
+     * The `onStreamOpened` callback must later be called with an outbound direction.
+     */
+    openOutSubstream(): void;
+}
+
+/**
+ * Configuration for a connection.
+ *
+ * @see connect
+ */
+export interface ConnectionConfig {
+    /**
+     * Multiaddress in string format that describes which node to try to connect to.
+     *
+     * Note that this address shouldn't be trusted. The value in this field might have been chosen
+     * by a potentially malicious peer.
+     */
+    address: string,
+
+    /**
+     * Callback called when the connection transitions from the `Opening` to the `Open` state.
+     *
+     * Must only be called once per connection.
+     */
+    onOpen: (info: { type: 'single-stream' } | { type: 'multi-stream', peerId: Uint8Array }) => void;
+
+    /**
+     * Callback called when the connection transitions to the `Closed` state.
+     *
+     * It it **not** called if `Connection.close` is manually called by the API user.
+     */
+    onConnectionClose: (message: string) => void;
+
+    /**
+     * Callback called when a new substream has been opened.
+     *
+     * This function must only be called for connections of type "multi-stream".
+     */
+    onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound') => void;
+
+    /**
+     * Callback called when a stream transitions to the `Closed` state.
+     *
+     * It it **not** called if `Connection.closeStream` is manually called by the API user.
+     *
+     * This function must only be called for connections of type "multi-stream".
+     */
+    onStreamClose: (streamId: number) => void;
+
+    /**
+     * Callback called when a message sent by the remote has been received.
+     *
+     * Can only happen while the connection is in the `Open` state.
+     *
+     * The `streamId` parameter must be provided if and only if the connection is of type
+     * "multi-stream".
+     */
+    onMessage: (message: Uint8Array, streamId?: number) => void;
+}
+
+/**
+ * Emitted by `connect` if the multiaddress couldn't be parsed or contains an invalid protocol.
+ *
+ * @see connect
+ */
+export class ConnectionError extends Error {
+    constructor(message: string) {
+        super(message);
+    }
+}
+
+export default function (config: Config): { imports: WebAssembly.ModuleImports, killAll: () => void } {
     // Used below to store the list of all connections.
     // The indices within this array are chosen by the Rust code.
-    let connections: Record<number, connection.Connection> = {};
+    let connections: Record<number, Connection> = {};
 
     // Object containing a boolean indicating whether the `killAll` function has been invoked by
     // the user.
@@ -130,7 +263,7 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
         unix_time_ms: () => Date.now(),
 
         // Must return the value of a monotonic clock in milliseconds.
-        monotonic_clock_ms: () => compat.performanceNow(),
+        monotonic_clock_ms: () => config.performanceNow(),
 
         // Must call `timer_finished` after the given number of milliseconds has elapsed.
         start_timer: (id: number, ms: number) => {
@@ -184,19 +317,26 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
 
                 const address = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), addrPtr, addrLen);
 
-                const connec = connection.connect({
+                const connec = config.connect({
                     address,
-                    forbidTcp: config.forbidTcp,
-                    forbidWs: config.forbidWs,
-                    forbidNonLocalWs: config.forbidNonLocalWs,
-                    forbidWss: config.forbidWss,
-                    onOpen: () => {
+                    onOpen: (info) => {
                         if (killedTracked.killed) return;
                         try {
-                            instance.exports.connection_open_single_stream(connectionId);
+                            switch (info.type) {
+                                case 'single-stream': {
+                                    instance.exports.connection_open_single_stream(connectionId);
+                                    break
+                                }
+                                case 'multi-stream': {
+                                    const ptr = instance.exports.alloc(info.peerId.length) >>> 0;
+                                    new Uint8Array(instance.exports.memory.buffer).set(info.peerId, ptr);
+                                    instance.exports.connection_open_multi_stream(connectionId, ptr, info.peerId.length);
+                                    break
+                                }
+                            }
                         } catch(_error) {}
                     },
-                    onClose: (message: string) => {
+                    onConnectionClose: (message: string) => {
                         if (killedTracked.killed) return;
                         try {
                             const encoded = new TextEncoder().encode(message)
@@ -205,21 +345,38 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
                             instance.exports.connection_closed(connectionId, ptr, encoded.length);
                         } catch(_error) {}
                     },
-                    onMessage: (message: Uint8Array) => {
+                    onMessage: (message: Uint8Array, streamId?: number) => {
                         if (killedTracked.killed) return;
                         try {
                             const ptr = instance.exports.alloc(message.length) >>> 0;
                             new Uint8Array(instance.exports.memory.buffer).set(message, ptr)
-                            instance.exports.stream_message(connectionId, 0, ptr, message.length);
+                            instance.exports.stream_message(connectionId, streamId || 0, ptr, message.length);
+                        } catch(_error) {}
+                    },
+                    onStreamOpened: (streamId: number, direction: 'inbound' | 'outbound') => {
+                        if (killedTracked.killed) return;
+                        try {
+                            instance.exports.connection_stream_opened(
+                                connectionId,
+                                streamId,
+                                direction === 'outbound' ? 1 : 0
+                            );
+                        } catch(_error) {}
+                    },
+                    onStreamClose: (streamId: number) => {
+                        if (killedTracked.killed) return;
+                        try {
+                            instance.exports.stream_closed(connectionId, streamId);
                         } catch(_error) {}
                     }
+                
                 });
 
                 connections[connectionId] = connec;
                 return 0;
 
             } catch (error) {
-                const isBadAddress = error instanceof connection.ConnectionError;
+                const isBadAddress = error instanceof ConnectionError;
                 let errorStr = "Unknown error";
                 if (error instanceof Error) {
                     errorStr = error.toString();
@@ -243,21 +400,21 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
             delete connections[connectionId];
         },
 
-        // Opens a new substream on a multi-stream connection
-        connection_stream_open: (_connectionId: number) => {
-            // Given that multi-stream connections are never opened at the moment, this function
-            // should never be called.
+        // Opens a new substream on a multi-stream connection.
+        connection_stream_open: (connectionId: number) => {
+            const connection = connections[connectionId]!;
+            connection.openOutSubstream()
         },
 
-        // Closes a substream on a multi-stream connection
-        connection_stream_close: (_connectionId: number, _streamId: number) => {
-            // Given that multi-stream connections are never opened at the moment, this function
-            // should never be called.
+        // Closes a substream on a multi-stream connection.
+        connection_stream_close: (connectionId: number, streamId: number) => {
+            const connection = connections[connectionId]!;
+            connection.close(streamId)
         },
 
         // Must queue the data found in the WebAssembly memory at the given pointer. It is assumed
         // that this function is called only when the connection is in an open state.
-        stream_send: (connectionId: number, _streamId: number, ptr: number, len: number) => {
+        stream_send: (connectionId: number, streamId: number, ptr: number, len: number) => {
             if (killedTracked.killed) return;
     
             const instance = config.instance!;
@@ -267,7 +424,7 @@ export default function (config: Config): { imports: compat.WasmModuleImports, k
 
             const data = new Uint8Array(instance.exports.memory.buffer).slice(ptr, ptr + len);
             const connection = connections[connectionId]!;
-            connection.send(data);
+            connection.send(data, streamId);  // TODO: docs says the streamId is provided only for multi-stream connections, but here it's always provided
         },
 
         current_task_entered: (ptr: number, len: number) => {

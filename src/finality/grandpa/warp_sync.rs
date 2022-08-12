@@ -163,21 +163,22 @@ impl Verifier {
         })
         .map_err(Error::Verify)?;
 
-        let authorities_list = header::decode(&fragment.scale_encoded_header)
-            .map_err(Error::InvalidHeader)?
-            .digest
-            .logs()
-            .find_map(|log_item| match log_item {
-                DigestItemRef::GrandpaConsensus(grandpa_log_item) => match grandpa_log_item {
-                    GrandpaConsensusLogRef::ScheduledChange(change)
-                    | GrandpaConsensusLogRef::ForcedChange { change, .. } => {
-                        Some(change.next_authorities)
-                    }
+        let authorities_list =
+            header::decode(&fragment.scale_encoded_header, self.block_number_bytes)
+                .map_err(Error::InvalidHeader)?
+                .digest
+                .logs()
+                .find_map(|log_item| match log_item {
+                    DigestItemRef::GrandpaConsensus(grandpa_log_item) => match grandpa_log_item {
+                        GrandpaConsensusLogRef::ScheduledChange(change)
+                        | GrandpaConsensusLogRef::ForcedChange { change, .. } => {
+                            Some(change.next_authorities)
+                        }
+                        _ => None,
+                    },
                     _ => None,
-                },
-                _ => None,
-            })
-            .map(|next_authorities| next_authorities.map(GrandpaAuthority::from).collect());
+                })
+                .map(|next_authorities| next_authorities.map(GrandpaAuthority::from).collect());
 
         self.index += 1;
 

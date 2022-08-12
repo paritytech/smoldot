@@ -1184,7 +1184,7 @@ impl<TPlat: Platform> Background<TPlat> {
             match cache_lock
                 .recent_pinned_blocks
                 .get(hash)
-                .map(|h| header::decode(h))
+                .map(|h| header::decode(h, self.sync_service.block_number_bytes()))
             {
                 Some(Ok(header)) => return Ok((*header.state_root, header.number)),
                 Some(Err(_)) => return Err(()),
@@ -1207,6 +1207,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             // The sync service knows which peers are potentially aware of
                             // this block.
                             let result = sync_service
+                                .clone()
                                 .block_query_unknown_number(
                                     hash,
                                     protocol::BlocksRequestFields {
@@ -1228,7 +1229,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                     header::hash_from_scale_encoded_header(&header),
                                     hash
                                 );
-                                let decoded = header::decode(&header).unwrap();
+                                let decoded =
+                                    header::decode(&header, sync_service.block_number_bytes())
+                                        .unwrap();
                                 Ok((*decoded.state_root, decoded.number))
                             } else {
                                 Err(())
@@ -1300,21 +1303,22 @@ impl<TPlat: Platform> Background<TPlat> {
 
             // Try to find the block in the cache of recent blocks. Most of the time, the call target
             // should be in there.
-            if cache_lock.recent_pinned_blocks.contains(block_hash) {
+            let lock = if cache_lock.recent_pinned_blocks.contains(block_hash) {
                 // The runtime service has the block pinned, meaning that we can ask the runtime
                 // service to perform the call.
-                let runtime_call_lock = self
-                    .runtime_service
+                self.runtime_service
                     .pinned_block_runtime_lock(
                         cache_lock.subscription_id.clone().unwrap(),
                         block_hash,
                     )
-                    .await;
+                    .await
+                    .ok()
+            } else {
+                None
+            };
 
-                // Make sure to unlock the cache, in order to not block the other requests.
-                drop::<futures::lock::MutexGuard<_>>(cache_lock);
-
-                runtime_call_lock
+            if let Some(lock) = lock {
+                lock
             } else {
                 // Second situation: the block is not in the cache of recent blocks. This isn't great.
                 drop::<futures::lock::MutexGuard<_>>(cache_lock);

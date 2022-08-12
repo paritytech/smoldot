@@ -106,6 +106,9 @@ pub struct ChainConfig {
     /// chain, so as to not introduce conflicts in the networking messages.
     pub protocol_id: String,
 
+    /// Number of bytes of the block number in the networking protocol.
+    pub block_number_bytes: usize,
+
     /// If true, the chain uses the GrandPa networking protocol.
     pub has_grandpa_protocol: bool,
 }
@@ -213,7 +216,7 @@ impl NetworkService {
                 in_slots: 25,
                 out_slots: 25,
                 protocol_id: chain.protocol_id.clone(),
-                block_number_bytes: 4, // TODO: correct value, maybe load from chain spec?
+                block_number_bytes: chain.block_number_bytes,
                 best_hash: chain.best_block.1,
                 best_number: chain.best_block.0,
                 genesis_hash: chain.genesis_block_hash,
@@ -535,13 +538,13 @@ impl NetworkService {
 
         // The call to `send_block_announce` below panics if we have no active connection.
         // TODO: not the correct check; must make sure that we have a substream open
-        if !guarded.network.has_established_connection(&target) {
+        if !guarded.network.has_established_connection(target) {
             return Err(QueueNotificationError::NoConnection);
         }
 
         let result = guarded
             .network
-            .send_block_announce(&target, chain_index, scale_encoded_header, is_best)
+            .send_block_announce(target, chain_index, scale_encoded_header, is_best)
             .map_err(QueueNotificationError::Queue);
 
         self.inner.wake_up_main_background_task.notify(1);
@@ -756,14 +759,18 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     let decoded = announce.decode();
                     let header_hash =
                         header::hash_from_scale_encoded_header(&decoded.scale_encoded_header);
-                    match header::decode(&decoded.scale_encoded_header) {
+                    match header::decode(
+                        decoded.scale_encoded_header,
+                        guarded.network.block_number_bytes(chain_index),
+                    ) {
                         Ok(decoded_header) => {
                             let mut _jaeger_span =
                                 inner.jaeger_service.block_announce_receive_span(
                                     &inner.local_peer_id,
                                     &peer_id,
                                     decoded_header.number,
-                                    &decoded_header.hash(),
+                                    &decoded_header
+                                        .hash(guarded.network.block_number_bytes(chain_index)),
                                 );
 
                             tracing::debug!(
@@ -902,8 +909,12 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     );
 
                     // TODO: is it a good idea to await here while the lock is held and freezing the entire networking background task?
-                    let response =
-                        blocks_request_response(&inner.databases[chain_index], config).await;
+                    let response = blocks_request_response(
+                        &inner.databases[chain_index],
+                        guarded.network.block_number_bytes(chain_index),
+                        config,
+                    )
+                    .await;
                     guarded.network.respond_blocks(
                         request_id,
                         match response {
@@ -982,7 +993,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
             break;
         }
 
-        let start_connect = match guarded.network.next_start_connect(|| Instant::now()) {
+        let start_connect = match guarded.network.next_start_connect(Instant::now) {
             Some(sc) => sc,
             None => break,
         };
@@ -1004,12 +1015,7 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
 
     // Pull messages that the coordinator has generated in destination to the various
     // connections.
-    loop {
-        let (connection_id, message) = match guarded.network.pull_message_to_connection() {
-            Some(m) => m,
-            None => break,
-        };
-
+    while let Some((connection_id, message)) = guarded.network.pull_message_to_connection() {
         // Note that it is critical for the sending to not take too long here, in order to not
         // block the process of the network service.
         // In particular, if sending the message to the connection is blocked due to sending
@@ -1366,6 +1372,7 @@ fn multiaddr_to_socket(
 /// Builds the response to a block request by reading from the given database.
 async fn blocks_request_response(
     database: &database_thread::DatabaseThread,
+    block_number_bytes: usize,
     config: protocol::BlocksRequestConfig,
 ) -> Result<Vec<protocol::BlockData>, full_sqlite::AccessError> {
     database
@@ -1400,7 +1407,7 @@ async fn blocks_request_response(
                 };
 
                 next_block = {
-                    let decoded = header::decode(&header).unwrap();
+                    let decoded = header::decode(&header, block_number_bytes).unwrap();
                     match config.direction {
                         protocol::BlocksRequestDirection::Ascending => {
                             protocol::BlocksRequestConfigStart::Hash(*decoded.parent_hash)

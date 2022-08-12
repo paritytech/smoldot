@@ -17,6 +17,6 @@
 
 #![no_main]
 
-libfuzzer_sys::fuzz_target!(|data: &[u8]| {
-    let _ = smoldot::header::decode(data);
+libfuzzer_sys::fuzz_target!(|params: (&[u8], u8)| {
+    let _ = smoldot::header::decode(params.0, usize::from(params.1) + 1);
 });

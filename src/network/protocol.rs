@@ -32,6 +32,7 @@ mod block_request;
 mod grandpa;
 mod grandpa_warp_sync;
 mod identify;
+mod kademlia;
 mod state_request;
 mod storage_call_proof;
 
@@ -40,5 +41,6 @@ pub use self::block_request::*;
 pub use self::grandpa::*;
 pub use self::grandpa_warp_sync::*;
 pub use self::identify::*;
+pub use self::kademlia::*;
 pub use self::state_request::*;
 pub use self::storage_call_proof::*;

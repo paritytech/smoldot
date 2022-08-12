@@ -99,7 +99,7 @@ pub use pending_blocks::{RequestId, RequestParams, SourceId};
 
 /// Configuration for the [`AllForksSync`].
 #[derive(Debug)]
-pub struct Config<TBannedBlocksIter> {
+pub struct Config {
     /// Information about the latest finalized block and its ancestors.
     pub chain_information: chain_information::ValidChainInformation,
 
@@ -160,13 +160,6 @@ pub struct Config<TBannedBlocksIter> {
 
     /// If true, the block bodies and storage are also synchronized.
     pub full: bool,
-
-    /// List of block hashes that are known to be bad and shouldn't be downloaded or verified.
-    ///
-    /// > **Note**: This list is typically filled with a list of blocks found in the chain
-    /// >           specification. It is part of the "trusted setup" of the node, in other words
-    /// >           the information that is passed by the user and blindly assumed to be true.
-    pub banned_blocks: TBannedBlocksIter,
 }
 
 pub struct AllForksSync<TBl, TRq, TSrc> {
@@ -182,9 +175,6 @@ pub struct AllForksSync<TBl, TRq, TSrc> {
 /// Extra fields. In a separate structure in order to be moved around.
 struct Inner<TBl, TRq, TSrc> {
     blocks: pending_blocks::PendingBlocks<PendingBlock<TBl>, TRq, Source<TSrc>>,
-
-    /// Same value as [`Config::banned_blocks`].
-    banned_blocks: hashbrown::HashSet<[u8; 32], fnv::FnvBuildHasher>,
 }
 
 struct PendingBlock<TBl> {
@@ -235,10 +225,9 @@ impl SourcePendingJustificationProofs {
 
     fn insert(&mut self, new_target_height: u64, new_proof: FinalityProofs) {
         // An empty list of justifications is an invalid state.
-        debug_assert!(match &new_proof {
-            FinalityProofs::Justifications(list) if list.is_empty() => false,
-            _ => true,
-        });
+        debug_assert!(
+            !matches!(&new_proof, FinalityProofs::Justifications(list) if list.is_empty())
+        );
 
         match mem::replace(self, SourcePendingJustificationProofs::None) {
             SourcePendingJustificationProofs::None => {
@@ -419,7 +408,7 @@ struct Block<TBl> {
 
 impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Initializes a new [`AllForksSync`].
-    pub fn new(config: Config<impl Iterator<Item = [u8; 32]>>) -> Self {
+    pub fn new(config: Config) -> Self {
         let finalized_block_height = config
             .chain_information
             .as_ref()
@@ -443,9 +432,13 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     sources_capacity: config.sources_capacity,
                     verify_bodies: config.full,
                 }),
-                banned_blocks: config.banned_blocks.collect(),
             },
         }
+    }
+
+    /// Returns the value that was initially passed in [`Config::block_number_bytes`].
+    pub fn block_number_bytes(&self) -> usize {
+        self.chain.block_number_bytes()
     }
 
     /// Builds a [`chain_information::ChainInformationRef`] struct corresponding to the current
@@ -832,14 +825,17 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
         announced_scale_encoded_header: Vec<u8>,
         is_best: bool,
     ) -> BlockAnnounceOutcome<TBl, TRq, TSrc> {
-        let announced_header = match header::decode(&announced_scale_encoded_header) {
+        let announced_header = match header::decode(
+            &announced_scale_encoded_header,
+            self.chain.block_number_bytes(),
+        ) {
             Ok(h) => h,
             Err(error) => return BlockAnnounceOutcome::InvalidHeader(error),
         };
 
         let announced_header_number = announced_header.number;
         let announced_header_parent_hash = *announced_header.parent_hash;
-        let announced_header_hash = announced_header.hash();
+        let announced_header_hash = announced_header.hash(self.chain.block_number_bytes());
 
         // It is assumed that all sources will eventually agree on the same finalized chain. If
         // the block number is lower or equal than the locally-finalized block number, it is
@@ -1125,15 +1121,16 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
         }
 
         // Invalid headers are erroneous.
-        let decoded_header = match header::decode(scale_encoded_header) {
-            Ok(h) => h,
-            Err(err) => {
-                return Err((
-                    AncestrySearchResponseError::InvalidHeader(err),
-                    self.finish(),
-                ))
-            }
-        };
+        let decoded_header =
+            match header::decode(scale_encoded_header, self.inner.chain.block_number_bytes()) {
+                Ok(h) => h,
+                Err(err) => {
+                    return Err((
+                        AncestrySearchResponseError::InvalidHeader(err),
+                        self.finish(),
+                    ))
+                }
+            };
 
         // Also compare the block numbers.
         // The utility of checking the height (even though we've already checked the hash) is
@@ -1413,19 +1410,6 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
                 );
         }
 
-        if self
-            .inner
-            .inner
-            .inner
-            .banned_blocks
-            .contains(&self.inner.expected_next_hash)
-        {
-            self.inner.inner.inner.blocks.mark_unverified_block_as_bad(
-                self.decoded_header.number,
-                &self.inner.expected_next_hash,
-            );
-        }
-
         // If there are too many blocks stored in the blocks list, remove unnecessary ones.
         // Not doing this could lead to an explosion of the size of the collections.
         // TODO: removing blocks should only be done explicitly through an API endpoint, because we want to store user datas in unverified blocks too; see https://github.com/paritytech/smoldot/issues/1572
@@ -1656,21 +1640,6 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
             },
         );
 
-        // Make sure that block isn't banned and that it is part of the finalized chain.
-        if self
-            .inner
-            .inner
-            .banned_blocks
-            .contains(&self.announced_header_hash)
-            || self.announced_header_number == self.inner.chain.finalized_block_header().number + 1
-                && self.announced_header_parent_hash != self.inner.chain.finalized_block_hash()
-        {
-            self.inner.inner.blocks.mark_unverified_block_as_bad(
-                self.announced_header_number,
-                &self.announced_header_hash,
-            );
-        }
-
         // If there are too many blocks stored in the blocks list, remove unnecessary ones.
         // Not doing this could lead to an explosion of the size of the collections.
         // TODO: removing blocks should only be done explicitly through an API endpoint, because we want to store user datas in unverified blocks too; see https://github.com/paritytech/smoldot/issues/1572
@@ -1871,18 +1840,6 @@ impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
             },
         );
 
-        if self
-            .inner
-            .inner
-            .banned_blocks
-            .contains(&self.best_block_hash)
-        {
-            self.inner
-                .inner
-                .blocks
-                .mark_unverified_block_as_bad(self.best_block_number, &self.best_block_hash);
-        }
-
         source_id
     }
 }
@@ -1920,7 +1877,7 @@ impl<TBl, TRq, TSrc> HeaderVerify<TBl, TRq, TSrc> {
             .header
             .as_ref()
             .unwrap()
-            .scale_encoding_vec();
+            .scale_encoding_vec(self.parent.chain.block_number_bytes());
 
         let result = match self
             .parent

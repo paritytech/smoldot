@@ -15,7 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { start as startInstance } from './instance/instance.js';
+import { PlatformBindings, start as startInstance } from './instance/instance.js';
+
+export { CrashError } from './instance/instance.js';
 
 /**
  * Thrown in case of a problem when initializing the chain.
@@ -45,17 +47,6 @@ export class JsonRpcDisabledError extends Error {
   constructor() {
     super()
     this.name = "JsonRpcDisabledError"
-  }
-}
-
-/**
- * Thrown in case the underlying client encounters an unexpected crash.
- *
- * This is always an internal bug in smoldot and is never supposed to happen.
- */
-export class CrashError extends Error {
-  constructor(message: string) {
-    super(message);
   }
 }
 
@@ -113,7 +104,7 @@ export interface Chain {
    * as the responses.
    *
    * No response is generated if the request isn't a valid JSON-RPC request or if the request is
-   * unreasonably large (8 MiB at the time of writing of this comment). The request is then
+   * unreasonably large (64 MiB at the time of writing of this comment). The request is then
    * silently discarded.
    * If, however, the request is a valid JSON-RPC request but that concerns an unknown method, a
    * error response is properly generated.
@@ -180,6 +171,7 @@ export type LogCallback = (level: number, target: string, message: string) => vo
 /**
  * Configuration of a client.
  */
+// TODO: these options aren't all used by the inner start; a bit spaghetti
 export interface ClientOptions {
   /**
    * Callback that the client will invoke in order to report a log event.
@@ -336,16 +328,10 @@ export interface AddChainOptions {
   jsonRpcCallback?: JsonRpcCallback;
 }
 
-/**
- * Initializes a new client. This is a pre-requisite to connecting to a blockchain.
- *
- * Can never fail.
- *
- * @param options Configuration of the client. Defaults to `{}`.
- */
-export function start(options?: ClientOptions): Client {
-  options = options || {};
-
+// This function is similar to the `start` function found in `index.ts`, except with an extra
+// parameter containing the platform-specific bindings.
+// Contrary to the one within `index.js`, this function is not supposed to be directly used.
+export function start(options: ClientOptions, platformBindings: PlatformBindings): Client {
   const logCallback = options.logCallback || ((level, target, message) => {
     // The first parameter of the methods of `console` has some printf-like substitution
     // capabilities. We don't really need to use this, but not using it means that the logs might
@@ -382,11 +368,7 @@ export function start(options?: ClientOptions): Client {
     // the moment, we enable it all the time, except if the user has logging disabled altogether.
     enableCurrentTask: options.maxLogLevel ? options.maxLogLevel >= 1 : true,
     cpuRateLimit: options.cpuRateLimit || 1.0,
-    forbidTcp: options.forbidTcp || false,
-    forbidWs: options.forbidWs || false,
-    forbidNonLocalWs: options.forbidNonLocalWs || false,
-    forbidWss: options.forbidWss || false,
-  });
+  }, platformBindings);
 
   return {
     addChain: async (options: AddChainOptions): Promise<Chain> => {
@@ -408,6 +390,18 @@ export function start(options?: ClientOptions): Client {
             continue;
           potentialRelayChainsIds.push(id);
         }
+      }
+
+      // We need to tweak the JSON-RPC callback to absorb exceptions that the user might throw.
+      if (options.jsonRpcCallback) {
+        const cb = options.jsonRpcCallback;
+        options.jsonRpcCallback = (response) => {
+          try {
+            cb(response)
+          } catch(error) {
+            console.warn("Uncaught exception in JSON-RPC callback:", error)
+          }
+        };
       }
 
       const outcome = await instance.addChain(options.chainSpec, typeof options.databaseContent === 'string' ? options.databaseContent : "", potentialRelayChainsIds, options.jsonRpcCallback);

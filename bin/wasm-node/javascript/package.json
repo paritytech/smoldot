@@ -1,6 +1,6 @@
 {
   "name": "@substrate/smoldot-light",
-  "version": "0.6.24",
+  "version": "0.6.30",
   "description": "Light client that connects to Polkadot and Substrate-based blockchains",
   "author": "Parity Technologies <admin@parity.io>",
   "license": "GPL-3.0-or-later WITH Classpath-exception-2.0",
@@ -13,13 +13,17 @@
     "url": "https://github.com/paritytech/smoldot/issues"
   },
   "files": ["dist"],
-  "main": "dist/cjs/index.js",
-  "types": "dist/mjs/index.d.ts",
-  "module": "dist/mjs/index.js",
+  "main": "dist/cjs/index-browser.js",
+  "types": "dist/mjs/index-browser.d.ts",
+  "module": "dist/mjs/index-browser.js",
   "exports": {
-    ".": {
-        "import": "./dist/mjs/index.js",
-        "require": "./dist/cjs/index.js"
+    "node": {
+      "import": "./dist/mjs/index-nodejs.js",
+      "require": "./dist/cjs/index-nodejs.js"
+    },
+    "default": {
+      "import": "./dist/mjs/index-browser.js",
+      "require": "./dist/cjs/index-browser.js"
     }
   },
   "scripts": {
@@ -27,18 +31,16 @@
     "prepublishOnly": "node prepare.mjs --release && rimraf ./dist && npm run buildModules",
     "build": "node prepare.mjs --release && rimraf ./dist && npm run buildModules",
     "start": "node prepare.mjs --debug && rimraf ./dist && npm run buildModules && node demo/demo.mjs",
-    "test": "node prepare.mjs --debug && rimraf ./dist && npm run buildModules && ava --timeout=2m --concurrency 2 --no-worker-threads"
-  },
-  "browser": {
-    "./dist/mjs/compat/index.js": "./dist/mjs/compat/index-browser-overwrite.js",
-    "./dist/cjs/compat/index.js": "./dist/cjs/compat/index-browser-overwrite.js"
+    "test": "node prepare.mjs --debug && rimraf ./dist && npm run buildModules && deno run ./dist/mjs/index-deno.js && ava --timeout=2m --concurrency 2 --no-worker-threads"
   },
   "dependencies": {
-    "websocket": "^1.0.32"
+    "pako": "^2.0.4",
+    "ws": "^8.8.1"
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
-    "@types/websocket": "^1.0.4",
+    "@types/pako": "^2.0.0",
+    "@types/ws": "^8.5.3",
     "ava": "^4.0.0",
     "dtslint": "^4.0.6",
     "rimraf": "^3.0.2",

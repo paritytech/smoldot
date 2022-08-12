@@ -18,7 +18,19 @@
 import * as buffer from './buffer.js';
 import * as instance from './raw-instance.js';
 import { SmoldotWasmInstance } from './bindings.js';
-import { CrashError } from '../client.js';
+
+export { PlatformBindings, ConnectionError, ConnectionConfig, Connection } from './raw-instance.js';
+
+/**
+ * Thrown in case the underlying client encounters an unexpected crash.
+ *
+ * This is always an internal bug in smoldot and is never supposed to happen.
+ */
+ export class CrashError extends Error {
+  constructor(message: string) {
+    super(message);
+  }
+}
 
 /**
  * Contains the configuration of the instance.
@@ -28,10 +40,6 @@ export interface Config {
   maxLogLevel: number;
   enableCurrentTask: boolean;
   cpuRateLimit: number,
-  forbidTcp: boolean;
-  forbidWs: boolean;
-  forbidNonLocalWs: boolean;
-  forbidWss: boolean;
 }
 
 export interface Instance {
@@ -42,7 +50,7 @@ export interface Instance {
   startShutdown: () => void
 }
 
-export function start(configMessage: Config): Instance {
+export function start(configMessage: Config, platformBindings: instance.PlatformBindings): Instance {
 
   // This variable represents the state of the instance, and serves two different purposes:
   //
@@ -93,14 +101,10 @@ export function start(configMessage: Config): Instance {
       currentTask.name = taskName
     },
     cpuRateLimit: configMessage.cpuRateLimit,
-    forbidTcp: configMessage.forbidTcp,
-    forbidWs: configMessage.forbidWs,
-    forbidNonLocalWs: configMessage.forbidNonLocalWs,
-    forbidWss: configMessage.forbidWss,
   };
 
   state = {
-    initialized: false, promise: instance.startInstance(config).then((instance) => {
+    initialized: false, promise: instance.startInstance(config, platformBindings).then((instance) => {
       // `config.cpuRateLimit` is a floating point that should be between 0 and 1, while the value
       // to pass as parameter must be between `0` and `2^32-1`.
       // The few lines of code below should handle all possible values of `number`, including

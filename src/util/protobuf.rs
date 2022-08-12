@@ -127,11 +127,10 @@ pub(crate) fn message_decode<'a, O, E, F: MessageDecodeFields<'a, O, E>>(
 pub(crate) fn tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], (u64, u8), E> {
-    // TODO: don't use usize but u64, for consistency between platforms
-    nom::combinator::map_opt(leb128::nom_leb128_usize, |num| {
+    nom::combinator::map(leb128::nom_leb128_u64, |num| {
         let wire_ty = u8::try_from(num & 0b111).unwrap();
-        let field = u64::try_from(num >> 3).ok()?;
-        Some((field, wire_ty))
+        let field = num >> 3;
+        (field, wire_ty)
     })(bytes)
 }
 
@@ -200,8 +199,7 @@ pub(crate) fn varint_zigzag_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 ) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], u64, E> {
     nom::sequence::preceded(
         nom::combinator::verify(tag_decode, move |(f, ty)| *f == field && *ty == 0),
-        // TODO: don't decode usize but u64, for consistency between platforms
-        nom::combinator::map_opt(leb128::nom_leb128_usize, |n| u64::try_from(n).ok()),
+        leb128::nom_leb128_u64,
     )
 }
 
@@ -221,7 +219,7 @@ pub(crate) fn tag_value_skip_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 ) -> nom::IResult<&'a [u8], (), E> {
     nom::combinator::flat_map(tag_decode, |(_, wire_ty)| {
         move |inner_bytes| match wire_ty {
-            0 => nom::combinator::map(leb128::nom_leb128_usize, |_| ())(inner_bytes),
+            0 => nom::combinator::map(leb128::nom_leb128_u64, |_| ())(inner_bytes),
             5 => nom::combinator::map(nom::bytes::complete::take(4u32), |_| ())(inner_bytes),
             1 => nom::combinator::map(nom::bytes::complete::take(8u32), |_| ())(inner_bytes),
             2 => nom::combinator::map(nom::multi::length_data(leb128::nom_leb128_usize), |_| ())(

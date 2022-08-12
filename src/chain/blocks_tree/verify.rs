@@ -59,7 +59,7 @@ impl<T> NonFinalizedTree<T> {
                 Err(err)
             }
             VerifyOut::HeaderOk(context, is_new_best, consensus) => {
-                let hash = context.header.hash();
+                let hash = context.header.hash(context.chain.block_number_bytes);
                 Ok(HeaderVerifySuccess::Insert {
                     block_height: context.header.number,
                     is_new_best,
@@ -122,7 +122,7 @@ impl<T> NonFinalizedTreeInner<T> {
         now_from_unix_epoch: Duration,
         full: bool,
     ) -> VerifyOut<T> {
-        let decoded_header = match header::decode(&scale_encoded_header) {
+        let decoded_header = match header::decode(&scale_encoded_header, self.block_number_bytes) {
             Ok(h) => h,
             Err(err) => {
                 return if full {
@@ -269,6 +269,7 @@ impl<T> NonFinalizedTreeInner<T> {
                 },
                 allow_unknown_consensus_engines: context.chain.allow_unknown_consensus_engines,
                 block_header: (&context.header).into(), // TODO: inefficiency ; in case of header only verify we do an extra allocation to build the context above
+                block_number_bytes: context.chain.block_number_bytes,
                 parent_block_header: parent_block_header.into(),
             })
             .map_err(HeaderVerifyError::VerificationFailed);
@@ -483,7 +484,7 @@ impl<T> VerifyContext<T> {
 
                 // Block verification is successful!
                 let (is_new_best, consensus) = self.apply_success_body(success.consensus);
-                let hash = self.header.hash();
+                let hash = self.header.hash(self.chain.block_number_bytes);
 
                 BodyVerifyStep2::Finished {
                     parent_runtime: success.parent_runtime,
@@ -705,6 +706,7 @@ impl<T> BodyVerifyRuntimeRequired<T> {
             allow_unknown_consensus_engines: self.context.chain.allow_unknown_consensus_engines,
             now_from_unix_epoch: self.now_from_unix_epoch,
             block_header: (&self.context.header).into(),
+            block_number_bytes: self.context.chain.block_number_bytes,
             parent_block_header: parent_block_header.into(),
             block_body,
             top_trie_root_calculation_cache,

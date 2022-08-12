@@ -32,15 +32,15 @@
 
 use crate::{
     chain::{blocks_tree, chain_information},
-    executor::{host, storage_diff, vm::ExecHint},
+    executor::{host, storage_diff},
     header,
     sync::{all_forks, optimistic, warp_sync},
     verify,
 };
 
-use alloc::{vec, vec::Vec};
+use alloc::{borrow::Cow, vec, vec::Vec};
 use core::{
-    cmp, iter, mem,
+    cmp, iter, marker, mem,
     num::{NonZeroU32, NonZeroU64},
     ops,
     time::Duration,
@@ -151,9 +151,14 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     start_chain_information: config.chain_information,
                     block_number_bytes: config.block_number_bytes,
                     sources_capacity: config.sources_capacity,
+                    requests_capacity: config.sources_capacity, // TODO: ?! add as config?
                 }) {
                     Ok(inner) => AllSyncInner::GrandpaWarpSync { inner },
-                    Err((chain_information, warp_sync::WarpSyncInitError::NotGrandpa)) => {
+                    Err((
+                        chain_information,
+                        warp_sync::WarpSyncInitError::NotGrandpa
+                        | warp_sync::WarpSyncInitError::UnknownConsensus,
+                    )) => {
                         // On error, `warp_sync` returns back the chain information that was
                         // provided in its configuration.
                         AllSyncInner::Optimistic {
@@ -180,6 +185,16 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 block_number_bytes: config.block_number_bytes,
                 allow_unknown_consensus_engines: config.allow_unknown_consensus_engines,
             },
+        }
+    }
+
+    /// Returns the value that was initially passed in [`Config::block_number_bytes`].
+    pub fn block_number_bytes(&self) -> usize {
+        match &self.inner {
+            AllSyncInner::AllForks(sync) => sync.block_number_bytes(),
+            AllSyncInner::GrandpaWarpSync { inner: sync } => sync.block_number_bytes(),
+            AllSyncInner::Optimistic { inner } => inner.block_number_bytes(),
+            AllSyncInner::Poisoned => unreachable!(),
         }
     }
 
@@ -240,7 +255,9 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         match &self.inner {
             AllSyncInner::AllForks(sync) => sync.best_block_hash(),
             AllSyncInner::Optimistic { inner } => inner.best_block_hash(),
-            AllSyncInner::GrandpaWarpSync { .. } => self.best_block_header().hash(),
+            AllSyncInner::GrandpaWarpSync { inner, .. } => {
+                self.best_block_header().hash(inner.block_number_bytes())
+            }
             AllSyncInner::Poisoned => unreachable!(),
         }
     }
@@ -333,29 +350,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
         // `inner` is temporarily replaced with `Poisoned`. A new value must be put back before
         // returning.
         match mem::replace(&mut self.inner, AllSyncInner::Poisoned) {
-            AllSyncInner::GrandpaWarpSync {
-                inner: warp_sync::InProgressWarpSync::WaitingForSources(waiting),
-            } => {
-                let outer_source_id_entry = self.shared.sources.vacant_entry();
-                let outer_source_id = SourceId(outer_source_id_entry.key());
-
-                let warp_sync_request = waiting.add_source(GrandpaWarpSyncSourceExtra {
-                    outer_source_id,
-                    user_data,
-                    best_block_number,
-                    best_block_hash,
-                });
-
-                let inner_source_id = warp_sync_request.current_source().0;
-                outer_source_id_entry.insert(SourceMapping::GrandpaWarpSync(inner_source_id));
-
-                self.inner = AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync_request.into(),
-                };
-
-                outer_source_id
-            }
-            AllSyncInner::GrandpaWarpSync { inner: mut grandpa } => {
+            AllSyncInner::GrandpaWarpSync { inner: mut sync } => {
                 let outer_source_id_entry = self.shared.sources.vacant_entry();
                 let outer_source_id = SourceId(outer_source_id_entry.key());
 
@@ -366,26 +361,11 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     best_block_hash,
                 };
 
-                let inner_source_id = match &mut grandpa {
-                    warp_sync::InProgressWarpSync::WaitingForSources(_) => {
-                        unreachable!()
-                    }
-                    warp_sync::InProgressWarpSync::Verifier(sync) => sync.add_source(source_extra),
-                    warp_sync::InProgressWarpSync::WarpSyncRequest(sync) => {
-                        sync.add_source(source_extra)
-                    }
-                    warp_sync::InProgressWarpSync::VirtualMachineParamsGet(sync) => {
-                        sync.add_source(source_extra)
-                    }
-                    warp_sync::InProgressWarpSync::StorageGet(sync) => {
-                        sync.add_source(source_extra)
-                    }
-                    warp_sync::InProgressWarpSync::NextKey(sync) => sync.add_source(source_extra),
-                };
+                let inner_source_id = sync.add_source(source_extra);
 
                 outer_source_id_entry.insert(SourceMapping::GrandpaWarpSync(inner_source_id));
 
-                self.inner = AllSyncInner::GrandpaWarpSync { inner: grandpa };
+                self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
                 outer_source_id
             }
             AllSyncInner::AllForks(mut all_forks) => {
@@ -506,18 +486,37 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
                 (user_data.user_data, requests)
             }
-            (AllSyncInner::GrandpaWarpSync { .. }, SourceMapping::GrandpaWarpSync(source_id)) => {
-                let sync = match mem::replace(&mut self.inner, AllSyncInner::Poisoned) {
-                    AllSyncInner::GrandpaWarpSync { inner: sync } => sync,
-                    _ => unreachable!(),
-                };
+            (
+                AllSyncInner::GrandpaWarpSync { inner },
+                SourceMapping::GrandpaWarpSync(source_id),
+            ) => {
+                let (user_data, requests) = inner.remove_source(source_id);
+                let requests = requests
+                    .map(|(_inner_request_id, request_inner_user_data)| {
+                        debug_assert!(self
+                            .shared
+                            .requests
+                            .contains(request_inner_user_data.outer_request_id.0));
+                        let _removed = self
+                            .shared
+                            .requests
+                            .remove(request_inner_user_data.outer_request_id.0);
+                        debug_assert!(matches!(
+                            _removed,
+                            RequestMapping::WarpSync(_inner_request_id)
+                        ));
 
-                let (user_data, grandpa_warp_sync) = sync.remove_source(source_id);
-                self.inner = AllSyncInner::GrandpaWarpSync {
-                    inner: grandpa_warp_sync,
-                };
+                        (
+                            request_inner_user_data.outer_request_id,
+                            request_inner_user_data.user_data,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter();
 
-                (user_data.user_data, Vec::new().into_iter()) // TODO: properly return requests
+                // TODO: also handle the "inline" requests
+
+                (user_data.user_data, requests)
             }
 
             (AllSyncInner::Poisoned, _) => unreachable!(),
@@ -784,7 +783,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// called in order for the request to actually be marked as started.
     pub fn desired_requests(
         &'_ self,
-    ) -> impl Iterator<Item = (SourceId, &'_ TSrc, RequestDetail)> + '_ {
+    ) -> impl Iterator<Item = (SourceId, &'_ TSrc, DesiredRequest)> + '_ {
         match &self.inner {
             AllSyncInner::AllForks(sync) => {
                 let iter = sync.desired_requests().map(
@@ -797,7 +796,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     },
                 );
 
-                either::Left(iter)
+                either::Left(either::Right(iter))
             }
             AllSyncInner::Optimistic { inner } => {
                 let iter = inner.desired_requests().map(move |rq_detail| {
@@ -808,56 +807,45 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     )
                 });
 
-                either::Right(either::Left(iter))
+                either::Right(iter)
             }
             AllSyncInner::GrandpaWarpSync { inner } => {
-                // Grandpa warp sync only ever requires one request at a time. Determine which
-                // one it is, if any.
-                let desired_request = match inner {
-                    warp_sync::InProgressWarpSync::WarpSyncRequest(rq) => Some((
-                        rq.current_source().1.outer_source_id,
-                        &rq.current_source().1.user_data,
-                        RequestDetail::GrandpaWarpSync {
-                            sync_start_block_hash: rq.start_block_hash(),
-                        },
-                    )),
-                    warp_sync::InProgressWarpSync::StorageGet(get) => Some((
-                        get.warp_sync_source().1.outer_source_id,
-                        &get.warp_sync_source().1.user_data,
-                        RequestDetail::StorageGet {
-                            block_hash: get.warp_sync_header().hash(),
-                            state_trie_root: *get.warp_sync_header().state_root,
-                            keys: vec![get.key_as_vec()],
-                        },
-                    )),
-                    warp_sync::InProgressWarpSync::VirtualMachineParamsGet(rq) => Some((
-                        rq.warp_sync_source().1.outer_source_id,
-                        &rq.warp_sync_source().1.user_data,
-                        RequestDetail::StorageGet {
-                            block_hash: rq.warp_sync_header().hash(),
-                            state_trie_root: *rq.warp_sync_header().state_root,
-                            keys: vec![b":code".to_vec(), b":heappages".to_vec()],
-                        },
-                    )),
-                    _ => None,
-                };
+                let iter = inner
+                    .desired_requests()
+                    .map(move |(_, src_user_data, rq_detail)| {
+                        let detail = match rq_detail {
+                            warp_sync::DesiredRequest::WarpSyncRequest { block_hash } => {
+                                DesiredRequest::GrandpaWarpSync {
+                                    sync_start_block_hash: block_hash,
+                                }
+                            }
+                            warp_sync::DesiredRequest::RuntimeParametersGet {
+                                block_hash,
+                                state_trie_root,
+                            } => DesiredRequest::StorageGet {
+                                block_hash,
+                                state_trie_root,
+                                keys: vec![b":code".to_vec(), b":heappages".to_vec()],
+                            },
+                            warp_sync::DesiredRequest::RuntimeCallMerkleProof {
+                                block_hash,
+                                function_name,
+                                parameter_vectored,
+                            } => DesiredRequest::RuntimeCallMerkleProof {
+                                block_hash,
+                                function_name,
+                                parameter_vectored,
+                            },
+                        };
 
-                let iter = if let Some(desired_request) = desired_request {
-                    if self.shared.requests.iter().any(|(_, rq)| match rq {
-                        RequestMapping::Inline(src_id, ud, _) => {
-                            (src_id, ud) == (&desired_request.0, &desired_request.2)
-                        }
-                        _ => false,
-                    }) {
-                        either::Left(iter::empty())
-                    } else {
-                        either::Right(iter::once(desired_request))
-                    }
-                } else {
-                    either::Left(iter::empty())
-                };
+                        (
+                            src_user_data.outer_source_id,
+                            &src_user_data.user_data,
+                            detail,
+                        )
+                    });
 
-                either::Right(either::Right(iter))
+                either::Left(either::Left(iter))
             }
             AllSyncInner::Poisoned => unreachable!(),
         }
@@ -946,6 +934,92 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 request_mapping_entry.insert(RequestMapping::Optimistic(inner_request_id));
                 return outer_request_id;
             }
+            (
+                AllSyncInner::GrandpaWarpSync { inner },
+                RequestDetail::GrandpaWarpSync {
+                    sync_start_block_hash,
+                },
+            ) => {
+                let inner_source_id = match self.shared.sources.get(source_id.0).unwrap() {
+                    SourceMapping::GrandpaWarpSync(inner_source_id) => *inner_source_id,
+                    _ => unreachable!(),
+                };
+
+                let request_mapping_entry = self.shared.requests.vacant_entry();
+                let outer_request_id = RequestId(request_mapping_entry.key());
+
+                let inner_request_id = inner.add_request(
+                    inner_source_id,
+                    GrandpaWarpSyncRequestExtra {
+                        outer_request_id,
+                        user_data,
+                    },
+                    warp_sync::RequestDetail::WarpSyncRequest {
+                        block_hash: *sync_start_block_hash,
+                    },
+                );
+
+                request_mapping_entry.insert(RequestMapping::WarpSync(inner_request_id));
+                return outer_request_id;
+            }
+            (
+                AllSyncInner::GrandpaWarpSync { inner },
+                RequestDetail::StorageGet { block_hash, keys },
+            ) if keys == &[&b":code"[..], &b":heappages"[..]] => {
+                let inner_source_id = match self.shared.sources.get(source_id.0).unwrap() {
+                    SourceMapping::GrandpaWarpSync(inner_source_id) => *inner_source_id,
+                    _ => unreachable!(),
+                };
+
+                let request_mapping_entry = self.shared.requests.vacant_entry();
+                let outer_request_id = RequestId(request_mapping_entry.key());
+
+                let inner_request_id = inner.add_request(
+                    inner_source_id,
+                    GrandpaWarpSyncRequestExtra {
+                        outer_request_id,
+                        user_data,
+                    },
+                    warp_sync::RequestDetail::RuntimeParametersGet {
+                        block_hash: *block_hash,
+                    },
+                );
+
+                request_mapping_entry.insert(RequestMapping::WarpSync(inner_request_id));
+                return outer_request_id;
+            }
+            (
+                AllSyncInner::GrandpaWarpSync { inner },
+                RequestDetail::RuntimeCallMerkleProof {
+                    block_hash,
+                    function_name,
+                    parameter_vectored,
+                },
+            ) => {
+                let inner_source_id = match self.shared.sources.get(source_id.0).unwrap() {
+                    SourceMapping::GrandpaWarpSync(inner_source_id) => *inner_source_id,
+                    _ => unreachable!(),
+                };
+
+                let request_mapping_entry = self.shared.requests.vacant_entry();
+                let outer_request_id = RequestId(request_mapping_entry.key());
+
+                let inner_request_id = inner.add_request(
+                    inner_source_id,
+                    GrandpaWarpSyncRequestExtra {
+                        outer_request_id,
+                        user_data,
+                    },
+                    warp_sync::RequestDetail::RuntimeCallMerkleProof {
+                        block_hash: *block_hash,
+                        function_name: function_name.clone(), // TODO: don't clone
+                        parameter_vectored: parameter_vectored.clone(), // TODO: don't clone
+                    },
+                );
+
+                request_mapping_entry.insert(RequestMapping::WarpSync(inner_request_id));
+                return outer_request_id;
+            }
             (AllSyncInner::AllForks { .. }, _) => {}
             (AllSyncInner::Optimistic { .. }, _) => {}
             (AllSyncInner::GrandpaWarpSync { .. }, _) => {}
@@ -1006,10 +1080,43 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// [`AllSync`] is yielded back at the end of this process.
     pub fn process_one(mut self) -> ProcessOne<TRq, TSrc, TBl> {
         match self.inner {
-            AllSyncInner::GrandpaWarpSync {
-                inner: warp_sync::InProgressWarpSync::Verifier(_),
-            } => ProcessOne::VerifyWarpSyncFragment(WarpSyncFragmentVerify { inner: self }),
-            AllSyncInner::GrandpaWarpSync { .. } => ProcessOne::AllSync(self),
+            AllSyncInner::GrandpaWarpSync { inner } => {
+                match inner.process_one() {
+                    warp_sync::ProcessOne::Idle(inner) => {
+                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                        ProcessOne::AllSync(self)
+                    }
+                    warp_sync::ProcessOne::VerifyWarpSyncFragment(inner) => {
+                        ProcessOne::VerifyWarpSyncFragment(WarpSyncFragmentVerify {
+                            inner,
+                            shared: self.shared,
+                            marker: marker::PhantomData,
+                        })
+                    }
+                    warp_sync::ProcessOne::BuildChainInformation(inner) => match inner.build().0 {
+                        // TODO: errors not reported to upper layer
+                        warp_sync::WarpSync::InProgress(inner) => {
+                            self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                            ProcessOne::AllSync(self)
+                        }
+                        warp_sync::WarpSync::Finished(success) => {
+                            let (
+                                new_inner,
+                                finalized_block_runtime,
+                                finalized_storage_code,
+                                finalized_storage_heap_pages,
+                            ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
+                            self.inner = AllSyncInner::AllForks(new_inner);
+                            ProcessOne::WarpSyncFinished {
+                                sync: self,
+                                finalized_block_runtime,
+                                finalized_storage_code,
+                                finalized_storage_heap_pages,
+                            }
+                        }
+                    },
+                }
+            }
             AllSyncInner::AllForks(sync) => match sync.process_one() {
                 all_forks::ProcessOne::AllSync { sync } => {
                     self.inner = AllSyncInner::AllForks(sync);
@@ -1084,7 +1191,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 }
             }
             (AllSyncInner::Optimistic { inner }, &SourceMapping::Optimistic(source_id)) => {
-                match header::decode(&announced_scale_encoded_header) {
+                match header::decode(&announced_scale_encoded_header, inner.block_number_bytes()) {
                     Ok(header) => {
                         if is_best {
                             inner.raise_source_best_block(source_id, header.number);
@@ -1102,7 +1209,8 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 AllSyncInner::GrandpaWarpSync { inner: sync },
                 &SourceMapping::GrandpaWarpSync(source_id),
             ) => {
-                match header::decode(&announced_scale_encoded_header) {
+                let block_number_bytes = sync.block_number_bytes();
+                match header::decode(&announced_scale_encoded_header, block_number_bytes) {
                     Err(err) => BlockAnnounceOutcome::InvalidHeader(err),
                     Ok(header) => {
                         // If GrandPa warp syncing is in progress, the best block of the source is stored
@@ -1111,7 +1219,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                         if is_best {
                             let mut user_data = &mut sync[source_id];
                             user_data.best_block_number = header.number;
-                            user_data.best_block_hash = header.hash();
+                            user_data.best_block_hash = header.hash(block_number_bytes);
                         }
 
                         BlockAnnounceOutcome::Discarded
@@ -1298,7 +1406,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Panics if the [`RequestId`] doesn't correspond to any request, or corresponds to a request
     /// of a different type.
     ///
-    pub fn grandpa_warp_sync_response_ok<'a>(
+    pub fn grandpa_warp_sync_response_ok(
         &mut self,
         request_id: RequestId,
         fragments: Vec<WarpSyncFragment>,
@@ -1328,34 +1436,28 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ) -> (TRq, ResponseOutcome) {
         debug_assert!(self.shared.requests.contains(request_id.0));
         let request = self.shared.requests.remove(request_id.0);
-        let user_data = match request {
-            RequestMapping::Inline(_, _, user_data) => user_data,
-            _ => panic!(),
-        };
 
-        let outcome = match mem::replace(&mut self.inner, AllSyncInner::Poisoned) {
-            AllSyncInner::GrandpaWarpSync {
-                inner: warp_sync::InProgressWarpSync::WarpSyncRequest(grandpa),
-            } => {
-                let updated_grandpa = if let Some((fragments, is_finished)) = response {
-                    grandpa.handle_response_ok(fragments, is_finished)
+        match (&mut self.inner, request) {
+            (
+                AllSyncInner::GrandpaWarpSync { inner: grandpa },
+                RequestMapping::WarpSync(request_id),
+            ) => {
+                let user_data = if let Some((fragments, is_finished)) = response {
+                    grandpa.warp_sync_request_success(request_id, fragments, is_finished)
                 } else {
-                    grandpa.handle_response_err()
+                    grandpa.fail_request(request_id)
                 };
-                self.inner = AllSyncInner::GrandpaWarpSync {
-                    inner: updated_grandpa,
-                };
-                ResponseOutcome::Queued
+
+                (user_data.user_data, ResponseOutcome::Queued)
             }
 
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
-            other => {
-                self.inner = other;
-                ResponseOutcome::Queued // TODO: no
+            (_, RequestMapping::Inline(_, _, user_data)) => {
+                (user_data, ResponseOutcome::Queued) // TODO: no, not queued
             }
-        };
 
-        (user_data, outcome)
+            _ => todo!(), // TODO: handle other variants
+        }
     }
 
     /// Inject a response to a previously-emitted storage proof request.
@@ -1375,20 +1477,16 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ) -> (TRq, ResponseOutcome) {
         debug_assert!(self.shared.requests.contains(request_id.0));
         let request = self.shared.requests.remove(request_id.0);
-        let user_data = match request {
-            RequestMapping::Inline(_, _, user_data) => user_data,
-            _ => panic!(),
-        };
 
-        let outcome = match (
+        match (
             mem::replace(&mut self.inner, AllSyncInner::Poisoned),
             response,
+            request,
         ) {
             (
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::VirtualMachineParamsGet(sync),
-                },
+                AllSyncInner::GrandpaWarpSync { inner: mut sync },
                 Ok(mut response),
+                RequestMapping::WarpSync(request_id),
             ) => {
                 // In this state, we expect the response to be one value for `:code` and one for
                 // `:heappages`. As documented, we panic if the number of items isn't 2.
@@ -1396,113 +1494,86 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                 let heap_pages = response.next().unwrap();
                 assert!(response.next().is_none());
 
-                // We use an `ExecHint` that assumes that the runtime will continue being used
-                // after the end of the warp syncing. This might be the case, since we provide
-                // the runtime to the API user. The API user might then immediately throw away
-                // this runtime, but we don't care enough about this possibility to optimize
-                // this.
-                // TODO: make `allow_unresolved_imports` configurable
-                let outcome = sync.set_virtual_machine_params(
-                    code,
-                    heap_pages,
-                    ExecHint::CompileAheadOfTime,
-                    false,
-                );
+                let user_data = sync.runtime_parameters_get_success(request_id, code, heap_pages);
 
-                match outcome {
-                    (warp_sync::WarpSync::InProgress(inner), None) => {
-                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                        ResponseOutcome::Queued
-                    }
-                    (warp_sync::WarpSync::InProgress(inner), Some(error)) => {
-                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                        ResponseOutcome::WarpSyncError { error }
-                    }
-                    (warp_sync::WarpSync::Finished(success), None) => {
-                        let (
-                            all_forks,
-                            finalized_block_runtime,
-                            finalized_storage_code,
-                            finalized_storage_heap_pages,
-                        ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
-                        self.inner = AllSyncInner::AllForks(all_forks);
-                        ResponseOutcome::WarpSyncFinished {
-                            finalized_block_runtime,
-                            finalized_storage_code,
-                            finalized_storage_heap_pages,
-                        }
-                    }
-                    (warp_sync::WarpSync::Finished(_), Some(_)) => unreachable!(),
-                }
+                self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
+                (user_data.user_data, ResponseOutcome::Queued)
             }
             (
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::StorageGet(sync),
-                },
-                Ok(mut response),
-            ) => {
-                // In this state, we expect the response to be one value. As documented, we panic
-                // if the number of items isn't 1.
-                let value = response.next().unwrap();
-                assert!(response.next().is_none());
-
-                let outcome = sync.inject_value(value.map(iter::once));
-                match outcome {
-                    (warp_sync::WarpSync::InProgress(inner), None) => {
-                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                        ResponseOutcome::Queued
-                    }
-                    (warp_sync::WarpSync::InProgress(inner), Some(error)) => {
-                        self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                        ResponseOutcome::WarpSyncError { error }
-                    }
-                    (warp_sync::WarpSync::Finished(success), None) => {
-                        let (
-                            all_forks,
-                            finalized_block_runtime,
-                            finalized_storage_code,
-                            finalized_storage_heap_pages,
-                        ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
-                        self.inner = AllSyncInner::AllForks(all_forks);
-                        ResponseOutcome::WarpSyncFinished {
-                            finalized_block_runtime,
-                            finalized_storage_code,
-                            finalized_storage_heap_pages,
-                        }
-                    }
-                    (warp_sync::WarpSync::Finished(_), Some(_)) => unreachable!(),
-                }
-            }
-            (
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::VirtualMachineParamsGet(sync),
-                },
+                AllSyncInner::GrandpaWarpSync { inner: mut sync },
                 Err(_),
+                RequestMapping::WarpSync(request_id),
             ) => {
-                let inner = sync.inject_error();
+                let user_data = sync.fail_request(request_id).user_data;
                 // TODO: notify user of the problem
-                self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                ResponseOutcome::Queued
-            }
-            (
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::StorageGet(sync),
-                },
-                Err(_),
-            ) => {
-                let inner = sync.inject_error();
-                // TODO: notify user of the problem
-                self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                ResponseOutcome::Queued
+                self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
+                (user_data, ResponseOutcome::Queued)
             }
             // Only the GrandPa warp syncing ever starts GrandPa warp sync requests.
-            (other, _) => {
+            (other, _, RequestMapping::Inline(_, _, user_data)) => {
                 self.inner = other;
-                ResponseOutcome::Queued // TODO: no
+                (user_data, ResponseOutcome::Queued) // TODO: no
             }
-        };
+            (_, _, _) => {
+                // Type of request doesn't correspond to a storage get.
+                panic!()
+            }
+        }
+    }
 
-        (user_data, outcome)
+    /// Inject a response to a previously-emitted call proof request.
+    ///
+    /// On success, must contain the encoded Merkle proof. See the
+    /// [`trie`](crate::trie::proof_verify) module for a description of the format of Merkle
+    /// proofs.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`RequestId`] doesn't correspond to any request, or corresponds to a request
+    /// of a different type.
+    ///
+    pub fn call_proof_response(
+        &mut self,
+        request_id: RequestId,
+        response: Result<impl Iterator<Item = impl AsRef<[u8]>>, ()>,
+    ) -> (TRq, ResponseOutcome) {
+        debug_assert!(self.shared.requests.contains(request_id.0));
+        let request = self.shared.requests.remove(request_id.0);
+
+        match (
+            mem::replace(&mut self.inner, AllSyncInner::Poisoned),
+            response,
+            request,
+        ) {
+            (
+                AllSyncInner::GrandpaWarpSync { inner: mut sync },
+                Ok(response),
+                RequestMapping::WarpSync(request_id),
+            ) => {
+                let user_data = sync.runtime_call_merkle_proof_success(request_id, response);
+                self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
+                (user_data.user_data, ResponseOutcome::Queued)
+            }
+            (
+                AllSyncInner::GrandpaWarpSync { inner: mut sync },
+                Err(_),
+                RequestMapping::WarpSync(request_id),
+            ) => {
+                let user_data = sync.fail_request(request_id);
+                // TODO: notify user of the problem
+                self.inner = AllSyncInner::GrandpaWarpSync { inner: sync };
+                (user_data.user_data, ResponseOutcome::Queued)
+            }
+            // Only the GrandPa warp syncing ever starts call proof requests.
+            (other, _, RequestMapping::Inline(_, _, user_data)) => {
+                self.inner = other;
+                (user_data, ResponseOutcome::Queued) // TODO: no
+            }
+            (_, _, _) => {
+                // Type of request doesn't correspond to a call proof request.
+                panic!()
+            }
+        }
     }
 }
 
@@ -1572,7 +1643,7 @@ impl<TRq, TSrc, TBl> ops::IndexMut<SourceId> for AllSync<TRq, TSrc, TBl> {
 /// See [`AllSync::desired_requests`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
-pub enum RequestDetail {
+pub enum DesiredRequest {
     /// Requesting blocks from the source is requested.
     BlocksRequest {
         /// Height of the first block to request.
@@ -1615,6 +1686,87 @@ pub enum RequestDetail {
         /// Keys whose values is requested.
         keys: Vec<Vec<u8>>,
     },
+
+    /// Sending a call proof query is requested.
+    RuntimeCallMerkleProof {
+        /// Hash of the block whose call is made against.
+        block_hash: [u8; 32],
+        /// Name of the function to be called.
+        function_name: Cow<'static, str>,
+        /// Concatenated SCALE-encoded parameters to provide to the call.
+        parameter_vectored: Cow<'static, [u8]>,
+    },
+}
+
+impl DesiredRequest {
+    /// Caps the number of blocks to request to `max`.
+    pub fn num_blocks_clamp(&mut self, max: NonZeroU64) {
+        if let DesiredRequest::BlocksRequest { num_blocks, .. } = self {
+            *num_blocks = NonZeroU64::new(cmp::min(num_blocks.get(), max.get())).unwrap();
+        }
+    }
+
+    /// Caps the number of blocks to request to `max`.
+    pub fn with_num_blocks_clamp(mut self, max: NonZeroU64) -> Self {
+        self.num_blocks_clamp(max);
+        self
+    }
+}
+
+/// See [`AllSync::desired_requests`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
+pub enum RequestDetail {
+    /// Requesting blocks from the source is requested.
+    BlocksRequest {
+        /// Height of the first block to request.
+        first_block_height: u64,
+        /// Hash of the first block to request. `None` if not known.
+        first_block_hash: Option<[u8; 32]>,
+        /// `True` if the `first_block_hash` is the response should contain blocks in an
+        /// increasing number, starting from `first_block_hash` with the lowest number. If `false`,
+        /// the blocks should be in decreasing number, with `first_block_hash` as the highest
+        /// number.
+        ascending: bool,
+        /// Number of blocks the request should return.
+        ///
+        /// Note that this is only an indication, and the source is free to give fewer blocks
+        /// than requested.
+        ///
+        /// This might be equal to `u64::max_value()` in case no upper bound is required. The API
+        /// user is responsible for clamping this value to a reasonable limit.
+        num_blocks: NonZeroU64,
+        /// `True` if headers should be included in the response.
+        request_headers: bool,
+        /// `True` if bodies should be included in the response.
+        request_bodies: bool,
+        /// `True` if the justification should be included in the response, if any.
+        request_justification: bool,
+    },
+
+    /// Sending a Grandpa warp sync request is requested.
+    GrandpaWarpSync {
+        /// Hash of the known finalized block. Starting point of the request.
+        sync_start_block_hash: [u8; 32],
+    },
+
+    /// Sending a storage query is requested.
+    StorageGet {
+        /// Hash of the block whose storage is requested.
+        block_hash: [u8; 32],
+        /// Keys whose values is requested.
+        keys: Vec<Vec<u8>>,
+    },
+
+    /// Sending a call proof query is requested.
+    RuntimeCallMerkleProof {
+        /// Hash of the block whose call is made against.
+        block_hash: [u8; 32],
+        /// Name of the function to be called.
+        function_name: Cow<'static, str>,
+        /// Concatenated SCALE-encoded parameters to provide to the call.
+        parameter_vectored: Cow<'static, [u8]>,
+    },
 }
 
 impl RequestDetail {
@@ -1629,6 +1781,47 @@ impl RequestDetail {
     pub fn with_num_blocks_clamp(mut self, max: NonZeroU64) -> Self {
         self.num_blocks_clamp(max);
         self
+    }
+}
+
+impl From<DesiredRequest> for RequestDetail {
+    fn from(rq: DesiredRequest) -> RequestDetail {
+        match rq {
+            DesiredRequest::BlocksRequest {
+                first_block_height,
+                first_block_hash,
+                ascending,
+                num_blocks,
+                request_headers,
+                request_bodies,
+                request_justification,
+            } => RequestDetail::BlocksRequest {
+                first_block_height,
+                first_block_hash,
+                ascending,
+                num_blocks,
+                request_headers,
+                request_bodies,
+                request_justification,
+            },
+            DesiredRequest::GrandpaWarpSync {
+                sync_start_block_hash,
+            } => RequestDetail::GrandpaWarpSync {
+                sync_start_block_hash,
+            },
+            DesiredRequest::StorageGet {
+                block_hash, keys, ..
+            } => RequestDetail::StorageGet { block_hash, keys },
+            DesiredRequest::RuntimeCallMerkleProof {
+                block_hash,
+                function_name,
+                parameter_vectored,
+            } => RequestDetail::RuntimeCallMerkleProof {
+                block_hash,
+                function_name,
+                parameter_vectored,
+            },
+        }
     }
 }
 
@@ -1730,6 +1923,31 @@ pub enum ProcessOne<TRq, TSrc, TBl> {
     /// No block ready to be processed.
     AllSync(AllSync<TRq, TSrc, TBl>),
 
+    /// Content of the response is erroneous in the context of warp syncing.
+    WarpSyncError {
+        sync: AllSync<TRq, TSrc, TBl>,
+
+        /// Error that happened.
+        error: warp_sync::Error,
+    },
+
+    /// Response has made it possible to finish warp syncing.
+    WarpSyncFinished {
+        sync: AllSync<TRq, TSrc, TBl>,
+
+        /// Runtime of the newly finalized block.
+        ///
+        /// > **Note**: Use methods such as [`AllSync::finalized_block_header`] to know which
+        /// >           block this runtime corresponds to.
+        finalized_block_runtime: host::HostVmPrototype,
+
+        /// Storage value at the `:code` key of the finalized block.
+        finalized_storage_code: Option<Vec<u8>>,
+
+        /// Storage value at the `:heappages` key of the finalized block.
+        finalized_storage_heap_pages: Option<Vec<u8>>,
+    },
+
     /// Ready to start verifying a header.
     VerifyHeader(HeaderVerify<TRq, TSrc, TBl>),
 
@@ -1750,27 +1968,6 @@ pub enum ResponseOutcome {
 
     /// Content of the response has been queued and will be processed later.
     Queued,
-
-    /// Content of the response is erroneous in the context of warp syncing.
-    WarpSyncError {
-        /// Error that happened.
-        error: warp_sync::Error,
-    },
-
-    /// Response has made it possible to finish warp syncing.
-    WarpSyncFinished {
-        /// Runtime of the newly finalized block.
-        ///
-        /// > **Note**: Use methods such as [`AllSync::finalized_block_header`] to know which
-        /// >           block this runtime corresponds to.
-        finalized_block_runtime: host::HostVmPrototype,
-
-        /// Storage value at the `:code` key of the finalized block.
-        finalized_storage_code: Option<Vec<u8>>,
-
-        /// Storage value at the `:heappages` key of the finalized block.
-        finalized_storage_heap_pages: Option<Vec<u8>>,
-    },
 
     /// Source has given blocks that aren't part of the finalized chain.
     ///
@@ -2063,43 +2260,40 @@ pub enum FinalityProofVerifyOutcome<TBl> {
 }
 
 pub struct WarpSyncFragmentVerify<TRq, TSrc, TBl> {
-    inner: AllSync<TRq, TSrc, TBl>,
+    inner: warp_sync::VerifyWarpSyncFragment<
+        GrandpaWarpSyncSourceExtra<TSrc>,
+        GrandpaWarpSyncRequestExtra<TRq>,
+    >,
+    shared: Shared<TRq>,
+    marker: marker::PhantomData<Vec<TBl>>,
 }
 
 impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
     /// Returns the identifier and user data of the source that has sent the fragment to be
     /// verified.
     pub fn proof_sender(&self) -> (SourceId, &TSrc) {
-        let sender = match &self.inner.inner {
-            AllSyncInner::GrandpaWarpSync {
-                inner: warp_sync::InProgressWarpSync::Verifier(verifier),
-            } => verifier.proof_sender(),
-            _ => unreachable!(),
-        };
-
-        (sender.1.outer_source_id, &sender.1.user_data)
+        let (_, ud) = self.inner.proof_sender();
+        (ud.outer_source_id, &ud.user_data)
     }
 
     /// Perform the verification.
     pub fn perform(
-        mut self,
+        self,
     ) -> (
         AllSync<TRq, TSrc, TBl>,
         Result<(), warp_sync::FragmentError>,
     ) {
-        let (next_grandpa_warp_sync, error) =
-            match mem::replace(&mut self.inner.inner, AllSyncInner::Poisoned) {
-                AllSyncInner::GrandpaWarpSync {
-                    inner: warp_sync::InProgressWarpSync::Verifier(verifier),
-                } => verifier.next(),
-                _ => unreachable!(),
-            };
+        let (next_grandpa_warp_sync, error) = self.inner.verify();
 
-        self.inner.inner = AllSyncInner::GrandpaWarpSync {
-            inner: next_grandpa_warp_sync,
-        };
-
-        (self.inner, error)
+        (
+            AllSync {
+                inner: AllSyncInner::GrandpaWarpSync {
+                    inner: next_grandpa_warp_sync,
+                },
+                shared: self.shared,
+            },
+            error.map_or(Ok(()), Result::Err),
+        )
     }
 }
 
@@ -2182,6 +2376,9 @@ pub enum BlockVerification<TRq, TSrc, TBl> {
     /// Fetching the key of the finalized block storage that follows a given one is required in
     /// order to continue.
     FinalizedStorageNextKey(StorageNextKey<TRq, TSrc, TBl>),
+
+    /// Compiling a runtime is required in order to continue.
+    RuntimeCompilation(RuntimeCompilation<TRq, TSrc, TBl>),
 }
 
 /// Error that can happen when verifying a block body.
@@ -2259,6 +2456,13 @@ impl<TRq, TSrc, TBl> BlockVerification<TRq, TSrc, TBl> {
             }
             optimistic::BlockVerification::FinalizedStorageNextKey(inner) => {
                 BlockVerification::FinalizedStorageNextKey(StorageNextKey {
+                    inner,
+                    shared,
+                    user_data,
+                })
+            }
+            optimistic::BlockVerification::RuntimeCompilation(inner) => {
+                BlockVerification::RuntimeCompilation(RuntimeCompilation {
                     inner,
                     shared,
                     user_data,
@@ -2350,9 +2554,32 @@ impl<TRq, TSrc, TBl> StorageNextKey<TRq, TSrc, TBl> {
     }
 }
 
+/// Compiling a new runtime is necessary as part of the verification.
+#[must_use]
+pub struct RuntimeCompilation<TRq, TSrc, TBl> {
+    inner: optimistic::RuntimeCompilation<
+        OptimisticRequestExtra<TRq>,
+        OptimisticSourceExtra<TSrc>,
+        TBl,
+    >,
+    shared: Shared<TRq>,
+    user_data: TBl,
+}
+
+impl<TRq, TSrc, TBl> RuntimeCompilation<TRq, TSrc, TBl> {
+    /// Builds the runtime.
+    pub fn build(self) -> BlockVerification<TRq, TSrc, TBl> {
+        let inner = self.inner.build();
+        BlockVerification::from_inner(inner, self.shared, self.user_data)
+    }
+}
+
 enum AllSyncInner<TRq, TSrc, TBl> {
     GrandpaWarpSync {
-        inner: warp_sync::InProgressWarpSync<GrandpaWarpSyncSourceExtra<TSrc>>,
+        inner: warp_sync::InProgressWarpSync<
+            GrandpaWarpSyncSourceExtra<TSrc>,
+            GrandpaWarpSyncRequestExtra<TRq>,
+        >,
     },
     Optimistic {
         inner: optimistic::OptimisticSync<
@@ -2396,6 +2623,11 @@ struct GrandpaWarpSyncSourceExtra<TSrc> {
     best_block_hash: [u8; 32],
 }
 
+struct GrandpaWarpSyncRequestExtra<TRq> {
+    outer_request_id: RequestId,
+    user_data: TRq,
+}
+
 struct Shared<TRq> {
     sources: slab::Slab<SourceMapping>,
     requests: slab::Slab<RequestMapping<TRq>>,
@@ -2422,7 +2654,10 @@ impl<TRq> Shared<TRq> {
     /// strategy.
     fn transition_grandpa_warp_sync_all_forks<TSrc, TBl>(
         &mut self,
-        grandpa: warp_sync::Success<GrandpaWarpSyncSourceExtra<TSrc>>,
+        grandpa: warp_sync::Success<
+            GrandpaWarpSyncSourceExtra<TSrc>,
+            GrandpaWarpSyncRequestExtra<TRq>,
+        >,
     ) -> (
         all_forks::AllForksSync<Option<TBl>, AllForksRequestExtra<TRq>, AllForksSourceExtra<TSrc>>,
         host::HostVmPrototype,
@@ -2438,13 +2673,60 @@ impl<TRq> Shared<TRq> {
             max_requests_per_block: self.max_requests_per_block,
             allow_unknown_consensus_engines: self.allow_unknown_consensus_engines,
             full: false,
-            banned_blocks: iter::empty(), // TODO: not implemented, should be passed by config after the optimistic sync supports banned blocks too
         });
 
         debug_assert!(self
             .sources
             .iter()
             .all(|(_, s)| matches!(s, SourceMapping::GrandpaWarpSync(_))));
+
+        for (
+            source_id,
+            _,
+            GrandpaWarpSyncRequestExtra {
+                outer_request_id,
+                user_data,
+            },
+            detail,
+        ) in grandpa.in_progress_requests
+        {
+            // TODO: DRY
+            let detail = match detail {
+                warp_sync::RequestDetail::WarpSyncRequest { block_hash } => {
+                    RequestDetail::GrandpaWarpSync {
+                        sync_start_block_hash: block_hash,
+                    }
+                }
+                warp_sync::RequestDetail::RuntimeParametersGet { block_hash } => {
+                    RequestDetail::StorageGet {
+                        block_hash,
+                        keys: vec![b":code".to_vec(), b":heappages".to_vec()],
+                    }
+                }
+                warp_sync::RequestDetail::RuntimeCallMerkleProof {
+                    block_hash,
+                    function_name,
+                    parameter_vectored,
+                } => RequestDetail::RuntimeCallMerkleProof {
+                    block_hash,
+                    function_name,
+                    parameter_vectored,
+                },
+            };
+
+            // TODO: O(n2)
+            let (source_id, _) = self
+                .sources
+                .iter()
+                .find(|(_, s)| match s {
+                    SourceMapping::GrandpaWarpSync(s) if *s == source_id => true,
+                    _ => false,
+                })
+                .unwrap();
+
+            self.requests[outer_request_id.0] =
+                RequestMapping::Inline(SourceId(source_id), detail, user_data);
+        }
 
         for source in grandpa.sources {
             let source_user_data = AllForksSourceExtra {
@@ -2472,6 +2754,10 @@ impl<TRq> Shared<TRq> {
             .sources
             .iter()
             .all(|(_, s)| matches!(s, SourceMapping::AllForks(_))));
+        debug_assert!(self
+            .requests
+            .iter()
+            .all(|(_, s)| matches!(s, RequestMapping::AllForks(..) | RequestMapping::Inline(..))));
 
         (
             all_forks,
@@ -2487,6 +2773,7 @@ enum RequestMapping<TRq> {
     Inline(SourceId, RequestDetail, TRq),
     AllForks(all_forks::RequestId),
     Optimistic(optimistic::RequestId),
+    WarpSync(warp_sync::RequestId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2499,8 +2786,8 @@ enum SourceMapping {
 fn all_forks_request_convert(
     rq_params: all_forks::RequestParams,
     full_node: bool,
-) -> RequestDetail {
-    RequestDetail::BlocksRequest {
+) -> DesiredRequest {
+    DesiredRequest::BlocksRequest {
         ascending: false, // Hardcoded based on the logic of the all-forks syncing.
         first_block_hash: Some(rq_params.first_block_hash),
         first_block_height: rq_params.first_block_height,
@@ -2514,8 +2801,8 @@ fn all_forks_request_convert(
 fn optimistic_request_convert(
     rq_params: optimistic::RequestDetail,
     full_node: bool,
-) -> RequestDetail {
-    RequestDetail::BlocksRequest {
+) -> DesiredRequest {
+    DesiredRequest::BlocksRequest {
         ascending: true, // Hardcoded based on the logic of the optimistic syncing.
         first_block_hash: None,
         first_block_height: rq_params.block_height.get(),

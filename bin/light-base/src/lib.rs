@@ -339,6 +339,7 @@ struct ChainServices<TPlat: Platform> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
+    block_number_bytes: usize,
 }
 
 impl<TPlat: Platform> Clone for ChainServices<TPlat> {
@@ -349,6 +350,7 @@ impl<TPlat: Platform> Clone for ChainServices<TPlat> {
             sync_service: self.sync_service.clone(),
             runtime_service: self.runtime_service.clone(),
             transactions_service: self.transactions_service.clone(),
+            block_number_bytes: self.block_number_bytes,
         }
     }
 }
@@ -409,7 +411,10 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         s.as_chain_information(),
                     )
                 }),
-                decode_database(config.database_content),
+                decode_database(
+                    config.database_content,
+                    chain_spec.block_number_bytes().into(),
+                ),
             ) {
                 // Use the database if it contains a more recent block than the chain spec checkpoint.
                 (Ok(Ok(genesis_ci)), checkpoint, Ok((database, checkpoint_nodes)))
@@ -589,7 +594,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
         // Grab a couple of fields from the chain specification for later, as the chain
         // specification is consumed below.
         let chain_spec_chain_id = chain_spec.id().to_owned();
-        let genesis_block_hash = genesis_block_header.hash();
+        let genesis_block_hash = genesis_block_header.hash(chain_spec.block_number_bytes().into());
         let genesis_block_state_root = genesis_block_header.state_root;
 
         // The key generated here uniquely identifies this chain within smoldot. Mutiple chains
@@ -720,14 +725,18 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         let relay_chain_para_id = chain_spec.relay_chain().map(|(_, id)| id);
                         let starting_block_number =
                             chain_information.as_ref().finalized_block_header.number;
-                        let starting_block_hash =
-                            chain_information.as_ref().finalized_block_header.hash();
+                        let starting_block_hash = chain_information
+                            .as_ref()
+                            .finalized_block_header
+                            .hash(chain_spec.block_number_bytes().into());
+                        let has_bad_blocks = chain_spec.bad_blocks_hashes().count() != 0;
 
                         let running_chain = start_services(
                             log_name.clone(),
                             new_tasks_tx,
                             chain_information,
-                            genesis_block_header.scale_encoding_vec(),
+                            genesis_block_header
+                                .scale_encoding_vec(chain_spec.block_number_bytes().into()),
                             chain_spec,
                             relay_chain.as_ref().map(|(r, _)| r),
                             network_noise_key,
@@ -766,6 +775,15 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                                 running_chain.network_identity,
                                 HashDisplay(&starting_block_hash),
                                 starting_block_number
+                            );
+                        }
+
+                        // TODO: remove after https://github.com/paritytech/smoldot/issues/2584
+                        if has_bad_blocks {
+                            log::warn!(
+                                target: "smoldot",
+                                "Chain {} has bad blocks in its chain specification. Bad blocks \
+                                are not implemented in the light client.", log_name
                             );
                         }
 
@@ -1107,9 +1125,13 @@ async fn start_services<TPlat: Platform>(
                 finalized_block_height: chain_information.as_ref().finalized_block_header.number,
                 best_block: (
                     chain_information.as_ref().finalized_block_header.number,
-                    chain_information.as_ref().finalized_block_header.hash(),
+                    chain_information
+                        .as_ref()
+                        .finalized_block_header
+                        .hash(chain_spec.block_number_bytes().into()),
                 ),
                 protocol_id: chain_spec.protocol_id().to_string(),
+                block_number_bytes: usize::from(chain_spec.block_number_bytes()),
             }],
         })
         .await;
@@ -1124,6 +1146,7 @@ async fn start_services<TPlat: Platform>(
             sync_service::SyncService::new(sync_service::Config {
                 log_name: log_name.clone(),
                 chain_information: chain_information.clone(),
+                block_number_bytes: usize::from(chain_spec.block_number_bytes()),
                 tasks_executor: Box::new({
                     let new_task_tx = new_task_tx.clone();
                     move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
@@ -1133,7 +1156,7 @@ async fn start_services<TPlat: Platform>(
                 parachain: Some(sync_service::ConfigParachain {
                     parachain_id: chain_spec.relay_chain().unwrap().1,
                     relay_chain_sync: relay_chain.runtime_service.clone(),
-                    relay_chain_block_number_bytes: 4, // TODO: load from chain specs or something
+                    relay_chain_block_number_bytes: relay_chain.block_number_bytes,
                 }),
             })
             .await,
@@ -1165,6 +1188,7 @@ async fn start_services<TPlat: Platform>(
             sync_service::SyncService::new(sync_service::Config {
                 log_name: log_name.clone(),
                 chain_information: chain_information.clone(),
+                block_number_bytes: usize::from(chain_spec.block_number_bytes()),
                 tasks_executor: Box::new({
                     let new_task_tx = new_task_tx.clone();
                     move |name, fut| new_task_tx.unbounded_send((name, fut)).unwrap()
@@ -1220,6 +1244,7 @@ async fn start_services<TPlat: Platform>(
         runtime_service,
         sync_service,
         transactions_service,
+        block_number_bytes: usize::from(chain_spec.block_number_bytes()),
     }
 }
 
@@ -1231,7 +1256,7 @@ async fn encode_database<TPlat: Platform>(
     let mut database_draft = SerdeDatabase {
         chain: match services.sync_service.serialize_chain_information().await {
             Some(ci) => {
-                let encoded = finalized_serialize::encode_chain(&ci);
+                let encoded = finalized_serialize::encode_chain(&ci, services.block_number_bytes);
                 serde_json::from_str(&encoded).unwrap()
             }
             None => {
@@ -1295,6 +1320,7 @@ async fn encode_database<TPlat: Platform>(
 
 fn decode_database(
     encoded: &str,
+    block_number_bytes: usize,
 ) -> Result<
     (
         chain::chain_information::ValidChainInformation,
@@ -1304,9 +1330,11 @@ fn decode_database(
 > {
     let decoded: SerdeDatabase = serde_json::from_str(encoded).map_err(|_| ())?;
 
-    let (chain, _) =
-        finalized_serialize::decode_chain(&serde_json::to_string(&decoded.chain).unwrap())
-            .map_err(|_| ())?;
+    let (chain, _) = finalized_serialize::decode_chain(
+        &serde_json::to_string(&decoded.chain).unwrap(),
+        block_number_bytes,
+    )
+    .map_err(|_| ())?;
 
     // Nodes that fail to decode are simply ignored. This is especially important for
     // multiaddresses, as the definition of a valid or invalid multiaddress might change across

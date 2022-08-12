@@ -121,7 +121,9 @@ impl<T> NonFinalizedTree<T> {
         let chain_information: chain_information::ChainInformation =
             config.chain_information.into();
 
-        let finalized_block_hash = chain_information.finalized_block_header.hash();
+        let finalized_block_hash = chain_information
+            .finalized_block_header
+            .hash(config.block_number_bytes);
 
         NonFinalizedTree {
             inner: Some(Box::new(NonFinalizedTreeInner {
@@ -226,6 +228,12 @@ impl<T> NonFinalizedTree<T> {
         let inner = self.inner.as_mut().unwrap();
         inner.blocks_by_hash.shrink_to_fit();
         inner.blocks.shrink_to_fit();
+    }
+
+    /// Returns the value that was initially passed in [`Config::block_number_bytes`].
+    pub fn block_number_bytes(&self) -> usize {
+        let inner = self.inner.as_ref().unwrap();
+        inner.block_number_bytes
     }
 
     /// Builds a [`chain_information::ChainInformationRef`] struct that might later be used to
@@ -429,7 +437,10 @@ where
         f.debug_struct("NonFinalizedTree")
             .field(
                 "finalized_block_hash",
-                &format!("0x{}", hex::encode(&inner.finalized_block_header.hash())),
+                &format!(
+                    "0x{}",
+                    hex::encode(&inner.finalized_block_header.hash(inner.block_number_bytes))
+                ),
             )
             .field("non_finalized_blocks", &Blocks(inner))
             .finish()

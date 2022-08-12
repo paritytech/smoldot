@@ -2,6 +2,62 @@
 
 ## Unreleased
 
+## 0.6.30 - 2022-08-12
+
+### Fixed
+
+- Fix panic that occured when connecting to a peer, then discovering it through the background discovery process, then disconnecting from it. ([#2616](https://github.com/paritytech/smoldot/pull/2616))
+- Fix circular dependency between JavaScript modules. ([#2614](https://github.com/paritytech/smoldot/pull/2614))
+- Fix panic when a handshake timeout or protocol error happens on a connection at the same time as the local node tries to shut it down. ([#2620](https://github.com/paritytech/smoldot/pull/2620))
+- Fix panic when a runtime call is made at the same time as a warp sync succeeds or that the limit to the number of blocks in memory is exceeded. ([#2621](https://github.com/paritytech/smoldot/pull/2621))
+
+## 0.6.29 - 2022-08-09
+
+### Fixed
+
+- Fix sometimes erroneously reporting a very old `parent_hash` (usually the genesis block hash) in `chainHead_unstable_follow` when following a parachain. ([#2602](https://github.com/paritytech/smoldot/pull/2602))
+- After smoldot has downloaded the runtime of an old parachain block, it would sometimes erroneously consider that this runtime hasn't changed since then. This would lead to issues such as `state_getRuntimeVersion` and `state_subscribeRuntimeVersion` returning information about an old runtime, or `state_getMetadata` or `state_call` using an old runtime. ([#2602](https://github.com/paritytech/smoldot/pull/2602))
+- Fix WebSocket errors leading to the program stopping while running in NodeJS. ([#2604](https://github.com/paritytech/smoldot/pull/2604))
+
+## 0.6.28 - 2022-08-08
+
+### Changed
+
+- The GRANDPA warp sync algorithm now downloads Merkle proofs of all the necessary storage items at once, rather than one by one sequentially. This removes approximately 11 networking round-trips and thus significantly reduces the time the warp syncing takes. ([#2578](https://github.com/paritytech/smoldot/pull/2578))
+- The GRANDPA warp sync algorithm now works on AURA-based chains. It previously only worked for chains that are using BABE. Note that GRANDPA warp sync is irrelevant for parachains. ([#2581](https://github.com/paritytech/smoldot/pull/2581))
+- The GRANDPA warp sync implementation has been considerably refactored. It is possible that unintended changes in behaviour have accidentally been introduced. ([#2578](https://github.com/paritytech/smoldot/pull/2578))
+- A warning is now printed if the `badBlocks` field in a chain specification is not empty. Bad blocks are not supported by the smoldot light client. ([#2585](https://github.com/paritytech/smoldot/pull/2585))
+
+### Fixed
+
+- Fix WebSockets not working in the CommonJS bindings for NodeJS due to a problematic import. ([#2589](https://github.com/paritytech/smoldot/pull/2589)).
+
+## 0.6.27 - 2022-07-29
+
+### Changed
+
+- The JavaScript code now targets ES6. This should ensure compatibility on a wider range of platforms. ([#2565](https://github.com/paritytech/smoldot/pull/2565))
+
+## 0.6.26 - 2022-07-20
+
+### Added
+
+- Add support for Deno. Smoldot is now available on the deno.land/x package registry. This doesn't modify anything to the behaviour of the smoldot NPM package. ([#2522](https://github.com/paritytech/smoldot/pull/2522))
+
+### Fixed
+
+- Exceptions thrown in the JSON-RPC callback no longer crash smoldot. ([#2527](https://github.com/paritytech/smoldot/pull/2527))
+
+## 0.6.25 - 2022-07-18
+
+### Added
+
+- Add an optional `blockNumberBytes` field to chain specifications indicating the number of bytes used to encode the block number of the chain. If the field is missing, the value defaults to 4. Prior to this change, the value was always hardcoded to 4. This field is at the moment specific to smoldot, and Substrate will fail to parse chain specifications containing it. ([#2512](https://github.com/paritytech/smoldot/pull/2512))
+
+### Changed
+
+- Refactored the `package.json` file. The `browser` field has been removed. The library now exports by default code reliant on web platform APIs. An `exports` -> `node` field has been added (supported since NodeJS v13.2.0 and NodeJS v12.16.0) in order to export code reliant on NodeJS APIs when NodeJS is importing the library. ([#2519](https://github.com/paritytech/smoldot/pull/2519))
+
 ## 0.6.24 - 2022-07-14
 
 ### Added

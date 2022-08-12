@@ -84,7 +84,11 @@ impl<'a> From<&'a GrandpaJustification> for GrandpaJustificationRef<'a> {
                 inner: PrecommitsRefInner::Decoded(&j.precommits),
             },
             // TODO:
-            votes_ancestries: VotesAncestriesIter { slice: &[], num: 0 },
+            votes_ancestries: VotesAncestriesIter {
+                slice: &[],
+                num: 0,
+                block_number_bytes: 4,
+            },
         }
     }
 }
@@ -269,6 +273,8 @@ pub struct VotesAncestriesIter<'a> {
     slice: &'a [u8],
     /// Number of headers items remaining.
     num: usize,
+    /// Number of bytes when encoding the block number.
+    block_number_bytes: usize,
 }
 
 impl<'a> Iterator for VotesAncestriesIter<'a> {
@@ -280,7 +286,8 @@ impl<'a> Iterator for VotesAncestriesIter<'a> {
         }
 
         // Validity is guaranteed when the `VotesAncestriesIter` is constructed.
-        let (item, new_slice) = header::decode_partial(self.slice).unwrap();
+        let (item, new_slice) =
+            header::decode_partial(self.slice, self.block_number_bytes).unwrap();
         self.slice = new_slice;
         self.num -= 1;
 
@@ -311,7 +318,7 @@ fn grandpa_justification<'a>(
                 nom::bytes::complete::take(32u32),
                 crate::util::nom_varsize_number_decode_u64(block_number_bytes),
                 precommits(block_number_bytes),
-                votes_ancestries,
+                votes_ancestries(block_number_bytes),
             )),
             |(round, target_hash, target_number, precommits, votes_ancestries)| {
                 GrandpaJustificationRef {
@@ -373,21 +380,25 @@ fn precommit<'a>(
 }
 
 /// `Nom` combinator that parses a list of headers.
-fn votes_ancestries(bytes: &[u8]) -> nom::IResult<&[u8], VotesAncestriesIter> {
+fn votes_ancestries<'a>(
+    block_number_bytes: usize,
+) -> impl FnMut(&'a [u8]) -> nom::IResult<&[u8], VotesAncestriesIter> {
     nom::error::context(
         "votes ancestries",
-        nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
+        nom::combinator::flat_map(crate::util::nom_scale_compact_usize, move |num_elems| {
             nom::combinator::map(
                 nom::combinator::recognize(nom::multi::fold_many_m_n(
                     num_elems,
                     num_elems,
-                    |s| {
-                        header::decode_partial(s).map(|(a, b)| (b, a)).map_err(|_| {
-                            nom::Err::Failure(nom::error::make_error(
-                                s,
-                                nom::error::ErrorKind::Verify,
-                            ))
-                        })
+                    move |s| {
+                        header::decode_partial(s, block_number_bytes)
+                            .map(|(a, b)| (b, a))
+                            .map_err(|_| {
+                                nom::Err::Failure(nom::error::make_error(
+                                    s,
+                                    nom::error::ErrorKind::Verify,
+                                ))
+                            })
                     },
                     || {},
                     |(), _| (),
@@ -395,10 +406,11 @@ fn votes_ancestries(bytes: &[u8]) -> nom::IResult<&[u8], VotesAncestriesIter> {
                 move |slice| VotesAncestriesIter {
                     slice,
                     num: num_elems,
+                    block_number_bytes,
                 },
             )
         }),
-    )(bytes)
+    )
 }
 
 #[cfg(test)]

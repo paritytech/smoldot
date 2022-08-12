@@ -121,7 +121,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 cache_lock
                     .recent_pinned_blocks
                     .get(&hash)
-                    .map(|h| header::decode(h)),
+                    .map(|h| header::decode(h, self.sync_service.block_number_bytes())),
                 cache_lock.block_state_root_hashes_numbers.get(&hash),
             ) {
                 (Some(Ok(header)), _) => Some(header.number),
@@ -175,7 +175,11 @@ impl<TPlat: Platform> Background<TPlat> {
                     .into_iter()
                     .map(methods::HexString)
                     .collect(),
-                header: methods::Header::from_scale_encoded_header(&block.header.unwrap()).unwrap(),
+                header: methods::Header::from_scale_encoded_header(
+                    &block.header.unwrap(),
+                    self.sync_service.block_number_bytes(),
+                )
+                .unwrap(),
                 justifications: block.justifications,
             })
             .to_json_response(request_id)
@@ -318,7 +322,10 @@ impl<TPlat: Platform> Background<TPlat> {
                 // In the case of a parachain, it is possible for the header to be in
                 // a format that smoldot isn't capable of parsing. In that situation,
                 // we take of liberty of returning a JSON-RPC error.
-                match methods::Header::from_scale_encoded_header(&header) {
+                match methods::Header::from_scale_encoded_header(
+                    &header,
+                    self.sync_service.block_number_bytes(),
+                ) {
                     Ok(decoded) => {
                         methods::Response::chain_getHeader(decoded).to_json_response(request_id)
                     }
@@ -444,6 +451,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                                 let header = match methods::Header::from_scale_encoded_header(
                                     &block.scale_encoded_header,
+                                    me.sync_service.block_number_bytes(),
                                 ) {
                                     Ok(h) => h,
                                     Err(error) => {
@@ -563,7 +571,10 @@ impl<TPlat: Platform> Background<TPlat> {
                     // Stream returned by `subscribe_finalized` is always unlimited.
                     let header = blocks_list.next().await.unwrap();
 
-                    let header = match methods::Header::from_scale_encoded_header(&header) {
+                    let header = match methods::Header::from_scale_encoded_header(
+                        &header,
+                        me.sync_service.block_number_bytes(),
+                    ) {
                         Ok(h) => h,
                         Err(error) => {
                             log::warn!(
@@ -668,7 +679,10 @@ impl<TPlat: Platform> Background<TPlat> {
                     // Stream returned by `subscribe_best` is always unlimited.
                     let header = blocks_list.next().await.unwrap();
 
-                    let header = match methods::Header::from_scale_encoded_header(&header) {
+                    let header = match methods::Header::from_scale_encoded_header(
+                        &header,
+                        me.sync_service.block_number_bytes(),
+                    ) {
                         Ok(h) => h,
                         Err(error) => {
                             log::warn!(
@@ -1143,23 +1157,25 @@ impl<TPlat: Platform> Background<TPlat> {
 
             // Try to find the block in the cache of recent blocks. Most of the time, the call
             // target should be in there.
-            if cache_lock.recent_pinned_blocks.contains(&block_hash) {
+            let spec = if cache_lock.recent_pinned_blocks.contains(&block_hash) {
                 // The runtime service has the block pinned, meaning that we can ask the runtime
                 // service for the specification.
-                let runtime_call_lock = self
-                    .runtime_service
+                self.runtime_service
                     .pinned_block_runtime_lock(
                         cache_lock.subscription_id.clone().unwrap(),
                         &block_hash,
                     )
-                    .await;
+                    .await
+                    .ok()
+                    .map(|rt| rt.specification())
+            } else {
+                None
+            };
 
-                // Unlock the cache early. While the call to `specification` shouldn't be very
-                // long, it doesn't cost anything to unlock this mutex early.
-                drop::<futures::lock::MutexGuard<_>>(cache_lock);
-
-                // Obtain the specification of that runtime.
-                runtime_call_lock.specification()
+            // If the block isn't a recent block or if the subscription is obsolete, fall back
+            // to downloading it.
+            if let Some(spec) = spec {
+                spec
             } else {
                 // Second situation: the block is not in the cache of recent blocks. This
                 // isn't great.
@@ -1637,7 +1653,9 @@ impl<TPlat: Platform> Background<TPlat> {
 
                             let block_hash = header::hash_from_scale_encoded_header(&block);
                             let (state_trie_root, block_number) = {
-                                let decoded = header::decode(&block).unwrap();
+                                let decoded =
+                                    header::decode(&block, sync_service.block_number_bytes())
+                                        .unwrap();
                                 (decoded.state_root, decoded.number)
                             };
 

@@ -56,6 +56,9 @@ pub struct Config<TPlat: Platform> {
     /// State of the finalized chain.
     pub chain_information: chain::chain_information::ValidChainInformation,
 
+    /// Number of bytes of the block number in the networking protocol.
+    pub block_number_bytes: usize,
+
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
@@ -102,6 +105,8 @@ pub struct SyncService<TPlat: Platform> {
     network_service: Arc<network_service::NetworkService<TPlat>>,
     /// See [`Config::network_service`].
     network_chain_index: usize,
+    /// See [`Config::block_number_bytes`].
+    block_number_bytes: usize,
 }
 
 impl<TPlat: Platform> SyncService<TPlat> {
@@ -116,6 +121,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                 Box::pin(parachain::start_parachain(
                     log_target,
                     config.chain_information,
+                    config.block_number_bytes,
                     config_parachain.relay_chain_sync.clone(),
                     config_parachain.relay_chain_block_number_bytes,
                     config_parachain.parachain_id,
@@ -130,6 +136,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                 Box::pin(standalone::start_standalone_chain(
                     log_target,
                     config.chain_information,
+                    config.block_number_bytes,
                     from_foreground,
                     config.network_service.0.clone(),
                     config.network_service.1,
@@ -142,7 +149,13 @@ impl<TPlat: Platform> SyncService<TPlat> {
             to_background: Mutex::new(to_background),
             network_service: config.network_service.0,
             network_chain_index: config.network_service.1,
+            block_number_bytes: config.block_number_bytes,
         }
+    }
+
+    /// Returns the value initially passed as [`Config::block_number_bytes`̀].
+    pub fn block_number_bytes(&self) -> usize {
+        self.block_number_bytes
     }
 
     /// Returns the state of the finalized block of the chain, after passing it through
@@ -179,6 +192,9 @@ impl<TPlat: Platform> SyncService<TPlat> {
     /// If `runtime_interest` is `false`, then [`SubscribeAll::finalized_block_runtime`] will
     /// always be `None`. Since the runtime can only be provided to one call to this function,
     /// only one subscriber should use `runtime_interest` equal to `true`.
+    ///
+    /// While this function is asynchronous, it is guaranteed to finish relatively quickly. Only
+    /// CPU operations are performed.
     pub async fn subscribe_all(&self, buffer_size: usize, runtime_interest: bool) -> SubscribeAll {
         let (send_back, rx) = oneshot::channel();
 

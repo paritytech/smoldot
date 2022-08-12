@@ -52,9 +52,12 @@
 //!
 //! // Decoding the header can panic if it is malformed. Do not unwrap if, for example, the
 //! // header has been received from a remote!
-//! let decoded_header = smoldot::header::decode(&scale_encoded_header).unwrap();
+//! // The second parameter is specific to each chain and corresponds to the number of bytes
+//! // that are used to encode block numbers. This value is also necessary when calculating
+//! // the hash of the header or encoding it.
+//! let decoded_header = smoldot::header::decode(&scale_encoded_header, 4).unwrap();
 //!
-//! println!("Block hash: {:?}", decoded_header.hash());
+//! println!("Block hash: {:?}", decoded_header.hash(4));
 //! println!("Header number: {}", decoded_header.number);
 //! println!("Parent block hash: {:?}", decoded_header.parent_hash);
 //! for item in decoded_header.digest.logs() {
@@ -63,7 +66,7 @@
 //!
 //! // Call `scale_encoding` to produce the header encoding.
 //! let reencoded: Vec<u8> = decoded_header
-//!     .scale_encoding()
+//!     .scale_encoding(4)
 //!     .fold(Vec::new(), |mut a, b| { a.extend_from_slice(b.as_ref()); a });
 //! assert_eq!(reencoded, scale_encoded_header);
 //! ```
@@ -121,8 +124,8 @@ pub fn extrinsics_root(transactions: &[impl AsRef<[u8]>]) -> [u8; 32] {
 }
 
 /// Attempt to decode the given SCALE-encoded header.
-pub fn decode(scale_encoded: &[u8]) -> Result<HeaderRef, Error> {
-    let (header, remainder) = decode_partial(scale_encoded)?;
+pub fn decode(scale_encoded: &[u8], block_number_bytes: usize) -> Result<HeaderRef, Error> {
+    let (header, remainder) = decode_partial(scale_encoded, block_number_bytes)?;
     if !remainder.is_empty() {
         return Err(Error::TooLong);
     }
@@ -134,7 +137,11 @@ pub fn decode(scale_encoded: &[u8]) -> Result<HeaderRef, Error> {
 ///
 /// Contrary to [`decode`], doesn't return an error if the slice is too long but returns the
 /// remainder.
-pub fn decode_partial(mut scale_encoded: &[u8]) -> Result<(HeaderRef, &[u8]), Error> {
+// TODO: use block_number_bytes
+pub fn decode_partial(
+    mut scale_encoded: &[u8],
+    block_number_bytes: usize,
+) -> Result<(HeaderRef, &[u8]), Error> {
     if scale_encoded.len() < 32 + 1 {
         return Err(Error::TooShort);
     }
@@ -155,7 +162,7 @@ pub fn decode_partial(mut scale_encoded: &[u8]) -> Result<(HeaderRef, &[u8]), Er
     let extrinsics_root: &[u8; 32] = TryFrom::try_from(&scale_encoded[0..32]).unwrap();
     scale_encoded = &scale_encoded[32..];
 
-    let (digest, remainder) = DigestRef::from_scale_bytes(scale_encoded)?;
+    let (digest, remainder) = DigestRef::from_scale_bytes(scale_encoded, block_number_bytes)?;
 
     let header = HeaderRef {
         parent_hash,
@@ -239,6 +246,7 @@ impl<'a> HeaderRef<'a> {
     /// encoding of the header.
     pub fn scale_encoding(
         &self,
+        block_number_bytes: usize,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
         iter::once(either::Left(either::Left(&self.parent_hash[..])))
             .chain(iter::once(either::Left(either::Right(
@@ -248,21 +256,26 @@ impl<'a> HeaderRef<'a> {
             .chain(iter::once(either::Left(either::Left(
                 &self.extrinsics_root[..],
             ))))
-            .chain(self.digest.scale_encoding().map(either::Right))
+            .chain(
+                self.digest
+                    .scale_encoding(block_number_bytes)
+                    .map(either::Right),
+            )
     }
 
     /// Equivalent to [`HeaderRef::scale_encoding`] but returns the data in a `Vec`.
-    pub fn scale_encoding_vec(&self) -> Vec<u8> {
+    pub fn scale_encoding_vec(&self, block_number_bytes: usize) -> Vec<u8> {
         // TODO: Vec::with_capacity?
-        self.scale_encoding().fold(Vec::new(), |mut a, b| {
-            a.extend_from_slice(b.as_ref());
-            a
-        })
+        self.scale_encoding(block_number_bytes)
+            .fold(Vec::new(), |mut a, b| {
+                a.extend_from_slice(b.as_ref());
+                a
+            })
     }
 
     /// Builds the hash of the header.
-    pub fn hash(&self) -> [u8; 32] {
-        hash_from_scale_encoded_header_vectored(self.scale_encoding())
+    pub fn hash(&self, block_number_bytes: usize) -> [u8; 32] {
+        hash_from_scale_encoded_header_vectored(self.scale_encoding(block_number_bytes))
     }
 }
 
@@ -303,18 +316,19 @@ impl Header {
     /// encoding of the header.
     pub fn scale_encoding(
         &'_ self,
+        block_number_bytes: usize,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + '_> + Clone + '_ {
-        HeaderRef::from(self).scale_encoding()
+        HeaderRef::from(self).scale_encoding(block_number_bytes)
     }
 
     /// Equivalent to [`Header::scale_encoding`] but returns the data in a `Vec`.
-    pub fn scale_encoding_vec(&self) -> Vec<u8> {
-        HeaderRef::from(self).scale_encoding_vec()
+    pub fn scale_encoding_vec(&self, block_number_bytes: usize) -> Vec<u8> {
+        HeaderRef::from(self).scale_encoding_vec(block_number_bytes)
     }
 
     /// Builds the hash of the header.
-    pub fn hash(&self) -> [u8; 32] {
-        HeaderRef::from(self).hash()
+    pub fn hash(&self, block_number_bytes: usize) -> [u8; 32] {
+        HeaderRef::from(self).hash(block_number_bytes)
     }
 }
 
@@ -364,6 +378,8 @@ enum DigestRefInner<'a> {
         /// Encoded digest. Its validity must be verified before a [`DigestRef`] object is
         /// instantiated.
         digest: &'a [u8],
+        /// Number of bytes used to encode block numbers in headers.
+        block_number_bytes: usize,
     },
     Parsed(&'a [DigestItem]),
 }
@@ -506,6 +522,7 @@ impl<'a> DigestRef<'a> {
             DigestRefInner::Undecoded {
                 digest,
                 digest_logs_len,
+                block_number_bytes,
             } => {
                 debug_assert_eq!(seal_pos, *digest_logs_len - 1);
 
@@ -513,6 +530,7 @@ impl<'a> DigestRef<'a> {
                     inner: LogsIterInner::Undecoded {
                         pointer: *digest,
                         remaining_len: *digest_logs_len,
+                        block_number_bytes: *block_number_bytes,
                     },
                 };
                 for _ in 0..seal_pos {
@@ -523,6 +541,7 @@ impl<'a> DigestRef<'a> {
                 if let LogsIterInner::Undecoded {
                     pointer,
                     remaining_len,
+                    ..
                 } = iter.inner
                 {
                     *digest_logs_len -= 1;
@@ -550,9 +569,11 @@ impl<'a> DigestRef<'a> {
                 DigestRefInner::Undecoded {
                     digest,
                     digest_logs_len,
+                    block_number_bytes,
                 } => LogsIterInner::Undecoded {
                     pointer: digest,
                     remaining_len: digest_logs_len,
+                    block_number_bytes,
                 },
             },
         }
@@ -562,11 +583,12 @@ impl<'a> DigestRef<'a> {
     /// encoding of the digest items.
     pub fn scale_encoding(
         &self,
+        block_number_bytes: usize,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
         let encoded_len = util::encode_scale_compact_usize(self.logs().len());
         iter::once(either::Left(encoded_len)).chain(
             self.logs()
-                .flat_map(|v| v.scale_encoding().map(either::Right)),
+                .flat_map(move |v| v.scale_encoding(block_number_bytes).map(either::Right)),
         )
     }
 
@@ -659,7 +681,10 @@ impl<'a> DigestRef<'a> {
     }
 
     /// Try to decode a list of digest items, from their SCALE encoding.
-    fn from_scale_bytes(scale_encoded: &'a [u8]) -> Result<(Self, &'a [u8]), Error> {
+    fn from_scale_bytes(
+        scale_encoded: &'a [u8],
+        block_number_bytes: usize,
+    ) -> Result<(Self, &'a [u8]), Error> {
         let (scale_encoded, digest_logs_len) =
             crate::util::nom_scale_compact_usize::<nom::error::Error<&[u8]>>(scale_encoded)
                 .map_err(|_| Error::DigestItemLenDecodeError)?;
@@ -675,7 +700,7 @@ impl<'a> DigestRef<'a> {
         // Iterate through the log items to see if anything is wrong.
         let mut next_digest = scale_encoded;
         for item_num in 0..digest_logs_len {
-            let (item, next) = decode_item(next_digest)?;
+            let (item, next) = decode_item(next_digest, block_number_bytes)?;
             next_digest = next;
 
             match item {
@@ -747,6 +772,7 @@ impl<'a> DigestRef<'a> {
             inner: DigestRefInner::Undecoded {
                 digest_logs_len,
                 digest: scale_encoded,
+                block_number_bytes,
             },
             aura_seal_index,
             aura_predigest_index,
@@ -907,6 +933,8 @@ enum LogsIterInner<'a> {
         pointer: &'a [u8],
         /// Number of log items remaining.
         remaining_len: usize,
+        /// Number of bytes used to encode block numbers in the header.
+        block_number_bytes: usize,
     },
 }
 
@@ -919,13 +947,14 @@ impl<'a> Iterator for LogsIter<'a> {
             LogsIterInner::Undecoded {
                 pointer,
                 remaining_len,
+                block_number_bytes,
             } => {
                 if *remaining_len == 0 {
                     return None;
                 }
 
                 // Validity is guaranteed when the `DigestRef` is constructed.
-                let (item, new_pointer) = decode_item(*pointer).unwrap();
+                let (item, new_pointer) = decode_item(*pointer, *block_number_bytes).unwrap();
                 *pointer = new_pointer;
                 *remaining_len -= 1;
 
@@ -1024,6 +1053,7 @@ impl<'a> DigestItemRef<'a> {
     /// encoding of that digest item.
     pub fn scale_encoding(
         &self,
+        block_number_bytes: usize,
     ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone + 'a> + Clone + 'a {
         // TODO: don't use Vecs?
         match *self {
@@ -1093,10 +1123,13 @@ impl<'a> DigestItemRef<'a> {
                 iter::once(ret)
             }
             DigestItemRef::GrandpaConsensus(ref gp_consensus) => {
-                let encoded = gp_consensus.scale_encoding().fold(Vec::new(), |mut a, b| {
-                    a.extend_from_slice(b.as_ref());
-                    a
-                });
+                let encoded =
+                    gp_consensus
+                        .scale_encoding(block_number_bytes)
+                        .fold(Vec::new(), |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        });
 
                 let mut ret = vec![4];
                 ret.extend_from_slice(b"FRNK");
@@ -1256,7 +1289,10 @@ impl<'a> From<DigestItemRef<'a>> for DigestItem {
 
 /// Decodes a single digest log item. On success, returns the item and the data that remains
 /// after the item.
-fn decode_item(mut slice: &[u8]) -> Result<(DigestItemRef, &[u8]), Error> {
+fn decode_item(
+    mut slice: &[u8],
+    block_number_bytes: usize,
+) -> Result<(DigestItemRef, &[u8]), Error> {
     let index = *slice.get(0).ok_or(Error::TooShort)?;
     slice = &slice[1..];
 
@@ -1280,7 +1316,7 @@ fn decode_item(mut slice: &[u8]) -> Result<(DigestItemRef, &[u8]), Error> {
             let content = &slice[..len];
             slice = &slice[len..];
 
-            let item = decode_item_from_parts(index, engine_id, content)?;
+            let item = decode_item_from_parts(index, block_number_bytes, engine_id, content)?;
             Ok((item, slice))
         }
         8 => Ok((DigestItemRef::RuntimeEnvironmentUpdated, slice)),
@@ -1307,6 +1343,7 @@ fn decode_item(mut slice: &[u8]) -> Result<(DigestItemRef, &[u8]), Error> {
 /// When we know the index, engine id, and content of an item, we can finish decoding.
 fn decode_item_from_parts<'a>(
     index: u8,
+    block_number_bytes: usize,
     engine_id: &'a [u8; 4],
     content: &'a [u8],
 ) -> Result<DigestItemRef<'a>, Error> {
@@ -1315,9 +1352,10 @@ fn decode_item_from_parts<'a>(
         // 4 = Consensus
         (4, b"aura") => DigestItemRef::AuraConsensus(AuraConsensusLogRef::from_slice(content)?),
         (4, b"BABE") => DigestItemRef::BabeConsensus(BabeConsensusLogRef::from_slice(content)?),
-        (4, b"FRNK") => {
-            DigestItemRef::GrandpaConsensus(GrandpaConsensusLogRef::from_slice(content)?)
-        }
+        (4, b"FRNK") => DigestItemRef::GrandpaConsensus(GrandpaConsensusLogRef::from_slice(
+            content,
+            block_number_bytes,
+        )?),
         (4, engine) => DigestItemRef::UnknownConsensus {
             engine: *engine,
             opaque: content,

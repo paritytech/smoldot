@@ -958,9 +958,9 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.12.2"
+version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "607c8a29735385251a339424dd462993c0fed8fa09d378f259377df08c126022"
+checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
 dependencies = [
  "serde",
 ]
@@ -1123,9 +1123,9 @@ checksum = "33a33a362ce288760ec6a508b94caaec573ae7d3bbbd91b87aa0bad4456839db"
 
 [[package]]
 name = "libsecp256k1"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0452aac8bab02242429380e9b2f94ea20cea2b37e2c1777a1358799bbe97f37"
+checksum = "95b09eff1b35ed3b33b877ced3a691fc7a481919c7e29c53c906226fcf55e2a1"
 dependencies = [
  "arrayref",
  "base64",
@@ -1828,7 +1828,7 @@ dependencies = [
  "event-listener",
  "fnv",
  "futures",
- "hashbrown 0.12.2",
+ "hashbrown 0.12.3",
  "hex",
  "hmac 0.12.1",
  "itertools",
@@ -1868,7 +1868,7 @@ version = "0.0.0"
 dependencies = [
  "arbitrary",
  "fnv",
- "hashbrown 0.12.2",
+ "hashbrown 0.12.3",
  "libfuzzer-sys",
  "smoldot",
 ]

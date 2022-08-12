@@ -18,7 +18,7 @@
 //! Runtime call to obtain the transactions validity status.
 
 use crate::{
-    executor::{self, host, runtime_host, storage_diff},
+    executor::{host, runtime_host, storage_diff},
     header, util,
 };
 
@@ -34,6 +34,9 @@ pub struct Config<'a, TTx> {
     /// Header of the block to verify the transaction against, in SCALE encoding.
     /// The runtime of this block must be the one in [`Config::runtime`].
     pub scale_encoded_header: &'a [u8],
+
+    /// Number of bytes used to encode the block number in the header.
+    pub block_number_bytes: usize,
 
     /// SCALE-encoded transaction.
     pub scale_encoded_transaction: TTx,
@@ -183,9 +186,6 @@ pub enum Error {
     /// Error while decoding the block header against which to make the call.
     #[display(fmt = "Failed to decode block header: {}", _0)]
     InvalidHeader(header::Error),
-    /// Failed to determine the runtime version of the runtime.
-    #[display(fmt = "Failed to determine runtime version: {}", _0)]
-    RuntimeVersion(executor::CoreVersionError),
     /// Transaction validation API version unrecognized.
     UnknownApiVersion,
     /// Error while starting the Wasm virtual machine.
@@ -281,23 +281,15 @@ pub fn validate_transaction(
 ) -> Query {
     // The parameters of the function, and whether to call `Core_initialize_block` beforehand,
     // depend on the API version.
-    // TODO: should the runtime spec be cached into the `HostVmPrototype`?
-    let (api_version, virtual_machine) = match executor::core_version(config.runtime) {
-        (Ok(runtime_spec), runtime) => {
-            let expected = blake2_rfc::blake2b::blake2b(8, &[], b"TaggedTransactionQueue");
-            let version = runtime_spec
-                .decode()
-                .apis
-                .find(|api| api.name_hash == expected.as_ref())
-                .map(|api| api.version);
-            (version, runtime)
-        }
-        (Err(err), virtual_machine) => {
-            return Query::Finished {
-                result: Err(Error::RuntimeVersion(err)),
-                virtual_machine,
-            }
-        }
+    let api_version = {
+        let expected = blake2_rfc::blake2b::blake2b(8, &[], b"TaggedTransactionQueue");
+        config
+            .runtime
+            .runtime_version()
+            .decode()
+            .apis
+            .find(|api| api.name_hash == expected.as_ref())
+            .map(|api| api.version)
     };
 
     match api_version {
@@ -307,28 +299,29 @@ pub fn validate_transaction(
             // The `Core_initialize_block` function called below expects a partially-initialized
             // SCALE-encoded header. Importantly, passing the entire header will lead to different code
             // paths in the runtime and not match what Substrate does.
-            let decoded_header = match header::decode(config.scale_encoded_header) {
-                Ok(h) => h,
-                Err(err) => {
-                    return Query::Finished {
-                        result: Err(Error::InvalidHeader(err)),
-                        virtual_machine,
+            let decoded_header =
+                match header::decode(config.scale_encoded_header, config.block_number_bytes) {
+                    Ok(h) => h,
+                    Err(err) => {
+                        return Query::Finished {
+                            result: Err(Error::InvalidHeader(err)),
+                            virtual_machine: config.runtime,
+                        }
                     }
-                }
-            };
+                };
 
             // Start the call to `Core_initialize_block`.
             let vm = runtime_host::run(runtime_host::Config {
-                virtual_machine,
+                virtual_machine: config.runtime,
                 function_to_call: "Core_initialize_block",
                 parameter: header::HeaderRef {
-                    parent_hash: &decoded_header.hash(),
+                    parent_hash: &decoded_header.hash(config.block_number_bytes),
                     number: decoded_header.number + 1,
                     extrinsics_root: &[0; 32],
                     state_root: &[0; 32],
                     digest: header::DigestRef::empty(),
                 }
-                .scale_encoding(),
+                .scale_encoding(config.block_number_bytes),
                 top_trie_root_calculation_cache: None,
                 storage_top_trie_changes: storage_diff::StorageDiff::empty(),
                 offchain_storage_changes: storage_diff::StorageDiff::empty(),
@@ -358,7 +351,7 @@ pub fn validate_transaction(
             // In version 3, we don't need to call `Core_initialize_block`.
 
             let vm = runtime_host::run(runtime_host::Config {
-                virtual_machine,
+                virtual_machine: config.runtime,
                 function_to_call: VALIDATION_FUNCTION_NAME,
                 parameter: validate_transaction_runtime_parameters_v3(
                     config.scale_encoded_transaction,
@@ -380,7 +373,7 @@ pub fn validate_transaction(
         }
         _ => Query::Finished {
             result: Err(Error::UnknownApiVersion),
-            virtual_machine,
+            virtual_machine: config.runtime,
         },
     }
 }
