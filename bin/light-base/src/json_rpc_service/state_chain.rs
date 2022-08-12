@@ -1157,23 +1157,25 @@ impl<TPlat: Platform> Background<TPlat> {
 
             // Try to find the block in the cache of recent blocks. Most of the time, the call
             // target should be in there.
-            if cache_lock.recent_pinned_blocks.contains(&block_hash) {
+            let spec = if cache_lock.recent_pinned_blocks.contains(&block_hash) {
                 // The runtime service has the block pinned, meaning that we can ask the runtime
                 // service for the specification.
-                let runtime_call_lock = self
-                    .runtime_service
+                self.runtime_service
                     .pinned_block_runtime_lock(
                         cache_lock.subscription_id.clone().unwrap(),
                         &block_hash,
                     )
-                    .await;
+                    .await
+                    .ok()
+                    .map(|rt| rt.specification())
+            } else {
+                None
+            };
 
-                // Unlock the cache early. While the call to `specification` shouldn't be very
-                // long, it doesn't cost anything to unlock this mutex early.
-                drop::<futures::lock::MutexGuard<_>>(cache_lock);
-
-                // Obtain the specification of that runtime.
-                runtime_call_lock.specification()
+            // If the block isn't a recent block or if the subscription is obsolete, fall back
+            // to downloading it.
+            if let Some(spec) = spec {
+                spec
             } else {
                 // Second situation: the block is not in the cache of recent blocks. This
                 // isn't great.
