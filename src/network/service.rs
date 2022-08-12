@@ -217,8 +217,8 @@ struct Chain<TNow> {
     /// Used in order to hold the list of peers that are known to be part of this chain.
     ///
     /// A peer is marked as "connected" in the k-buckets when a block announces substream is open
-    /// and that the remote's handshake is valid (i.e. parsable and containing a correct genesis
-    /// hash), and disconnected when it is closed or that the remote's handshake isn't
+    /// and that the remote's handshake is valid (i.e. can be parsed and containing a correct
+    /// genesis hash), and disconnected when it is closed or that the remote's handshake isn't
     /// satisfactory.
     kbuckets: kademlia::kbuckets::KBuckets<PeerId, (), TNow, 20>,
 }
