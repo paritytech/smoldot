@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fix circular dependency between JavaScript modules. ([#2614](https://github.com/paritytech/smoldot/pull/2614))
+- Fix panic when a handshake timeout or protocol error happens on a connection at the same time as the local node tries to shut it down.
 
 ## 0.6.29 - 2022-08-09
 

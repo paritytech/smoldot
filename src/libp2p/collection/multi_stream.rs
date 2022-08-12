@@ -54,9 +54,8 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
     /// Connection has finished its shutdown. A [`ConnectionToCoordinatorInner::ShutdownFinished`]
     /// message has been sent and is waiting to be acknowledged.
     ShutdownWaitingAck {
-        /// If true, [`MultiStreamConnectionTask::reset`] has been called. This doesn't modify any
-        /// of the behavior but is used to make sure that the API is used correctly.
-        was_api_reset: bool,
+        /// What has initiated the shutdown.
+        initiator: ShutdownInitiator,
 
         /// `None` if the [`ConnectionToCoordinatorInner::StartShutdown`] message has already
         /// been sent to the coordinator. `Some` if the message hasn't been sent yet.
@@ -70,10 +69,19 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
     /// Connection has finished its shutdown and its shutdown has been acknowledged. There is
     /// nothing more to do except stop the connection task.
     ShutdownAcked {
-        /// If true, [`MultiStreamConnectionTask::reset`] has been called. This doesn't modify any
-        /// of the behavior but is used to make sure that the API is used correctly.
-        was_api_reset: bool,
+        /// What has initiated the shutdown.
+        initiator: ShutdownInitiator,
     },
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum ShutdownInitiator {
+    /// The coordinator sent a [`CoordinatorToConnectionInner::StartShutdown`] message.
+    Coordinator,
+    /// [`MultiStreamConnectionTask::reset`] has been called.
+    Api,
+    /// The shutdown has been initiated due to a protocol error.
+    Remote,
 }
 
 impl<TNow, TSubId> MultiStreamConnectionTask<TNow, TSubId>
@@ -403,7 +411,7 @@ where
                 self.connection = MultiStreamConnectionTaskInner::ShutdownWaitingAck {
                     start_shutdown_message_to_send: Some(None),
                     shutdown_finish_message_sent: false,
-                    was_api_reset: false,
+                    initiator: ShutdownInitiator::Coordinator,
                 };
             }
             (
@@ -429,7 +437,7 @@ where
             | (
                 CoordinatorToConnectionInner::StartShutdown,
                 MultiStreamConnectionTaskInner::ShutdownWaitingAck {
-                    was_api_reset: true,
+                    initiator: ShutdownInitiator::Api | ShutdownInitiator::Remote,
                     ..
                 },
             ) => {
@@ -443,19 +451,22 @@ where
                 MultiStreamConnectionTaskInner::ShutdownWaitingAck {
                     start_shutdown_message_to_send: start_shutdown_message_sent,
                     shutdown_finish_message_sent,
-                    was_api_reset: was_reset,
+                    initiator,
                 },
             ) => {
                 debug_assert!(
                     start_shutdown_message_sent.is_none() && *shutdown_finish_message_sent
                 );
                 self.connection = MultiStreamConnectionTaskInner::ShutdownAcked {
-                    was_api_reset: *was_reset,
+                    initiator: *initiator,
                 };
             }
             (
                 CoordinatorToConnectionInner::StartShutdown,
-                MultiStreamConnectionTaskInner::ShutdownWaitingAck { .. }
+                MultiStreamConnectionTaskInner::ShutdownWaitingAck {
+                    initiator: ShutdownInitiator::Coordinator,
+                    ..
+                }
                 | MultiStreamConnectionTaskInner::ShutdownAcked { .. },
             ) => unreachable!(),
             (CoordinatorToConnectionInner::ShutdownFinishedAck, _) => unreachable!(),
@@ -546,23 +557,35 @@ where
     /// Panics if [`MultiStreamConnectionTask::reset`] has been called in the past.
     ///
     pub fn reset(&mut self) {
-        // It is illegal to call `reset` a second time. Verify that the user didn't do this.
-        if let MultiStreamConnectionTaskInner::ShutdownWaitingAck {
-            was_api_reset: true,
-            ..
+        match self.connection {
+            MultiStreamConnectionTaskInner::ShutdownWaitingAck {
+                initiator: ShutdownInitiator::Api,
+                ..
+            }
+            | MultiStreamConnectionTaskInner::ShutdownAcked {
+                initiator: ShutdownInitiator::Api,
+                ..
+            } => {
+                // It is illegal to call `reset` a second time.
+                panic!()
+            }
+            MultiStreamConnectionTaskInner::ShutdownWaitingAck {
+                ref mut initiator, ..
+            }
+            | MultiStreamConnectionTaskInner::ShutdownAcked {
+                ref mut initiator, ..
+            } => {
+                // Mark the initiator as being the API in order to track proper API usage.
+                *initiator = ShutdownInitiator::Api;
+            }
+            _ => {
+                self.connection = MultiStreamConnectionTaskInner::ShutdownWaitingAck {
+                    initiator: ShutdownInitiator::Api,
+                    shutdown_finish_message_sent: false,
+                    start_shutdown_message_to_send: Some(Some(ShutdownCause::RemoteReset)),
+                };
+            }
         }
-        | MultiStreamConnectionTaskInner::ShutdownAcked {
-            was_api_reset: true,
-        } = self.connection
-        {
-            panic!()
-        }
-
-        self.connection = MultiStreamConnectionTaskInner::ShutdownWaitingAck {
-            was_api_reset: true,
-            shutdown_finish_message_sent: false,
-            start_shutdown_message_to_send: Some(Some(ShutdownCause::RemoteReset)),
-        };
     }
 
     /// Immediately destroys the substream with the given identifier.
