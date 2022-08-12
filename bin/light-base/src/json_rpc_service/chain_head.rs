@@ -100,11 +100,10 @@ impl<TPlat: Platform> Background<TPlat> {
                             return;
                         }
 
-                        Some(
-                            me.runtime_service
-                                .pinned_block_runtime_lock(runtime_service_subscribe_all, &hash.0)
-                                .await,
-                        )
+                        me.runtime_service
+                            .pinned_block_runtime_lock(runtime_service_subscribe_all, &hash.0)
+                            .await
+                            .ok()
                     } else {
                         None
                     }

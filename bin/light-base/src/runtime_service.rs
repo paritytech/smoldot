@@ -395,8 +395,6 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                     .unwrap();
                 *finalized_pinned_remaining += 1;
             }
-        } else {
-            panic!("Invalid subscription")
         }
     }
 
@@ -406,6 +404,9 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// to make the call. The block must be currently pinned in the context of the provided
     /// [`SubscriptionId`].
     ///
+    /// Returns an error if the subscription is stale, meaning that it has been reset by the
+    /// runtime service.
+    ///
     /// # Panic
     ///
     /// Panics if the given block isn't currently pinned by the given subscription.
@@ -414,7 +415,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         &'a self,
         subscription_id: SubscriptionId,
         block_hash: &[u8; 32],
-    ) -> RuntimeLock<'a, TPlat> {
+    ) -> Result<RuntimeLock<'a, TPlat>, PinnedBlockRuntimeLockError> {
         // Note: copying the hash ahead of time fixes some weird intermittent borrow checker
         // issue.
         let block_hash = *block_hash;
@@ -423,22 +424,35 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         let guarded = &mut *guarded;
 
         let (runtime, block_state_root_hash, block_number, _) = {
-            if let GuardedInner::FinalizedBlockRuntimeKnown { pinned_blocks, .. } =
-                &mut guarded.tree
+            if let GuardedInner::FinalizedBlockRuntimeKnown {
+                all_blocks_subscriptions,
+                pinned_blocks,
+                ..
+            } = &mut guarded.tree
             {
-                (*pinned_blocks.get(&(subscription_id.0, block_hash)).unwrap()).clone()
+                match pinned_blocks.get(&(subscription_id.0, block_hash)) {
+                    Some(v) => v.clone(),
+                    None => {
+                        // Cold path.
+                        if all_blocks_subscriptions.contains_key(&subscription_id.0) {
+                            panic!("block already unpinned");
+                        } else {
+                            return Err(PinnedBlockRuntimeLockError::ObsoleteSubscription);
+                        }
+                    }
+                }
             } else {
-                panic!("Invalid subscription")
+                return Err(PinnedBlockRuntimeLockError::ObsoleteSubscription);
             }
         };
 
-        RuntimeLock {
+        Ok(RuntimeLock {
             service: self,
             hash: block_hash,
             runtime,
             block_number,
             block_state_root_hash,
-        }
+        })
     }
 
     /// Lock the runtime service and prepare a call to a runtime entry point.
@@ -692,6 +706,13 @@ async fn is_near_head_of_chain_heuristic<TPlat: Platform>(
     // to make sure that we don't report "near" while having reported only blocks that were
     // far.
     guarded.lock().await.best_near_head_of_chain
+}
+
+/// See [`RuntimeService::pinned_block_runtime_lock`].
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum PinnedBlockRuntimeLockError {
+    /// Subscription is dead.
+    ObsoleteSubscription,
 }
 
 /// See [`RuntimeService::pinned_block_runtime_lock`].
