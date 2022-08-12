@@ -55,6 +55,7 @@ use alloc::{
 };
 use core::{
     hash::Hash,
+    iter,
     num::NonZeroU32,
     ops::{self, Add, Sub},
     time::Duration,
@@ -62,10 +63,10 @@ use core::{
 use rand::{Rng as _, SeedableRng as _};
 
 pub use collection::{
-    ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionToCoordinator,
-    CoordinatorToConnection, InboundError, MultiStreamConnectionTask, NotificationProtocolConfig,
-    NotificationsInClosedErr, NotificationsOutErr, ReadWrite, RequestError, ShutdownCause,
-    SingleStreamConnectionTask, SubstreamId,
+    ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionState,
+    ConnectionToCoordinator, CoordinatorToConnection, InboundError, MultiStreamConnectionTask,
+    NotificationProtocolConfig, NotificationsInClosedErr, NotificationsOutErr, ReadWrite,
+    RequestError, ShutdownCause, SingleStreamConnectionTask, SubstreamId,
 };
 
 /// Configuration for a [`Peers`].
@@ -850,6 +851,65 @@ where
         // TODO: must immediately open all desired substreams
 
         (connection_id, connection_task)
+    }
+
+    /// Returns all the non-handshaking connections that are connected to the given peer. The list
+    /// also includes connections that are shutting down.
+    pub fn established_peer_connections(
+        &'_ self,
+        peer_id: &PeerId,
+    ) -> impl Iterator<Item = ConnectionId> + '_ {
+        let peer_index = match self.peer_indices.get(peer_id) {
+            Some(idx) => *idx,
+            None => return either::Right(iter::empty()),
+        };
+
+        either::Left(
+            self.connections_by_peer
+                .range(
+                    (peer_index, ConnectionId::min_value())
+                        ..=(peer_index, ConnectionId::max_value()),
+                )
+                .map(|(_, connection_id)| *connection_id)
+                .filter(move |connection_id| {
+                    self.inner.connection_state(*connection_id).established
+                }),
+        )
+    }
+
+    /// Returns all the handshaking connections that are expected to reach the given peer. The
+    /// list also includes connections that are shutting down.
+    pub fn handshaking_peer_connections(
+        &'_ self,
+        peer_id: &PeerId,
+    ) -> impl Iterator<Item = ConnectionId> + '_ {
+        let peer_index = match self.peer_indices.get(peer_id) {
+            Some(idx) => *idx,
+            None => return either::Right(iter::empty()),
+        };
+
+        either::Left(
+            self.connections_by_peer
+                .range(
+                    (peer_index, ConnectionId::min_value())
+                        ..=(peer_index, ConnectionId::max_value()),
+                )
+                .map(|(_, connection_id)| *connection_id)
+                .filter(move |connection_id| {
+                    !self.inner.connection_state(*connection_id).established
+                }),
+        )
+    }
+
+    /// Returns the state of the given connection.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the identifier is invalid or corresponds to a connection that has already
+    /// entirely shut down.
+    ///
+    pub fn connection_state(&self, connection_id: ConnectionId) -> ConnectionState {
+        self.inner.connection_state(connection_id)
     }
 
     /// Returns the list of [`PeerId`]s that have been marked as desired, but that don't have any

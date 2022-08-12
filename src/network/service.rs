@@ -847,6 +847,7 @@ where
                 kademlia::kbuckets::Entry::LocalKey => return, // TODO: return some diagnostic?
                 kademlia::kbuckets::Entry::Vacant(entry) => {
                     match entry.insert((), now, kademlia::kbuckets::PeerState::Disconnected) {
+                        Err(kademlia::kbuckets::InsertError::Full) => return, // TODO: return some diagnostic?
                         Ok((_, removed_entry)) => {
                             // `removed_entry` is the peer that was removed the k-buckets as the
                             // result of the new insertion. Purge it from `self.kbuckets_peers`
@@ -873,16 +874,52 @@ where
                                         NonZeroUsize::new(e.num_references.get() + 1).unwrap();
                                     e
                                 }
-                                // TODO: is it possible that we're already connected to this peer? since we call set_disconnected() when we disconnect, we would geta panic
-                                hashbrown::hash_map::Entry::Vacant(e) => e.insert(KBucketsPeer {
-                                    num_references: NonZeroUsize::new(1).unwrap(),
-                                    addresses: addresses::Addresses::with_capacity(
+                                hashbrown::hash_map::Entry::Vacant(e) => {
+                                    // The peer was not in the k-buckets, but it is possible that
+                                    // we already have existing connections to it.
+                                    let mut addresses = addresses::Addresses::with_capacity(
                                         self.max_addresses_per_peer.get(),
-                                    ),
-                                }),
+                                    );
+
+                                    for connection_id in
+                                        self.inner.established_peer_connections(&e.key())
+                                    {
+                                        let state = self.inner.connection_state(connection_id);
+                                        debug_assert!(state.established);
+                                        // Because we mark addresses as disconnected when the
+                                        // shutdown process starts, we ignore shutting down
+                                        // connections.
+                                        if state.shutting_down {
+                                            continue;
+                                        }
+                                        addresses
+                                            .insert_discovered(self.inner[connection_id].clone());
+                                        addresses.set_connected(&self.inner[connection_id]);
+                                    }
+
+                                    for connection_id in
+                                        self.inner.handshaking_peer_connections(&e.key())
+                                    {
+                                        let state = self.inner.connection_state(connection_id);
+                                        debug_assert!(!state.established);
+                                        // Because we mark addresses as disconnected when the
+                                        // shutdown process starts, we ignore shutting down
+                                        // connections.
+                                        if state.shutting_down {
+                                            continue;
+                                        }
+                                        addresses
+                                            .insert_discovered(self.inner[connection_id].clone());
+                                        addresses.set_pending(&self.inner[connection_id]);
+                                    }
+
+                                    e.insert(KBucketsPeer {
+                                        num_references: NonZeroUsize::new(1).unwrap(),
+                                        addresses,
+                                    })
+                                }
                             }
                         }
-                        Err(kademlia::kbuckets::InsertError::Full) => return, // TODO: return some diagnostic?
                     }
                 }
                 kademlia::kbuckets::Entry::Occupied(_) => {
