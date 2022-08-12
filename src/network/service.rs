@@ -886,6 +886,9 @@ where
                                     {
                                         let state = self.inner.connection_state(connection_id);
                                         debug_assert!(state.established);
+                                        // Because we mark addresses as disconnected when the
+                                        // shutdown process starts, we ignore shutting down
+                                        // connections.
                                         if state.shutting_down {
                                             continue;
                                         }
@@ -899,6 +902,9 @@ where
                                     {
                                         let state = self.inner.connection_state(connection_id);
                                         debug_assert!(!state.established);
+                                        // Because we mark addresses as disconnected when the
+                                        // shutdown process starts, we ignore shutting down
+                                        // connections.
                                         if state.shutting_down {
                                             continue;
                                         }
