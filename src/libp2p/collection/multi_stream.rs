@@ -80,8 +80,6 @@ enum ShutdownInitiator {
     Coordinator,
     /// [`MultiStreamConnectionTask::reset`] has been called.
     Api,
-    /// The shutdown has been initiated due to a protocol error.
-    Remote,
 }
 
 impl<TNow, TSubId> MultiStreamConnectionTask<TNow, TSubId>
@@ -437,7 +435,7 @@ where
             | (
                 CoordinatorToConnectionInner::StartShutdown,
                 MultiStreamConnectionTaskInner::ShutdownWaitingAck {
-                    initiator: ShutdownInitiator::Api | ShutdownInitiator::Remote,
+                    initiator: ShutdownInitiator::Api,
                     ..
                 },
             ) => {
