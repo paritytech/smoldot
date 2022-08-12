@@ -213,8 +213,10 @@ struct Chain<TNow> {
     ///
     /// Used in order to hold the list of peers that are known to be part of this chain.
     ///
-    /// A peer is marked as "connected" in the k-buckets when a block announces substream is open,
-    /// and disconnected when it is closed.
+    /// A peer is marked as "connected" in the k-buckets when a block announces substream is open
+    /// and that the remote's handshake is valid (i.e. parsable and containing a correct genesis
+    /// hash), and disconnected when it is closed or that the remote's handshake isn't
+    /// satisfactory.
     ///
     /// For each peer, a list of addresses is hold. This list must never become empty.
     kbuckets: kademlia::kbuckets::KBuckets<PeerId, addresses::Addresses, TNow, 20>,
@@ -1101,8 +1103,6 @@ where
                     let address = &self.inner[connection_id];
                     for chain in &mut self.chains {
                         if let Some(mut entry) = chain.kbuckets.entry(&peer_id).into_occupied() {
-                            // TODO: this doesn't seem right
-                            entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
                             entry.get_mut().set_disconnected(&address);
                         }
                     }
@@ -1125,8 +1125,6 @@ where
                     let address = &self.inner[connection_id];
                     for chain in &mut self.chains {
                         if let Some(mut entry) = chain.kbuckets.entry(&peer_id).into_occupied() {
-                            // TODO: this doesn't seem right
-                            entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
                             entry.get_mut().set_disconnected(&address);
                         }
                     }
@@ -1296,7 +1294,9 @@ where
                             });
                         }
 
-                        // Update the k-buckets.
+                        // Update the k-buckets to mark the peer as connected.
+                        // Note that this is done after having made sure that the handshake
+                        // was correct.
                         if let Some(mut entry) = self.chains[chain_index]
                             .kbuckets
                             .entry(&peer_id)
@@ -1573,6 +1573,9 @@ where
                                 .entry(&peer_id)
                                 .into_occupied()
                             {
+                                // Note that the state might have already be `Disconnected`, which
+                                // can happen for example in case of a problem in the handshake
+                                // sent back by the remote.
                                 entry.set_state(&now, kademlia::kbuckets::PeerState::Disconnected);
                             }
 
