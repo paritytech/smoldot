@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix circular dependency between JavaScript modules. ([#2614](https://github.com/paritytech/smoldot/pull/2614))
+
 ## 0.6.29 - 2022-08-09
 
 ### Fixed

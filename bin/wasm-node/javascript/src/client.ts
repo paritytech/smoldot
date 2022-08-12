@@ -17,6 +17,8 @@
 
 import { PlatformBindings, start as startInstance } from './instance/instance.js';
 
+export { CrashError } from './instance/instance.js';
+
 /**
  * Thrown in case of a problem when initializing the chain.
  */
@@ -45,17 +47,6 @@ export class JsonRpcDisabledError extends Error {
   constructor() {
     super()
     this.name = "JsonRpcDisabledError"
-  }
-}
-
-/**
- * Thrown in case the underlying client encounters an unexpected crash.
- *
- * This is always an internal bug in smoldot and is never supposed to happen.
- */
-export class CrashError extends Error {
-  constructor(message: string) {
-    super(message);
   }
 }
 

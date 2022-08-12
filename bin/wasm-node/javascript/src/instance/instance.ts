@@ -18,9 +18,19 @@
 import * as buffer from './buffer.js';
 import * as instance from './raw-instance.js';
 import { SmoldotWasmInstance } from './bindings.js';
-import { CrashError } from '../client.js';
 
 export { PlatformBindings, ConnectionError, ConnectionConfig, Connection } from './raw-instance.js';
+
+/**
+ * Thrown in case the underlying client encounters an unexpected crash.
+ *
+ * This is always an internal bug in smoldot and is never supposed to happen.
+ */
+ export class CrashError extends Error {
+  constructor(message: string) {
+    super(message);
+  }
+}
 
 /**
  * Contains the configuration of the instance.
