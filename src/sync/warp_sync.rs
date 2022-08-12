@@ -1111,7 +1111,11 @@ pub struct BuildChainInformation<TSrc, TRq> {
 }
 
 impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
-    pub fn build(mut self) -> (WarpSync<TSrc, TRq>, Option<Error>) {
+    pub fn build(
+        mut self,
+        exec_hint: ExecHint,
+        allow_unresolved_imports: bool,
+    ) -> (WarpSync<TSrc, TRq>, Option<Error>) {
         // TODO: this function implementation could get a lot of cleanups
 
         if let (
@@ -1166,8 +1170,8 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             let runtime = match HostVmPrototype::new(host::Config {
                 module: &finalized_storage_code,
                 heap_pages: decoded_heap_pages,
-                exec_hint: ExecHint::CompileAheadOfTime, // TODO: make configurable
-                allow_unresolved_imports: false,         // TODO: make configurable
+                exec_hint,
+                allow_unresolved_imports,
             }) {
                 Ok(runtime) => runtime,
                 Err(error) => {
@@ -1432,8 +1436,8 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             let runtime = match HostVmPrototype::new(host::Config {
                 module: &finalized_storage_code,
                 heap_pages: decoded_heap_pages,
-                exec_hint: ExecHint::CompileAheadOfTime, // TODO: make configurable
-                allow_unresolved_imports: false,         // TODO: make configurable
+                exec_hint,
+                allow_unresolved_imports,
             }) {
                 Ok(runtime) => runtime,
                 Err(error) => {
