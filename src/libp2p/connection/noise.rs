@@ -70,7 +70,7 @@ use crate::{
 };
 
 use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
-use core::{cmp, fmt, iter};
+use core::{cmp, fmt};
 
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
 pub const PROTOCOL_NAME: &str = "/noise";
