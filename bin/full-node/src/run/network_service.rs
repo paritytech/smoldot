@@ -251,11 +251,7 @@ impl NetworkService {
         // Add the bootnodes to the inner state machine.
         for (chain_index, chain) in config.chains.into_iter().enumerate() {
             for (peer_id, addr) in chain.bootstrap_nodes {
-                network.discover(
-                    &Instant::now(),
-                    chain_index,
-                    iter::once((peer_id, iter::once(addr))),
-                );
+                network.discover(&Instant::now(), chain_index, peer_id, iter::once(addr));
             }
         }
 
@@ -872,9 +868,14 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     match result {
                         Ok(nodes) => {
                             tracing::debug!(discovered = ?nodes, "discovered");
-                            guarded
-                                .network
-                                .discover(&Instant::now(), chain_index, nodes);
+                            for (peer_id, addrs) in nodes {
+                                guarded.network.discover(
+                                    &Instant::now(),
+                                    chain_index,
+                                    peer_id,
+                                    addrs,
+                                );
+                            }
                         }
                         Err(error) => {
                             tracing::debug!(%error, "discovery-error");
