@@ -783,13 +783,12 @@ impl<TPlat: Platform> NetworkService<TPlat> {
     ) {
         let mut guarded = self.shared.guarded.lock().await;
 
-        if important_nodes {
-            let list = list.into_iter().collect::<Vec<_>>();
-            let to_add_important = list.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>();
-            guarded.network.discover(now, chain_index, list);
-            guarded.important_nodes.extend(to_add_important);
-        } else {
-            guarded.network.discover(now, chain_index, list)
+        for (peer_id, addrs) in list {
+            if important_nodes {
+                guarded.important_nodes.insert(peer_id.clone());
+            }
+
+            guarded.network.discover(now, chain_index, peer_id, addrs);
         }
 
         self.shared.wake_up_main_background_task.notify(1);
@@ -1153,7 +1152,14 @@ async fn update_round<TPlat: Platform>(
                                 nodes.iter().map(|(p, _)| p.to_string()).join(", ")
                             );
 
-                            guarded.network.discover(&TPlat::now(), chain_index, nodes);
+                            for (peer_id, addrs) in nodes {
+                                guarded.network.discover(
+                                    &TPlat::now(),
+                                    chain_index,
+                                    peer_id,
+                                    addrs,
+                                );
+                            }
                         }
                         Err(error) => {
                             log::debug!(

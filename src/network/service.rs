@@ -830,114 +830,111 @@ where
         &mut self,
         now: &TNow,
         chain_index: usize,
-        list: impl IntoIterator<Item = (PeerId, impl IntoIterator<Item = multiaddr::Multiaddr>)>,
+        peer_id: PeerId,
+        discovered_addrs: impl IntoIterator<Item = multiaddr::Multiaddr>,
     ) {
         let kbuckets = &mut self.chains[chain_index].kbuckets;
 
-        for (peer_id, discovered_addrs) in list {
-            let mut discovered_addrs = discovered_addrs.into_iter().peekable();
+        let mut discovered_addrs = discovered_addrs.into_iter().peekable();
 
-            // Check whether there is any address in the iterator at all before inserting the
-            // node in the buckets.
-            if discovered_addrs.peek().is_none() {
-                continue;
-            }
+        // Check whether there is any address in the iterator at all before inserting the
+        // node in the buckets.
+        if discovered_addrs.peek().is_none() {
+            return;
+        }
 
-            let kbuckets_peer = match kbuckets.entry(&peer_id) {
-                kademlia::kbuckets::Entry::LocalKey => return, // TODO: return some diagnostic?
-                kademlia::kbuckets::Entry::Vacant(entry) => {
-                    match entry.insert((), now, kademlia::kbuckets::PeerState::Disconnected) {
-                        Err(kademlia::kbuckets::InsertError::Full) => return, // TODO: return some diagnostic?
-                        Ok((_, removed_entry)) => {
-                            // `removed_entry` is the peer that was removed the k-buckets as the
-                            // result of the new insertion. Purge it from `self.kbuckets_peers`
-                            // if necessary.
-                            if let Some((removed_peer_id, _)) = removed_entry {
-                                match self.kbuckets_peers.entry(removed_peer_id) {
-                                    hashbrown::hash_map::Entry::Occupied(e)
-                                        if e.get().num_references.get() == 1 =>
-                                    {
-                                        e.remove();
-                                    }
-                                    hashbrown::hash_map::Entry::Occupied(e) => {
-                                        let num_refs = &mut e.into_mut().num_references;
-                                        *num_refs = NonZeroUsize::new(num_refs.get() - 1).unwrap();
-                                    }
-                                    hashbrown::hash_map::Entry::Vacant(_) => unreachable!(),
+        let kbuckets_peer = match kbuckets.entry(&peer_id) {
+            kademlia::kbuckets::Entry::LocalKey => return, // TODO: return some diagnostic?
+            kademlia::kbuckets::Entry::Vacant(entry) => {
+                match entry.insert((), now, kademlia::kbuckets::PeerState::Disconnected) {
+                    Err(kademlia::kbuckets::InsertError::Full) => return, // TODO: return some diagnostic?
+                    Ok((_, removed_entry)) => {
+                        // `removed_entry` is the peer that was removed the k-buckets as the
+                        // result of the new insertion. Purge it from `self.kbuckets_peers`
+                        // if necessary.
+                        if let Some((removed_peer_id, _)) = removed_entry {
+                            match self.kbuckets_peers.entry(removed_peer_id) {
+                                hashbrown::hash_map::Entry::Occupied(e)
+                                    if e.get().num_references.get() == 1 =>
+                                {
+                                    e.remove();
                                 }
-                            }
-
-                            match self.kbuckets_peers.entry(peer_id) {
                                 hashbrown::hash_map::Entry::Occupied(e) => {
-                                    let e = e.into_mut();
-                                    e.num_references =
-                                        NonZeroUsize::new(e.num_references.get() + 1).unwrap();
-                                    e
+                                    let num_refs = &mut e.into_mut().num_references;
+                                    *num_refs = NonZeroUsize::new(num_refs.get() - 1).unwrap();
                                 }
-                                hashbrown::hash_map::Entry::Vacant(e) => {
-                                    // The peer was not in the k-buckets, but it is possible that
-                                    // we already have existing connections to it.
-                                    let mut addresses = addresses::Addresses::with_capacity(
-                                        self.max_addresses_per_peer.get(),
-                                    );
+                                hashbrown::hash_map::Entry::Vacant(_) => unreachable!(),
+                            }
+                        }
 
-                                    for connection_id in
-                                        self.inner.established_peer_connections(&e.key())
-                                    {
-                                        let state = self.inner.connection_state(connection_id);
-                                        debug_assert!(state.established);
-                                        // Because we mark addresses as disconnected when the
-                                        // shutdown process starts, we ignore shutting down
-                                        // connections.
-                                        if state.shutting_down {
-                                            continue;
-                                        }
-                                        addresses
-                                            .insert_discovered(self.inner[connection_id].clone());
-                                        addresses.set_connected(&self.inner[connection_id]);
+                        match self.kbuckets_peers.entry(peer_id) {
+                            hashbrown::hash_map::Entry::Occupied(e) => {
+                                let e = e.into_mut();
+                                e.num_references =
+                                    NonZeroUsize::new(e.num_references.get() + 1).unwrap();
+                                e
+                            }
+                            hashbrown::hash_map::Entry::Vacant(e) => {
+                                // The peer was not in the k-buckets, but it is possible that
+                                // we already have existing connections to it.
+                                let mut addresses = addresses::Addresses::with_capacity(
+                                    self.max_addresses_per_peer.get(),
+                                );
+
+                                for connection_id in
+                                    self.inner.established_peer_connections(&e.key())
+                                {
+                                    let state = self.inner.connection_state(connection_id);
+                                    debug_assert!(state.established);
+                                    // Because we mark addresses as disconnected when the
+                                    // shutdown process starts, we ignore shutting down
+                                    // connections.
+                                    if state.shutting_down {
+                                        continue;
                                     }
-
-                                    for connection_id in
-                                        self.inner.handshaking_peer_connections(&e.key())
-                                    {
-                                        let state = self.inner.connection_state(connection_id);
-                                        debug_assert!(!state.established);
-                                        // Because we mark addresses as disconnected when the
-                                        // shutdown process starts, we ignore shutting down
-                                        // connections.
-                                        if state.shutting_down {
-                                            continue;
-                                        }
-                                        addresses
-                                            .insert_discovered(self.inner[connection_id].clone());
-                                        addresses.set_pending(&self.inner[connection_id]);
-                                    }
-
-                                    e.insert(KBucketsPeer {
-                                        num_references: NonZeroUsize::new(1).unwrap(),
-                                        addresses,
-                                    })
+                                    addresses.insert_discovered(self.inner[connection_id].clone());
+                                    addresses.set_connected(&self.inner[connection_id]);
                                 }
+
+                                for connection_id in
+                                    self.inner.handshaking_peer_connections(&e.key())
+                                {
+                                    let state = self.inner.connection_state(connection_id);
+                                    debug_assert!(!state.established);
+                                    // Because we mark addresses as disconnected when the
+                                    // shutdown process starts, we ignore shutting down
+                                    // connections.
+                                    if state.shutting_down {
+                                        continue;
+                                    }
+                                    addresses.insert_discovered(self.inner[connection_id].clone());
+                                    addresses.set_pending(&self.inner[connection_id]);
+                                }
+
+                                e.insert(KBucketsPeer {
+                                    num_references: NonZeroUsize::new(1).unwrap(),
+                                    addresses,
+                                })
                             }
                         }
                     }
                 }
-                kademlia::kbuckets::Entry::Occupied(_) => {
-                    self.kbuckets_peers.get_mut(&peer_id).unwrap()
-                }
-            };
+            }
+            kademlia::kbuckets::Entry::Occupied(_) => {
+                self.kbuckets_peers.get_mut(&peer_id).unwrap()
+            }
+        };
 
-            for to_insert in discovered_addrs {
-                if kbuckets_peer.addresses.len() >= self.max_addresses_per_peer.get() {
-                    continue;
-                }
-
-                kbuckets_peer.addresses.insert_discovered(to_insert);
+        for to_insert in discovered_addrs {
+            if kbuckets_peer.addresses.len() >= self.max_addresses_per_peer.get() {
+                continue;
             }
 
-            // List of addresses must never be empty.
-            debug_assert!(!kbuckets_peer.addresses.is_empty());
+            kbuckets_peer.addresses.insert_discovered(to_insert);
         }
+
+        // List of addresses must never be empty.
+        debug_assert!(!kbuckets_peer.addresses.is_empty());
     }
 
     /// Returns a list of nodes (their [`PeerId`] and multiaddresses) that we know are part of
