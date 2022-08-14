@@ -602,7 +602,11 @@ impl<TPlat: Platform> Background<TPlat> {
                     // malicious.
                     let mut subscribe_all = me
                         .runtime_service
-                        .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
+                        .subscribe_all(
+                            "json-rpc-blocks-cache",
+                            32,
+                            NonZeroUsize::new(usize::max_value()).unwrap(),
+                        )
                         .await;
 
                     cache.subscription_id = Some(subscribe_all.new_blocks.id());

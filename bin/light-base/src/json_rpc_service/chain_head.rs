@@ -380,7 +380,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let (mut subscribe_all, runtime_subscribe_all) = if runtime_updates {
             let subscribe_all = self
                 .runtime_service
-                .subscribe_all(32, NonZeroUsize::new(32).unwrap())
+                .subscribe_all("chainHead_follow", 32, NonZeroUsize::new(32).unwrap())
                 .await;
             let id = subscribe_all.new_blocks.id();
             (either::Left(subscribe_all), Some(id))
