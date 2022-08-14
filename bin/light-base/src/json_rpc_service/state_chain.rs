@@ -417,7 +417,11 @@ impl<TPlat: Platform> Background<TPlat> {
                         // malicious.
                         let subscribe_all = me
                             .runtime_service
-                            .subscribe_all(64, NonZeroUsize::new(usize::max_value()).unwrap())
+                            .subscribe_all(
+                                "chain_subscribeAllHeads",
+                                64,
+                                NonZeroUsize::new(usize::max_value()).unwrap(),
+                            )
                             .await;
 
                         // The existing finalized and already-known blocks aren't reported to the
