@@ -217,6 +217,10 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     let local_peer_id =
         peer_id::PublicKey::Ed25519(*noise_key.libp2p_public_ed25519_key()).into_peer_id();
 
+    let genesis_block_hash = genesis_chain_information
+        .finalized_block_header
+        .hash(chain_spec.block_number_bytes().into());
+
     let jaeger_service = jaeger_service::JaegerService::new(jaeger_service::Config {
         tasks_executor: &mut |task| threads_pool.spawn_ok(task),
         service_name: local_peer_id.to_string(),
@@ -237,7 +241,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                     genesis_chain_information.finality,
                     chain::chain_information::ChainInformationFinality::Grandpa { .. }
                 ),
-                genesis_block_hash: genesis_chain_information.finalized_block_header.hash(chain_spec.block_number_bytes().into(),),
+                genesis_block_hash,
                 best_block: {
                     let block_number_bytes = chain_spec.block_number_bytes();
                     database
@@ -358,6 +362,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     let consensus_service = consensus_service::ConsensusService::new(consensus_service::Config {
         tasks_executor: &mut |task| threads_pool.spawn_ok(task),
+        genesis_block_hash,
         network_events_receiver: network_events_receivers.next().unwrap(),
         network_service: (network_service.clone(), 0),
         database,
@@ -373,6 +378,13 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         Some(
             consensus_service::ConsensusService::new(consensus_service::Config {
                 tasks_executor: &mut |task| threads_pool.spawn_ok(task),
+                genesis_block_hash: relay_genesis_chain_information
+                    .as_ref()
+                    .unwrap()
+                    .finalized_block_header
+                    .hash(usize::from(
+                        relay_chain_spec.as_ref().unwrap().block_number_bytes(),
+                    )),
                 network_events_receiver: network_events_receivers.next().unwrap(),
                 network_service: (network_service.clone(), 1),
                 database: relay_chain_database,
