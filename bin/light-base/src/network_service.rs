@@ -143,7 +143,7 @@ struct SharedGuarded<TPlat: Platform> {
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
     important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
 
-    /// List of (peer, chain_index) combinations for which no outbound slot should be assigned.
+    /// List of peer and chain index tuples for which no outbound slot should be assigned.
     ///
     /// The values are the moment when the ban expires.
     // TODO: use SipHasher
