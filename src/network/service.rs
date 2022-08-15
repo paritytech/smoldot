@@ -227,8 +227,18 @@ struct KBucketsPeer {
     /// Number of k-buckets containing this peer. Used to know when to remove this entry.
     num_references: NonZeroUsize,
 
-    /// List of addresses known for this peer, and whether we are currently connected to each of
-    /// them.
+    /// List of addresses known for this peer, and whether we currently have an outgoing connection
+    /// to each of them. In this context, "connected" means "outgoing connection whose handshake is
+    /// finished and is not shutting down".
+    ///
+    /// It is not possible to have multiple outgoing connections for a single address.
+    /// Incoming connections are not taken into account at all.
+    ///
+    /// An address is marked as pending when there is a "pending connection" (see
+    /// [`ChainNetwork::pending_ids`]) to it, or if there is an outgoing connection to it that is
+    /// still handshaking.
+    ///
+    /// An address is marked as disconnected as soon as the shutting down is starting.
     ///
     /// Must never be empty.
     addresses: addresses::Addresses,
@@ -892,8 +902,11 @@ where
                                     if state.shutting_down {
                                         continue;
                                     }
-                                    addresses.insert_discovered(self.inner[connection_id].clone());
-                                    addresses.set_connected(&self.inner[connection_id]);
+                                    if state.outbound {
+                                        addresses
+                                            .insert_discovered(self.inner[connection_id].clone());
+                                        addresses.set_connected(&self.inner[connection_id]);
+                                    }
                                 }
 
                                 for connection_id in
@@ -901,6 +914,7 @@ where
                                 {
                                     let state = self.inner.connection_state(connection_id);
                                     debug_assert!(!state.established);
+                                    debug_assert!(state.outbound);
                                     // Because we mark addresses as disconnected when the
                                     // shutdown process starts, we ignore shutting down
                                     // connections.
@@ -909,6 +923,14 @@ where
                                     }
                                     addresses.insert_discovered(self.inner[connection_id].clone());
                                     addresses.set_pending(&self.inner[connection_id]);
+                                }
+
+                                // TODO: O(n)
+                                for (_, (p, addr, _)) in &self.pending_ids {
+                                    if p == e.key() {
+                                        addresses.insert_discovered(addr.clone());
+                                        addresses.set_pending(addr);
+                                    }
                                 }
 
                                 e.insert(KBucketsPeer {
@@ -990,13 +1012,6 @@ where
             }
         }
 
-        // Update the list of addresses.
-        // TODO: what if address already present? is it possible?
-        if let Some(KBucketsPeer { addresses, .. }) = self.kbuckets_peers.get_mut(expected_peer_id)
-        {
-            addresses.set_connected(multiaddr);
-        }
-
         self.pending_ids.remove(id.0);
 
         (connection_id, connection_task)
@@ -1046,8 +1061,8 @@ where
             }
         }
 
-        // Update the list of addresses.
-        // TODO: what if address already present? is it possible?
+        // Because multi-stream connections are considered as having immediately finished their
+        // handshake, we mark the address as connected.
         if let Some(KBucketsPeer { addresses, .. }) = self.kbuckets_peers.get_mut(expected_peer_id)
         {
             addresses.set_connected(multiaddr);
@@ -1109,6 +1124,9 @@ where
                 debug_assert!(!addresses.is_empty());
                 if addresses.len() > 1 {
                     addresses.remove(&multiaddr);
+                } else {
+                    // TODO: remove peer from k-buckets instead?
+                    addresses.set_disconnected(&multiaddr);
                 }
             } else {
                 addresses.set_disconnected(&multiaddr);
@@ -1150,14 +1168,49 @@ where
 
             match inner_event {
                 peers::Event::HandshakeFinished {
+                    connection_id,
                     peer_id,
-                    num_healthy_peer_connections: num_peer_connections,
-                    ..
-                } if num_peer_connections.get() == 1 => {
-                    break Some(Event::Connected(peer_id));
-                }
-                peers::Event::HandshakeFinished { .. } => {
-                    // When `num_peer_connections` != 1 we don't care about this event.
+                    num_healthy_peer_connections,
+                    expected_peer_id,
+                } => {
+                    let multiaddr = &self.inner[connection_id];
+
+                    debug_assert_eq!(
+                        self.inner.connection_state(connection_id).outbound,
+                        expected_peer_id.is_some()
+                    );
+
+                    if let Some(expected_peer_id) = expected_peer_id.as_ref() {
+                        if *expected_peer_id != peer_id {
+                            if let Some(KBucketsPeer { addresses, .. }) =
+                                self.kbuckets_peers.get_mut(expected_peer_id)
+                            {
+                                debug_assert!(!addresses.is_empty());
+                                if addresses.len() > 1 {
+                                    addresses.remove(multiaddr);
+                                } else {
+                                    // TODO: remove peer from k-buckets instead?
+                                    addresses.set_disconnected(multiaddr);
+                                }
+                            }
+                        }
+
+                        // Mark the address as connected.
+                        // Note that this is done only for outgoing connections.
+                        if let Some(KBucketsPeer { addresses, .. }) =
+                            self.kbuckets_peers.get_mut(&peer_id)
+                        {
+                            if *expected_peer_id != peer_id {
+                                addresses.insert_discovered(multiaddr.clone());
+                            }
+
+                            addresses.set_connected(multiaddr);
+                        }
+                    }
+
+                    if num_healthy_peer_connections.get() == 1 {
+                        break Some(Event::Connected(peer_id));
+                    }
                 }
 
                 peers::Event::Shutdown { .. } => {
@@ -1169,10 +1222,10 @@ where
                     peer:
                         peers::ShutdownPeer::Established {
                             peer_id,
-                            num_healthy_peer_connections: num_peer_connections,
+                            num_healthy_peer_connections,
                         },
                     ..
-                } if num_peer_connections == 0 => {
+                } if num_healthy_peer_connections == 0 => {
                     // TODO: O(n)
                     let chain_indices = self
                         .open_chains
@@ -1186,12 +1239,15 @@ where
                         self.unassign_slot(*idx, &peer_id);
                     }
 
-                    // Update the k-buckets.
-                    let address = &self.inner[connection_id];
-                    if let Some(KBucketsPeer { addresses, .. }) =
-                        self.kbuckets_peers.get_mut(&peer_id)
-                    {
-                        addresses.set_disconnected(&address);
+                    // Update the list of addresses of this peer.
+                    if self.inner.connection_state(connection_id).outbound {
+                        let address = &self.inner[connection_id];
+                        if let Some(KBucketsPeer { addresses, .. }) =
+                            self.kbuckets_peers.get_mut(&peer_id)
+                        {
+                            addresses.set_disconnected(&address);
+                            debug_assert_eq!(addresses.iter_connected().count(), 0);
+                        }
                     }
 
                     for idx in &chain_indices {
@@ -1208,12 +1264,15 @@ where
                     peer: peers::ShutdownPeer::Established { peer_id, .. },
                     ..
                 } => {
-                    // Update the k-buckets.
-                    let address = &self.inner[connection_id];
-                    if let Some(KBucketsPeer { addresses, .. }) =
-                        self.kbuckets_peers.get_mut(&peer_id)
-                    {
-                        addresses.set_disconnected(&address);
+                    // Update the list of addresses of this peer.
+                    if self.inner.connection_state(connection_id).outbound {
+                        let address = &self.inner[connection_id];
+                        if let Some(KBucketsPeer { addresses, .. }) =
+                            self.kbuckets_peers.get_mut(&peer_id)
+                        {
+                            addresses.set_disconnected(&address);
+                            debug_assert_ne!(addresses.iter_connected().count(), 0);
+                        }
                     }
                 }
                 peers::Event::StartShutdown {
@@ -2038,14 +2097,15 @@ where
                 .kbuckets
                 .closest_entries(&random_peer_id)
                 // TODO: instead of filtering by connectd only, connect to nodes if not connected
+                // TODO: additionally, this only takes outgoing connections into account
                 .find(|(peer_id, _)| {
                     self.kbuckets_peers
                         .get(peer_id)
                         .unwrap()
                         .addresses
                         .iter_connected()
-                        .count()
-                        != 0
+                        .next()
+                        .is_some()
                 })
                 .map(|(peer_id, _)| peer_id.clone());
             peer_id
@@ -2055,20 +2115,18 @@ where
         self.next_kademlia_operation_id.0 += 1;
 
         if let Some(queried_peer) = queried_peer {
-            // TODO: this check for `has_established_connection` is a hack because the connected/disconnected state in the k-buckets doesn't actually reflect the state of connection even though it should; this if is normally not necessary at all
-            if self.inner.has_established_connection(&queried_peer) {
-                self.start_kademlia_find_node_inner(
-                    &queried_peer,
-                    now,
-                    chain_index,
-                    random_peer_id.as_bytes(),
-                    Some(kademlia_operation_id),
-                );
-            } else {
-                // TODO: the NoPeer error isn't appropriate, but as explained above this is a hack
-                self.pending_kademlia_errors
-                    .push_back((kademlia_operation_id, DiscoveryError::NoPeer))
-            }
+            debug_assert!(self
+                .inner
+                .established_peer_connections(&queried_peer)
+                .any(|cid| !self.inner.connection_state(cid).shutting_down));
+
+            self.start_kademlia_find_node_inner(
+                &queried_peer,
+                now,
+                chain_index,
+                random_peer_id.as_bytes(),
+                Some(kademlia_operation_id),
+            );
         } else {
             self.pending_kademlia_errors
                 .push_back((kademlia_operation_id, DiscoveryError::NoPeer))
@@ -2201,6 +2259,7 @@ where
     }
 
     /// Returns `true` if there exists an established connection with the given peer.
+    // TODO: revisit this API w.r.t. shutdowns
     pub fn has_established_connection(&self, peer_id: &PeerId) -> bool {
         self.inner.has_established_connection(peer_id)
     }

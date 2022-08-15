@@ -63,10 +63,10 @@ use core::{
 use rand::{Rng as _, SeedableRng as _};
 
 pub use collection::{
-    ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionState,
-    ConnectionToCoordinator, CoordinatorToConnection, InboundError, MultiStreamConnectionTask,
-    NotificationProtocolConfig, NotificationsInClosedErr, NotificationsOutErr, ReadWrite,
-    RequestError, ShutdownCause, SingleStreamConnectionTask, SubstreamId,
+    ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionToCoordinator,
+    CoordinatorToConnection, InboundError, MultiStreamConnectionTask, NotificationProtocolConfig,
+    NotificationsInClosedErr, NotificationsOutErr, ReadWrite, RequestError, ShutdownCause,
+    SingleStreamConnectionTask, SubstreamId,
 };
 
 /// Configuration for a [`Peers`].
@@ -185,6 +185,9 @@ struct Connection<TConn> {
     /// peer, which might not be the same as the actual.
     /// - If the handshake is in progress and the connection is inbound, contains `None`.
     peer_index: Option<usize>,
+
+    /// `true` if the connection is outgoing.
+    outbound: bool,
 
     /// Opaque data decided by the API user.
     user_data: TConn,
@@ -378,6 +381,7 @@ where
                     }
 
                     return Some(Event::HandshakeFinished {
+                        connection_id,
                         num_healthy_peer_connections,
                         peer_id,
                         expected_peer_id,
@@ -444,6 +448,7 @@ where
                         Connection {
                             peer_index: Some(expected_peer_index),
                             user_data,
+                            ..
                         },
                 } => {
                     // `expected_peer_index` is `None` iff the connection was an incoming
@@ -493,6 +498,7 @@ where
                         Connection {
                             peer_index: None,
                             user_data,
+                            ..
                         },
                     ..
                 } => {
@@ -781,6 +787,7 @@ where
             Connection {
                 peer_index: None,
                 user_data,
+                outbound: false,
             },
         )
     }
@@ -808,6 +815,7 @@ where
             Connection {
                 peer_index: Some(peer_index),
                 user_data,
+                outbound: true,
             },
         );
 
@@ -842,6 +850,7 @@ where
             Connection {
                 peer_index: Some(peer_index),
                 user_data,
+                outbound: true,
             },
         );
 
@@ -909,7 +918,13 @@ where
     /// entirely shut down.
     ///
     pub fn connection_state(&self, connection_id: ConnectionId) -> ConnectionState {
-        self.inner.connection_state(connection_id)
+        let inner_state = self.inner.connection_state(connection_id);
+
+        ConnectionState {
+            established: inner_state.established,
+            shutting_down: inner_state.shutting_down,
+            outbound: self.inner[connection_id].outbound,
+        }
     }
 
     /// Returns the list of [`PeerId`]s that have been marked as desired, but that don't have any
@@ -1356,6 +1371,7 @@ where
     }
 
     /// Returns `true` if there exists an established connection with the given peer.
+    // TODO: revisit this API as it's a duplicate of established_peer_connections
     pub fn has_established_connection(&self, peer_id: &PeerId) -> bool {
         // Connections that are shutting down are still counted, as we report the disconnected
         // event only at the end of the shutdown.
@@ -1510,6 +1526,19 @@ enum ConnectionIdForPeer {
     NotConnected,
 }
 
+/// See [`Peers::connection_state`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ConnectionState {
+    /// If `true`, the connection has finished its handshaking phase.
+    pub established: bool,
+
+    /// If `true`, the connection is shutting down.
+    pub shutting_down: bool,
+
+    /// `true` if the connection is outgoing.
+    pub outbound: bool,
+}
+
 /// See [`Event::DesiredInNotification`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DesiredInNotificationId(usize);
@@ -1535,6 +1564,9 @@ pub enum Event<TConn> {
     /// Only generated for single-stream connections. The handshake of multi-stream connections is
     /// considered to be already finished.
     HandshakeFinished {
+        /// Identifier of the connection that has finished its handshake.
+        connection_id: ConnectionId,
+
         /// Identity of the peer on the other side of the connection.
         peer_id: PeerId,
 
