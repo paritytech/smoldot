@@ -764,6 +764,49 @@ where
                             }
                         }
                     }
+
+                    // TODO: DRY with StartShutdown event
+                    let connection_state = self.inner.connection_state(id);
+                    debug_assert!(connection_state.shutting_down);
+
+                    let peer = if let Some(peer_index) = self.inner[id].peer_index {
+                        let peer_id = self.peers[peer_index].peer_id.clone();
+
+                        if connection_state.established {
+                            let num_healthy_peer_connections = {
+                                let num = self
+                                    .connections_by_peer
+                                    .range(
+                                        (peer_index, collection::ConnectionId::min_value())
+                                            ..=(peer_index, collection::ConnectionId::max_value()),
+                                    )
+                                    .filter(|(_, connection_id)| {
+                                        let state = self.inner.connection_state(*connection_id);
+                                        state.established && !state.shutting_down
+                                    })
+                                    .count();
+                                u32::try_from(num).unwrap()
+                            };
+
+                            ShutdownPeer::Established {
+                                peer_id,
+                                num_healthy_peer_connections,
+                            }
+                        } else {
+                            ShutdownPeer::OutgoingHandshake {
+                                expected_peer_id: peer_id,
+                            }
+                        }
+                    } else {
+                        debug_assert!(!connection_state.established);
+                        ShutdownPeer::IngoingHandshake
+                    };
+
+                    return Some(Event::StartShutdown {
+                        connection_id: id,
+                        peer,
+                        reason: ShutdownCause::RemoteReset, // TODO: no
+                    });
                 }
             }
         }
