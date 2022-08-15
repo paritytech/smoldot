@@ -1170,7 +1170,7 @@ where
                 peers::Event::HandshakeFinished {
                     connection_id,
                     peer_id,
-                    num_healthy_peer_connections: num_peer_connections,
+                    num_healthy_peer_connections,
                     expected_peer_id,
                 } => {
                     let multiaddr = &self.inner[connection_id];
@@ -1208,7 +1208,7 @@ where
                         }
                     }
 
-                    if num_peer_connections.get() == 1 {
+                    if num_healthy_peer_connections.get() == 1 {
                         break Some(Event::Connected(peer_id));
                     }
                 }
@@ -1222,10 +1222,10 @@ where
                     peer:
                         peers::ShutdownPeer::Established {
                             peer_id,
-                            num_healthy_peer_connections: num_peer_connections,
+                            num_healthy_peer_connections,
                         },
                     ..
-                } if num_peer_connections == 0 => {
+                } if num_healthy_peer_connections == 0 => {
                     // TODO: O(n)
                     let chain_indices = self
                         .open_chains
@@ -1246,6 +1246,7 @@ where
                             self.kbuckets_peers.get_mut(&peer_id)
                         {
                             addresses.set_disconnected(&address);
+                            debug_assert_eq!(addresses.iter_connected().count(), 0);
                         }
                     }
 
@@ -1270,6 +1271,7 @@ where
                             self.kbuckets_peers.get_mut(&peer_id)
                         {
                             addresses.set_disconnected(&address);
+                            debug_assert_ne!(addresses.iter_connected().count(), 0);
                         }
                     }
                 }
