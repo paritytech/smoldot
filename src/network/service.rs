@@ -232,7 +232,7 @@ struct KBucketsPeer {
     /// finished and is not shutting down".
     ///
     /// It is not possible to have multiple outgoing connections for a single address.
-    /// Ingoing connections are not taken into account at all.
+    /// Incoming connections are not taken into account at all.
     ///
     /// An address is marked as pending when there is a "pending connection" (see
     /// [`ChainNetwork::pending_ids`]) to it, or if there is an outgoing connection to it that is
