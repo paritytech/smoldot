@@ -52,7 +52,7 @@ use smoldot::{
     network::{protocol, service},
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{hash_map, HashMap, HashSet},
     pin::Pin,
     sync::Arc,
 };
@@ -142,6 +142,12 @@ struct SharedGuarded<TPlat: Platform> {
     /// List of nodes that are considered as important for logging purposes.
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
     important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
+
+    /// List of (peer, chain_index) combinations for which no outbound slot should be assigned.
+    ///
+    /// The values are the moment when the ban expires.
+    // TODO: use SipHasher
+    slots_assign_backoff: HashMap<(PeerId, usize), TPlat::Instant, fnv::FnvBuildHasher>,
 
     messages_from_connections_tx:
         mpsc::Sender<(service::ConnectionId, service::ConnectionToCoordinator)>,
@@ -246,6 +252,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     handshake_timeout: Duration::from_secs(8),
                     randomness_seed: rand::random(),
                 }),
+                slots_assign_backoff: HashMap::with_capacity_and_hasher(32, Default::default()),
                 important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
                 active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
                 messages_from_connections_tx,
@@ -1064,6 +1071,8 @@ async fn update_round<TPlat: Platform>(
                         &shared.log_chain_names[chain_index],
                         peer_id
                     );
+                    guarded.unassign_slot_and_ban(chain_index, peer_id);
+                    shared.wake_up_main_background_task.notify(1);
                 }
                 service::Event::ChainDisconnected {
                     peer_id,
@@ -1086,6 +1095,8 @@ async fn update_round<TPlat: Platform>(
                         &shared.log_chain_names[chain_index],
                         peer_id
                     );
+                    guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
+                    shared.wake_up_main_background_task.notify(1);
                     break Event::Disconnected {
                         peer_id,
                         chain_index,
@@ -1242,6 +1253,11 @@ async fn update_round<TPlat: Platform>(
                         peer_id,
                         error,
                     );
+
+                    for chain_index in 0..guarded.network.num_chains() {
+                        guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
+                    }
+                    shared.wake_up_main_background_task.notify(1);
                 }
             }
         };
@@ -1271,8 +1287,27 @@ async fn update_round<TPlat: Platform>(
 
     // TODO: doc
     for chain_index in 0..shared.log_chain_names.len() {
+        let now = TPlat::now();
+
+        // Clean up the content of `slots_assign_backoff`.
+        // TODO: the background task should be woken up when the ban expires
+        // TODO: O(n)
+        guarded
+            .slots_assign_backoff
+            .retain(|_, expiration| *expiration > now);
+
         loop {
-            let peer_id = guarded.network.slots_to_assign(chain_index).next().cloned();
+            let peer_id = guarded
+                .network
+                .slots_to_assign(chain_index)
+                .filter(|peer_id| {
+                    !guarded
+                        .slots_assign_backoff
+                        .contains_key(&((**peer_id).clone(), chain_index)) // TODO: spurious cloning
+                })
+                .next()
+                .cloned();
+
             if let Some(peer_id) = peer_id {
                 log::debug!(
                     target: "connections",
@@ -1336,6 +1371,23 @@ async fn update_round<TPlat: Platform>(
             .send(message)
             .await
             .unwrap();
+    }
+}
+
+impl<TPlat: Platform> SharedGuarded<TPlat> {
+    fn unassign_slot_and_ban(&mut self, chain_index: usize, peer_id: PeerId) {
+        self.network.unassign_slot(chain_index, &peer_id);
+
+        let new_expiration = TPlat::now() + Duration::from_secs(20); // TODO: arbitrary constant
+        match self.slots_assign_backoff.entry((peer_id, chain_index)) {
+            hash_map::Entry::Occupied(e) if *e.get() < new_expiration => {
+                *e.into_mut() = new_expiration;
+            }
+            hash_map::Entry::Occupied(_) => {}
+            hash_map::Entry::Vacant(e) => {
+                e.insert(new_expiration);
+            }
+        }
     }
 }
 
