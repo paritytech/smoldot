@@ -2330,7 +2330,7 @@ where
     }
 
     /// Removes the slot assignment of the given peer, if any.
-    fn unassign_slot(&mut self, chain_index: usize, peer_id: &PeerId) -> Option<SlotTy> {
+    pub fn unassign_slot(&mut self, chain_index: usize, peer_id: &PeerId) -> Option<SlotTy> {
         self.inner.set_peer_notifications_out_desired(
             peer_id,
             chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
