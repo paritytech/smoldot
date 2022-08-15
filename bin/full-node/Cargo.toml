@@ -24,7 +24,7 @@ directories = "4.0.1"
 either = { version = "1.7.0", default-features = false }
 event-listener = { version = "2.5.3" }
 fnv = { version = "1.0.7", default-features = false }
-futures = { version = "0.3.21", default-features = false, features = ["std", "thread-pool"] }
+futures = { version = "0.3.23", default-features = false, features = ["std", "thread-pool"] }
 futures-timer = "3.0"
 hashbrown = { version = "0.12.3", default-features = false }
 hex = { version = "0.4.3", default-features = false }
