@@ -38,7 +38,7 @@ use core::{
     ops::{Add, Sub},
     time::Duration,
 };
-use rand::{seq::SliceRandom as _, Rng as _, SeedableRng as _};
+use rand::{Rng as _, SeedableRng as _};
 
 pub use crate::libp2p::{
     collection::ReadWrite,
@@ -2211,48 +2211,54 @@ where
         self.inner.peers_list()
     }
 
-    ///
-    ///
-    /// Returns the [`PeerId`] that now has an outbound slot.
-    // TODO: docs
-    // TODO: when to call this?
-    pub fn assign_slots(&mut self, chain_index: usize) -> Option<PeerId> {
-        let chain = &mut self.chains[chain_index];
+    // TODO: docs and appropriate naming
+    pub fn slots_to_assign(&'_ self, chain_index: usize) -> impl Iterator<Item = &'_ PeerId> + '_ {
+        let chain = &self.chains[chain_index];
 
-        let list = {
-            let mut list = chain.kbuckets.iter_ordered().collect::<Vec<_>>();
-            list.shuffle(&mut self.randomness);
-            list
-        };
-
-        for (peer_id, _) in list {
-            // Check if maximum number of slots is reached.
-            if chain.out_peers.len()
-                >= usize::try_from(chain.chain_config.out_slots).unwrap_or(usize::max_value())
-            {
-                break;
-            }
-
-            // Don't assign slots to peers that already have a slot.
-            if chain.out_peers.contains(peer_id) || chain.in_peers.contains(peer_id) {
-                continue;
-            }
-
-            // It is now guaranteed that this peer will be assigned an outbound slot.
-
-            // The peer is marked as desired before inserting it in `out_peers`, to handle
-            // potential future cancellation issues.
-            self.inner.set_peer_notifications_out_desired(
-                peer_id,
-                chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
-                peers::DesiredState::DesiredReset, // TODO: ?
-            );
-            chain.out_peers.insert(peer_id.clone());
-
-            return Some(peer_id.clone());
+        // Check if maximum number of slots is reached.
+        if chain.out_peers.len()
+            >= usize::try_from(chain.chain_config.out_slots).unwrap_or(usize::max_value())
+        {
+            return either::Right(iter::empty());
         }
 
-        None
+        // TODO: return in some specific order?
+        either::Left(
+            chain
+                .kbuckets
+                .iter_ordered()
+                .map(|(peer_id, _)| peer_id)
+                .filter(|peer_id| {
+                    // Don't assign slots to peers that already have a slot.
+                    !chain.out_peers.contains(peer_id) && !chain.in_peers.contains(peer_id)
+                }),
+        )
+    }
+
+    // TODO: docs
+    // TODO: when to call this?
+    pub fn assign_out_slot(&mut self, chain_index: usize, peer_id: PeerId) {
+        let chain = &mut self.chains[chain_index];
+
+        // Check if maximum number of slots is reached.
+        if chain.out_peers.len()
+            >= usize::try_from(chain.chain_config.out_slots).unwrap_or(usize::max_value())
+        {
+            return; // TODO: return error?
+        }
+
+        // Don't assign slots to peers that already have a slot.
+        if chain.out_peers.contains(&peer_id) || chain.in_peers.contains(&peer_id) {
+            return; // TODO: return error?
+        }
+
+        self.inner.set_peer_notifications_out_desired(
+            &peer_id,
+            chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,
+            peers::DesiredState::DesiredReset, // TODO: ?
+        );
+
+        chain.out_peers.insert(peer_id);
     }
 
     ///
@@ -2324,7 +2330,7 @@ where
     }
 
     /// Removes the slot assignment of the given peer, if any.
-    fn unassign_slot(&mut self, chain_index: usize, peer_id: &PeerId) -> Option<SlotTy> {
+    pub fn unassign_slot(&mut self, chain_index: usize, peer_id: &PeerId) -> Option<SlotTy> {
         self.inner.set_peer_notifications_out_desired(
             peer_id,
             chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN,

@@ -182,6 +182,12 @@ struct Guarded {
         fnv::FnvBuildHasher,
     >,
 
+    /// List of peer and chain index tuples for which no outbound slot should be assigned.
+    ///
+    /// The values are the moment when the ban expires.
+    // TODO: use SipHasher
+    slots_assign_backoff: HashMap<(PeerId, usize), Instant, fnv::FnvBuildHasher>,
+
     messages_from_connections_tx:
         mpsc::Sender<(service::ConnectionId, service::ConnectionToCoordinator)>,
 
@@ -279,6 +285,10 @@ impl NetworkService {
                     messages_from_connections_rx,
                     conn_tasks_tx: conn_tasks_tx.clone(),
                     network,
+                    slots_assign_backoff: hashbrown::HashMap::with_capacity_and_hasher(
+                        50, // TODO: ?
+                        Default::default(),
+                    ),
                     active_connections: hashbrown::HashMap::with_capacity_and_hasher(
                         100, // TODO: ?
                         Default::default(),
@@ -792,6 +802,9 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                                 %error,
                                 "block-announce-bad-header"
                             );
+
+                            guarded.unassign_slot_and_ban(chain_index, peer_id);
+                            inner.wake_up_main_background_task.notify(1);
                         }
                     }
                 }
@@ -821,16 +834,28 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     ..
                 } => {
                     tracing::debug!(%peer_id, "chain-disconnected");
+
+                    guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
+                    inner.wake_up_main_background_task.notify(1);
+
                     break Event::Disconnected {
                         chain_index,
                         peer_id,
                     };
                 }
-                service::Event::ChainConnectAttemptFailed { peer_id, error, .. } => {
+                service::Event::ChainConnectAttemptFailed {
+                    chain_index,
+                    peer_id,
+                    error,
+                    ..
+                } => {
                     tracing::debug!(
                         %peer_id, %error,
                         "chain-connect-attempt-failed"
                     );
+
+                    guarded.unassign_slot_and_ban(chain_index, peer_id);
+                    inner.wake_up_main_background_task.notify(1);
                 }
                 service::Event::InboundSlotAssigned { .. } => {
                     // TODO: log this
@@ -939,12 +964,16 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
                     );
                 }
                 service::Event::ProtocolError { peer_id, error } => {
-                    // TODO: handle properly?
                     tracing::warn!(
                         %peer_id,
                         %error,
                         "protocol-error"
                     );
+
+                    for chain_index in 0..guarded.network.num_chains() {
+                        guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
+                    }
+                    inner.wake_up_main_background_task.notify(1);
                 }
             }
         };
@@ -974,11 +1003,31 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
 
     // TODO: doc
     for chain_index in 0..guarded.network.num_chains() {
+        let now = Instant::now();
+
+        // Clean up the content of `slots_assign_backoff`.
+        // TODO: the background task should be woken up when the ban expires
+        // TODO: O(n)
+        guarded
+            .slots_assign_backoff
+            .retain(|_, expiration| *expiration > now);
+
+        // Assign outgoing slots.
         loop {
-            let assigned_peer = guarded.network.assign_slots(chain_index);
-            if let Some(assigned_peer) = assigned_peer {
-                // TODO: log slot de-assignments
-                tracing::debug!(peer_id = %assigned_peer, %chain_index, "slot-assigned");
+            let peer_to_assign = guarded
+                .network
+                .slots_to_assign(chain_index)
+                .filter(|peer_id| {
+                    !guarded
+                        .slots_assign_backoff
+                        .contains_key(&((**peer_id).clone(), chain_index)) // TODO: spurious cloning
+                })
+                .next()
+                .cloned();
+
+            if let Some(peer_to_assign) = peer_to_assign {
+                tracing::debug!(peer_id = %peer_to_assign, %chain_index, "slot-assigned");
+                guarded.network.assign_out_slot(chain_index, peer_to_assign);
             } else {
                 break;
             }
@@ -1030,6 +1079,23 @@ async fn update_round(inner: &Arc<Inner>, event_senders: &mut [mpsc::Sender<Even
             .send(message)
             .await
             .unwrap();
+    }
+}
+
+impl Guarded {
+    fn unassign_slot_and_ban(&mut self, chain_index: usize, peer_id: PeerId) {
+        self.network.unassign_slot(chain_index, &peer_id);
+
+        let new_expiration = Instant::now() + Duration::from_secs(20); // TODO: arbitrary constant
+        match self.slots_assign_backoff.entry((peer_id, chain_index)) {
+            hashbrown::hash_map::Entry::Occupied(e) if *e.get() < new_expiration => {
+                *e.into_mut() = new_expiration;
+            }
+            hashbrown::hash_map::Entry::Occupied(_) => {}
+            hashbrown::hash_map::Entry::Vacant(e) => {
+                e.insert(new_expiration);
+            }
+        }
     }
 }
 
