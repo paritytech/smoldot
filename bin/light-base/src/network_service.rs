@@ -1272,14 +1272,16 @@ async fn update_round<TPlat: Platform>(
     // TODO: doc
     for chain_index in 0..shared.log_chain_names.len() {
         loop {
-            let peer = guarded.network.assign_slots(chain_index);
-            if let Some(peer_id) = peer {
+            let peer_id = guarded.network.slots_to_assign(chain_index).next().cloned();
+            if let Some(peer_id) = peer_id {
                 log::debug!(
                     target: "connections",
                     "OutSlots({}) ∋ {}",
                     &shared.log_chain_names[chain_index],
                     peer_id
                 );
+
+                guarded.network.assign_out_slot(chain_index, peer_id);
             } else {
                 break;
             }
