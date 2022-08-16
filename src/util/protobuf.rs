@@ -24,7 +24,7 @@ pub(crate) fn bool_tag_encode(
     bool_value: bool,
 ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
     // Note that booleans aren't documented. However, the source code of the official Java
-    // protobuf library encodes/decodes them as 1 or 0s.
+    // protobuf library encodes them as 1 or 0.
     // See <https://github.com/protocolbuffers/protobuf/blob/520c601c99012101c816b6ccc89e8d6fc28fdbb8/java/core/src/main/java/com/google/protobuf/CodedOutputStream.java#L447>
     varint_zigzag_tag_encode(field, if bool_value { 1 } else { 0 }).map(|b| [b])
 }
