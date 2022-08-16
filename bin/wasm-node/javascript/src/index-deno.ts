@@ -42,7 +42,7 @@ export function start(options?: ClientOptions): Client {
     options = options || {};
 
     return innerStart(options || {}, {
-        base64DecodeAndZlibInflate: async (input) => {
+        trustedBase64DecodeAndZlibInflate: async (input) => {
             const buffer = trustedBase64Decode(input);
 
             // This code has been copy-pasted from the official streams draft specification.
