@@ -1134,7 +1134,7 @@ impl SyncBackground {
                     );
                     let _enter = span.enter();
 
-                    match verify.perform() {
+                    match verify.perform(rand::random()) {
                         (
                             sync_out,
                             all::FinalityProofVerifyOutcome::NewFinalized {

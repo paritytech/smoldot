@@ -697,7 +697,7 @@ impl<TPlat: Platform> Task<TPlat> {
                 // Grandpa warp sync fragment to verify.
                 let sender_peer_id = verify.proof_sender().1 .0.clone(); // TODO: unnecessary cloning most of the time
 
-                let (sync, result) = verify.perform();
+                let (sync, result) = verify.perform(rand::random());
                 self.sync = sync;
 
                 if let Err(err) = result {
@@ -857,7 +857,7 @@ impl<TPlat: Platform> Task<TPlat> {
 
             all::ProcessOne::VerifyFinalityProof(verify) => {
                 // Finality proof to verify.
-                match verify.perform() {
+                match verify.perform(rand::random()) {
                     (
                         sync,
                         all::FinalityProofVerifyOutcome::NewFinalized {
@@ -1182,10 +1182,11 @@ impl<TPlat: Platform> Task<TPlat> {
                 message,
             } if chain_index == self.network_chain_index => {
                 let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
-                match self
-                    .sync
-                    .grandpa_commit_message(sync_source_id, &message.as_encoded())
-                {
+                match self.sync.grandpa_commit_message(
+                    sync_source_id,
+                    &message.as_encoded(),
+                    rand::random(),
+                ) {
                     Ok(()) => {
                         // TODO: print more details
                         log::debug!(

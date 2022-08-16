@@ -123,7 +123,7 @@ impl Verifier {
         }
     }
 
-    pub fn next(mut self) -> Result<Next, Error> {
+    pub fn next(mut self, randomness_seed: [u8; 32]) -> Result<Next, Error> {
         if self.wrong_chain_algorithm {
             return Err(Error::WrongChainAlgorithm);
         }
@@ -158,6 +158,7 @@ impl Verifier {
             block_number_bytes: self.block_number_bytes,
             authorities_list: self.authorities_list.iter().map(|a| &a.public_key),
             authorities_set_id: self.authorities_set_id,
+            randomness_seed,
         })
         .map_err(Error::Verify)?;
 

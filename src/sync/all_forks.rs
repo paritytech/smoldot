@@ -911,23 +911,28 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// On success, the finalized block has been updated.
     ///
+    /// A randomness seed must be provided and will be used during the verification. Note that the
+    /// verification is nonetheless deterministic.
+    /// TODO: ^ will be removed at some point
+    ///
     /// # Panic
     ///
     /// Panics if `source_id` is invalid.
     ///
     // TODO: return which blocks are removed as finalized
-    // TODO: this should probably just insert the commit in the state machine and not verify it immediately
+    // TODO: this should probably just insert the commit in the state machine and not verify it immediately; also remove the randomness seed then
     pub fn grandpa_commit_message(
         &mut self,
         source_id: SourceId,
         scale_encoded_commit: &[u8],
+        randomness_seed: [u8; 32],
     ) -> Result<(), blocks_tree::CommitVerifyError> {
         // Grabbing the source is done early on in order to panic if the `source_id` is invalid.
         let source = &mut self.inner.blocks[source_id];
 
         let block_number = match self
             .chain
-            .verify_grandpa_commit_message(scale_encoded_commit)
+            .verify_grandpa_commit_message(scale_encoded_commit, randomness_seed)
         {
             Ok(apply) => {
                 apply.apply();
@@ -1984,8 +1989,12 @@ pub struct FinalityProofVerify<TBl, TRq, TSrc> {
 
 impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
     /// Perform the verification.
+    ///
+    /// A randomness seed must be provided and will be used during the verification. Note that the
+    /// verification is nonetheless deterministic.
     pub fn perform(
         mut self,
+        randomness_seed: [u8; 32],
     ) -> (
         AllForksSync<TBl, TRq, TSrc>,
         FinalityProofVerifyOutcome<TBl>,
@@ -1995,7 +2004,7 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                 match self
                     .parent
                     .chain
-                    .verify_grandpa_commit_message(&scale_encoded_commit)
+                    .verify_grandpa_commit_message(&scale_encoded_commit, randomness_seed)
                 {
                     Ok(success) => {
                         // TODO: DRY
@@ -2048,11 +2057,11 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                 }
             }
             FinalityProof::Justification((consensus_engine_id, scale_encoded_justification)) => {
-                match self
-                    .parent
-                    .chain
-                    .verify_justification(consensus_engine_id, &scale_encoded_justification)
-                {
+                match self.parent.chain.verify_justification(
+                    consensus_engine_id,
+                    &scale_encoded_justification,
+                    randomness_seed,
+                ) {
                     Ok(success) => {
                         let finalized_blocks_iter = success.apply();
                         let updates_best_block = finalized_blocks_iter.updates_best_block();

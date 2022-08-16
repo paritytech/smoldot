@@ -19,6 +19,8 @@ use crate::finality::grandpa::commit::decode;
 
 use alloc::vec::Vec;
 use core::{cmp, iter, mem};
+use rand::Rng as _;
+use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
 /// Configuration for a commit verification process.
 #[derive(Debug)]
@@ -35,6 +37,11 @@ pub struct Config<C> {
     /// Number of authorities that are allowed to emit pre-commits. Used to calculate the
     /// threshold of the number of required signatures.
     pub num_authorities: u32,
+
+    /// Seed for a PRNG used for various purposes during the verification.
+    ///
+    /// > **Note**: The verification is nonetheless deterministic.
+    pub randomness_seed: [u8; 32],
 }
 
 /// Commit verification in progress.
@@ -70,11 +77,13 @@ pub fn verify<C: AsRef<[u8]>>(config: Config<C>) -> InProgress<C> {
         return InProgress::Finished(Err(Error::InvalidFormat));
     }
 
+    let mut randomness = ChaCha20Rng::from_seed(config.randomness_seed);
+
     // Make sure that there is no duplicate authority public key.
     {
         let mut unique = hashbrown::HashSet::with_capacity_and_hasher(
             decoded_commit.message.auth_data.len(),
-            fnv::FnvBuildHasher::default(), // TODO: use SipHasher due to untrusted message
+            crate::util::SipHasherBuild::new(randomness.gen()),
         );
         if let Some((_, faulty_pub_key)) = decoded_commit
             .message
@@ -95,6 +104,7 @@ pub fn verify<C: AsRef<[u8]>>(config: Config<C>) -> InProgress<C> {
         num_verified_signatures: 0,
         num_authorities: config.num_authorities,
         signatures_batch: ed25519_zebra::batch::Verifier::new(),
+        randomness,
     }
     .resume()
 }
@@ -231,6 +241,9 @@ struct Verification<C> {
     /// See <https://docs.rs/ed25519-zebra/2.2.0/ed25519_zebra/batch/index.html> and
     /// <https://github.com/zcash/zips/blob/master/zip-0215.rst>
     signatures_batch: ed25519_zebra::batch::Verifier,
+
+    /// Randomness generator used during the batch verification.
+    randomness: ChaCha20Rng,
 }
 
 impl<C: AsRef<[u8]>> Verification<C> {
@@ -315,8 +328,7 @@ impl<C: AsRef<[u8]>> Verification<C> {
                 }
 
                 // Actual signatures verification performed here.
-                // TODO: thread_rng()?!?! what to do here?
-                match self.signatures_batch.verify(rand::thread_rng()) {
+                match self.signatures_batch.verify(&mut self.randomness) {
                     Ok(()) => {}
                     Err(_) => return InProgress::Finished(Err(Error::BadSignature)),
                 }
