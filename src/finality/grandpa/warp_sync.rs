@@ -140,13 +140,11 @@ impl Verifier {
 
         let fragment_header_hash =
             header::hash_from_scale_encoded_header(&fragment.scale_encoded_header);
-        let justification = finality::justification::decode::decode_partial_grandpa(
-            // TODO: don't use decode_partial but decode
+        let justification = finality::justification::decode::decode_grandpa(
             &fragment.scale_encoded_justification,
             self.block_number_bytes,
         )
-        .map_err(Error::InvalidJustification)?
-        .0;
+        .map_err(Error::InvalidJustification)?;
         if *justification.target_hash != fragment_header_hash {
             return Err(Error::TargetHashMismatch {
                 justification_target_hash: *justification.target_hash,

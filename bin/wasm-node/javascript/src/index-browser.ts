@@ -45,7 +45,7 @@ export function start(options?: ClientOptions): Client {
   options = options || {}
 
   return innerStart(options, {
-    base64DecodeAndZlibInflate: (input) => {
+    trustedBase64DecodeAndZlibInflate: (input) => {
         return Promise.resolve(inflate(trustedBase64Decode(input)))
     },
     performanceNow: () => {

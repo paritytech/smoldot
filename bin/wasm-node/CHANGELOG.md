@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- In case of protocol error, or if a peer refuses a block announces substream, no new substream with the same peer will be attempted for 20 seconds. This avoids loops where the same peer is tried over and over again.
+
 ## 0.6.30 - 2022-08-12
 
 ### Fixed

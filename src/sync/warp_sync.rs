@@ -241,13 +241,17 @@ enum Phase {
         header: Header,
         chain_information_finality: ChainInformationFinality,
         warp_sync_source_id: SourceId,
-        // TODO: use struct instead?
-        runtime: Option<(Option<Vec<u8>>, Option<Vec<u8>>)>,
+        runtime: Option<DownloadedRuntime>,
         babeapi_current_epoch_response: Option<Vec<Vec<u8>>>,
         babeapi_next_epoch_response: Option<Vec<Vec<u8>>>,
         aura_authorities_response: Option<Vec<Vec<u8>>>,
         aura_slot_duration_response: Option<Vec<Vec<u8>>>,
     },
+}
+
+struct DownloadedRuntime {
+    storage_code: Option<Vec<u8>>,
+    storage_heap_pages: Option<Vec<u8>>,
 }
 
 impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
@@ -727,10 +731,10 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             ..
         } = self.phase
         {
-            *runtime_store = Some((
-                code.map(|c| c.as_ref().to_vec()),
-                heap_pages.map(|hp| hp.as_ref().to_vec()),
-            ));
+            *runtime_store = Some(DownloadedRuntime {
+                storage_code: code.map(|c| c.as_ref().to_vec()),
+                storage_heap_pages: heap_pages.map(|hp| hp.as_ref().to_vec()),
+            });
         } else {
             // This is checked at the beginning of this function.
             unreachable!()
@@ -1132,7 +1136,10 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             &mut self.inner.phase,
             self.inner.start_chain_information.as_ref().consensus,
         ) {
-            let (finalized_storage_code, finalized_storage_heap_pages) = runtime.take().unwrap();
+            let DownloadedRuntime {
+                storage_code: finalized_storage_code,
+                storage_heap_pages: finalized_storage_heap_pages,
+            } = runtime.take().unwrap();
             let babeapi_current_epoch_response = babeapi_current_epoch_response.take().unwrap();
             let babeapi_next_epoch_response = babeapi_next_epoch_response.take().unwrap();
 
@@ -1398,7 +1405,10 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             &mut self.inner.phase,
             self.inner.start_chain_information.as_ref().consensus,
         ) {
-            let (finalized_storage_code, finalized_storage_heap_pages) = runtime.take().unwrap();
+            let DownloadedRuntime {
+                storage_code: finalized_storage_code,
+                storage_heap_pages: finalized_storage_heap_pages,
+            } = runtime.take().unwrap();
             let aura_authorities_response = aura_authorities_response.take().unwrap();
             let aura_slot_duration_response = aura_slot_duration_response.take().unwrap();
 
