@@ -176,34 +176,29 @@ impl<T> NonFinalizedTreeInner<T> {
         // Some consensus-specific information must be fetched from the tree of ancestry. The
         // information is found either in the parent block, or in the finalized block.
         let consensus = if let Some(parent_tree_index) = parent_tree_index {
-            match &self.blocks.get(parent_tree_index).unwrap().consensus {
-                BlockConsensus::Aura { authorities_list } => VerifyConsensusSpecific::Aura {
-                    authorities_list: authorities_list.clone(),
-                },
-                BlockConsensus::Babe {
-                    current_epoch,
-                    next_epoch,
-                } => VerifyConsensusSpecific::Babe {
-                    current_epoch: current_epoch.clone(),
-                    next_epoch: next_epoch.clone(),
-                },
-            }
+            Some(
+                self.blocks
+                    .get(parent_tree_index)
+                    .unwrap()
+                    .consensus
+                    .clone(),
+            )
         } else {
             match &self.finalized_consensus {
-                FinalizedConsensus::Unknown => VerifyConsensusSpecific::Unknown,
+                FinalizedConsensus::Unknown => None,
                 FinalizedConsensus::Aura {
                     authorities_list, ..
-                } => VerifyConsensusSpecific::Aura {
+                } => Some(BlockConsensus::Aura {
                     authorities_list: authorities_list.clone(),
-                },
+                }),
                 FinalizedConsensus::Babe {
                     block_epoch_information,
                     next_epoch_transition,
                     ..
-                } => VerifyConsensusSpecific::Babe {
+                } => Some(BlockConsensus::Babe {
                     current_epoch: block_epoch_information.clone(),
                     next_epoch: next_epoch_transition.clone(),
-                },
+                }),
             }
         };
 
@@ -232,7 +227,7 @@ impl<T> NonFinalizedTreeInner<T> {
                 consensus: match (&context.chain.finalized_consensus, &context.consensus) {
                     (
                         FinalizedConsensus::Aura { slot_duration, .. },
-                        VerifyConsensusSpecific::Aura { authorities_list },
+                        Some(BlockConsensus::Aura { authorities_list }),
                     ) => verify::header_only::ConfigConsensus::Aura {
                         current_authorities: header::AuraAuthoritiesIter::from_slice(
                             &*authorities_list,
@@ -244,17 +239,17 @@ impl<T> NonFinalizedTreeInner<T> {
                         FinalizedConsensus::Babe {
                             slots_per_epoch, ..
                         },
-                        VerifyConsensusSpecific::Babe {
+                        Some(BlockConsensus::Babe {
                             current_epoch,
                             next_epoch,
-                        },
+                        }),
                     ) => verify::header_only::ConfigConsensus::Babe {
                         parent_block_epoch: current_epoch.as_ref().map(|v| (&**v).into()),
                         parent_block_next_epoch: (&**next_epoch).into(),
                         slots_per_epoch: *slots_per_epoch,
                         now_from_unix_epoch,
                     },
-                    (FinalizedConsensus::Unknown, VerifyConsensusSpecific::Unknown) => {
+                    (FinalizedConsensus::Unknown, None) => {
                         return VerifyOut::HeaderErr(
                             context.chain,
                             HeaderVerifyError::UnknownConsensusEngine,
@@ -296,7 +291,7 @@ struct VerifyContext<T> {
     chain: Box<NonFinalizedTreeInner<T>>,
     parent_tree_index: Option<fork_tree::NodeIndex>,
     header: header::Header,
-    consensus: VerifyConsensusSpecific,
+    consensus: Option<BlockConsensus>,
 }
 
 impl<T> VerifyContext<T> {
@@ -344,9 +339,9 @@ impl<T> VerifyContext<T> {
         ) {
             (
                 verify::header_body::SuccessConsensus::Aura { authorities_change },
-                VerifyConsensusSpecific::Aura {
+                Some(BlockConsensus::Aura {
                     authorities_list: parent_authorities,
-                },
+                }),
                 FinalizedConsensus::Aura { .. },
                 _,
             ) => {
@@ -367,7 +362,7 @@ impl<T> VerifyContext<T> {
                     epoch_transition_target: Some(epoch_transition_target),
                     ..
                 },
-                VerifyConsensusSpecific::Babe { .. },
+                Some(BlockConsensus::Babe { .. }),
                 FinalizedConsensus::Babe { .. },
                 Some(BlockConsensus::Babe { next_epoch, .. }),
             ) if next_epoch.start_slot_number.is_some() => BlockConsensus::Babe {
@@ -381,7 +376,7 @@ impl<T> VerifyContext<T> {
                     slot_number,
                     ..
                 },
-                VerifyConsensusSpecific::Babe { .. },
+                Some(BlockConsensus::Babe { .. }),
                 FinalizedConsensus::Babe { .. },
                 Some(BlockConsensus::Babe { next_epoch, .. }),
             ) => BlockConsensus::Babe {
@@ -401,7 +396,7 @@ impl<T> VerifyContext<T> {
                     epoch_transition_target: None,
                     ..
                 },
-                VerifyConsensusSpecific::Babe { .. },
+                Some(BlockConsensus::Babe { .. }),
                 FinalizedConsensus::Babe { .. },
                 Some(BlockConsensus::Babe {
                     current_epoch,
@@ -417,7 +412,7 @@ impl<T> VerifyContext<T> {
                     epoch_transition_target: Some(epoch_transition_target),
                     ..
                 },
-                VerifyConsensusSpecific::Babe { .. },
+                Some(BlockConsensus::Babe { .. }),
                 FinalizedConsensus::Babe {
                     next_epoch_transition,
                     ..
@@ -434,7 +429,7 @@ impl<T> VerifyContext<T> {
                     slot_number,
                     ..
                 },
-                VerifyConsensusSpecific::Babe { .. },
+                Some(BlockConsensus::Babe { .. }),
                 FinalizedConsensus::Babe {
                     next_epoch_transition,
                     ..
@@ -457,7 +452,7 @@ impl<T> VerifyContext<T> {
                     epoch_transition_target: None,
                     ..
                 },
-                VerifyConsensusSpecific::Babe { .. },
+                Some(BlockConsensus::Babe { .. }),
                 FinalizedConsensus::Babe {
                     block_epoch_information,
                     next_epoch_transition,
@@ -561,18 +556,6 @@ pub enum BodyVerifyStep1<T> {
     ParentRuntimeRequired(BodyVerifyRuntimeRequired<T>),
 }
 
-#[derive(Debug)]
-enum VerifyConsensusSpecific {
-    Unknown,
-    Aura {
-        authorities_list: Arc<Vec<header::AuraAuthority>>,
-    },
-    Babe {
-        current_epoch: Option<Arc<chain_information::BabeEpochInformation>>,
-        next_epoch: Arc<chain_information::BabeEpochInformation>,
-    },
-}
-
 /// Verification is pending. In order to continue, a [`host::HostVmPrototype`] of the runtime
 /// of the parent block must be provided.
 #[must_use]
@@ -660,7 +643,7 @@ impl<T> BodyVerifyRuntimeRequired<T> {
             &self.context.chain.finalized_consensus,
             &self.context.consensus,
         ) {
-            (FinalizedConsensus::Unknown, VerifyConsensusSpecific::Unknown) => {
+            (FinalizedConsensus::Unknown, None) => {
                 return BodyVerifyStep2::Error {
                     chain: NonFinalizedTree {
                         inner: Some(self.context.chain),
@@ -671,7 +654,7 @@ impl<T> BodyVerifyRuntimeRequired<T> {
             }
             (
                 FinalizedConsensus::Aura { slot_duration, .. },
-                VerifyConsensusSpecific::Aura { authorities_list },
+                Some(BlockConsensus::Aura { authorities_list }),
             ) => verify::header_body::ConfigConsensus::Aura {
                 current_authorities: header::AuraAuthoritiesIter::from_slice(&*authorities_list),
                 slot_duration: *slot_duration,
@@ -680,10 +663,10 @@ impl<T> BodyVerifyRuntimeRequired<T> {
                 FinalizedConsensus::Babe {
                     slots_per_epoch, ..
                 },
-                VerifyConsensusSpecific::Babe {
+                Some(BlockConsensus::Babe {
                     current_epoch,
                     next_epoch,
-                },
+                }),
             ) => verify::header_body::ConfigConsensus::Babe {
                 parent_block_epoch: current_epoch.as_ref().map(|v| (&**v).into()),
                 parent_block_next_epoch: (&**next_epoch).into(),
