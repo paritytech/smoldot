@@ -352,12 +352,7 @@ where
                                 (actual_peer_index, usize::min_value())
                                     ..=(actual_peer_index, usize::max_value()),
                             )
-                            .filter(|(_, v)| {
-                                // Since this check happens only at the first connection, all
-                                // substreams are necessarily closed.
-                                debug_assert!(matches!(v.open, NotificationsOutOpenState::Closed));
-                                v.desired
-                            })
+                            .filter(|(_, v)| v.desired)
                             .map(|((_, index), _)| *index)
                             .collect::<Vec<_>>();
 
