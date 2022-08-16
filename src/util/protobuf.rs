@@ -23,7 +23,9 @@ pub(crate) fn bool_tag_encode(
     field: u64,
     bool_value: bool,
 ) -> impl Iterator<Item = impl AsRef<[u8]> + Clone> + Clone {
-    // TODO: unclear; bools are undocumented
+    // Note that booleans aren't documented. However, the source code of the official Java
+    // protobuf library encodes them as 1 or 0.
+    // See <https://github.com/protocolbuffers/protobuf/blob/520c601c99012101c816b6ccc89e8d6fc28fdbb8/java/core/src/main/java/com/google/protobuf/CodedOutputStream.java#L447>
     varint_zigzag_tag_encode(field, if bool_value { 1 } else { 0 }).map(|b| [b])
 }
 
@@ -144,14 +146,20 @@ pub(crate) fn uint32_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 }
 
 /// Decodes a Protobuf tag of the given field number, and value where the data type is `bool`.
+///
+/// > **Note**: The implementation decodes any non-zero value as `true`, meaning that multiple
+/// >           different encoded messages can be decoded to `true`. This is important to take
+/// >           into consideration if determinism is desired.
 pub(crate) fn bool_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     field: u64,
 ) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], bool, E> {
-    nom::combinator::map_opt(varint_zigzag_tag_decode(field), |n| match n {
-        // TODO: it's unclear whether this is correct, as bools are undocumented
-        0 => Some(false),
-        1 => Some(true),
-        _ => None,
+    nom::combinator::map(varint_zigzag_tag_decode(field), |n| match n {
+        // Note that booleans are undocumented. However, the official Java library interprets
+        // 0 as false and any other value as true.
+        // See <https://github.com/protocolbuffers/protobuf/blob/520c601c99012101c816b6ccc89e8d6fc28fdbb8/java/core/src/main/java/com/google/protobuf/BinaryReader.java#L206>
+        // or <https://github.com/protocolbuffers/protobuf/blob/520c601c99012101c816b6ccc89e8d6fc28fdbb8/java/core/src/main/java/com/google/protobuf/CodedInputStream.java#L788>
+        0 => false,
+        _ => true,
     })
 }
 
