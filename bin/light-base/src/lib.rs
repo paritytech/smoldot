@@ -782,8 +782,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         if has_bad_blocks {
                             log::warn!(
                                 target: "smoldot",
-                                "Chain {} has bad blocks in its chain specification. Bad blocks \
-                                are not implemented in the light client.", log_name
+                                "Chain specification of {} contains a list of bad blocks. Bad \
+                                blocks are not implemented in the light client.", log_name
                             );
                         }
 
