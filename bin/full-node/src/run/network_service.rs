@@ -61,6 +61,8 @@ use std::{
 };
 use tracing::Instrument as _;
 
+mod websocket;
+
 /// Configuration for a [`NetworkService`].
 pub struct Config<'a> {
     /// Closure that spawns background tasks.
@@ -377,6 +379,7 @@ impl NetworkService {
                         }
                     }
                 } else {
+                    // TODO: support WebSocket server
                     return Err(InitError::BadListenMultiaddr(listen_address));
                 }
             };
@@ -398,6 +401,15 @@ impl NetworkService {
                                 continue;
                             }
                         };
+
+                        // The Nagle algorithm, implemented in the kernel, consists in buffering the
+                        // data to be sent out and waiting a bit before actually sending it out, in
+                        // order to potentially merge multiple writes in a row into one packet. In
+                        // the implementation below, it is guaranteed that the buffer in `WithBuffers`
+                        // is filled with as much data as possible before the operating system gets
+                        // involved. As such, we disable the Nagle algorithm, in order to avoid adding
+                        // an artificial delay to all sends.
+                        let _ = socket.set_nodelay(true);
 
                         let multiaddr = [
                             match addr.ip() {
@@ -1193,7 +1205,7 @@ async fn opening_connection_task(
 #[tracing::instrument(
     level = "trace",
     skip(
-        tcp_socket,
+        socket,
         inner,
         connection_task,
         coordinator_to_connection,
@@ -1201,7 +1213,7 @@ async fn opening_connection_task(
     )
 )]
 async fn established_connection_task(
-    tcp_socket: async_std::net::TcpStream,
+    socket: impl AsyncRead + AsyncWrite + Unpin,
     inner: Arc<Inner>,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<Instant>,
@@ -1211,20 +1223,12 @@ async fn established_connection_task(
         service::ConnectionToCoordinator,
     )>,
 ) {
-    // The Nagle algorithm, implemented in the kernel, consists in buffering the data to be
-    // sent out and waiting a bit before actually sending it out, in order to potentially merge
-    // multiple writes in a row into one packet. In the implementation below, it is guaranteed
-    // that the buffer in `WithBuffers` is filled with as much data as possible before the
-    // operating system gets involved. As such, we disable the Nagle algorithm, in order to
-    // avoid adding an artificial delay to all sends.
-    let _ = tcp_socket.set_nodelay(true);
-
     // The socket is wrapped around a `WithBuffers` object containing a read buffer and a write
     // buffer. These are the buffers whose pointer is passed to `read(2)` and `write(2)` when
     // reading/writing the socket.
     //
     // Contains `None` if an I/O error has happened on the socket in the past.
-    let mut tcp_socket = Some(with_buffers::WithBuffers::new(tcp_socket));
+    let mut socket_container = Some(with_buffers::WithBuffers::new(socket));
 
     // We need to use `peek()` on this future later down this function.
     let mut coordinator_to_connection = coordinator_to_connection.peekable();
@@ -1239,13 +1243,13 @@ async fn established_connection_task(
             connection_task.inject_coordinator_message(message);
         }
 
-        let wake_up_after = if let Some(socket) = tcp_socket.as_mut() {
+        let wake_up_after = if let Some(socket) = socket_container.as_mut() {
             let (read_buffer, write_buffer) = match socket.buffers() {
                 Ok(b) => b,
                 Err(error) => {
                     tracing::debug!(%error, "connection-error");
                     connection_task.reset();
-                    tcp_socket = None;
+                    socket_container = None;
                     continue;
                 }
             };
@@ -1372,8 +1376,8 @@ async fn established_connection_task(
         .fuse();
 
         // Future that is woken up when new data is ready on the socket.
-        let connection_ready = if let Some(tcp_socket) = tcp_socket.as_mut() {
-            future::Either::Left(Pin::new(tcp_socket).process())
+        let connection_ready = if let Some(socket) = socket_container.as_mut() {
+            future::Either::Left(Pin::new(socket).process())
         } else {
             future::Either::Right(future::pending())
         };
@@ -1396,42 +1400,77 @@ async fn established_connection_task(
 /// protocols aren't supported.
 fn multiaddr_to_socket(
     addr: &Multiaddr,
-) -> Result<impl Future<Output = Result<async_std::net::TcpStream, io::Error>>, ()> {
-    let mut iter = addr.iter();
+) -> Result<impl Future<Output = Result<impl AsyncRead + AsyncWrite + Unpin, io::Error>>, ()> {
+    let mut iter = addr.iter().fuse();
     let proto1 = iter.next().ok_or(())?;
     let proto2 = iter.next().ok_or(())?;
+    let proto3 = iter.next();
 
     if iter.next().is_some() {
         return Err(());
     }
 
+    // TODO: doesn't support WebSocket secure connections
+
     // Ensure ahead of time that the multiaddress is supported.
-    let addr = match (&proto1, &proto2) {
-        (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port)) => {
-            either::Left(SocketAddr::new(IpAddr::V4((*ip).into()), *port))
-        }
-        (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port)) => {
-            either::Left(SocketAddr::new(IpAddr::V6((*ip).into()), *port))
-        }
+    let (addr, is_websocket) = match (&proto1, &proto2, &proto3) {
+        (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), None) => (
+            either::Left(SocketAddr::new(IpAddr::V4((*ip).into()), *port)),
+            false,
+        ),
+        (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), None) => (
+            either::Left(SocketAddr::new(IpAddr::V6((*ip).into()), *port)),
+            false,
+        ),
+        (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => (
+            either::Left(SocketAddr::new(IpAddr::V4((*ip).into()), *port)),
+            true,
+        ),
+        (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => (
+            either::Left(SocketAddr::new(IpAddr::V6((*ip).into()), *port)),
+            true,
+        ),
+
         // TODO: we don't care about the differences between Dns, Dns4, and Dns6
-        (ProtocolRef::Dns(addr), ProtocolRef::Tcp(port)) => {
-            either::Right((addr.to_string(), *port))
-        }
-        (ProtocolRef::Dns4(addr), ProtocolRef::Tcp(port)) => {
-            either::Right((addr.to_string(), *port))
-        }
-        (ProtocolRef::Dns6(addr), ProtocolRef::Tcp(port)) => {
-            either::Right((addr.to_string(), *port))
-        }
+        (
+            ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
+            ProtocolRef::Tcp(port),
+            None,
+        ) => (either::Right((addr.to_string(), *port)), false),
+        (
+            ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
+            ProtocolRef::Tcp(port),
+            Some(ProtocolRef::Ws),
+        ) => (either::Right((addr.to_string(), *port)), true),
+
         _ => return Err(()),
     };
 
     Ok(async move {
-        match addr {
+        let tcp_socket = match addr {
             either::Left(socket_addr) => async_std::net::TcpStream::connect(socket_addr).await,
             either::Right((dns, port)) => {
                 async_std::net::TcpStream::connect((&dns[..], port)).await
             }
+        };
+
+        if let Ok(tcp_socket) = &tcp_socket {
+            // The Nagle algorithm, implemented in the kernel, consists in buffering the
+            // data to be sent out and waiting a bit before actually sending it out, in
+            // order to potentially merge multiple writes in a row into one packet. In
+            // the implementation below, it is guaranteed that the buffer in `WithBuffers`
+            // is filled with as much data as possible before the operating system gets
+            // involved. As such, we disable the Nagle algorithm, in order to avoid adding
+            // an artificial delay to all sends.
+            let _ = tcp_socket.set_nodelay(true);
+        }
+
+        match (tcp_socket, is_websocket) {
+            (Ok(tcp_socket), true) => websocket::websocket_handshake(tcp_socket)
+                .await
+                .map(future::Either::Right),
+            (Ok(tcp_socket), false) => Ok(future::Either::Left(tcp_socket)),
+            (Err(err), _) => Err(err),
         }
     })
 }

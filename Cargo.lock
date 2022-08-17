@@ -2354,6 +2354,7 @@ dependencies = [
  "mick-jaeger",
  "rand",
  "smoldot",
+ "soketto",
  "terminal_size",
  "tracing",
  "tracing-subscriber",
