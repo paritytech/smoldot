@@ -99,6 +99,7 @@ pub mod multihash;
 pub mod peer_id;
 pub mod peers;
 pub mod read_write;
+pub mod websocket;
 
 pub use multiaddr::Multiaddr;
 pub use peer_id::PeerId;

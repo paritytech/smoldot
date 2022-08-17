@@ -31,7 +31,6 @@ hex = { version = "0.4.3", default-features = false }
 mick-jaeger = "0.1.8"
 rand = "0.8.5"
 smoldot = { version = "0.2.0", path = "../..", default-features = false, features = ["database-sqlite", "std"] }
-soketto = "0.7.1"
 terminal_size = "0.2.1"
 tracing = { version = "0.1.36", features = ["attributes"] }
 tracing-subscriber = { version = "0.2.25", default-features = false, features = ["ansi", "chrono", "env-filter", "json", "fmt", "parking_lot", "smallvec"] }
