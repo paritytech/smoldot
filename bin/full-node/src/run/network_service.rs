@@ -1203,7 +1203,7 @@ async fn opening_connection_task(
 #[tracing::instrument(
     level = "trace",
     skip(
-        tcp_socket,
+        socket,
         inner,
         connection_task,
         coordinator_to_connection,
@@ -1211,7 +1211,7 @@ async fn opening_connection_task(
     )
 )]
 async fn established_connection_task(
-    tcp_socket: async_std::net::TcpStream,
+    socket: async_std::net::TcpStream,
     inner: Arc<Inner>,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<Instant>,
@@ -1226,7 +1226,7 @@ async fn established_connection_task(
     // reading/writing the socket.
     //
     // Contains `None` if an I/O error has happened on the socket in the past.
-    let mut tcp_socket = Some(with_buffers::WithBuffers::new(tcp_socket));
+    let mut socket_container = Some(with_buffers::WithBuffers::new(socket));
 
     // We need to use `peek()` on this future later down this function.
     let mut coordinator_to_connection = coordinator_to_connection.peekable();
@@ -1241,13 +1241,13 @@ async fn established_connection_task(
             connection_task.inject_coordinator_message(message);
         }
 
-        let wake_up_after = if let Some(socket) = tcp_socket.as_mut() {
+        let wake_up_after = if let Some(socket) = socket_container.as_mut() {
             let (read_buffer, write_buffer) = match socket.buffers() {
                 Ok(b) => b,
                 Err(error) => {
                     tracing::debug!(%error, "connection-error");
                     connection_task.reset();
-                    tcp_socket = None;
+                    socket_container = None;
                     continue;
                 }
             };
@@ -1374,8 +1374,8 @@ async fn established_connection_task(
         .fuse();
 
         // Future that is woken up when new data is ready on the socket.
-        let connection_ready = if let Some(tcp_socket) = tcp_socket.as_mut() {
-            future::Either::Left(Pin::new(tcp_socket).process())
+        let connection_ready = if let Some(socket) = socket_container.as_mut() {
+            future::Either::Left(Pin::new(socket).process())
         } else {
             future::Either::Right(future::pending())
         };
