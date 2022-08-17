@@ -118,7 +118,7 @@ jobs:
   all-deploy:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [build-push-docker-image, npm-publish]
+    needs: [build-push-docker-image, npm-publish, deno-publish]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success
