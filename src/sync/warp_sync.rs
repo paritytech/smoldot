@@ -851,7 +851,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     Some(response.map(|e| e.as_ref().to_vec()).collect());
                 user_data
             }
-            ((_, user_data, RequestDetail::RuntimeCallMerkleProof { .. }), _) => return user_data,
+            ((_, user_data, RequestDetail::RuntimeCallMerkleProof { .. }), _) => user_data,
             (
                 (_, _, RequestDetail::RuntimeParametersGet { .. })
                 | (_, _, RequestDetail::WarpSyncRequest { .. }),

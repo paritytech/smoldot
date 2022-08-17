@@ -416,7 +416,7 @@ where
     T: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        struct Blocks<'a, T>(&'a Box<NonFinalizedTreeInner<T>>);
+        struct Blocks<'a, T>(&'a NonFinalizedTreeInner<T>);
         impl<'a, T> fmt::Debug for Blocks<'a, T>
         where
             T: fmt::Debug,

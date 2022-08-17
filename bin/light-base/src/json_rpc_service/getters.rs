@@ -46,7 +46,7 @@ impl<TPlat: Platform> Background<TPlat> {
         .to_json_response(request_id);
 
         self.requests_subscriptions
-            .respond(&state_machine_request_id, response)
+            .respond(state_machine_request_id, response)
             .await;
     }
 

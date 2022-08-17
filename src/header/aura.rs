@@ -33,7 +33,7 @@ pub enum AuraConsensusLogRef<'a> {
 impl<'a> AuraConsensusLogRef<'a> {
     /// Decodes a [`AuraConsensusLogRef`] from a slice of bytes.
     pub fn from_slice(slice: &'a [u8]) -> Result<Self, Error> {
-        Ok(match slice.get(0) {
+        Ok(match slice.first() {
             Some(1) => {
                 AuraConsensusLogRef::AuthoritiesChange(AuraAuthoritiesIter::decode(&slice[1..])?)
             }
