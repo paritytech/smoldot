@@ -399,6 +399,15 @@ impl NetworkService {
                             }
                         };
 
+                        // The Nagle algorithm, implemented in the kernel, consists in buffering the
+                        // data to be sent out and waiting a bit before actually sending it out, in
+                        // order to potentially merge multiple writes in a row into one packet. In
+                        // the implementation below, it is guaranteed that the buffer in `WithBuffers`
+                        // is filled with as much data as possible before the operating system gets
+                        // involved. As such, we disable the Nagle algorithm, in order to avoid adding
+                        // an artificial delay to all sends.
+                        let _ = socket.set_nodelay(true);
+
                         let multiaddr = [
                             match addr.ip() {
                                 IpAddr::V4(ip) => ProtocolRef::Ip4(ip.octets()),
@@ -1211,14 +1220,6 @@ async fn established_connection_task(
         service::ConnectionToCoordinator,
     )>,
 ) {
-    // The Nagle algorithm, implemented in the kernel, consists in buffering the data to be
-    // sent out and waiting a bit before actually sending it out, in order to potentially merge
-    // multiple writes in a row into one packet. In the implementation below, it is guaranteed
-    // that the buffer in `WithBuffers` is filled with as much data as possible before the
-    // operating system gets involved. As such, we disable the Nagle algorithm, in order to
-    // avoid adding an artificial delay to all sends.
-    let _ = tcp_socket.set_nodelay(true);
-
     // The socket is wrapped around a `WithBuffers` object containing a read buffer and a write
     // buffer. These are the buffers whose pointer is passed to `read(2)` and `write(2)` when
     // reading/writing the socket.
@@ -1428,7 +1429,22 @@ fn multiaddr_to_socket(
 
     Ok(async move {
         match addr {
-            either::Left(socket_addr) => async_std::net::TcpStream::connect(socket_addr).await,
+            either::Left(socket_addr) => {
+                let tcp_socket = async_std::net::TcpStream::connect(socket_addr).await;
+
+                if let Ok(tcp_socket) = &tcp_socket {
+                    // The Nagle algorithm, implemented in the kernel, consists in buffering the
+                    // data to be sent out and waiting a bit before actually sending it out, in
+                    // order to potentially merge multiple writes in a row into one packet. In
+                    // the implementation below, it is guaranteed that the buffer in `WithBuffers`
+                    // is filled with as much data as possible before the operating system gets
+                    // involved. As such, we disable the Nagle algorithm, in order to avoid adding
+                    // an artificial delay to all sends.
+                    let _ = tcp_socket.set_nodelay(true);
+                }
+
+                tcp_socket
+            }
             either::Right((dns, port)) => {
                 async_std::net::TcpStream::connect((&dns[..], port)).await
             }
