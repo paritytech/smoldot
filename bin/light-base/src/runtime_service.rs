@@ -833,7 +833,7 @@ impl<'a> RuntimeCallLock<'a> {
         };
 
         match proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-            requested_key: &requested_key,
+            requested_key,
             trie_root_hash: self.block_storage_root(),
             proof: call_proof.iter().map(|v| &v[..]),
         }) {
@@ -862,10 +862,10 @@ impl<'a> RuntimeCallLock<'a> {
             Err(err) => return Err(err.clone()),
         };
 
-        for key in mem::replace(&mut to_find, Vec::new()) {
+        for key in mem::take(&mut to_find) {
             let node_info = proof_verify::trie_node_info(proof_verify::TrieNodeInfoConfig {
                 requested_key: key.iter().cloned(),
-                trie_root_hash: &self.block_storage_root(),
+                trie_root_hash: self.block_storage_root(),
                 proof: call_proof.iter().map(|v| &v[..]),
             })
             .map_err(RuntimeCallError::StorageRetrieval)?;

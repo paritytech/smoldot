@@ -75,15 +75,9 @@ enum Read<T> {
     Idle(soketto::connection::Receiver<T>, Vec<u8>, usize),
     Error(soketto::connection::Error),
     InProgress(
-        Pin<
-            Box<
-                dyn Future<
-                        Output = Result<
-                            (soketto::connection::Receiver<T>, Vec<u8>),
-                            soketto::connection::Error,
-                        >,
-                    > + Send,
-            >,
+        future::BoxFuture<
+            'static,
+            Result<(soketto::connection::Receiver<T>, Vec<u8>), soketto::connection::Error>,
         >,
     ),
     Poisoned,
@@ -92,24 +86,18 @@ enum Read<T> {
 enum Write<T> {
     Idle(soketto::connection::Sender<T>),
     Writing(
-        Pin<
-            Box<
-                dyn Future<
-                        Output = Result<soketto::connection::Sender<T>, soketto::connection::Error>,
-                    > + Send,
-            >,
+        future::BoxFuture<
+            'static,
+            Result<soketto::connection::Sender<T>, soketto::connection::Error>,
         >,
     ),
     Flushing(
-        Pin<
-            Box<
-                dyn Future<
-                        Output = Result<soketto::connection::Sender<T>, soketto::connection::Error>,
-                    > + Send,
-            >,
+        future::BoxFuture<
+            'static,
+            Result<soketto::connection::Sender<T>, soketto::connection::Error>,
         >,
     ),
-    Closing(Pin<Box<dyn Future<Output = Result<(), soketto::connection::Error>> + Send>>),
+    Closing(future::BoxFuture<'static, Result<(), soketto::connection::Error>>),
     Closed,
     Error(soketto::connection::Error),
     Poisoned,

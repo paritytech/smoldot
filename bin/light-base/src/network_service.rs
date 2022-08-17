@@ -739,7 +739,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         for peer in guarded.network.peers_list().cloned().collect::<Vec<_>>() {
             if guarded
                 .network
-                .announce_transaction(&peer, chain_index, &transaction)
+                .announce_transaction(&peer, chain_index, transaction)
                 .is_ok()
             {
                 sent_peers.push(peer);
@@ -763,7 +763,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
         // The call to `send_block_announce` below panics if we have no active connection.
         // TODO: not the correct check; must make sure that we have a substream open
-        if !guarded.network.has_established_connection(&target) {
+        if !guarded.network.has_established_connection(target) {
             return Err(QueueNotificationError::NoConnection);
         }
 
@@ -818,7 +818,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
             .map(|(peer_id, addresses)| {
                 (
                     peer_id.clone(),
-                    addresses.map(|a| a.clone()).collect::<Vec<_>>().into_iter(),
+                    addresses.cloned().collect::<Vec<_>>().into_iter(),
                 )
             })
             .collect::<Vec<_>>()

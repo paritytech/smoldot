@@ -204,7 +204,7 @@ impl<T> NonFinalizedTreeInner<T> {
 
         let mut context = VerifyContext {
             chain: self,
-            header: decoded_header.into(),
+            header: Box::new(decoded_header.into()),
             parent_tree_index,
             consensus,
         };
@@ -230,7 +230,7 @@ impl<T> NonFinalizedTreeInner<T> {
                         Some(BlockConsensus::Aura { authorities_list }),
                     ) => verify::header_only::ConfigConsensus::Aura {
                         current_authorities: header::AuraAuthoritiesIter::from_slice(
-                            &*authorities_list,
+                            authorities_list,
                         ),
                         now_from_unix_epoch,
                         slot_duration: *slot_duration,
@@ -263,7 +263,7 @@ impl<T> NonFinalizedTreeInner<T> {
                     }
                 },
                 allow_unknown_consensus_engines: context.chain.allow_unknown_consensus_engines,
-                block_header: (&context.header).into(), // TODO: inefficiency ; in case of header only verify we do an extra allocation to build the context above
+                block_header: (&*context.header).into(), // TODO: inefficiency ; in case of header only verify we do an extra allocation to build the context above
                 block_number_bytes: context.chain.block_number_bytes,
                 parent_block_header: parent_block_header.into(),
             })
@@ -290,7 +290,7 @@ enum VerifyOut<T> {
 struct VerifyContext<T> {
     chain: Box<NonFinalizedTreeInner<T>>,
     parent_tree_index: Option<fork_tree::NodeIndex>,
-    header: header::Header,
+    header: Box<header::Header>,
     consensus: Option<BlockConsensus>,
 }
 
@@ -324,7 +324,7 @@ impl<T> VerifyContext<T> {
                 &self.chain.blocks,
                 current_best,
                 self.parent_tree_index,
-                (&self.header).into(),
+                (&*self.header).into(),
             ) == Ordering::Greater
         } else {
             true
@@ -656,7 +656,7 @@ impl<T> BodyVerifyRuntimeRequired<T> {
                 FinalizedConsensus::Aura { slot_duration, .. },
                 Some(BlockConsensus::Aura { authorities_list }),
             ) => verify::header_body::ConfigConsensus::Aura {
-                current_authorities: header::AuraAuthoritiesIter::from_slice(&*authorities_list),
+                current_authorities: header::AuraAuthoritiesIter::from_slice(authorities_list),
                 slot_duration: *slot_duration,
             },
             (
@@ -688,7 +688,7 @@ impl<T> BodyVerifyRuntimeRequired<T> {
             consensus: config_consensus,
             allow_unknown_consensus_engines: self.context.chain.allow_unknown_consensus_engines,
             now_from_unix_epoch: self.now_from_unix_epoch,
-            block_header: (&self.context.header).into(),
+            block_header: (&*self.context.header).into(),
             block_number_bytes: self.context.chain.block_number_bytes,
             parent_block_header: parent_block_header.into(),
             block_body,
@@ -1016,7 +1016,7 @@ impl<'c, T> HeaderInsert<'c, T> {
         let new_node_index = context.chain.blocks.insert(
             context.parent_tree_index,
             Block {
-                header: context.header,
+                header: *context.header,
                 hash: self.hash,
                 consensus: self.consensus.take().unwrap(),
                 user_data,
@@ -1039,14 +1039,14 @@ impl<'c, T> HeaderInsert<'c, T> {
 
     /// Returns the block header about to be inserted.
     pub fn header(&self) -> header::HeaderRef {
-        From::from(&self.context.as_ref().unwrap().header)
+        From::from(&*self.context.as_ref().unwrap().header)
     }
 
     /// Destroys the object without inserting the block in the chain. Returns the block header.
     pub fn into_header(mut self) -> header::Header {
         let context = self.context.take().unwrap();
         self.chain.inner = Some(context.chain);
-        context.header
+        *context.header
     }
 }
 
@@ -1101,7 +1101,7 @@ pub struct BodyInsert<T> {
 impl<T> BodyInsert<T> {
     /// Returns the header of the block about to be inserted.
     pub fn header(&self) -> header::HeaderRef {
-        (&self.context.header).into()
+        (&*self.context.header).into()
     }
 
     /// Inserts the block with the given user data.
@@ -1114,7 +1114,7 @@ impl<T> BodyInsert<T> {
         let new_node_index = self.context.chain.blocks.insert(
             self.context.parent_tree_index,
             Block {
-                header: self.context.header,
+                header: *self.context.header,
                 hash: self.hash,
                 consensus: self.consensus,
                 user_data,

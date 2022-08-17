@@ -744,7 +744,7 @@ async fn background_task<TPlat: Platform>(
                         .clone()
                         .announce_transaction(
                             worker.network_chain_index,
-                            &worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap()
+                            worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap()
                         )
                         .await;
                     log::debug!(

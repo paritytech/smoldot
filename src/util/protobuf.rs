@@ -153,13 +153,12 @@ pub(crate) fn uint32_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
 pub(crate) fn bool_tag_decode<'a, E: nom::error::ParseError<&'a [u8]>>(
     field: u64,
 ) -> impl FnMut(&'a [u8]) -> nom::IResult<&'a [u8], bool, E> {
-    nom::combinator::map(varint_zigzag_tag_decode(field), |n| match n {
+    nom::combinator::map(varint_zigzag_tag_decode(field), |n| {
         // Note that booleans are undocumented. However, the official Java library interprets
         // 0 as false and any other value as true.
         // See <https://github.com/protocolbuffers/protobuf/blob/520c601c99012101c816b6ccc89e8d6fc28fdbb8/java/core/src/main/java/com/google/protobuf/BinaryReader.java#L206>
         // or <https://github.com/protocolbuffers/protobuf/blob/520c601c99012101c816b6ccc89e8d6fc28fdbb8/java/core/src/main/java/com/google/protobuf/CodedInputStream.java#L788>
-        0 => false,
-        _ => true,
+        n != 0
     })
 }
 
@@ -397,7 +396,7 @@ mod tests {
         let decoded = super::bool_tag_decode::<nom::error::Error<&[u8]>>(504)(&encoded)
             .unwrap()
             .1;
-        assert_eq!(decoded, true);
+        assert!(decoded);
     }
 
     #[test]

@@ -128,7 +128,7 @@ pub async fn subscribe_runtime_version<TPlat: Platform>(
                                 let new_best_runtime = headers.get(&hash).unwrap();
                                 current_best = hash;
 
-                                if !Arc::ptr_eq(&current_best_runtime, new_best_runtime) {
+                                if !Arc::ptr_eq(current_best_runtime, new_best_runtime) {
                                     let runtime = (**new_best_runtime).clone();
                                     break Some((
                                         runtime,
