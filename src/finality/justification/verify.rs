@@ -19,6 +19,8 @@ use crate::finality::justification::decode;
 
 use alloc::vec::Vec;
 use core::{cmp, iter, mem};
+use rand::Rng as _;
+use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
 /// Configuration for a justification verification process.
 #[derive(Debug)]
@@ -35,6 +37,11 @@ pub struct Config<'a, I> {
     /// the justification. Must implement `Iterator<Item = impl AsRef<[u8]>> + Clone`, where
     /// each item is the public key of an authority.
     pub authorities_list: I,
+
+    /// Seed for a PRNG used for various purposes during the verification.
+    ///
+    /// > **Note**: The verification is nonetheless deterministic.
+    pub randomness_seed: [u8; 32],
 }
 
 // TODO: rewrite as a generator-style process?
@@ -51,11 +58,13 @@ pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>) ->
         return Err(Error::NotEnoughSignatures);
     }
 
+    let mut randomness = ChaCha20Rng::from_seed(config.randomness_seed);
+
     // Used to store the authority public keys that have been seen, in order to check for
     // duplicates.
     let mut seen_pub_keys = hashbrown::HashSet::with_capacity_and_hasher(
         num_precommits,
-        fnv::FnvBuildHasher::default(), // TODO: use SipHasher due to untrusted message
+        crate::util::SipHasherBuild::new(randomness.gen()),
     );
 
     // Verifying all the signatures together brings better performances than verifying them one
@@ -114,9 +123,8 @@ pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>) ->
     }
 
     // Actual signatures verification performed here.
-    // TODO: thread_rng()?!?! what to do here?
     batch
-        .verify(rand::thread_rng())
+        .verify(&mut randomness)
         .map_err(|_| Error::BadSignature)?;
 
     // TODO: must check that votes_ancestries doesn't contain any unused entry

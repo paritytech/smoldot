@@ -1033,7 +1033,10 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
     }
 
     // TODO: does this API make sense?
-    pub fn verify(mut self) -> (InProgressWarpSync<TSrc, TRq>, Option<FragmentError>) {
+    pub fn verify(
+        mut self,
+        randomness_seed: [u8; 32],
+    ) -> (InProgressWarpSync<TSrc, TRq>, Option<FragmentError>) {
         if let Phase::PendingVerify {
             previous_verifier_values,
             verifier,
@@ -1041,7 +1044,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
             downloaded_source,
         } = &mut self.inner.phase
         {
-            match verifier.take().unwrap().next() {
+            match verifier.take().unwrap().next(randomness_seed) {
                 Ok(warp_sync::Next::NotFinished(next_verifier)) => {
                     *verifier = Some(next_verifier);
                 }

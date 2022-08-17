@@ -93,16 +93,21 @@ impl<T> NonFinalizedTree<T> {
     ///
     /// If the verification succeeds, a [`FinalityApply`] object will be returned which can
     /// be used to apply the finalization.
+    ///
+    /// A randomness seed must be provided and will be used during the verification. Note that the
+    /// verification is nonetheless deterministic.
     // TODO: expand the documentation about how blocks with authorities changes have to be finalized before any further block can be finalized
     pub fn verify_justification(
         &mut self,
         consensus_engine_id: [u8; 4],
         scale_encoded_justification: &[u8],
+        randomness_seed: [u8; 32],
     ) -> Result<FinalityApply<T>, JustificationVerifyError> {
-        self.inner
-            .as_mut()
-            .unwrap()
-            .verify_justification(consensus_engine_id, scale_encoded_justification)
+        self.inner.as_mut().unwrap().verify_justification(
+            consensus_engine_id,
+            scale_encoded_justification,
+            randomness_seed,
+        )
     }
 
     /// Verifies the given Grandpa commit message.
@@ -113,14 +118,18 @@ impl<T> NonFinalizedTree<T> {
     ///
     /// If the verification succeeds, a [`FinalityApply`] object will be returned which can
     /// be used to apply the finalization.
+    ///
+    /// A randomness seed must be provided and will be used during the verification. Note that the
+    /// verification is nonetheless deterministic.
     pub fn verify_grandpa_commit_message(
         &mut self,
         scale_encoded_commit: &[u8],
+        randomness_seed: [u8; 32],
     ) -> Result<FinalityApply<T>, CommitVerifyError> {
         self.inner
             .as_mut()
             .unwrap()
-            .verify_grandpa_commit_message(scale_encoded_commit)
+            .verify_grandpa_commit_message(scale_encoded_commit, randomness_seed)
     }
 
     /// Sets the latest known finalized block. Trying to verify a block that isn't a descendant of
@@ -305,6 +314,7 @@ impl<T> NonFinalizedTreeInner<T> {
         &mut self,
         consensus_engine_id: [u8; 4],
         scale_encoded_justification: &[u8],
+        randomness_seed: [u8; 32],
     ) -> Result<FinalityApply<T>, JustificationVerifyError> {
         match (&self.finality, &consensus_engine_id) {
             (Finality::Grandpa { .. }, b"FRNK") => {
@@ -325,6 +335,7 @@ impl<T> NonFinalizedTreeInner<T> {
                     block_number_bytes: self.block_number_bytes,
                     authorities_set_id,
                     authorities_list,
+                    randomness_seed,
                 })
                 .map_err(JustificationVerifyError::VerificationFailed)?;
 
@@ -342,6 +353,7 @@ impl<T> NonFinalizedTreeInner<T> {
     fn verify_grandpa_commit_message(
         &mut self,
         verify_grandpa_commit_message: &[u8],
+        randomness_seed: [u8; 32],
     ) -> Result<FinalityApply<T>, CommitVerifyError> {
         // The code below would panic if the chain doesn't use Grandpa.
         if !matches!(self.finality, Finality::Grandpa { .. }) {
@@ -367,6 +379,7 @@ impl<T> NonFinalizedTreeInner<T> {
             block_number_bytes: self.block_number_bytes,
             expected_authorities_set_id,
             num_authorities: u32::try_from(authorities_list.clone().count()).unwrap(),
+            randomness_seed,
         });
 
         loop {

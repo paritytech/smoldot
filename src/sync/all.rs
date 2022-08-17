@@ -1246,18 +1246,23 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     /// Update the state machine with a Grandpa commit message received from the network.
     ///
     /// On success, the finalized block might have been updated.
+    ///
+    /// A randomness seed must be provided and will be used during the verification. Note that the
+    /// verification is nonetheless deterministic.
+    /// TODO: randomness seed will be removed at some point
     // TODO: return which blocks are removed as finalized
     pub fn grandpa_commit_message(
         &mut self,
         source_id: SourceId,
         scale_encoded_message: &[u8],
+        randomness_seed: [u8; 32],
     ) -> Result<(), blocks_tree::CommitVerifyError> {
         let source_id = self.shared.sources.get(source_id.0).unwrap();
 
         // TODO: clearly indicate if message has been ignored
         match (&mut self.inner, source_id) {
             (AllSyncInner::AllForks(sync), SourceMapping::AllForks(source_id)) => {
-                sync.grandpa_commit_message(*source_id, scale_encoded_message)
+                sync.grandpa_commit_message(*source_id, scale_encoded_message, randomness_seed)
             }
             (AllSyncInner::Optimistic { .. }, _) => Ok(()),
             (AllSyncInner::GrandpaWarpSync { .. }, _) => Ok(()),
@@ -2156,10 +2161,16 @@ enum FinalityProofVerifyInner<TRq, TSrc, TBl> {
 
 impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
     /// Perform the verification.
-    pub fn perform(self) -> (AllSync<TRq, TSrc, TBl>, FinalityProofVerifyOutcome<TBl>) {
+    ///
+    /// A randomness seed must be provided and will be used during the verification. Note that the
+    /// verification is nonetheless deterministic.
+    pub fn perform(
+        self,
+        randomness_seed: [u8; 32],
+    ) -> (AllSync<TRq, TSrc, TBl>, FinalityProofVerifyOutcome<TBl>) {
         match self.inner {
             FinalityProofVerifyInner::AllForks(verify) => {
-                let (sync, outcome) = match verify.perform() {
+                let (sync, outcome) = match verify.perform(randomness_seed) {
                     (
                         sync,
                         all_forks::FinalityProofVerifyOutcome::NewFinalized {
@@ -2203,7 +2214,7 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
                     outcome,
                 )
             }
-            FinalityProofVerifyInner::Optimistic(verify) => match verify.perform() {
+            FinalityProofVerifyInner::Optimistic(verify) => match verify.perform(randomness_seed) {
                 (inner, optimistic::JustificationVerification::Finalized { finalized_blocks }) => (
                     // TODO: transition to all_forks
                     AllSync {
@@ -2280,13 +2291,17 @@ impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
     }
 
     /// Perform the verification.
+    ///
+    /// A randomness seed must be provided and will be used during the verification. Note that the
+    /// verification is nonetheless deterministic.
     pub fn perform(
         self,
+        randomness_seed: [u8; 32],
     ) -> (
         AllSync<TRq, TSrc, TBl>,
         Result<(), warp_sync::FragmentError>,
     ) {
-        let (next_grandpa_warp_sync, error) = self.inner.verify();
+        let (next_grandpa_warp_sync, error) = self.inner.verify(randomness_seed);
 
         (
             AllSync {
