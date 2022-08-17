@@ -1249,7 +1249,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     ///
     /// A randomness seed must be provided and will be used during the verification. Note that the
     /// verification is nonetheless deterministic.
-    /// TODO: randomness seed ^ will be removed at some point
+    /// TODO: randomness seed will be removed at some point
     // TODO: return which blocks are removed as finalized
     pub fn grandpa_commit_message(
         &mut self,

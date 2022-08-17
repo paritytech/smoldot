@@ -913,7 +913,7 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     ///
     /// A randomness seed must be provided and will be used during the verification. Note that the
     /// verification is nonetheless deterministic.
-    /// TODO: ^ will be removed at some point
+    /// TODO: randomness seed will be removed at some point
     ///
     /// # Panic
     ///
