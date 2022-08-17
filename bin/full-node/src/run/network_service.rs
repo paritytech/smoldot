@@ -1211,7 +1211,7 @@ async fn opening_connection_task(
     )
 )]
 async fn established_connection_task(
-    socket: async_std::net::TcpStream,
+    socket: impl AsyncRead + AsyncWrite + Unpin,
     inner: Arc<Inner>,
     connection_id: service::ConnectionId,
     mut connection_task: service::SingleStreamConnectionTask<Instant>,
