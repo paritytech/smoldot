@@ -377,6 +377,7 @@ impl NetworkService {
                         }
                     }
                 } else {
+                    // TODO: support WebSocket server
                     return Err(InitError::BadListenMultiaddr(listen_address));
                 }
             };
