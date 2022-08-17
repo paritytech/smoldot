@@ -15,6 +15,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+//! Implementation of a WebSocket client that wraps around an abstract representation of a TCP
+//! socket through the `AsyncRead` and `AsyncWrite` traits.
+
+#![cfg(all(feature = "std"))]
+#![cfg_attr(docsrs, doc(cfg(all(feature = "std"))))]
+
 use futures::prelude::*;
 
 use core::{
@@ -22,11 +28,12 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
+
 use std::io;
 
 /// Negotiates the WebSocket protocol (including the HTTP-like request) on the given socket, and
 /// returns an object that translates reads and writes into WebSocket binary frames.
-pub async fn websocket_handshake(
+pub async fn websocket_client_handshake(
     tcp_socket: impl AsyncRead + AsyncWrite + Send + Unpin + 'static,
 ) -> Result<impl AsyncRead + AsyncWrite + Send + Unpin + 'static, io::Error> {
     // TODO: what is the host?

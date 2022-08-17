@@ -47,6 +47,7 @@ use smoldot::{
         multiaddr::{Multiaddr, ProtocolRef},
         peer_id::{self, PeerId},
         peers,
+        websocket::websocket_client_handshake,
     },
     network::{protocol, service},
 };
@@ -60,8 +61,6 @@ use std::{
     time::Instant,
 };
 use tracing::Instrument as _;
-
-mod websocket;
 
 /// Configuration for a [`NetworkService`].
 pub struct Config<'a> {
@@ -1466,7 +1465,7 @@ fn multiaddr_to_socket(
         }
 
         match (tcp_socket, is_websocket) {
-            (Ok(tcp_socket), true) => websocket::websocket_handshake(tcp_socket)
+            (Ok(tcp_socket), true) => websocket_client_handshake(tcp_socket)
                 .await
                 .map(future::Either::Right),
             (Ok(tcp_socket), false) => Ok(future::Either::Left(tcp_socket)),
