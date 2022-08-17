@@ -95,7 +95,11 @@ impl<T: Future> Future for CpuRateLimiter<T> {
                     poll_duration.as_secs_f64() * *this.max_divided_by_rate_limit_minus_one;
                 debug_assert!(after_poll_sleep >= 0.0 && !after_poll_sleep.is_nan());
                 let max_duration_float: f64 = Duration::MAX.as_secs_f64(); // TODO: turn this into a `const` once `as_secs_f64` is `const`
-                if after_poll_sleep.partial_cmp(&max_duration_float).map(|ord| ord.is_ge()).unwrap_or(true) {
+                if after_poll_sleep
+                    .partial_cmp(&max_duration_float)
+                    .map(|ord| ord.is_ge())
+                    .unwrap_or(true)
+                {
                     after_poll_sleep = max_duration_float;
                 }
                 // TODO: use try_from_secs_f64 when it's stable https://github.com/rust-lang/rust/issues/83400
