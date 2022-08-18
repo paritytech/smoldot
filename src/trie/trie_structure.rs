@@ -23,7 +23,7 @@
 use super::nibble::Nibble;
 
 use alloc::{borrow::ToOwned as _, vec::Vec};
-use core::{fmt, iter};
+use core::{fmt, iter, mem};
 use either::Either;
 use slab::Slab;
 
@@ -349,37 +349,109 @@ impl<TUd> TrieStructure<TUd> {
     /// closest ancestor is not a descendant of the new trie root.
     pub fn remove_prefix(
         &mut self,
-        _prefix: impl Iterator<Item = Nibble> + Clone,
+        prefix: impl Iterator<Item = Nibble> + Clone,
     ) -> Option<NodeAccess<TUd>> {
-        todo!() // TODO: implement and write example
-                /*// `ancestor` is the node that will stay in the tree and the common ancestor of all the
-                // nodes to remove.
-                let ancestor = match self.existing_node_inner(prefix.clone()) {
-                    ExistingNodeInnerResult::Found { node_index, .. } => {
-                        self.nodes.get(node_index).unwrap().parent
-                    }
-                    ExistingNodeInnerResult::NotFound {
-                        closest_ancestor: None,
-                    } => None,
-                    ExistingNodeInnerResult::NotFound {
-                        closest_ancestor: Some(ancestor),
-                    } => {
-                        let key_len = self.node_full_key(ancestor).count();
-                        let child_index = prefix.skip(key_len).next().unwrap();
-                        Some((ancestor, child_index))
-                    }
-                };
+        // `ancestor` is the node that doesn't have the prefix but is the common ancestor of all
+        // the nodes to remove.
+        let ancestor = match self.existing_node_inner(prefix.clone()) {
+            ExistingNodeInnerResult::Found { node_index, .. } => {
+                self.nodes.get(node_index).unwrap().parent
+            }
+            ExistingNodeInnerResult::NotFound {
+                closest_ancestor: None,
+            } => None,
+            ExistingNodeInnerResult::NotFound {
+                closest_ancestor: Some(ancestor),
+            } => {
+                let key_len = self.node_full_key(ancestor).count();
+                let child_index = prefix.skip(key_len).next().unwrap();
+                Some((ancestor, child_index))
+            }
+        };
 
-                // If `ancestor` is `None`, .
+        // If `ancestor` is `None`, then it's easy: we clear the entire trie.
+        let (ancestor_index, ancestor_child_nibble) = match ancestor {
+            Some(a) => a,
+            None => {
+                self.nodes.clear();
+                self.root_index = None;
+                return None;
+            }
+        };
 
-                if let Some((ancestor_index, child_index)) = ancestor {
-                    let to_drop = self.nodes.get_mut(ancestor_index).unwrap().children
-                        [usize::from(u8::from(child_index))]
-                    .take();
-                    if let Some(to_drop) = to_drop {
-                        // TODO: ! we leak if we don't do anything here
-                    }
-                }*/
+        // Removes all the descendants of `ancestor` through `ancestor_child_nibble`.
+        {
+            // TODO: this performs allocations, do we care?
+            let first_remove_index = self.nodes.get_mut(ancestor_index).unwrap().children
+                [usize::from(u8::from(ancestor_child_nibble))]
+            .take()
+            .unwrap();
+            let mut to_remove = vec![first_remove_index];
+            while !to_remove.is_empty() {
+                let mut next_to_remove = Vec::new();
+                for node_index in to_remove.drain(..) {
+                    let node = self.nodes.remove(node_index);
+                    next_to_remove.extend(node.children.iter().filter_map(|n| *n));
+                }
+                mem::swap(&mut to_remove, &mut next_to_remove);
+            }
+        }
+
+        // If `ancestor` is a branch node with only two children, we have to remove it from the
+        // tree as well.
+        // If this is the case, `actual_ancestor_index` will be equal to `ancestor`'s parent.
+        // Otherwise it is set to `ancestor_index`.
+        let actual_ancestor_index = {
+            let ancestor = self.nodes.get_mut(ancestor_index).unwrap();
+            if !ancestor.has_storage_value
+                && ancestor.children.iter().filter(|c| c.is_some()).count() == 2
+            {
+                let removed_ancestor = self.nodes.remove(ancestor_index);
+                let sibling_node_index: usize = removed_ancestor
+                    .children
+                    .iter()
+                    .enumerate()
+                    .filter(|(n, _)| *n != usize::from(u8::from(ancestor_child_nibble)))
+                    .find_map(|(_, c)| *c)
+                    .unwrap();
+
+                // Update the sibling to point to the ancestor's parent.
+                {
+                    let sibling = self.nodes.get_mut(sibling_node_index).unwrap();
+                    debug_assert_eq!(sibling.parent.as_ref().unwrap().0, ancestor_index);
+                    insert_front(
+                        &mut sibling.partial_key,
+                        removed_ancestor.partial_key,
+                        sibling.parent.unwrap().1,
+                    );
+                    sibling.parent = removed_ancestor.parent;
+                }
+
+                // Update the ancestor's parent to point to the sibling.
+                if let Some((ancestor_parent_index, parent_to_sibling_index)) =
+                    removed_ancestor.parent
+                {
+                    // Update the ancestory's parent to point to the sibling.
+                    let ancestor_parent = self.nodes.get_mut(ancestor_parent_index).unwrap();
+                    debug_assert_eq!(
+                        ancestor_parent.children[usize::from(u8::from(parent_to_sibling_index))],
+                        Some(ancestor_index)
+                    );
+                    ancestor_parent.children[usize::from(u8::from(parent_to_sibling_index))] =
+                        Some(sibling_node_index);
+                } else {
+                    debug_assert_eq!(self.root_index, Some(ancestor_index));
+                    self.root_index = Some(sibling_node_index);
+                }
+
+                removed_ancestor.parent.map(|(idx, _)| idx)
+            } else {
+                Some(ancestor_index)
+            }
+        };
+
+        // Return value of the function.
+        actual_ancestor_index.map(move |idx| self.node_by_index_inner(idx).unwrap())
     }
 
     /// Returns true if the structure of this trie is the same as the structure of `other`.
@@ -597,6 +669,7 @@ impl<TUd> TrieStructure<TUd> {
     ///
     /// Panics if `node_index` is not a valid index.
     fn descendants(&'_ self, node_index: usize) -> impl Iterator<Item = usize> + '_ {
+        // TODO: implementation looks wrong
         // First element is `node_index`. Each successor is the first child of `current` or,
         // if `current` doesn't have any children, the next sibling of `current`.
         // Since `node_index` must explicitly not be included, we skip the first element.
