@@ -246,6 +246,12 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
         let (tx, new_blocks_channel) = mpsc::channel(buffer_size);
         let subscription_id = guarded_lock.next_subscription_id;
+        debug_assert_eq!(
+            pinned_blocks
+                .range((subscription_id, [0; 32])..=(subscription_id, [0xff; 32]))
+                .count(),
+            0
+        );
         guarded_lock.next_subscription_id += 1;
 
         let decoded_finalized_block = header::decode(
@@ -253,7 +259,8 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             self.sync_service.block_number_bytes(),
         )
         .unwrap();
-        pinned_blocks.insert(
+
+        let _prev_value = pinned_blocks.insert(
             (subscription_id, finalized_block.hash),
             (
                 tree.finalized_async_user_data().clone(),
@@ -262,6 +269,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 false,
             ),
         );
+        debug_assert!(_prev_value.is_none());
 
         let mut non_finalized_blocks_ancestry_order =
             Vec::with_capacity(tree.num_input_non_finalized_blocks());
@@ -296,7 +304,8 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 self.sync_service.block_number_bytes(),
             )
             .unwrap();
-            pinned_blocks.insert(
+
+            let _prev_value = pinned_blocks.insert(
                 (subscription_id, block_hash),
                 (
                     runtime.clone(),
@@ -305,6 +314,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                     true,
                 ),
             );
+            debug_assert!(_prev_value.is_none());
 
             non_finalized_blocks_ancestry_order.push(BlockNotification {
                 is_new_best: block.is_output_best,
@@ -1677,7 +1687,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         for (subscription_id, (_, sender, _)) in all_blocks_subscriptions.iter_mut()
                         {
                             if sender.try_send(notif.clone()).is_ok() {
-                                pinned_blocks.insert(
+                                let _prev_value = pinned_blocks.insert(
                                     (*subscription_id, block_hash),
                                     (
                                         block_runtime.clone(),
@@ -1686,6 +1696,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                         true,
                                     ),
                                 );
+                                debug_assert!(_prev_value.is_none());
                             } else {
                                 to_remove.push(*subscription_id);
                             }
