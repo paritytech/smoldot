@@ -1182,34 +1182,21 @@ impl<TPlat: Platform> Task<TPlat> {
                 message,
             } if chain_index == self.network_chain_index => {
                 let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
-                match self.sync.grandpa_commit_message(
-                    sync_source_id,
-                    &message.as_encoded(),
-                    rand::random(),
-                ) {
-                    Ok(()) => {
-                        // TODO: print more details
+                match self
+                    .sync
+                    .grandpa_commit_message(sync_source_id, message.into_encoded())
+                {
+                    all::GrandpaCommitMessageOutcome::Queued => {
+                        // TODO: print more details?
                         log::debug!(
                             target: &self.log_target,
-                            "Sync => GrandpaCommitVerified"
+                            "Sync <= QueuedGrandpaCommit"
                         );
-
-                        self.network_up_to_date_finalized = false; // TODO: only do if commit message has been processed
-                        self.known_finalized_runtime = None; // TODO: only do if commit message has been processed and if there was no RuntimeUpdated log item in the finalized blocks
-                        self.network_up_to_date_best = false; // TODO: done in case finality changes the best block; make this clearer in the sync layer
-                        self.dispatch_all_subscribers(Notification::Finalized {
-                            hash: self
-                                .sync
-                                .finalized_block_header()
-                                .hash(self.sync.block_number_bytes()),
-                            best_block_hash: self.sync.best_block_hash(),
-                        });
                     }
-                    Err(err) => {
-                        log::warn!(
+                    all::GrandpaCommitMessageOutcome::Discarded => {
+                        log::debug!(
                             target: &self.log_target,
-                            "Error when verifying GrandPa commit message: {}",
-                            err
+                            "Sync <= IgnoredGrandpaCommit"
                         );
                     }
                 }

@@ -1245,27 +1245,28 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
     /// Update the state machine with a Grandpa commit message received from the network.
     ///
-    /// On success, the finalized block might have been updated.
-    ///
-    /// A randomness seed must be provided and will be used during the verification. Note that the
-    /// verification is nonetheless deterministic.
-    /// TODO: randomness seed will be removed at some point
-    // TODO: return which blocks are removed as finalized
+    /// This function only inserts the commit message into the state machine, and does not
+    /// immediately verify it.
     pub fn grandpa_commit_message(
         &mut self,
         source_id: SourceId,
-        scale_encoded_message: &[u8],
-        randomness_seed: [u8; 32],
-    ) -> Result<(), blocks_tree::CommitVerifyError> {
+        scale_encoded_message: Vec<u8>,
+    ) -> GrandpaCommitMessageOutcome {
         let source_id = self.shared.sources.get(source_id.0).unwrap();
 
-        // TODO: clearly indicate if message has been ignored
         match (&mut self.inner, source_id) {
             (AllSyncInner::AllForks(sync), SourceMapping::AllForks(source_id)) => {
-                sync.grandpa_commit_message(*source_id, scale_encoded_message, randomness_seed)
+                match sync.grandpa_commit_message(*source_id, scale_encoded_message) {
+                    all_forks::GrandpaCommitMessageOutcome::ParseError => {
+                        GrandpaCommitMessageOutcome::Discarded
+                    }
+                    all_forks::GrandpaCommitMessageOutcome::Queued => {
+                        GrandpaCommitMessageOutcome::Queued
+                    }
+                }
             }
-            (AllSyncInner::Optimistic { .. }, _) => Ok(()),
-            (AllSyncInner::GrandpaWarpSync { .. }, _) => Ok(()),
+            (AllSyncInner::Optimistic { .. }, _) => GrandpaCommitMessageOutcome::Discarded,
+            (AllSyncInner::GrandpaWarpSync { .. }, _) => GrandpaCommitMessageOutcome::Discarded,
 
             // Invalid internal states.
             (AllSyncInner::AllForks(_), _) => unreachable!(),
@@ -1993,6 +1994,15 @@ pub enum ResponseOutcome {
     /// This can happen if a block announce or different ancestry search response has been
     /// processed in between the request and response.
     AllAlreadyInChain,
+}
+
+/// See [`AllSync::grandpa_commit_message`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrandpaCommitMessageOutcome {
+    /// Message has been silently discarded.
+    Discarded,
+    /// Message has been queued for later verification.
+    Queued,
 }
 
 // TODO: doc
