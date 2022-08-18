@@ -22,7 +22,7 @@
 
 use super::nibble::Nibble;
 
-use alloc::{borrow::ToOwned as _, vec::Vec};
+use alloc::{borrow::ToOwned as _, vec, vec::Vec};
 use core::{fmt, iter, mem};
 use either::Either;
 use slab::Slab;
