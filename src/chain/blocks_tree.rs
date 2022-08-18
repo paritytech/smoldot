@@ -67,7 +67,7 @@ use crate::{
 };
 
 use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
-use core::{cmp, fmt, mem, num::NonZeroU64, time::Duration};
+use core::{fmt, mem, num::NonZeroU64, time::Duration};
 use hashbrown::HashMap;
 
 mod best_block;
@@ -137,8 +137,9 @@ impl<T> NonFinalizedTree<T> {
                         finalized_triggered_authorities,
                     } => Finality::Grandpa {
                         after_finalized_block_authorities_set_id,
-                        finalized_scheduled_change,
-                        finalized_triggered_authorities,
+                        finalized_scheduled_change: finalized_scheduled_change
+                            .map(|(n, l)| (n, Arc::new(l))),
+                        finalized_triggered_authorities: Arc::new(finalized_triggered_authorities),
                     },
                 },
                 finalized_consensus: match chain_information.consensus {
@@ -503,13 +504,18 @@ enum Finality {
     Grandpa {
         /// Grandpa authorities set ID of the block right after the finalized block.
         after_finalized_block_authorities_set_id: u64,
+
         /// List of GrandPa authorities that need to finalize the block right after the finalized
         /// block.
-        finalized_triggered_authorities: Vec<header::GrandpaAuthority>,
+        // TODO: consider `Arc<[..]>`
+        finalized_triggered_authorities: Arc<Vec<header::GrandpaAuthority>>,
+
         /// Change in the GrandPa authorities list that has been scheduled by a block that is already
         /// finalized but not triggered yet. These changes will for sure happen. Contains the block
-        /// number where the changes are to be triggered.
-        finalized_scheduled_change: Option<(u64, Vec<header::GrandpaAuthority>)>,
+        /// number where the changes are to be triggered. The descendants of the block with that
+        /// number need to be finalized with the new authorities.
+        // TODO: consider `Arc<[..]>`
+        finalized_scheduled_change: Option<(u64, Arc<Vec<header::GrandpaAuthority>>)>,
     },
 }
 
@@ -550,7 +556,31 @@ enum BlockConsensus {
 #[derive(Clone)]
 enum BlockFinality {
     Outsourced,
-    Grandpa,
+    Grandpa {
+        /// If a block A triggers a change in the list of Grandpa authorities, and a block B is
+        /// a descendant of A, then B cannot be finalized before A is.
+        /// This field contains the height of A, if it is known. Contains `None` if A is the
+        /// current finalized block or below, and thus doesn't matter anyway.
+        prev_auth_change_trigger_number: Option<u64>,
+
+        /// Authorities set id that must be used to finalize the blocks that descend from this
+        /// one.
+        after_block_authorities_set_id: u64,
+
+        /// `true` if this block triggers a change in the list of Grandpa authorities.
+        triggers_change: bool,
+
+        /// List of GrandPa authorities that need to finalize the block right after this block.
+        ///
+        /// If `triggers_change` is `false`, then this field must be equal to the parent block's.
+        triggered_authorities: Arc<Vec<header::GrandpaAuthority>>,
+
+        /// A change in the GrandPa authorities list that has been scheduled for the block with the
+        /// given number that descends from this one. The block with that number will trigger the
+        /// new authorities, meaning that its descendants will need to be finalized with the new
+        /// authorities.
+        scheduled_change: Option<(u64, Arc<Vec<header::GrandpaAuthority>>)>,
+    },
 }
 
 /// Access to a block's information and hierarchy.

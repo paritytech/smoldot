@@ -199,7 +199,23 @@ impl<T> NonFinalizedTreeInner<T> {
 
             let finality = match self.finality {
                 Finality::Outsourced => BlockFinality::Outsourced,
-                Finality::Grandpa { .. } => BlockFinality::Grandpa,
+                Finality::Grandpa {
+                    after_finalized_block_authorities_set_id,
+                    ref finalized_scheduled_change,
+                    ref finalized_triggered_authorities,
+                } => {
+                    debug_assert!(finalized_scheduled_change
+                        .as_ref()
+                        .map(|(n, _)| *n >= decoded_header.number)
+                        .unwrap_or(true));
+                    BlockFinality::Grandpa {
+                        prev_auth_change_trigger_number: None,
+                        triggers_change: false,
+                        scheduled_change: finalized_scheduled_change.clone(),
+                        after_block_authorities_set_id: after_finalized_block_authorities_set_id,
+                        triggered_authorities: finalized_triggered_authorities.clone(),
+                    }
+                }
             };
 
             (consensus, finality)
@@ -476,7 +492,87 @@ impl<T> VerifyContext<T> {
 
         let finality = match &self.finality {
             BlockFinality::Outsourced => BlockFinality::Outsourced,
-            BlockFinality::Grandpa => BlockFinality::Grandpa,
+            BlockFinality::Grandpa {
+                prev_auth_change_trigger_number: parent_prev_auth_change_trigger_number,
+                after_block_authorities_set_id: parent_after_block_authorities_set_id,
+                scheduled_change: parent_scheduled_change,
+                triggered_authorities: parent_triggered_authorities,
+                triggers_change: parent_triggers_change,
+                ..
+            } => {
+                let mut triggered_authorities = parent_triggered_authorities.clone();
+                let mut triggers_change = false;
+                let mut scheduled_change = parent_scheduled_change.clone();
+
+                // Check whether the verified block schedules a change of authorities.
+                for grandpa_digest_item in self.header.digest.logs().filter_map(|d| match d {
+                    header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
+                    _ => None,
+                }) {
+                    match grandpa_digest_item {
+                        header::GrandpaConsensusLogRef::ScheduledChange(change) => {
+                            let trigger_block_height = self
+                                .header
+                                .number
+                                .checked_add(u64::from(change.delay))
+                                .unwrap();
+
+                            match scheduled_change {
+                                Some(_) => panic!("invalid block!"), // TODO: this problem is not checked during block verification
+                                None => {
+                                    scheduled_change = Some((
+                                        trigger_block_height,
+                                        Arc::new(
+                                            change
+                                                .next_authorities
+                                                .map(|a| a.into())
+                                                .collect::<Vec<_>>(),
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {} // TODO: unimplemented
+                    }
+                }
+
+                // If the newly-verified block is one where Grandpa scheduled change are
+                // triggered, we need update the field values.
+                // Note that this is checked after we have potentially fetched `scheduled_change`
+                // from the block.
+                if let Some((trigger_height, new_list)) = &scheduled_change {
+                    if *trigger_height == self.header.number {
+                        triggers_change = true;
+                        triggered_authorities = new_list.clone();
+                        scheduled_change = None;
+                    }
+                }
+
+                debug_assert!(scheduled_change
+                    .as_ref()
+                    .map(|(n, _)| *n >= self.header.number)
+                    .unwrap_or(true));
+                debug_assert!(parent_prev_auth_change_trigger_number
+                    .as_ref()
+                    .map(|n| *n < self.header.number)
+                    .unwrap_or(true));
+
+                BlockFinality::Grandpa {
+                    prev_auth_change_trigger_number: if *parent_triggers_change {
+                        Some(self.header.number - 1)
+                    } else {
+                        *parent_prev_auth_change_trigger_number
+                    },
+                    triggered_authorities,
+                    scheduled_change,
+                    triggers_change,
+                    after_block_authorities_set_id: if triggers_change {
+                        *parent_after_block_authorities_set_id + 1
+                    } else {
+                        *parent_after_block_authorities_set_id
+                    },
+                }
+            }
         };
 
         (is_new_best, consensus, finality)
