@@ -521,6 +521,8 @@ struct Block<T> {
     hash: [u8; 32],
     /// Changes to the consensus made by the block.
     consensus: BlockConsensus,
+    /// Information about finality attached to each block.
+    finality: BlockFinality,
     /// Opaque data decided by the user.
     user_data: T,
 }
@@ -542,6 +544,13 @@ enum BlockConsensus {
         /// Information about the Babe epoch the block belongs to.
         next_epoch: Arc<chain_information::BabeEpochInformation>,
     },
+}
+
+/// Information about finality attached to each block.
+#[derive(Clone)]
+enum BlockFinality {
+    Outsourced,
+    Grandpa,
 }
 
 /// Access to a block's information and hierarchy.
