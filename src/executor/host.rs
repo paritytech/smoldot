@@ -2829,6 +2829,7 @@ pub enum Error {
     },
     /// The host function isn't implemented.
     // TODO: this variant should eventually disappear as all functions are implemented
+    #[display(fmt = "Host function not implemented: {}", function)]
     HostFunctionNotImplemented {
         /// Name of the function being called.
         function: &'static str,
