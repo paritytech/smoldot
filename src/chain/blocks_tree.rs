@@ -561,10 +561,14 @@ enum BlockFinality {
         /// a descendant of A, then B cannot be finalized before A is.
         /// This field contains the height of A, if it is known. Contains `None` if A is the
         /// current finalized block or below, and thus doesn't matter anyway.
+        ///
+        /// If `Some`, the value must always be strictly inferior to the attached block's number.
         prev_auth_change_trigger_number: Option<u64>,
 
         /// Authorities set id that must be used to finalize the blocks that descend from this
         /// one.
+        ///
+        /// If `triggers_change` is `false`, then this field must be equal to the parent block's.
         after_block_authorities_set_id: u64,
 
         /// `true` if this block triggers a change in the list of Grandpa authorities.
@@ -579,6 +583,8 @@ enum BlockFinality {
         /// given number that descends from this one. The block with that number will trigger the
         /// new authorities, meaning that its descendants will need to be finalized with the new
         /// authorities.
+        ///
+        /// If `Some`, the value must always be strictly superior to the attached block's number.
         scheduled_change: Option<(u64, Arc<[header::GrandpaAuthority]>)>,
     },
 }

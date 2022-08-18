@@ -517,6 +517,9 @@ impl<T> VerifyContext<T> {
                                 .checked_add(u64::from(change.delay))
                                 .unwrap();
 
+                            // It is forbidden to schedule a change while a change is already
+                            // scheduled, otherwise the block is invalid. This is verified during
+                            // the block verification.
                             match scheduled_change {
                                 Some(_) => panic!("invalid block!"), // TODO: this problem is not checked during block verification
                                 None => {
@@ -543,9 +546,10 @@ impl<T> VerifyContext<T> {
                     }
                 }
 
+                // Some sanity checks.
                 debug_assert!(scheduled_change
                     .as_ref()
-                    .map(|(n, _)| *n >= self.header.number)
+                    .map(|(n, _)| *n > self.header.number)
                     .unwrap_or(true));
                 debug_assert!(parent_prev_auth_change_trigger_number
                     .as_ref()
