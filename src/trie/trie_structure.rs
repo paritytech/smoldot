@@ -669,7 +669,6 @@ impl<TUd> TrieStructure<TUd> {
     ///
     /// Panics if `node_index` is not a valid index.
     fn descendants(&'_ self, node_index: usize) -> impl Iterator<Item = usize> + '_ {
-        // TODO: implementation looks wrong
         // First element is `node_index`. Each successor is the first child of `current` or,
         // if `current` doesn't have any children, the next sibling of `current`.
         // Since `node_index` must explicitly not be included, we skip the first element.
