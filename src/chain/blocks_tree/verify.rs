@@ -522,12 +522,7 @@ impl<T> VerifyContext<T> {
                                 None => {
                                     scheduled_change = Some((
                                         trigger_block_height,
-                                        Arc::new(
-                                            change
-                                                .next_authorities
-                                                .map(|a| a.into())
-                                                .collect::<Vec<_>>(),
-                                        ),
+                                        change.next_authorities.map(|a| a.into()).collect(),
                                     ));
                                 }
                             }

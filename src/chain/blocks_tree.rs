@@ -138,8 +138,10 @@ impl<T> NonFinalizedTree<T> {
                     } => Finality::Grandpa {
                         after_finalized_block_authorities_set_id,
                         finalized_scheduled_change: finalized_scheduled_change
-                            .map(|(n, l)| (n, Arc::new(l))),
-                        finalized_triggered_authorities: Arc::new(finalized_triggered_authorities),
+                            .map(|(n, l)| (n, l.into_iter().collect())),
+                        finalized_triggered_authorities: finalized_triggered_authorities
+                            .into_iter()
+                            .collect(),
                     },
                 },
                 finalized_consensus: match chain_information.consensus {
@@ -507,15 +509,13 @@ enum Finality {
 
         /// List of GrandPa authorities that need to finalize the block right after the finalized
         /// block.
-        // TODO: consider `Arc<[..]>`
-        finalized_triggered_authorities: Arc<Vec<header::GrandpaAuthority>>,
+        finalized_triggered_authorities: Arc<[header::GrandpaAuthority]>,
 
         /// Change in the GrandPa authorities list that has been scheduled by a block that is already
         /// finalized but not triggered yet. These changes will for sure happen. Contains the block
         /// number where the changes are to be triggered. The descendants of the block with that
         /// number need to be finalized with the new authorities.
-        // TODO: consider `Arc<[..]>`
-        finalized_scheduled_change: Option<(u64, Arc<Vec<header::GrandpaAuthority>>)>,
+        finalized_scheduled_change: Option<(u64, Arc<[header::GrandpaAuthority]>)>,
     },
 }
 
@@ -573,13 +573,13 @@ enum BlockFinality {
         /// List of GrandPa authorities that need to finalize the block right after this block.
         ///
         /// If `triggers_change` is `false`, then this field must be equal to the parent block's.
-        triggered_authorities: Arc<Vec<header::GrandpaAuthority>>,
+        triggered_authorities: Arc<[header::GrandpaAuthority]>,
 
         /// A change in the GrandPa authorities list that has been scheduled for the block with the
         /// given number that descends from this one. The block with that number will trigger the
         /// new authorities, meaning that its descendants will need to be finalized with the new
         /// authorities.
-        scheduled_change: Option<(u64, Arc<Vec<header::GrandpaAuthority>>)>,
+        scheduled_change: Option<(u64, Arc<[header::GrandpaAuthority]>)>,
     },
 }
 
