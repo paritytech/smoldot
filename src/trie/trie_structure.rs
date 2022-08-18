@@ -456,7 +456,7 @@ impl<TUd> TrieStructure<TUd> {
         }
     }
 
-    /// Iterates over all nodes of the trie, in a specific but undeterminate order.
+    /// Iterates over all nodes of the trie, in a specific but unspecified order.
     fn all_nodes_ordered(&'_ self) -> impl Iterator<Item = usize> + '_ {
         fn ancestry_order_next<TUd>(tree: &TrieStructure<TUd>, node_index: usize) -> Option<usize> {
             if let Some(first_child) = tree
