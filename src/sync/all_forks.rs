@@ -2070,7 +2070,7 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
     }
 }
 
-/// See [`AllSync::grandpa_commit_message`].
+/// See [`AllForksSync::grandpa_commit_message`].
 #[derive(Debug, Clone)]
 pub enum GrandpaCommitMessageOutcome {
     /// Failed to parse message. Commit has been silently discarded.
