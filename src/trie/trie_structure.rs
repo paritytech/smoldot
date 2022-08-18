@@ -456,13 +456,35 @@ impl<TUd> TrieStructure<TUd> {
         }
     }
 
-    /// Iterates over all nodes of the trie, in a specific order.
+    /// Iterates over all nodes of the trie, in a specific but undeterminate order.
     fn all_nodes_ordered(&'_ self) -> impl Iterator<Item = usize> + '_ {
-        if let Some(root_index) = self.root_index {
-            either::Left(iter::once(root_index).chain(self.descendants(root_index)))
-        } else {
-            either::Right(iter::empty())
+        fn ancestry_order_next<TUd>(tree: &TrieStructure<TUd>, node_index: usize) -> Option<usize> {
+            if let Some(first_child) = tree
+                .nodes
+                .get(node_index)
+                .unwrap()
+                .children
+                .iter()
+                .find_map(|c| *c)
+            {
+                return Some(first_child);
+            }
+
+            if let Some(next_sibling) = tree.next_sibling(node_index) {
+                return Some(next_sibling);
+            }
+
+            let mut return_value = tree.nodes[node_index].parent.map(|(i, _)| i);
+            while let Some(idx) = return_value {
+                if let Some(next_sibling) = tree.next_sibling(idx) {
+                    return Some(next_sibling);
+                }
+                return_value = tree.nodes[idx].parent.map(|(i, _)| i);
+            }
+            return_value
         }
+
+        iter::successors(self.root_index, move |n| ancestry_order_next(self, *n))
     }
 
     /// Returns the [`NodeAccess`] of the node at the given index, or `None` if no such node
@@ -586,33 +608,6 @@ impl<TUd> TrieStructure<TUd> {
         // Since `target` must explicitly not be included, we skip the first element.
         iter::successors(Some(target), move |current| {
             Some(self.nodes.get(*current).unwrap().parent?.0)
-        })
-        .skip(1)
-    }
-
-    /// Returns the indices of all the descendants (direct or indirect) of `node_index`, not
-    /// including `node_index` itself.
-    ///
-    /// # Panic
-    ///
-    /// Panics if `node_index` is not a valid index.
-    fn descendants(&'_ self, node_index: usize) -> impl Iterator<Item = usize> + '_ {
-        // First element is `node_index`. Each successor is the first child of `current` or,
-        // if `current` doesn't have any children, the next sibling of `current`.
-        // Since `node_index` must explicitly not be included, we skip the first element.
-        iter::successors(Some(node_index), move |current| {
-            let first_child = self
-                .nodes
-                .get(*current)
-                .unwrap()
-                .children
-                .iter()
-                .find_map(|c| *c);
-            if let Some(first_child) = first_child {
-                Some(first_child)
-            } else {
-                self.next_sibling(*current)
-            }
         })
         .skip(1)
     }

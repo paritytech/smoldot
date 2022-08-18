@@ -416,3 +416,31 @@ fn fuzzing() {
         }
     }
 }
+
+#[test]
+fn iter_properly_traverses() {
+    let mut trie = TrieStructure::new();
+
+    // Fill the trie with entries with randomly generated keys.
+    for _ in 0..Uniform::new_inclusive(0, 32).sample(&mut rand::thread_rng()) {
+        let mut key = Vec::new();
+        for _ in 0..Uniform::new_inclusive(0, 12).sample(&mut rand::thread_rng()) {
+            key.push(
+                Nibble::try_from(Uniform::new_inclusive(0, 15).sample(&mut rand::thread_rng()))
+                    .unwrap(),
+            );
+        }
+
+        match trie.node(key.into_iter()) {
+            super::Entry::Vacant(e) => {
+                e.insert_storage_value().insert((), ());
+            }
+            super::Entry::Occupied(super::NodeAccess::Branch(e)) => {
+                e.insert_storage_value();
+            }
+            super::Entry::Occupied(super::NodeAccess::Storage(_)) => {}
+        }
+    }
+
+    assert_eq!(trie.all_nodes_ordered().count(), trie.nodes.len());
+}
