@@ -5,6 +5,7 @@
 ### Changed
 
 - In case of protocol error, or if a peer refuses a block announces substream, no new substream with the same peer will be attempted for 20 seconds. This avoids loops where the same peer is tried over and over again.
+- Blocks now fail verification if they start a GrandPa scheduled change while there is already a GrandPa scheduled change in progress.
 
 ## 0.6.30 - 2022-08-12
 

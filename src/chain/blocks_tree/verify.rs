@@ -282,6 +282,14 @@ impl<T> NonFinalizedTreeInner<T> {
                         )
                     }
                 },
+                finality: match &context.finality {
+                    BlockFinality::Outsourced => verify::header_only::ConfigFinality::Outsourced,
+                    BlockFinality::Grandpa {
+                        scheduled_change, ..
+                    } => verify::header_only::ConfigFinality::Grandpa {
+                        has_scheduled_change: scheduled_change.is_some(),
+                    },
+                },
                 allow_unknown_consensus_engines: context.chain.allow_unknown_consensus_engines,
                 block_header: (&*context.header).into(), // TODO: inefficiency ; in case of header only verify we do an extra allocation to build the context above
                 block_number_bytes: context.chain.block_number_bytes,
@@ -521,7 +529,9 @@ impl<T> VerifyContext<T> {
                             // scheduled, otherwise the block is invalid. This is verified during
                             // the block verification.
                             match scheduled_change {
-                                Some(_) => panic!("invalid block!"), // TODO: this problem is not checked during block verification
+                                Some(_) => unreachable!(
+                                    "new scheduled change while a change is already in progress"
+                                ),
                                 None => {
                                     scheduled_change = Some((
                                         trigger_block_height,
