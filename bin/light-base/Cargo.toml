@@ -11,7 +11,7 @@ publish = false
 [dependencies]
 blake2-rfc = { version = "0.2.18", default-features = false }
 derive_more = "0.99.17"
-either = { version = "1.7.0", default-features = false }
+either = { version = "1.8.0", default-features = false }
 event-listener = { version = "2.5.3" }
 fnv = { version = "1.0.7", default-features = false }
 futures = "0.3.23"
