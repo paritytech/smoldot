@@ -284,11 +284,7 @@ impl<T> NonFinalizedTreeInner<T> {
                 },
                 finality: match &context.finality {
                     BlockFinality::Outsourced => verify::header_only::ConfigFinality::Outsourced,
-                    BlockFinality::Grandpa {
-                        scheduled_change, ..
-                    } => verify::header_only::ConfigFinality::Grandpa {
-                        has_scheduled_change: scheduled_change.is_some(),
-                    },
+                    BlockFinality::Grandpa { .. } => verify::header_only::ConfigFinality::Grandpa,
                 },
                 allow_unknown_consensus_engines: context.chain.allow_unknown_consensus_engines,
                 block_header: (&*context.header).into(), // TODO: inefficiency ; in case of header only verify we do an extra allocation to build the context above
@@ -529,9 +525,10 @@ impl<T> VerifyContext<T> {
                             // scheduled, otherwise the block is invalid. This is verified during
                             // the block verification.
                             match scheduled_change {
-                                Some(_) => unreachable!(
-                                    "new scheduled change while a change is already in progress"
-                                ),
+                                Some(_) => {
+                                    // Ignore any new change if a change is already in progress.
+                                    // Matches the behaviour here: <https://github.com/paritytech/substrate/blob/a357c29ebabb075235977edd5e3901c66575f995/client/finality-grandpa/src/authorities.rs#L479>
+                                }
                                 None => {
                                     scheduled_change = Some((
                                         trigger_block_height,
@@ -540,7 +537,10 @@ impl<T> VerifyContext<T> {
                                 }
                             }
                         }
-                        _ => {} // TODO: unimplemented
+                        _ => {
+                            // TODO: unimplemented
+                            // TODO: when it comes to forced change, they take precedence over scheduled changes but only sheduled changes within the same block
+                        }
                     }
                 }
 
