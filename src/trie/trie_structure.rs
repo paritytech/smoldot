@@ -365,6 +365,9 @@ impl<TUd> TrieStructure<TUd> {
             } => {
                 let key_len = self.node_full_key(ancestor).count();
                 let child_index = prefix.skip(key_len).next().unwrap();
+                debug_assert!(
+                    self.nodes[ancestor].children[usize::from(u8::from(child_index))].is_some()
+                );
                 Some((ancestor, child_index))
             }
         };
