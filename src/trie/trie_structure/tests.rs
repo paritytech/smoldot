@@ -353,9 +353,15 @@ fn fuzzing() {
         // Create multiple tries, each with a different order of insertion for the nodes.
         let mut tries = Vec::new();
         for _ in 0..16 {
+            enum Op {
+                Insert,
+                Remove,
+                ClearPrefix,
+            }
+
             let mut operations = final_storage
                 .iter()
-                .map(|k| (k.clone(), true))
+                .map(|k| (k.clone(), Op::Insert))
                 .collect::<Vec<_>>();
             operations.shuffle(&mut rand::thread_rng());
 
@@ -379,15 +385,56 @@ fn fuzzing() {
                     Uniform::new_inclusive(0, max_remove_index).sample(&mut rand::thread_rng());
                 let insert_index =
                     Uniform::new_inclusive(0, remove_index).sample(&mut rand::thread_rng());
-                operations.insert(remove_index, (base_key.clone(), false));
-                operations.insert(insert_index, (base_key, true));
+                operations.insert(remove_index, (base_key.clone(), Op::Remove));
+                operations.insert(insert_index, (base_key, Op::Insert));
+            }
+
+            // Insert in `operations` a tuple of multiple insertions of the same prefix, and
+            // removal of said prefix.
+            for _ in 0..uniform_sample(0, 4) {
+                let mut base_key = match operations.choose(&mut rand::thread_rng()) {
+                    Some(op) => op.0.clone(),
+                    None => continue,
+                };
+
+                for _ in 0..uniform_sample(0, 2) {
+                    base_key.push(Nibble::try_from(uniform_sample(0, 15)).unwrap());
+                }
+
+                let max_remove_index = operations
+                    .iter()
+                    .position(|(k, _)| k.starts_with(&base_key))
+                    .unwrap_or(operations.len());
+
+                let remove_index =
+                    Uniform::new_inclusive(0, max_remove_index).sample(&mut rand::thread_rng());
+                operations.insert(remove_index, (base_key.clone(), Op::ClearPrefix));
+
+                for _ in 0..uniform_sample(0, 12) {
+                    let mut base_key = base_key.clone();
+                    for _ in 0..uniform_sample(0, 8) {
+                        base_key.push(Nibble::try_from(uniform_sample(0, 15)).unwrap());
+                    }
+
+                    if operations
+                        .iter()
+                        .take(remove_index)
+                        .any(|(k, _)| *k == base_key)
+                    {
+                        continue;
+                    }
+
+                    let insert_index =
+                        Uniform::new_inclusive(0, remove_index).sample(&mut rand::thread_rng());
+                    operations.insert(insert_index, (base_key, Op::Insert));
+                }
             }
 
             // Create a trie and applies `operations` on it.
             let mut trie = TrieStructure::new();
-            for (key, insert) in operations {
-                if insert {
-                    match trie.node(key.into_iter()) {
+            for (key, op) in operations {
+                match op {
+                    Op::Insert => match trie.node(key.into_iter()) {
                         super::Entry::Vacant(e) => {
                             e.insert_storage_value().insert((), ());
                         }
@@ -395,14 +442,16 @@ fn fuzzing() {
                             e.insert_storage_value();
                         }
                         super::Entry::Occupied(super::NodeAccess::Storage(_)) => unreachable!(),
-                    }
-                } else {
-                    match trie.node(key.into_iter()) {
+                    },
+                    Op::Remove => match trie.node(key.into_iter()) {
                         super::Entry::Occupied(super::NodeAccess::Storage(e)) => {
                             e.remove();
                         }
                         super::Entry::Vacant(_) => unreachable!(),
                         super::Entry::Occupied(super::NodeAccess::Branch(_)) => unreachable!(),
+                    },
+                    Op::ClearPrefix => {
+                        trie.remove_prefix(key.into_iter());
                     }
                 }
             }
