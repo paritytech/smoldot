@@ -406,7 +406,7 @@ fn fuzzing() {
                     .position(|(k, _)| k.starts_with(&base_key))
                     .unwrap_or(operations.len());
 
-                let remove_index =
+                let mut remove_index =
                     Uniform::new_inclusive(0, max_remove_index).sample(&mut rand::thread_rng());
                 operations.insert(remove_index, (base_key.clone(), Op::ClearPrefix));
 
@@ -427,6 +427,7 @@ fn fuzzing() {
                     let insert_index =
                         Uniform::new_inclusive(0, remove_index).sample(&mut rand::thread_rng());
                     operations.insert(insert_index, (base_key, Op::Insert));
+                    remove_index += 1;
                 }
             }
 
