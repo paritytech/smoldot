@@ -363,6 +363,7 @@ impl<TUd> TrieStructure<TUd> {
             ExistingNodeInnerResult::NotFound {
                 closest_ancestor: Some(ancestor),
             } => {
+                // TODO: maybe return the key length from existing_node_inner or something
                 let key_len = self.node_full_key(ancestor).count();
                 let child_index = prefix.skip(key_len).next().unwrap();
                 // It is possible that there is simply no node at all with the given prefix, in
@@ -388,10 +389,16 @@ impl<TUd> TrieStructure<TUd> {
         // Removes all the descendants of `ancestor` through `ancestor_child_nibble`.
         {
             // TODO: this performs allocations, do we care?
-            let first_remove_index = self.nodes.get_mut(ancestor_index).unwrap().children
-                [usize::from(u8::from(ancestor_child_nibble))]
-            .take()
-            .unwrap();
+            let first_remove_index = self
+                .nodes
+                .get_mut(ancestor_index)
+                .unwrap()
+                .children
+                .get_mut(usize::from(u8::from(ancestor_child_nibble)))
+                .unwrap()
+                .take()
+                .unwrap();
+
             let mut to_remove = vec![first_remove_index];
             while !to_remove.is_empty() {
                 let mut next_to_remove = Vec::new();
@@ -403,23 +410,20 @@ impl<TUd> TrieStructure<TUd> {
             }
         }
 
-        // If `ancestor` is a branch node with only two children, we have to remove it from the
-        // tree as well.
+        // If `ancestor` is a branch node with only one child (had two children before this
+        // function call, but we removed one earlier), we have to remove it from the tree as well.
         // If this is the case, `actual_ancestor_index` will be equal to `ancestor`'s parent.
         // Otherwise it is set to `ancestor_index`.
         let actual_ancestor_index = {
             let ancestor = self.nodes.get_mut(ancestor_index).unwrap();
+            debug_assert!(
+                ancestor.has_storage_value || ancestor.children.iter().any(|c| c.is_some())
+            );
             if !ancestor.has_storage_value
-                && ancestor.children.iter().filter(|c| c.is_some()).count() == 2
+                && ancestor.children.iter().filter(|c| c.is_some()).count() == 1
             {
-                let removed_ancestor = self.nodes.remove(ancestor_index);
-                let sibling_node_index: usize = removed_ancestor
-                    .children
-                    .iter()
-                    .enumerate()
-                    .filter(|(n, _)| *n != usize::from(u8::from(ancestor_child_nibble)))
-                    .find_map(|(_, c)| *c)
-                    .unwrap();
+                let ancestor = self.nodes.remove(ancestor_index);
+                let sibling_node_index: usize = ancestor.children.iter().find_map(|c| *c).unwrap();
 
                 // Update the sibling to point to the ancestor's parent.
                 {
@@ -427,16 +431,14 @@ impl<TUd> TrieStructure<TUd> {
                     debug_assert_eq!(sibling.parent.as_ref().unwrap().0, ancestor_index);
                     insert_front(
                         &mut sibling.partial_key,
-                        removed_ancestor.partial_key,
+                        ancestor.partial_key,
                         sibling.parent.unwrap().1,
                     );
-                    sibling.parent = removed_ancestor.parent;
+                    sibling.parent = ancestor.parent;
                 }
 
                 // Update the ancestor's parent to point to the sibling.
-                if let Some((ancestor_parent_index, parent_to_sibling_index)) =
-                    removed_ancestor.parent
-                {
+                if let Some((ancestor_parent_index, parent_to_sibling_index)) = ancestor.parent {
                     // Update the ancestory's parent to point to the sibling.
                     let ancestor_parent = self.nodes.get_mut(ancestor_parent_index).unwrap();
                     debug_assert_eq!(
@@ -450,7 +452,7 @@ impl<TUd> TrieStructure<TUd> {
                     self.root_index = Some(sibling_node_index);
                 }
 
-                removed_ancestor.parent.map(|(idx, _)| idx)
+                ancestor.parent.map(|(idx, _)| idx)
             } else {
                 Some(ancestor_index)
             }
