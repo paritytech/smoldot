@@ -359,16 +359,19 @@ impl<TUd> TrieStructure<TUd> {
             }
             ExistingNodeInnerResult::NotFound {
                 closest_ancestor: None,
-            } => None,
+            } => None, // TODO: is this correct?
             ExistingNodeInnerResult::NotFound {
                 closest_ancestor: Some(ancestor),
             } => {
                 let key_len = self.node_full_key(ancestor).count();
                 let child_index = prefix.skip(key_len).next().unwrap();
-                debug_assert!(
-                    self.nodes[ancestor].children[usize::from(u8::from(child_index))].is_some()
-                );
-                Some((ancestor, child_index))
+                // It is possible that there is simply no node at all with the given prefix, in
+                // which case there is closest ancestor but nothing to clear.
+                if self.nodes[ancestor].children[usize::from(u8::from(child_index))].is_some() {
+                    Some((ancestor, child_index))
+                } else {
+                    return Some(self.node_by_index_inner(ancestor).unwrap());
+                }
             }
         };
 
