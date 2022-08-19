@@ -653,23 +653,31 @@ mod tests {
             // cache. The more modifications the more information is removed, and thus the higher
             // the chances that we don't detect a bug causing obsolete information to remain in
             // the cache.
-            // TODO: this test doesn't clear prefixes, even though it should, because `prefix_remove_update` is implemented in a dummy way that would make the test pointless
             for _ in 0..rand::thread_rng().gen_range::<u32, _>(1..5) {
                 let key_to_tweak = match trie.keys().choose(&mut rand::thread_rng()) {
                     Some(k) => k.to_vec(),
                     None => break,
                 };
 
-                if rand::random() {
-                    // Modify the key.
-                    cache.storage_value_update(&key_to_tweak, true);
-                    let mut new_value = vec![0u8; 50];
-                    rand::thread_rng().fill(&mut new_value[..]);
-                    trie.insert(key_to_tweak, new_value);
-                } else {
-                    // Remove the key.
-                    cache.storage_value_update(&key_to_tweak, false);
-                    trie.remove(&key_to_tweak);
+                match rand::thread_rng().gen_range::<u32, _>(0..40) {
+                    0..=18 => {
+                        // Modify the key.
+                        cache.storage_value_update(&key_to_tweak, true);
+                        let mut new_value = vec![0u8; 50];
+                        rand::thread_rng().fill(&mut new_value[..]);
+                        trie.insert(key_to_tweak, new_value);
+                    }
+                    19..=38 => {
+                        // Remove the key.
+                        cache.storage_value_update(&key_to_tweak, false);
+                        trie.remove(&key_to_tweak);
+                    }
+                    39 => {
+                        // Clear prefix.
+                        cache.prefix_remove_update(&key_to_tweak);
+                        trie.retain(|k, _| !k.starts_with(&key_to_tweak));
+                    }
+                    _ => unreachable!(),
                 }
             }
 
