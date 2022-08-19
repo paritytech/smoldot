@@ -353,36 +353,63 @@ impl<TUd> TrieStructure<TUd> {
     ) -> Option<NodeAccess<TUd>> {
         // `ancestor` is the node that doesn't have the prefix but is the common ancestor of all
         // the nodes to remove.
-        let ancestor = match self.existing_node_inner(prefix.clone()) {
+        let (ancestor_index, ancestor_child_nibble) = match self.existing_node_inner(prefix.clone())
+        {
             ExistingNodeInnerResult::Found { node_index, .. } => {
-                self.nodes.get(node_index).unwrap().parent
+                match self.nodes.get(node_index).unwrap().parent {
+                    Some(p) => p,
+                    None => {
+                        // There is no parent, meaning that the trie is empty or the root of trie
+                        // is a node with the requested prefix. Simply clear the entire trie.
+                        self.nodes.clear();
+                        self.root_index = None;
+                        return None;
+                    }
+                }
             }
             ExistingNodeInnerResult::NotFound {
                 closest_ancestor: None,
-            } => None, // TODO: is this correct?
+            } => {
+                // Either the trie is empty, or the key of the root node of the trie doesn't
+                // start with the requested prefix.
+                // Nothing to do.
+                return None;
+            }
             ExistingNodeInnerResult::NotFound {
                 closest_ancestor: Some(ancestor),
             } => {
                 // TODO: maybe return the key length from existing_node_inner or something
                 let key_len = self.node_full_key(ancestor).count();
-                let child_index = prefix.skip(key_len).next().unwrap();
+                let child_index = prefix.clone().skip(key_len).next().unwrap();
+
                 // It is possible that there is simply no node at all with the given prefix, in
                 // which case there is closest ancestor but nothing to clear.
-                if self.nodes[ancestor].children[usize::from(u8::from(child_index))].is_some() {
-                    Some((ancestor, child_index))
+
+                // First possibility in case there is no node with the given prefix: the ancestor
+                // simply has no child in the direction we want. For example, ancestor is
+                // `[1, 2]`, there is a node at `[1, 2, 8]`, and we want to clear `[1, 2, 5]`.
+                let direct_child = if let Some(c) =
+                    self.nodes[ancestor].children[usize::from(u8::from(child_index))]
+                {
+                    c
                 } else {
                     return Some(self.node_by_index_inner(ancestor).unwrap());
-                }
-            }
-        };
+                };
 
-        // If `ancestor` is `None`, then it's easy: we clear the entire trie.
-        let (ancestor_index, ancestor_child_nibble) = match ancestor {
-            Some(a) => a,
-            None => {
-                self.nodes.clear();
-                self.root_index = None;
-                return None;
+                // Second possibility in case there is no node with the given prefix: the ancestor
+                // has a child in the direction we want, but this child doesn't have the prefix
+                // that we want. For example, ancestor is `[1, 2]`, there is a node at
+                // `[1, 2, 3, 8]`, and we want to clear `[1, 2, 3, 6]`.
+                // TODO: this seems sub-optimal
+                if !self
+                    .node_full_key(direct_child)
+                    .zip(prefix)
+                    .all(|(a, b)| a == b)
+                {
+                    return Some(self.node_by_index_inner(ancestor).unwrap());
+                }
+
+                (ancestor, child_index)
             }
         };
 
