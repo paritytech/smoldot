@@ -260,7 +260,7 @@ impl<TUd> TrieStructure<TUd> {
             ExistingNodeInnerResult::NotFound { closest_ancestor } => Entry::Vacant(Vacant {
                 trie: self,
                 key,
-                closest_ancestor,
+                closest_ancestor: closest_ancestor.map(|(i, _)| i),
             }),
         }
     }
@@ -269,7 +269,10 @@ impl<TUd> TrieStructure<TUd> {
     ///
     /// This method is a shortcut for calling [`TrieStructure::node`] followed with
     /// [`Entry::into_occupied`].
-    pub fn existing_node(&mut self, key: impl Iterator<Item = Nibble>) -> Option<NodeAccess<TUd>> {
+    pub fn existing_node(
+        &mut self,
+        key: impl Iterator<Item = Nibble> + Clone,
+    ) -> Option<NodeAccess<TUd>> {
         if let ExistingNodeInnerResult::Found {
             node_index,
             has_storage_value,
@@ -293,10 +296,10 @@ impl<TUd> TrieStructure<TUd> {
 
     /// Inner implementation of [`TrieStructure::existing_node`]. Traverses the tree, trying to
     /// find a node whose key is `key`.
-    fn existing_node_inner(
+    fn existing_node_inner<I: Iterator<Item = Nibble> + Clone>(
         &mut self,
-        mut key: impl Iterator<Item = Nibble>,
-    ) -> ExistingNodeInnerResult {
+        mut key: I,
+    ) -> ExistingNodeInnerResult<I> {
         let mut current_index = match self.root_index {
             Some(ri) => ri,
             None => {
@@ -322,6 +325,8 @@ impl<TUd> TrieStructure<TUd> {
 
             // At this point, the tree traversal cursor (the `key` iterator) exactly matches
             // `current`.
+            closest_ancestor = Some((current_index, key.clone()));
+
             // If `key.next()` is `Some`, put it in `child_index`, otherwise return successfully.
             let child_index = match key.next() {
                 Some(n) => n,
@@ -332,8 +337,6 @@ impl<TUd> TrieStructure<TUd> {
                     }
                 }
             };
-
-            closest_ancestor = Some(current_index);
 
             if let Some(next_index) = current.children[usize::from(u8::from(child_index))] {
                 current_index = next_index;
@@ -376,14 +379,12 @@ impl<TUd> TrieStructure<TUd> {
                 return None;
             }
             ExistingNodeInnerResult::NotFound {
-                closest_ancestor: Some(ancestor),
+                closest_ancestor: Some((ancestor, mut prefix_remain)),
             } => {
-                // TODO: maybe return the key length from existing_node_inner or something
-                let key_len = self.node_full_key(ancestor).count();
-                let child_index = prefix.clone().skip(key_len).next().unwrap();
-
                 // It is possible that there is simply no node at all with the given prefix, in
                 // which case there is closest ancestor but nothing to clear.
+
+                let child_index = prefix_remain.next().unwrap();
 
                 // First possibility in case there is no node with the given prefix: the ancestor
                 // simply has no child in the direction we want. For example, ancestor is
@@ -401,10 +402,11 @@ impl<TUd> TrieStructure<TUd> {
                 // that we want. For example, ancestor is `[1, 2]`, there is a node at
                 // `[1, 2, 3, 8]`, and we want to clear `[1, 2, 3, 6]`.
                 // TODO: this seems sub-optimal
-                if !self
-                    .node_full_key(direct_child)
-                    .zip(prefix)
-                    .all(|(a, b)| a == b)
+                if !self.nodes[direct_child]
+                    .partial_key
+                    .iter()
+                    .zip(prefix_remain)
+                    .all(|(a, b)| *a == b)
                 {
                     return Some(self.node_by_index_inner(ancestor).unwrap());
                 }
@@ -755,14 +757,16 @@ impl<TUd: fmt::Debug> fmt::Debug for TrieStructure<TUd> {
     }
 }
 
-enum ExistingNodeInnerResult {
+enum ExistingNodeInnerResult<I> {
     Found {
         node_index: usize,
         has_storage_value: bool,
     },
     NotFound {
         /// Closest ancestor that actually exists.
-        closest_ancestor: Option<usize>,
+        /// If `Some`, also contains `desired_nibbles - closest_ancestor_key`. This iterator is
+        /// guaranteed to have at least one element.
+        closest_ancestor: Option<(usize, I)>,
     },
 }
 
@@ -1462,6 +1466,7 @@ where
         let future_parent = match (self.closest_ancestor, self.trie.root_index) {
             (Some(_), None) => unreachable!(),
             (Some(ancestor), Some(_)) => {
+                // TODO: could be optimized by passing in the Vacant the key remainder
                 let key_len = self.trie.node_full_key(ancestor).count();
                 debug_assert!(self.key.clone().count() > key_len);
                 Some((ancestor, key_len))
