@@ -101,18 +101,7 @@ pub enum ConfigFinality {
     Outsourced,
 
     /// Chain uses the Grandpa finality algorithm.
-    Grandpa {
-        /// Must be `true` if an ancestor block has scheduled a change in the list of Grandpa
-        /// authorities, and the block being verified is still within the delay before the changes
-        /// are triggered.
-        ///
-        /// > **Note**: For example, if a block schedules a change with a delay of 0, then the
-        /// >           value `false` must be passed when verifying children of this block. If,
-        /// >           however, a block schedules a change with a delay of 1, then `true` must be
-        /// >           passed when verifying children of this block and `false` must be passed
-        /// >           when verifying children of children of this block.
-        has_scheduled_change: bool,
-    },
+    Grandpa,
 }
 
 /// Block successfully verified.
@@ -210,29 +199,15 @@ pub fn verify(config: Config) -> Result<Success, Error> {
     }
 
     // Check whether the log items respect the finality engine.
-    // TODO: we iterate through the log items, which is O(n), is it worth optimizing this?
     match config.finality {
+        ConfigFinality::Grandpa => {}
         ConfigFinality::Outsourced => {
+            // TODO: we iterate through the log items, which is O(n), is it worth optimizing this?
             for item in config.block_header.digest.logs() {
                 match item {
                     header::DigestItemRef::GrandpaConsensus(_) => {
                         return Err(Error::FinalityEngineMismatch)
                     }
-                    _ => {}
-                }
-            }
-        }
-        ConfigFinality::Grandpa {
-            has_scheduled_change,
-        } => {
-            for item in config.block_header.digest.logs() {
-                match item {
-                    header::DigestItemRef::GrandpaConsensus(
-                        header::GrandpaConsensusLogRef::ScheduledChange(_),
-                    )
-                    | header::DigestItemRef::GrandpaConsensus(
-                        header::GrandpaConsensusLogRef::ForcedChange { .. },
-                    ) if has_scheduled_change => return Err(Error::GrandpaChangesOverlap),
                     _ => {}
                 }
             }
