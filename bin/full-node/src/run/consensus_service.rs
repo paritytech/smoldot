@@ -60,6 +60,12 @@ pub struct Config<'a> {
     /// Number of bytes of the block number in the networking protocol.
     pub block_number_bytes: usize,
 
+    /// Hash of the genesis block.
+    ///
+    /// > **Note**: At the time of writing of this comment, the value in this field is used only
+    /// >           to compare against a known genesis hash and print a warning.
+    pub genesis_block_hash: [u8; 32],
+
     /// Stores of key to use for all block-production-related purposes.
     pub keystore: Arc<keystore::Keystore>,
 
@@ -166,6 +172,25 @@ impl ConsensusService {
                 }
             })
             .await;
+
+        // The Kusama chain contains a fork hardcoded in the official Polkadot client.
+        // See <https://github.com/paritytech/polkadot/blob/93f45f996a3d5592a57eba02f91f2fc2bc5a07cf/node/service/src/grandpa_support.rs#L111-L216>
+        // Because we don't want to support this in smoldot, a warning is printed instead if we
+        // recognize Kusama.
+        // See also <https://github.com/paritytech/smoldot/issues/1866>.
+        if config.genesis_block_hash
+            == [
+                176, 168, 212, 147, 40, 92, 45, 247, 50, 144, 223, 183, 230, 31, 135, 15, 23, 180,
+                24, 1, 25, 122, 20, 156, 169, 54, 84, 73, 158, 163, 218, 254,
+            ]
+            && finalized_block_number <= 1500988
+        {
+            tracing::warn!(
+                "The Kusama chain is known to be borked at block #1491596. The official Polkadot \
+                client works around this issue by hardcoding a fork in its source code. Smoldot \
+                does not support this hardcoded fork and will thus fail to sync past this block."
+            );
+        }
 
         let sync_state = Arc::new(Mutex::new(SyncState {
             best_block_number,
@@ -1109,7 +1134,7 @@ impl SyncBackground {
                     );
                     let _enter = span.enter();
 
-                    match verify.perform() {
+                    match verify.perform(rand::random()) {
                         (
                             sync_out,
                             all::FinalityProofVerifyOutcome::NewFinalized {

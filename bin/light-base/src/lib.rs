@@ -420,8 +420,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                 (Ok(Ok(genesis_ci)), checkpoint, Ok((database, checkpoint_nodes)))
                     if checkpoint
                         .as_ref()
-                        .map(|r| r.as_ref().ok())
-                        .flatten()
+                        .and_then(|r| r.as_ref().ok())
                         .map_or(true, |cp| {
                             cp.as_ref().finalized_block_header.number
                                 < database.as_ref().finalized_block_header.number
@@ -438,8 +437,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                     Ok((database, checkpoint_nodes)),
                 ) if checkpoint
                     .as_ref()
-                    .map(|r| r.as_ref().ok())
-                    .flatten()
+                    .and_then(|r| r.as_ref().ok())
                     .map_or(true, |cp| {
                         cp.as_ref().finalized_block_header.number
                             < database.as_ref().finalized_block_header.number
@@ -458,12 +456,13 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
 
                 (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None, _) => {
                     // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
-                        user_data: config.user_data,
-                        error: format!(
-                            "Either a checkpoint or the genesis storage must be provided"
-                        ),
-                    }));
+                    return ChainId(
+                        self.public_api_chains.insert(PublicApiChain::Erroneous {
+                            user_data: config.user_data,
+                            error: "Either a checkpoint or the genesis storage must be provided"
+                                .to_string(),
+                        }),
+                    );
                 }
 
                 (
@@ -782,8 +781,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         if has_bad_blocks {
                             log::warn!(
                                 target: "smoldot",
-                                "Chain {} has bad blocks in its chain specification. Bad blocks \
-                                are not implemented in the light client.", log_name
+                                "Chain specification of {} contains a list of bad blocks. Bad \
+                                blocks are not implemented in the light client.", log_name
                             );
                         }
 
@@ -901,7 +900,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                     transactions_service: running_chain.transactions_service,
                     runtime_service: running_chain.runtime_service,
                     chain_spec: &chain_spec,
-                    peer_id: &running_chain.network_identity.clone(),
+                    peer_id: &running_chain.network_identity,
                     system_name,
                     system_version,
                     genesis_block_hash,
@@ -944,12 +943,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     /// If [`Client::add_chain`] encountered an error when creating this chain, returns the error
     /// message corresponding to it.
     pub fn chain_is_erroneous(&self, id: ChainId) -> Option<&str> {
-        if let Some(public_chain) = self.public_api_chains.get(id.0) {
-            if let PublicApiChain::Erroneous { error, .. } = &public_chain {
-                Some(error)
-            } else {
-                None
-            }
+        if let Some(PublicApiChain::Erroneous { error, .. }) = self.public_api_chains.get(id.0) {
+            Some(error)
         } else {
             None
         }

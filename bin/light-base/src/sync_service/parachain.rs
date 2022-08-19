@@ -81,7 +81,11 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         // The maximum number of pinned block is ignored, as this maximum is a way to avoid
         // malicious behaviors. This code is by definition not considered malicious.
         let mut relay_chain_subscribe_all = relay_chain_sync
-            .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
+            .subscribe_all(
+                "parachain-sync",
+                32,
+                NonZeroUsize::new(usize::max_value()).unwrap(),
+            )
             .await;
         log::debug!(
             target: &log_target,

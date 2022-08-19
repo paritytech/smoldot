@@ -338,7 +338,11 @@ async fn background_task<TPlat: Platform>(
         // malicious behaviors. This code is by definition not considered malicious.
         let mut subscribe_all = worker
             .runtime_service
-            .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
+            .subscribe_all(
+                "transactions-service",
+                32,
+                NonZeroUsize::new(usize::max_value()).unwrap(),
+            )
             .await;
         let initial_finalized_block_hash = header::hash_from_scale_encoded_header(
             &subscribe_all.finalized_block_scale_encoded_header,
@@ -740,7 +744,7 @@ async fn background_task<TPlat: Platform>(
                         .clone()
                         .announce_transaction(
                             worker.network_chain_index,
-                            &worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap()
+                            worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap()
                         )
                         .await;
                     log::debug!(

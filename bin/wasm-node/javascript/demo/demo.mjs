@@ -33,7 +33,6 @@ const chainSpecsFiles = [
     '../../kusama-statemine.json',
     '../../kusama-karura.json',
     '../../rococo.json',
-    '../../rococo-adz.json',
     '../../rococo-canvas.json',
 ];
 

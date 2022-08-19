@@ -241,13 +241,17 @@ enum Phase {
         header: Header,
         chain_information_finality: ChainInformationFinality,
         warp_sync_source_id: SourceId,
-        // TODO: use struct instead?
-        runtime: Option<(Option<Vec<u8>>, Option<Vec<u8>>)>,
+        runtime: Option<DownloadedRuntime>,
         babeapi_current_epoch_response: Option<Vec<Vec<u8>>>,
         babeapi_next_epoch_response: Option<Vec<Vec<u8>>>,
         aura_authorities_response: Option<Vec<Vec<u8>>>,
         aura_slot_duration_response: Option<Vec<Vec<u8>>>,
     },
+}
+
+struct DownloadedRuntime {
+    storage_code: Option<Vec<u8>>,
+    storage_heap_pages: Option<Vec<u8>>,
 }
 
 impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
@@ -727,10 +731,10 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             ..
         } = self.phase
         {
-            *runtime_store = Some((
-                code.map(|c| c.as_ref().to_vec()),
-                heap_pages.map(|hp| hp.as_ref().to_vec()),
-            ));
+            *runtime_store = Some(DownloadedRuntime {
+                storage_code: code.map(|c| c.as_ref().to_vec()),
+                storage_heap_pages: heap_pages.map(|hp| hp.as_ref().to_vec()),
+            });
         } else {
             // This is checked at the beginning of this function.
             unreachable!()
@@ -847,7 +851,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     Some(response.map(|e| e.as_ref().to_vec()).collect());
                 user_data
             }
-            ((_, user_data, RequestDetail::RuntimeCallMerkleProof { .. }), _) => return user_data,
+            ((_, user_data, RequestDetail::RuntimeCallMerkleProof { .. }), _) => user_data,
             (
                 (_, _, RequestDetail::RuntimeParametersGet { .. })
                 | (_, _, RequestDetail::WarpSyncRequest { .. }),
@@ -1029,7 +1033,10 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
     }
 
     // TODO: does this API make sense?
-    pub fn verify(mut self) -> (InProgressWarpSync<TSrc, TRq>, Option<FragmentError>) {
+    pub fn verify(
+        mut self,
+        randomness_seed: [u8; 32],
+    ) -> (InProgressWarpSync<TSrc, TRq>, Option<FragmentError>) {
         if let Phase::PendingVerify {
             previous_verifier_values,
             verifier,
@@ -1037,7 +1044,7 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
             downloaded_source,
         } = &mut self.inner.phase
         {
-            match verifier.take().unwrap().next() {
+            match verifier.take().unwrap().next(randomness_seed) {
                 Ok(warp_sync::Next::NotFinished(next_verifier)) => {
                     *verifier = Some(next_verifier);
                 }
@@ -1111,7 +1118,11 @@ pub struct BuildChainInformation<TSrc, TRq> {
 }
 
 impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
-    pub fn build(mut self) -> (WarpSync<TSrc, TRq>, Option<Error>) {
+    pub fn build(
+        mut self,
+        exec_hint: ExecHint,
+        allow_unresolved_imports: bool,
+    ) -> (WarpSync<TSrc, TRq>, Option<Error>) {
         // TODO: this function implementation could get a lot of cleanups
 
         if let (
@@ -1128,7 +1139,10 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             &mut self.inner.phase,
             self.inner.start_chain_information.as_ref().consensus,
         ) {
-            let (finalized_storage_code, finalized_storage_heap_pages) = runtime.take().unwrap();
+            let DownloadedRuntime {
+                storage_code: finalized_storage_code,
+                storage_heap_pages: finalized_storage_heap_pages,
+            } = runtime.take().unwrap();
             let babeapi_current_epoch_response = babeapi_current_epoch_response.take().unwrap();
             let babeapi_next_epoch_response = babeapi_next_epoch_response.take().unwrap();
 
@@ -1166,8 +1180,8 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             let runtime = match HostVmPrototype::new(host::Config {
                 module: &finalized_storage_code,
                 heap_pages: decoded_heap_pages,
-                exec_hint: ExecHint::CompileAheadOfTime, // TODO: make configurable
-                allow_unresolved_imports: false,         // TODO: make configurable
+                exec_hint,
+                allow_unresolved_imports,
             }) {
                 Ok(runtime) => runtime,
                 Err(error) => {
@@ -1394,7 +1408,10 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             &mut self.inner.phase,
             self.inner.start_chain_information.as_ref().consensus,
         ) {
-            let (finalized_storage_code, finalized_storage_heap_pages) = runtime.take().unwrap();
+            let DownloadedRuntime {
+                storage_code: finalized_storage_code,
+                storage_heap_pages: finalized_storage_heap_pages,
+            } = runtime.take().unwrap();
             let aura_authorities_response = aura_authorities_response.take().unwrap();
             let aura_slot_duration_response = aura_slot_duration_response.take().unwrap();
 
@@ -1432,8 +1449,8 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
             let runtime = match HostVmPrototype::new(host::Config {
                 module: &finalized_storage_code,
                 heap_pages: decoded_heap_pages,
-                exec_hint: ExecHint::CompileAheadOfTime, // TODO: make configurable
-                allow_unresolved_imports: false,         // TODO: make configurable
+                exec_hint,
+                allow_unresolved_imports,
             }) {
                 Ok(runtime) => runtime,
                 Err(error) => {

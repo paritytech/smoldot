@@ -1292,8 +1292,12 @@ pub struct JustificationVerify<TRq, TSrc, TBl> {
 
 impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
     /// Verify the justification.
+    ///
+    /// A randomness seed must be provided and will be used during the verification. Note that the
+    /// verification is nonetheless deterministic.
     pub fn perform(
         mut self,
+        randomness_seed: [u8; 32],
     ) -> (
         OptimisticSync<TRq, TSrc, TBl>,
         JustificationVerification<TBl>,
@@ -1301,10 +1305,11 @@ impl<TRq, TSrc, TBl> JustificationVerify<TRq, TSrc, TBl> {
         let (consensus_engine_id, justification, source_id) =
             self.inner.pending_encoded_justifications.next().unwrap();
 
-        let mut apply = match self
-            .chain
-            .verify_justification(consensus_engine_id, &justification)
-        {
+        let mut apply = match self.chain.verify_justification(
+            consensus_engine_id,
+            &justification,
+            randomness_seed,
+        ) {
             Ok(a) => a,
             Err(error) => {
                 if let Some(source) = self.inner.sources.get_mut(&source_id) {

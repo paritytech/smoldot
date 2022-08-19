@@ -71,14 +71,14 @@ impl<T: Future> Future for CpuRateLimiter<T> {
         // We add a small zero-cost shim to ensure at compile time that this is indeed the case.
         fn enforce_fused<T: futures::future::FusedFuture>(_: &T) {}
         enforce_fused(&this.prevent_poll_until);
-        if let Poll::Pending = Future::poll(this.prevent_poll_until.as_mut(), cx) {
+        if Future::poll(this.prevent_poll_until.as_mut(), cx).is_pending() {
             return Poll::Pending;
         }
 
         let before_polling = crate::Instant::now();
 
         match this.inner.poll(cx) {
-            Poll::Ready(value) => return Poll::Ready(value),
+            Poll::Ready(value) => Poll::Ready(value),
             Poll::Pending => {
                 let after_polling = crate::Instant::now();
 
@@ -95,7 +95,11 @@ impl<T: Future> Future for CpuRateLimiter<T> {
                     poll_duration.as_secs_f64() * *this.max_divided_by_rate_limit_minus_one;
                 debug_assert!(after_poll_sleep >= 0.0 && !after_poll_sleep.is_nan());
                 let max_duration_float: f64 = Duration::MAX.as_secs_f64(); // TODO: turn this into a `const` once `as_secs_f64` is `const`
-                if !(after_poll_sleep < max_duration_float) {
+                if after_poll_sleep
+                    .partial_cmp(&max_duration_float)
+                    .map(|ord| ord.is_ge())
+                    .unwrap_or(true)
+                {
                     after_poll_sleep = max_duration_float;
                 }
                 // TODO: use try_from_secs_f64 when it's stable https://github.com/rust-lang/rust/issues/83400

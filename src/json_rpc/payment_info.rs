@@ -17,14 +17,15 @@
 
 use super::methods;
 
-use core::iter;
-
 /// Produces the input to pass to the `TransactionPaymentApi_query_info` runtime call.
 pub fn payment_info_parameters(
     extrinsic: &'_ [u8],
 ) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + Clone + '_ {
-    iter::once(either::Left(extrinsic))
-        .chain(iter::once(u32::try_from(extrinsic.len()).unwrap().to_le_bytes()).map(either::Right))
+    [
+        either::Left(extrinsic),
+        either::Right(u32::try_from(extrinsic.len()).unwrap().to_le_bytes()),
+    ]
+    .into_iter()
 }
 
 /// Name of the runtime function to call in order to obtain the payment fees.

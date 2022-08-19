@@ -32,7 +32,7 @@
 
 use crate::{
     chain::{blocks_tree, chain_information},
-    executor::{host, storage_diff},
+    executor::{host, storage_diff, vm::ExecHint},
     header,
     sync::{all_forks, optimistic, warp_sync},
     verify,
@@ -1093,28 +1093,31 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                             marker: marker::PhantomData,
                         })
                     }
-                    warp_sync::ProcessOne::BuildChainInformation(inner) => match inner.build().0 {
-                        // TODO: errors not reported to upper layer
-                        warp_sync::WarpSync::InProgress(inner) => {
-                            self.inner = AllSyncInner::GrandpaWarpSync { inner };
-                            ProcessOne::AllSync(self)
-                        }
-                        warp_sync::WarpSync::Finished(success) => {
-                            let (
-                                new_inner,
-                                finalized_block_runtime,
-                                finalized_storage_code,
-                                finalized_storage_heap_pages,
-                            ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
-                            self.inner = AllSyncInner::AllForks(new_inner);
-                            ProcessOne::WarpSyncFinished {
-                                sync: self,
-                                finalized_block_runtime,
-                                finalized_storage_code,
-                                finalized_storage_heap_pages,
+                    warp_sync::ProcessOne::BuildChainInformation(inner) => {
+                        // TODO: make these parameters configurable
+                        match inner.build(ExecHint::CompileAheadOfTime, false).0 {
+                            // TODO: errors not reported to upper layer
+                            warp_sync::WarpSync::InProgress(inner) => {
+                                self.inner = AllSyncInner::GrandpaWarpSync { inner };
+                                ProcessOne::AllSync(self)
+                            }
+                            warp_sync::WarpSync::Finished(success) => {
+                                let (
+                                    new_inner,
+                                    finalized_block_runtime,
+                                    finalized_storage_code,
+                                    finalized_storage_heap_pages,
+                                ) = self.shared.transition_grandpa_warp_sync_all_forks(success);
+                                self.inner = AllSyncInner::AllForks(new_inner);
+                                ProcessOne::WarpSyncFinished {
+                                    sync: self,
+                                    finalized_block_runtime,
+                                    finalized_storage_code,
+                                    finalized_storage_heap_pages,
+                                }
                             }
                         }
-                    },
+                    }
                 }
             }
             AllSyncInner::AllForks(sync) => match sync.process_one() {
@@ -1242,22 +1245,28 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
 
     /// Update the state machine with a Grandpa commit message received from the network.
     ///
-    /// On success, the finalized block might have been updated.
-    // TODO: return which blocks are removed as finalized
+    /// This function only inserts the commit message into the state machine, and does not
+    /// immediately verify it.
     pub fn grandpa_commit_message(
         &mut self,
         source_id: SourceId,
-        scale_encoded_message: &[u8],
-    ) -> Result<(), blocks_tree::CommitVerifyError> {
+        scale_encoded_message: Vec<u8>,
+    ) -> GrandpaCommitMessageOutcome {
         let source_id = self.shared.sources.get(source_id.0).unwrap();
 
-        // TODO: clearly indicate if message has been ignored
         match (&mut self.inner, source_id) {
             (AllSyncInner::AllForks(sync), SourceMapping::AllForks(source_id)) => {
-                sync.grandpa_commit_message(*source_id, scale_encoded_message)
+                match sync.grandpa_commit_message(*source_id, scale_encoded_message) {
+                    all_forks::GrandpaCommitMessageOutcome::ParseError => {
+                        GrandpaCommitMessageOutcome::Discarded
+                    }
+                    all_forks::GrandpaCommitMessageOutcome::Queued => {
+                        GrandpaCommitMessageOutcome::Queued
+                    }
+                }
             }
-            (AllSyncInner::Optimistic { .. }, _) => Ok(()),
-            (AllSyncInner::GrandpaWarpSync { .. }, _) => Ok(()),
+            (AllSyncInner::Optimistic { .. }, _) => GrandpaCommitMessageOutcome::Discarded,
+            (AllSyncInner::GrandpaWarpSync { .. }, _) => GrandpaCommitMessageOutcome::Discarded,
 
             // Invalid internal states.
             (AllSyncInner::AllForks(_), _) => unreachable!(),
@@ -1987,6 +1996,15 @@ pub enum ResponseOutcome {
     AllAlreadyInChain,
 }
 
+/// See [`AllSync::grandpa_commit_message`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrandpaCommitMessageOutcome {
+    /// Message has been silently discarded.
+    Discarded,
+    /// Message has been queued for later verification.
+    Queued,
+}
+
 // TODO: doc
 #[derive(Debug, Clone)]
 pub struct Block<TBl> {
@@ -2153,10 +2171,16 @@ enum FinalityProofVerifyInner<TRq, TSrc, TBl> {
 
 impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
     /// Perform the verification.
-    pub fn perform(self) -> (AllSync<TRq, TSrc, TBl>, FinalityProofVerifyOutcome<TBl>) {
+    ///
+    /// A randomness seed must be provided and will be used during the verification. Note that the
+    /// verification is nonetheless deterministic.
+    pub fn perform(
+        self,
+        randomness_seed: [u8; 32],
+    ) -> (AllSync<TRq, TSrc, TBl>, FinalityProofVerifyOutcome<TBl>) {
         match self.inner {
             FinalityProofVerifyInner::AllForks(verify) => {
-                let (sync, outcome) = match verify.perform() {
+                let (sync, outcome) = match verify.perform(randomness_seed) {
                     (
                         sync,
                         all_forks::FinalityProofVerifyOutcome::NewFinalized {
@@ -2200,7 +2224,7 @@ impl<TRq, TSrc, TBl> FinalityProofVerify<TRq, TSrc, TBl> {
                     outcome,
                 )
             }
-            FinalityProofVerifyInner::Optimistic(verify) => match verify.perform() {
+            FinalityProofVerifyInner::Optimistic(verify) => match verify.perform(randomness_seed) {
                 (inner, optimistic::JustificationVerification::Finalized { finalized_blocks }) => (
                     // TODO: transition to all_forks
                     AllSync {
@@ -2277,13 +2301,17 @@ impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
     }
 
     /// Perform the verification.
+    ///
+    /// A randomness seed must be provided and will be used during the verification. Note that the
+    /// verification is nonetheless deterministic.
     pub fn perform(
         self,
+        randomness_seed: [u8; 32],
     ) -> (
         AllSync<TRq, TSrc, TBl>,
         Result<(), warp_sync::FragmentError>,
     ) {
-        let (next_grandpa_warp_sync, error) = self.inner.verify();
+        let (next_grandpa_warp_sync, error) = self.inner.verify(randomness_seed);
 
         (
             AllSync {

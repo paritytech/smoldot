@@ -37,6 +37,7 @@ Namespace
 POV
 Polkadot
 PolkadotJS
+PRNG
 Protobuf
 QUIC
 RPC
@@ -71,6 +72,7 @@ benchmarked
 blockchain
 boolean/S
 bootnode
+borked
 broadcasted
 bytecode
 checksum

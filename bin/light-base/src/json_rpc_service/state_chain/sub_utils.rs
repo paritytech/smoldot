@@ -44,7 +44,7 @@ pub async fn subscribe_runtime_version<TPlat: Platform>(
 ) {
     let mut master_stream = stream::unfold(runtime_service.clone(), |runtime_service| async move {
         let subscribe_all = runtime_service
-            .subscribe_all(16, NonZeroUsize::new(24).unwrap())
+            .subscribe_all("subscribe-runtime-version", 16, NonZeroUsize::new(24).unwrap())
             .await;
 
         // Map of runtimes by hash. Contains all non-finalized blocks, plus the current finalized
@@ -128,7 +128,7 @@ pub async fn subscribe_runtime_version<TPlat: Platform>(
                                 let new_best_runtime = headers.get(&hash).unwrap();
                                 current_best = hash;
 
-                                if !Arc::ptr_eq(&current_best_runtime, new_best_runtime) {
+                                if !Arc::ptr_eq(current_best_runtime, new_best_runtime) {
                                     let runtime = (**new_best_runtime).clone();
                                     break Some((
                                         runtime,
@@ -227,7 +227,7 @@ pub async fn subscribe_finalized<TPlat: Platform>(
 ) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
     let mut master_stream = stream::unfold(runtime_service.clone(), |runtime_service| async move {
         let subscribe_all = runtime_service
-            .subscribe_all(16, NonZeroUsize::new(32).unwrap())
+            .subscribe_all("subscribe-finalized", 16, NonZeroUsize::new(32).unwrap())
             .await;
 
         // Map of block headers by hash. Contains all non-finalized blocks headers.
@@ -310,7 +310,7 @@ pub async fn subscribe_best<TPlat: Platform>(
 ) -> (Vec<u8>, stream::BoxStream<'static, Vec<u8>>) {
     let mut master_stream = stream::unfold(runtime_service.clone(), |runtime_service| async move {
         let subscribe_all = runtime_service
-            .subscribe_all(16, NonZeroUsize::new(32).unwrap())
+            .subscribe_all("subscribe-best", 16, NonZeroUsize::new(32).unwrap())
             .await;
 
         // Map of block headers by hash. Contains all non-finalized blocks headers, plus the

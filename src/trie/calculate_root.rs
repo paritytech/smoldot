@@ -182,17 +182,13 @@ impl CalculationCache {
 
     /// Notify the cache that all the storage values whose key start with the given prefix have
     /// been removed.
-    pub fn prefix_remove_update(&mut self, _prefix: &[u8]) {
-        let _structure = match &mut self.structure {
+    pub fn prefix_remove_update(&mut self, prefix: &[u8]) {
+        let structure = match &mut self.structure {
             Some(s) => s,
             None => return,
         };
 
-        // TODO: implement correctly
-        self.structure = None;
-
-        /*
-        if let Some(mut node) = structure.remove_prefix(bytes_to_nibbles(prefix).iter().cloned()) {
+        if let Some(mut node) = structure.remove_prefix(bytes_to_nibbles(prefix.iter().cloned())) {
             node.user_data().merkle_value = None;
             let mut parent = node.into_parent();
             while let Some(mut p) = parent.take() {
@@ -201,7 +197,7 @@ impl CalculationCache {
             }
         } else if let Some(mut root_node) = structure.root_node() {
             root_node.user_data().merkle_value = None;
-        }*/
+        }
     }
 }
 

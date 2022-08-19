@@ -84,6 +84,7 @@
 
 use crate::{
     chain::{blocks_tree, chain_information},
+    finality::grandpa,
     header, verify,
 };
 
@@ -909,60 +910,34 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
     /// Update the state machine with a Grandpa commit message received from the network.
     ///
-    /// On success, the finalized block has been updated.
+    /// This function only inserts the commit message into the state machine, and does not
+    /// immediately verify it.
     ///
     /// # Panic
     ///
     /// Panics if `source_id` is invalid.
     ///
-    // TODO: return which blocks are removed as finalized
-    // TODO: this should probably just insert the commit in the state machine and not verify it immediately
     pub fn grandpa_commit_message(
         &mut self,
         source_id: SourceId,
-        scale_encoded_commit: &[u8],
-    ) -> Result<(), blocks_tree::CommitVerifyError> {
-        // Grabbing the source is done early on in order to panic if the `source_id` is invalid.
+        scale_encoded_commit: Vec<u8>,
+    ) -> GrandpaCommitMessageOutcome {
         let source = &mut self.inner.blocks[source_id];
 
-        let block_number = match self
-            .chain
-            .verify_grandpa_commit_message(scale_encoded_commit)
-        {
-            Ok(apply) => {
-                apply.apply();
-                return Ok(());
-            }
-            // In case where the commit message concerns a block older or equal to the finalized
-            // block, the operation is silently considered successful.
-            Err(blocks_tree::CommitVerifyError::FinalityVerify(
-                blocks_tree::FinalityVerifyError::EqualToFinalized
-                | blocks_tree::FinalityVerifyError::BelowFinalized,
-            )) => return Ok(()),
-            Err(
-                blocks_tree::CommitVerifyError::FinalityVerify(
-                    blocks_tree::FinalityVerifyError::UnknownTargetBlock { block_number, .. },
-                )
-                | blocks_tree::CommitVerifyError::FinalityVerify(
-                    blocks_tree::FinalityVerifyError::TooFarAhead {
-                        justification_block_number: block_number,
-                        ..
-                    },
-                )
-                | blocks_tree::CommitVerifyError::NotEnoughKnownBlocks {
-                    target_block_number: block_number,
-                },
-            ) => block_number,
-            Err(err) => return Err(err),
+        let block_number = match grandpa::commit::decode::decode_grandpa_commit(
+            &scale_encoded_commit,
+            self.chain.block_number_bytes(),
+        ) {
+            Ok(msg) => msg.message.target_number,
+            Err(_) => return GrandpaCommitMessageOutcome::ParseError,
         };
 
-        // If we reach here, the commit can't be verified yet. The commit is stored for later.
-        source.pending_finality_proofs.insert(
+        source.unverified_finality_proofs.insert(
             block_number,
-            FinalityProofs::GrandpaCommit(scale_encoded_commit.to_vec()),
+            FinalityProofs::GrandpaCommit(scale_encoded_commit),
         );
 
-        Ok(())
+        GrandpaCommitMessageOutcome::Queued
     }
 
     /// Process the next block in the queue of verification.
@@ -1984,8 +1959,12 @@ pub struct FinalityProofVerify<TBl, TRq, TSrc> {
 
 impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
     /// Perform the verification.
+    ///
+    /// A randomness seed must be provided and will be used during the verification. Note that the
+    /// verification is nonetheless deterministic.
     pub fn perform(
         mut self,
+        randomness_seed: [u8; 32],
     ) -> (
         AllForksSync<TBl, TRq, TSrc>,
         FinalityProofVerifyOutcome<TBl>,
@@ -1995,7 +1974,7 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                 match self
                     .parent
                     .chain
-                    .verify_grandpa_commit_message(&scale_encoded_commit)
+                    .verify_grandpa_commit_message(&scale_encoded_commit, randomness_seed)
                 {
                     Ok(success) => {
                         // TODO: DRY
@@ -2048,11 +2027,11 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                 }
             }
             FinalityProof::Justification((consensus_engine_id, scale_encoded_justification)) => {
-                match self
-                    .parent
-                    .chain
-                    .verify_justification(consensus_engine_id, &scale_encoded_justification)
-                {
+                match self.parent.chain.verify_justification(
+                    consensus_engine_id,
+                    &scale_encoded_justification,
+                    randomness_seed,
+                ) {
                     Ok(success) => {
                         let finalized_blocks_iter = success.apply();
                         let updates_best_block = finalized_blocks_iter.updates_best_block();
@@ -2089,6 +2068,15 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
     pub fn cancel(self) -> AllForksSync<TBl, TRq, TSrc> {
         self.parent
     }
+}
+
+/// See [`AllForksSync::grandpa_commit_message`].
+#[derive(Debug, Clone)]
+pub enum GrandpaCommitMessageOutcome {
+    /// Failed to parse message. Commit has been silently discarded.
+    ParseError, // TODO: should probably contain the error, but difficult due to lifetimes in said error
+    /// Message has been queued for later verification.
+    Queued,
 }
 
 /// State of the processing of blocks.
