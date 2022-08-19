@@ -346,33 +346,7 @@ where
                     // If there isn't any other connection with this peer yet, check the desired
                     // substreams and open them.
                     if num_healthy_peer_connections.get() == 1 {
-                        let notification_protocols_indices = self
-                            .peers_notifications_out
-                            .range(
-                                (actual_peer_index, usize::min_value())
-                                    ..=(actual_peer_index, usize::max_value()),
-                            )
-                            .filter(|(_, v)| v.desired)
-                            .map(|((_, index), _)| *index)
-                            .collect::<Vec<_>>();
-
-                        for idx in notification_protocols_indices {
-                            let id = DesiredOutNotificationId(
-                                self.desired_out_notifications.insert(Some((
-                                    actual_peer_index,
-                                    connection_id,
-                                    idx,
-                                ))),
-                            );
-
-                            self.peers_notifications_out
-                                .get_mut(&(actual_peer_index, idx))
-                                .unwrap()
-                                .open = NotificationsOutOpenState::ApiHandshakeWait(id);
-
-                            self.pending_desired_out_notifs
-                                .push_back((id, actual_peer_index, idx));
-                        }
+                        self.open_desired_notifications_out(actual_peer_index);
                     }
 
                     return Some(Event::HandshakeFinished {
@@ -895,7 +869,7 @@ where
         let _inserted = self.connections_by_peer.insert((peer_index, connection_id));
         debug_assert!(_inserted);
 
-        // TODO: must immediately open all desired substreams
+        self.open_desired_notifications_out(peer_index);
 
         (connection_id, connection_task)
     }
@@ -1541,6 +1515,53 @@ where
         let peer_id = self.peers.remove(peer_index).peer_id;
         let _index = self.peer_indices.remove(&peer_id).unwrap();
         debug_assert_eq!(_index, peer_index);
+    }
+
+    /// Opens all the outbound notification substreams that have been marked as desired for the
+    /// given peer.
+    ///
+    /// Has no effect if the peer doesn't have any established non-shutting-down connection.
+    fn open_desired_notifications_out(&mut self, peer_index: usize) {
+        let connection_id = self
+            .connections_by_peer
+            .range(
+                (peer_index, collection::ConnectionId::min_value())
+                    ..=(peer_index, collection::ConnectionId::max_value()),
+            )
+            .map(|(_, connection_id)| *connection_id)
+            .filter(|connection_id| {
+                let state = self.inner.connection_state(*connection_id);
+                state.established && !state.shutting_down
+            })
+            .next();
+
+        let connection_id = match connection_id {
+            Some(c) => c,
+            None => return,
+        };
+
+        let notification_protocols_indices = self
+            .peers_notifications_out
+            .range((peer_index, usize::min_value())..=(peer_index, usize::max_value()))
+            .filter(|(_, v)| v.desired)
+            .map(|((_, index), _)| *index)
+            .collect::<Vec<_>>();
+
+        for idx in notification_protocols_indices {
+            let id = DesiredOutNotificationId(self.desired_out_notifications.insert(Some((
+                peer_index,
+                connection_id,
+                idx,
+            ))));
+
+            self.peers_notifications_out
+                .get_mut(&(peer_index, idx))
+                .unwrap()
+                .open = NotificationsOutOpenState::ApiHandshakeWait(id);
+
+            self.pending_desired_out_notifs
+                .push_back((id, peer_index, idx));
+        }
     }
 }
 
