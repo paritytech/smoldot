@@ -373,9 +373,30 @@ impl<TUd> TrieStructure<TUd> {
             ExistingNodeInnerResult::NotFound {
                 closest_ancestor: None,
             } => {
-                // Either the trie is empty, or the key of the root node of the trie doesn't
-                // start with the requested prefix.
-                // Nothing to do.
+                // The trie is empty, or the key of the root node of the trie doesn't start with
+                // the requested prefix, or the key of the root node of the trie starts with the
+                // requested prefix.
+                let root_index = if let Some(i) = self.root_index {
+                    i
+                } else {
+                    // Trie is empty. Nothing to do.
+                    return None;
+                };
+
+                // Compare root key with the prefix.
+                if !self.nodes[root_index]
+                    .partial_key
+                    .iter()
+                    .zip(prefix)
+                    .all(|(a, b)| *a == b)
+                {
+                    // Root node key doesn't match the prefix. Nothing to do.
+                    return None;
+                }
+
+                // Root node key starts with the requested prefix. Clear the entire trie.
+                self.nodes.clear();
+                self.root_index = None;
                 return None;
             }
             ExistingNodeInnerResult::NotFound {
