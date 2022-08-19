@@ -54,7 +54,7 @@ jobs:
     - uses: Swatinem/rust-cache@v1
     - uses: actions/setup-node@v3.4.1
       with:
-        node-version: '14'
+        node-version: '12'  # An old version is used to ensure compatibility
     - uses: denoland/setup-deno@v1
       with:
         deno-version: v1.x
@@ -72,7 +72,7 @@ jobs:
     - uses: Swatinem/rust-cache@v1
     - uses: actions/setup-node@v3.4.1
       with:
-        node-version: '14'
+        node-version: '14'  # Because this step doesn't actually check anything, we use a more liberal version
     - uses: baptiste0928/cargo-install@v1  # This action ensures that the twiggy compilation is cached.
       with:
         crate: twiggy
