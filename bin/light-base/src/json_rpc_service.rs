@@ -57,7 +57,7 @@ use smoldot::{
 use std::{
     collections::HashMap,
     iter,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     str,
     sync::{atomic, Arc},
     time::Duration,
@@ -602,7 +602,11 @@ impl<TPlat: Platform> Background<TPlat> {
                     // malicious.
                     let mut subscribe_all = me
                         .runtime_service
-                        .subscribe_all(32, usize::max_value())
+                        .subscribe_all(
+                            "json-rpc-blocks-cache",
+                            32,
+                            NonZeroUsize::new(usize::max_value()).unwrap(),
+                        )
                         .await;
 
                     cache.subscription_id = Some(subscribe_all.new_blocks.id());
@@ -652,7 +656,8 @@ impl<TPlat: Platform> Background<TPlat> {
                                     .recent_pinned_blocks
                                     .put(hash, block.scale_encoded_header);
                             }
-                            Some(runtime_service::Notification::Finalized { .. }) => {}
+                            Some(runtime_service::Notification::Finalized { .. })
+                            | Some(runtime_service::Notification::BestBlockChanged { .. }) => {}
                             None => break,
                         }
                     }
@@ -692,7 +697,7 @@ impl<TPlat: Platform> Background<TPlat> {
             Err(methods::ParseError::Method { request_id, error }) => {
                 log::warn!(
                     target: &self.log_target,
-                    "Error in JSON-RPC method call: {}", error
+                    "Error in JSON-RPC method call with id {:?}: {}", request_id, error
                 );
                 self.requests_subscriptions
                     .respond(&state_machine_request_id, error.to_json_error(request_id))
@@ -796,6 +801,24 @@ impl<TPlat: Platform> Background<TPlat> {
             }
             methods::MethodCall::rpc_methods {} => {
                 self.rpc_methods(request_id, &state_machine_request_id)
+                    .await;
+            }
+            methods::MethodCall::state_call {
+                name,
+                parameters,
+                hash,
+            } => {
+                self.state_call(
+                    request_id,
+                    &state_machine_request_id,
+                    &name,
+                    parameters,
+                    hash,
+                )
+                .await;
+            }
+            methods::MethodCall::state_getKeys { prefix, hash } => {
+                self.state_get_keys(request_id, &state_machine_request_id, prefix, hash)
                     .await;
             }
             methods::MethodCall::state_getKeysPaged {
@@ -1069,8 +1092,6 @@ impl<TPlat: Platform> Background<TPlat> {
             | methods::MethodCall::grandpa_roundState { .. }
             | methods::MethodCall::offchain_localStorageGet { .. }
             | methods::MethodCall::offchain_localStorageSet { .. }
-            | methods::MethodCall::state_call { .. }
-            | methods::MethodCall::state_getKeys { .. }
             | methods::MethodCall::state_getPairs { .. }
             | methods::MethodCall::state_getReadProof { .. }
             | methods::MethodCall::state_getStorageHash { .. }
@@ -1080,7 +1101,9 @@ impl<TPlat: Platform> Background<TPlat> {
             | methods::MethodCall::system_dryRun { .. }
             | methods::MethodCall::system_networkState { .. }
             | methods::MethodCall::system_nodeRoles { .. }
-            | methods::MethodCall::system_removeReservedPeer { .. }) => {
+            | methods::MethodCall::system_removeReservedPeer { .. }
+            | methods::MethodCall::network_unstable_subscribeEvents { .. }
+            | methods::MethodCall::network_unstable_unsubscribeEvents { .. }) => {
                 // TODO: implement the ones that make sense to implement ^
                 log::error!(target: &self.log_target, "JSON-RPC call not supported yet: {:?}", _method);
                 self.requests_subscriptions
@@ -1165,7 +1188,7 @@ impl<TPlat: Platform> Background<TPlat> {
             match cache_lock
                 .recent_pinned_blocks
                 .get(hash)
-                .map(|h| header::decode(h))
+                .map(|h| header::decode(h, self.sync_service.block_number_bytes()))
             {
                 Some(Ok(header)) => return Ok((*header.state_root, header.number)),
                 Some(Err(_)) => return Err(()),
@@ -1188,6 +1211,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             // The sync service knows which peers are potentially aware of
                             // this block.
                             let result = sync_service
+                                .clone()
                                 .block_query_unknown_number(
                                     hash,
                                     protocol::BlocksRequestFields {
@@ -1209,7 +1233,9 @@ impl<TPlat: Platform> Background<TPlat> {
                                     header::hash_from_scale_encoded_header(&header),
                                     hash
                                 );
-                                let decoded = header::decode(&header).unwrap();
+                                let decoded =
+                                    header::decode(&header, sync_service.block_number_bytes())
+                                        .unwrap();
                                 Ok((*decoded.state_root, decoded.number))
                             } else {
                                 Err(())
@@ -1281,21 +1307,22 @@ impl<TPlat: Platform> Background<TPlat> {
 
             // Try to find the block in the cache of recent blocks. Most of the time, the call target
             // should be in there.
-            if cache_lock.recent_pinned_blocks.contains(block_hash) {
+            let lock = if cache_lock.recent_pinned_blocks.contains(block_hash) {
                 // The runtime service has the block pinned, meaning that we can ask the runtime
                 // service to perform the call.
-                let runtime_call_lock = self
-                    .runtime_service
+                self.runtime_service
                     .pinned_block_runtime_lock(
                         cache_lock.subscription_id.clone().unwrap(),
                         block_hash,
                     )
-                    .await;
+                    .await
+                    .ok()
+            } else {
+                None
+            };
 
-                // Make sure to unlock the cache, in order to not block the other requests.
-                drop::<futures::lock::MutexGuard<_>>(cache_lock);
-
-                runtime_call_lock
+            if let Some(lock) = lock {
+                lock
             } else {
                 // Second situation: the block is not in the cache of recent blocks. This isn't great.
                 drop::<futures::lock::MutexGuard<_>>(cache_lock);
@@ -1433,6 +1460,7 @@ enum StorageQueryError {
     StorageRetrieval(sync_service::StorageQueryError),
 }
 
+// TODO: doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone)]
 enum RuntimeCallError {
     Call(runtime_service::RuntimeCallError),

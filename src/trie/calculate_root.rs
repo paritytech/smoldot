@@ -182,17 +182,13 @@ impl CalculationCache {
 
     /// Notify the cache that all the storage values whose key start with the given prefix have
     /// been removed.
-    pub fn prefix_remove_update(&mut self, _prefix: &[u8]) {
-        let _structure = match &mut self.structure {
+    pub fn prefix_remove_update(&mut self, prefix: &[u8]) {
+        let structure = match &mut self.structure {
             Some(s) => s,
             None => return,
         };
 
-        // TODO: implement correctly
-        self.structure = None;
-
-        /*
-        if let Some(mut node) = structure.remove_prefix(bytes_to_nibbles(prefix).iter().cloned()) {
+        if let Some(mut node) = structure.remove_prefix(bytes_to_nibbles(prefix.iter().cloned())) {
             node.user_data().merkle_value = None;
             let mut parent = node.into_parent();
             while let Some(mut p) = parent.take() {
@@ -201,7 +197,7 @@ impl CalculationCache {
             }
         } else if let Some(mut root_node) = structure.root_node() {
             root_node.user_data().merkle_value = None;
-        }*/
+        }
     }
 }
 
@@ -490,14 +486,11 @@ impl StorageValue {
     }
 }
 
-// TODO: add a test that generates a random trie, calculates its root using a cache, modifies it
-// randomly, invalidating the cache in the process, then calculates the root again, once with
-// cache and once without cache, and compares the two values
-
 #[cfg(test)]
 mod tests {
     use crate::trie::TrieEntryVersion;
     use alloc::collections::BTreeMap;
+    use rand::{seq::IteratorRandom as _, Rng as _};
 
     fn calculate_root(version: TrieEntryVersion, trie: &BTreeMap<Vec<u8>, Vec<u8>>) -> [u8; 32] {
         let mut calculation = super::root_merkle_value(None);
@@ -604,5 +597,106 @@ mod tests {
             calculate_root(TrieEntryVersion::V1, &trie),
             expected.as_bytes()
         );
+    }
+
+    #[test]
+    fn cache_up_to_date() {
+        // This test builds a random trie, then calculates its root, then randomly modifies that
+        // trie, then calculates its root again twice, with and without the cache used in the
+        // first computation, and compares the two results.
+
+        // Run the test many times, as it relies on randomness.
+        for _ in 0..1000 {
+            // Generate a random trie.
+            let mut trie = {
+                let mut trie = BTreeMap::<Vec<u8>, Vec<u8>>::new();
+
+                for _ in 0..rand::thread_rng().gen_range::<u32, _>(5..400) {
+                    let mut new_key = trie
+                        .keys()
+                        .choose(&mut rand::thread_rng())
+                        .map(|s| s.to_vec())
+                        .unwrap_or(Vec::new());
+                    for _ in 0..rand::thread_rng().gen_range::<u32, _>(1..6) {
+                        new_key.push(rand::random::<u8>());
+                    }
+                    let mut new_value = vec![0u8; 50];
+                    rand::thread_rng().fill(&mut new_value[..]);
+                    trie.insert(new_key, new_value);
+                }
+
+                trie
+            };
+
+            // Calculate its root.
+            // We don't actually care about the root hash. We just want the cache.
+            let mut cache = {
+                let mut calculation = super::root_merkle_value(None);
+                loop {
+                    match calculation {
+                        super::RootMerkleValueCalculation::Finished { cache, .. } => {
+                            break cache;
+                        }
+                        super::RootMerkleValueCalculation::AllKeys(keys) => {
+                            calculation = keys.inject(trie.keys().map(|k| k.iter().cloned()));
+                        }
+                        super::RootMerkleValueCalculation::StorageValue(value) => {
+                            let key = value.key().collect::<Vec<u8>>();
+                            calculation = value.inject(TrieEntryVersion::V1, trie.get(&key));
+                        }
+                    }
+                }
+            };
+
+            // Now modify the first trie, flushing the corresponding cache entries.
+            // We perform very few modifications. Cache flushes removes information from the
+            // cache. The more modifications the more information is removed, and thus the higher
+            // the chances that we don't detect a bug causing obsolete information to remain in
+            // the cache.
+            // TODO: this test doesn't clear prefixes, even though it should, because `prefix_remove_update` is implemented in a dummy way that would make the test pointless
+            for _ in 0..rand::thread_rng().gen_range::<u32, _>(1..5) {
+                let key_to_tweak = match trie.keys().choose(&mut rand::thread_rng()) {
+                    Some(k) => k.to_vec(),
+                    None => break,
+                };
+
+                if rand::random() {
+                    // Modify the key.
+                    cache.storage_value_update(&key_to_tweak, true);
+                    let mut new_value = vec![0u8; 50];
+                    rand::thread_rng().fill(&mut new_value[..]);
+                    trie.insert(key_to_tweak, new_value);
+                } else {
+                    // Remove the key.
+                    cache.storage_value_update(&key_to_tweak, false);
+                    trie.remove(&key_to_tweak);
+                }
+            }
+
+            // Now calculate the root again, without a cache.
+            let root_no_cache = calculate_root(TrieEntryVersion::V1, &trie);
+
+            // Now calculate the root again, with a cache.
+            let root_with_cache = {
+                let mut calculation = super::root_merkle_value(Some(cache));
+                loop {
+                    match calculation {
+                        super::RootMerkleValueCalculation::Finished { hash, .. } => {
+                            break hash;
+                        }
+                        super::RootMerkleValueCalculation::AllKeys(keys) => {
+                            calculation = keys.inject(trie.keys().map(|k| k.iter().cloned()));
+                        }
+                        super::RootMerkleValueCalculation::StorageValue(value) => {
+                            let key = value.key().collect::<Vec<u8>>();
+                            calculation = value.inject(TrieEntryVersion::V1, trie.get(&key));
+                        }
+                    }
+                }
+            };
+
+            // Make sure they're equal.
+            assert_eq!(root_no_cache, root_with_cache);
+        }
     }
 }

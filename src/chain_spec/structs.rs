@@ -41,7 +41,7 @@ pub(super) struct ClientSpec {
     ///
     /// The given runtime code will be used to substitute the on-chain runtime code starting with
     /// the given block number until the `spec_version`
-    /// ([`crate::executor::CoreVersionRef::spec_version`]) on chain changes.
+    /// ([`crate::executor::host::CoreVersionRef::spec_version`]) on chain changes.
     #[serde(default)]
     // TODO: make use of this
     pub(super) code_substitutes: HashMap<u64, HexString, fnv::FnvBuildHasher>,
@@ -50,10 +50,16 @@ pub(super) struct ClientSpec {
     pub(super) protocol_id: Option<String>,
     #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
     pub(super) fork_id: Option<String>,
+    /// The `blockNumberBytes` field is (at the time of writing of this comment) a custom addition
+    /// to the format of smoldot chain specs compared to Substrate. It is necessary because,
+    /// contrary to Substrate, smoldot has no way to know the size of the block number field of
+    /// various data structures. If the field is missing, a value of 4 is assumed.
+    // TODO: revisit this field in the future to maybe bring compatibility with Substrate
+    #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
+    pub(super) block_number_bytes: Option<u8>,
     pub(super) properties: Option<Box<serde_json::value::RawValue>>,
     // TODO: make use of this
     pub(super) fork_blocks: Option<Vec<(u64, HashHexString)>>,
-    // TODO: make use of this
     pub(super) bad_blocks: Option<HashSet<HashHexString, FnvBuildHasher>>,
     // Unused but for some reason still part of the chain specs.
     #[serde(default, skip_serializing)]
@@ -68,7 +74,14 @@ pub(super) struct ClientSpec {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ChainSpecParachain {
+    // Note that in Substrate/Cumulus this field is only named `relay_chain` and `relayChain` is
+    // not accepted (as of 2022-06-09). This seems to be an oversight, as there are only two
+    // fields that use snake_case while the rest uses camelCase. For this reason, smoldot
+    // supports both.
+    #[serde(alias = "relayChain")]
     pub(super) relay_chain: String,
+    // Same remark concerning the name as `relay_chain`
+    #[serde(alias = "paraId")]
     pub(super) para_id: u32,
 }
 

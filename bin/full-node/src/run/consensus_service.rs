@@ -26,7 +26,7 @@
 
 use crate::run::{database_thread, jaeger_service, network_service};
 
-use core::num::NonZeroU32;
+use core::{num::NonZeroU32, ops};
 use futures::{lock::Mutex, prelude::*};
 use hashbrown::HashSet;
 use smoldot::{
@@ -56,6 +56,15 @@ pub struct Config<'a> {
 
     /// Database to use to read and write information about the chain.
     pub database: Arc<database_thread::DatabaseThread>,
+
+    /// Number of bytes of the block number in the networking protocol.
+    pub block_number_bytes: usize,
+
+    /// Hash of the genesis block.
+    ///
+    /// > **Note**: At the time of writing of this comment, the value in this field is used only
+    /// >           to compare against a known genesis hash and print a warning.
+    pub genesis_block_hash: [u8; 32],
 
     /// Stores of key to use for all block-production-related purposes.
     pub keystore: Arc<keystore::Keystore>,
@@ -123,41 +132,65 @@ impl ConsensusService {
             finalized_chain_information,
         ): (_, _, _, _, BTreeMap<Vec<u8>, Vec<u8>>, _) = config
             .database
-            .with_database(|database| {
-                let finalized_block_hash = database.finalized_block_hash().unwrap();
-                let finalized_block_number = header::decode(
-                    &database
-                        .block_scale_encoded_header(&finalized_block_hash)
-                        .unwrap()
-                        .unwrap(),
-                )
-                .unwrap()
-                .number;
-                let best_block_hash = database.best_block_hash().unwrap();
-                let best_block_number = header::decode(
-                    &database
-                        .block_scale_encoded_header(&best_block_hash)
-                        .unwrap()
-                        .unwrap(),
-                )
-                .unwrap()
-                .number;
-                let finalized_block_storage = database
-                    .finalized_block_storage_top_trie(&finalized_block_hash)
-                    .unwrap();
-                let finalized_chain_information = database
-                    .to_chain_information(&finalized_block_hash)
-                    .unwrap();
-                (
-                    finalized_block_hash,
-                    finalized_block_number,
-                    best_block_hash,
-                    best_block_number,
-                    finalized_block_storage,
-                    finalized_chain_information,
-                )
+            .with_database({
+                let block_number_bytes = config.block_number_bytes;
+                move |database| {
+                    let finalized_block_hash = database.finalized_block_hash().unwrap();
+                    let finalized_block_number = header::decode(
+                        &database
+                            .block_scale_encoded_header(&finalized_block_hash)
+                            .unwrap()
+                            .unwrap(),
+                        block_number_bytes,
+                    )
+                    .unwrap()
+                    .number;
+                    let best_block_hash = database.best_block_hash().unwrap();
+                    let best_block_number = header::decode(
+                        &database
+                            .block_scale_encoded_header(&best_block_hash)
+                            .unwrap()
+                            .unwrap(),
+                        block_number_bytes,
+                    )
+                    .unwrap()
+                    .number;
+                    let finalized_block_storage = database
+                        .finalized_block_storage_top_trie(&finalized_block_hash)
+                        .unwrap();
+                    let finalized_chain_information = database
+                        .to_chain_information(&finalized_block_hash)
+                        .unwrap();
+                    (
+                        finalized_block_hash,
+                        finalized_block_number,
+                        best_block_hash,
+                        best_block_number,
+                        finalized_block_storage,
+                        finalized_chain_information,
+                    )
+                }
             })
             .await;
+
+        // The Kusama chain contains a fork hardcoded in the official Polkadot client.
+        // See <https://github.com/paritytech/polkadot/blob/93f45f996a3d5592a57eba02f91f2fc2bc5a07cf/node/service/src/grandpa_support.rs#L111-L216>
+        // Because we don't want to support this in smoldot, a warning is printed instead if we
+        // recognize Kusama.
+        // See also <https://github.com/paritytech/smoldot/issues/1866>.
+        if config.genesis_block_hash
+            == [
+                176, 168, 212, 147, 40, 92, 45, 247, 50, 144, 223, 183, 230, 31, 135, 15, 23, 180,
+                24, 1, 25, 122, 20, 156, 169, 54, 84, 73, 158, 163, 218, 254,
+            ]
+            && finalized_block_number <= 1500988
+        {
+            tracing::warn!(
+                "The Kusama chain is known to be borked at block #1491596. The official Polkadot \
+                client works around this issue by hardcoding a fork in its source code. Smoldot \
+                does not support this hardcoded fork and will thus fail to sync past this block."
+            );
+        }
 
         let sync_state = Arc::new(Mutex::new(SyncState {
             best_block_number,
@@ -170,6 +203,8 @@ impl ConsensusService {
         (config.tasks_executor)({
             let mut sync = all::AllSync::new(all::Config {
                 chain_information: finalized_chain_information,
+                block_number_bytes: config.block_number_bytes,
+                allow_unknown_consensus_engines: false,
                 sources_capacity: 32,
                 blocks_capacity: {
                     // This is the maximum number of blocks between two consecutive justifications.
@@ -364,9 +399,9 @@ impl SyncBackground {
                         chain_information::ChainInformationConsensusRef::Babe { .. } => {
                             Some(keystore::KeyNamespace::Babe)
                         }
-                        chain_information::ChainInformationConsensusRef::AllAuthorized => {
-                            // In `AllAuthorized` mode, all keys are accepted and there is no
-                            // filter on the namespace.
+                        chain_information::ChainInformationConsensusRef::Unknown => {
+                            // In `Unknown` mode, all keys are accepted and there is no
+                            // filter on the namespace, as we can't author blocks anyway.
                             // TODO: is that correct?
                             None
                         }
@@ -484,17 +519,17 @@ impl SyncBackground {
                         {
                             let _jaeger_span = self
                                 .jaeger_service
-                                .block_announce_process_span(&header.hash());
+                                .block_announce_process_span(&header.hash(self.sync.block_number_bytes()));
 
                             let id = *self.peers_source_id_map.get(&peer_id).unwrap();
                             // TODO: log the outcome
-                            match self.sync.block_announce(id, header.scale_encoding_vec(), is_best) {
+                            match self.sync.block_announce(id, header.scale_encoding_vec(self.sync.block_number_bytes()), is_best) {
                                 all::BlockAnnounceOutcome::HeaderVerify => {},
                                 all::BlockAnnounceOutcome::TooOld { .. } => {},
                                 all::BlockAnnounceOutcome::AlreadyInChain => {},
                                 all::BlockAnnounceOutcome::NotFinalizedChain => {},
                                 all::BlockAnnounceOutcome::Discarded => {},
-                                all::BlockAnnounceOutcome::Disjoint {} => {},
+                                all::BlockAnnounceOutcome::StoredForLater {} => {},
                                 all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(),
                             }
                         },
@@ -522,10 +557,6 @@ impl SyncBackground {
                             | all::ResponseOutcome::Queued
                             | all::ResponseOutcome::NotFinalizedChain { .. }
                             | all::ResponseOutcome::AllAlreadyInChain { .. } => {
-                            }
-                            all::ResponseOutcome::WarpSyncError { .. } |
-                            all::ResponseOutcome::WarpSyncFinished { .. } => {
-                                unreachable!()
                             }
                         }
                     }
@@ -594,6 +625,7 @@ impl SyncBackground {
                 let parent_runtime = best_block_storage_access.runtime().clone(); // TODO: overhead here with cloning, but solving it requires very tricky API changes in syncing code
 
                 authoring_start.start(author::build::AuthoringStartConfig {
+                    block_number_bytes: self.sync.block_number_bytes(),
                     parent_hash: &self.sync.best_block_hash(),
                     parent_number: self.sync.best_block_number(),
                     now_from_unix_epoch: SystemTime::now()
@@ -699,7 +731,10 @@ impl SyncBackground {
                             .prefix_keys_ordered(
                                 prefix_key.prefix().as_ref(),
                                 self.finalized_block_storage
-                                    .range((prefix_key.prefix().as_ref().to_vec())..)
+                                    .range::<[u8], _>((
+                                        ops::Bound::Included(prefix_key.prefix().as_ref()),
+                                        ops::Bound::Unbounded,
+                                    ))
                                     .take_while(|(k, _)| {
                                         k.starts_with(prefix_key.prefix().as_ref())
                                     })
@@ -752,7 +787,7 @@ impl SyncBackground {
             true, // Since the new block is a child of the current best block, it always becomes the new best.
         ) {
             all::BlockAnnounceOutcome::HeaderVerify
-            | all::BlockAnnounceOutcome::Disjoint
+            | all::BlockAnnounceOutcome::StoredForLater
             | all::BlockAnnounceOutcome::Discarded => {}
             all::BlockAnnounceOutcome::TooOld { .. }
             | all::BlockAnnounceOutcome::AlreadyInChain
@@ -788,7 +823,7 @@ impl SyncBackground {
                             // Locally-authored blocks source.
                             match (request_details, &self.authored_block) {
                                 (
-                                    all::RequestDetail::BlocksRequest {
+                                    all::DesiredRequest::BlocksRequest {
                                         first_block_hash: None,
                                         first_block_height,
                                         ..
@@ -796,7 +831,7 @@ impl SyncBackground {
                                     Some((authored_height, _, _, _)),
                                 ) if first_block_height == authored_height => true,
                                 (
-                                    all::RequestDetail::BlocksRequest {
+                                    all::DesiredRequest::BlocksRequest {
                                         first_block_hash: Some(first_block_hash),
                                         first_block_height,
                                         ..
@@ -820,7 +855,7 @@ impl SyncBackground {
             request_info.num_blocks_clamp(NonZeroU64::new(64).unwrap());
 
             match request_info {
-                all::RequestDetail::BlocksRequest { .. }
+                all::DesiredRequest::BlocksRequest { .. }
                     if source_id == self.block_author_sync_source =>
                 {
                     tracing::debug!("queue-locally-authored-block-for-import");
@@ -833,7 +868,7 @@ impl SyncBackground {
                     // Create a request that is immediately answered right below.
                     let request_id = self.sync.add_request(
                         source_id,
-                        request_info,
+                        request_info.into(),
                         future::AbortHandle::new_pair().0, // Temporary dummy.
                     );
 
@@ -849,7 +884,7 @@ impl SyncBackground {
                     );
                 }
 
-                all::RequestDetail::BlocksRequest {
+                all::DesiredRequest::BlocksRequest {
                     first_block_hash,
                     first_block_height,
                     ascending,
@@ -891,15 +926,14 @@ impl SyncBackground {
                     );
 
                     let (request, abort) = future::abortable(request);
-                    let request_id = self
-                        .sync
-                        .add_request(source_id, request_info.clone(), abort);
+                    let request_id = self.sync.add_request(source_id, request_info.into(), abort);
 
                     self.block_requests_finished
                         .push(request.map(move |r| (request_id, r)).boxed());
                 }
-                all::RequestDetail::GrandpaWarpSync { .. }
-                | all::RequestDetail::StorageGet { .. } => {
+                all::DesiredRequest::GrandpaWarpSync { .. }
+                | all::DesiredRequest::StorageGet { .. }
+                | all::DesiredRequest::RuntimeCallMerkleProof { .. } => {
                     // Not used in "full" mode.
                     unreachable!()
                 }
@@ -923,7 +957,9 @@ impl SyncBackground {
                     self.sync = idle;
                     break;
                 }
-                all::ProcessOne::VerifyWarpSyncFragment(_) => unreachable!(),
+                all::ProcessOne::VerifyWarpSyncFragment(_)
+                | all::ProcessOne::WarpSyncError { .. }
+                | all::ProcessOne::WarpSyncFinished { .. } => unreachable!(),
                 all::ProcessOne::VerifyBodyHeader(verify) => {
                     let hash_to_verify = verify.hash();
                     let height_to_verify = verify.height();
@@ -939,6 +975,7 @@ impl SyncBackground {
                     let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
 
                     let mut verify = verify.start(unix_time, ());
+                    // TODO: check this block against the chain spec's badBlocks
                     loop {
                         match verify {
                             all::BlockVerification::Error {
@@ -1057,43 +1094,50 @@ impl SyncBackground {
                                 verify = req.inject_value(value);
                             }
                             all::BlockVerification::FinalizedStorageNextKey(req) => {
-                                // TODO: to_vec() :-/
+                                // TODO: to_vec() :-/ range() immediately calculates the range of keys so there's no borrowing issue, but the take_while needs to keep req borrowed, which isn't possible
                                 let req_key = req.key().as_ref().to_vec();
-                                // TODO: to_vec() :-/
                                 let next_key = self
                                     .finalized_block_storage
-                                    .range(req.key().as_ref().to_vec()..)
+                                    .range::<[u8], _>((
+                                        ops::Bound::Included(req.key().as_ref()),
+                                        ops::Bound::Unbounded,
+                                    ))
                                     .find(move |(k, _)| k[..] > req_key[..])
                                     .map(|(k, _)| k);
                                 verify = req.inject_key(next_key);
                             }
                             all::BlockVerification::FinalizedStoragePrefixKeys(req) => {
-                                // TODO: to_vec() :-/
+                                // TODO: to_vec() :-/ range() immediately calculates the range of keys so there's no borrowing issue, but the take_while needs to keep req borrowed, which isn't possible
                                 let prefix = req.prefix().as_ref().to_vec();
-                                // TODO: to_vec() :-/
                                 let keys = self
                                     .finalized_block_storage
-                                    .range(req.prefix().as_ref().to_vec()..)
+                                    .range::<[u8], _>((
+                                        ops::Bound::Included(req.prefix().as_ref()),
+                                        ops::Bound::Unbounded,
+                                    ))
                                     .take_while(|(k, _)| k.starts_with(&prefix))
                                     .map(|(k, _)| k);
                                 verify = req.inject_keys_ordered(keys);
+                            }
+                            all::BlockVerification::RuntimeCompilation(rt) => {
+                                verify = rt.build();
                             }
                         }
                     }
                 }
 
-                all::ProcessOne::VerifyJustification(verify) => {
+                all::ProcessOne::VerifyFinalityProof(verify) => {
                     let span = tracing::debug_span!(
-                        "justification-verification",
+                        "finality-proof-verification",
                         outcome = tracing::field::Empty,
                         error = tracing::field::Empty,
                     );
                     let _enter = span.enter();
 
-                    match verify.perform() {
+                    match verify.perform(rand::random()) {
                         (
                             sync_out,
-                            all::JustificationVerifyOutcome::NewFinalized {
+                            all::FinalityProofVerifyOutcome::NewFinalized {
                                 finalized_blocks,
                                 updates_best_block,
                             },
@@ -1121,7 +1165,8 @@ impl SyncBackground {
 
                             if let Some(last_finalized) = finalized_blocks.last() {
                                 let mut lock = self.sync_state.lock().await;
-                                lock.finalized_block_hash = last_finalized.header.hash();
+                                lock.finalized_block_hash =
+                                    last_finalized.header.hash(self.sync.block_number_bytes());
                                 lock.finalized_block_number = last_finalized.header.number;
                             }
 
@@ -1145,13 +1190,33 @@ impl SyncBackground {
                                 }
                             }
 
-                            let new_finalized_hash =
-                                finalized_blocks.last().map(|lf| lf.header.hash()).unwrap();
-                            database_blocks(&self.database, finalized_blocks).await;
+                            let new_finalized_hash = finalized_blocks
+                                .last()
+                                .map(|lf| lf.header.hash(self.sync.block_number_bytes()))
+                                .unwrap();
+                            let block_number_bytes = self.sync.block_number_bytes();
+                            database_blocks(&self.database, finalized_blocks, block_number_bytes)
+                                .await;
                             database_set_finalized(&self.database, new_finalized_hash).await;
                             continue;
                         }
-                        (sync_out, all::JustificationVerifyOutcome::Error(error)) => {
+                        (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
+                            span.record("outcome", &"pending");
+                            self.sync = sync_out;
+                            continue;
+                        }
+                        (sync_out, all::FinalityProofVerifyOutcome::AlreadyFinalized) => {
+                            span.record("outcome", &"already-finalized");
+                            self.sync = sync_out;
+                            continue;
+                        }
+                        (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
+                            span.record("outcome", &"failure");
+                            span.record("error", &tracing::field::display(error));
+                            self.sync = sync_out;
+                            continue;
+                        }
+                        (sync_out, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
                             span.record("outcome", &"failure");
                             span.record("error", &tracing::field::display(error));
                             self.sync = sync_out;
@@ -1200,16 +1265,23 @@ impl SyncBackground {
 }
 
 /// Writes blocks to the database
-async fn database_blocks(database: &database_thread::DatabaseThread, blocks: Vec<all::Block<()>>) {
+async fn database_blocks(
+    database: &database_thread::DatabaseThread,
+    blocks: Vec<all::Block<()>>,
+    block_number_bytes: usize,
+) {
     database
-        .with_database_detached(|database| {
+        .with_database_detached(move |database| {
             for block in blocks {
                 // TODO: overhead for building the SCALE encoding of the header
                 let result = database.insert(
-                    &block.header.scale_encoding().fold(Vec::new(), |mut a, b| {
-                        a.extend_from_slice(b.as_ref());
-                        a
-                    }),
+                    &block.header.scale_encoding(block_number_bytes).fold(
+                        Vec::new(),
+                        |mut a, b| {
+                            a.extend_from_slice(b.as_ref());
+                            a
+                        },
+                    ),
                     true, // TODO: is_new_best?
                     block.full.as_ref().unwrap().body.iter(),
                     block

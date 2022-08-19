@@ -73,7 +73,8 @@ impl ChainSpec {
 
         // Make sure that the light sync state can be successfully decoded.
         if let Some(light_sync_state) = &client_spec.light_sync_state {
-            light_sync_state.decode()?;
+            // TODO: this "4" constant is repeated
+            light_sync_state.decode(client_spec.block_number_bytes.unwrap_or(4).into())?;
         }
 
         Ok(ChainSpec { client_spec })
@@ -98,7 +99,7 @@ impl ChainSpec {
             .value(b":code")
             .ok_or(FromGenesisStorageError::RuntimeNotFound)?;
         let heap_pages =
-            executor::storage_heap_pages_to_value(genesis_storage.value(b":heappages").as_deref())
+            executor::storage_heap_pages_to_value(genesis_storage.value(b":heappages"))
                 .map_err(FromGenesisStorageError::HeapPagesDecode)?;
         let vm_prototype = executor::host::HostVmPrototype::new(executor::host::Config {
             module: &wasm_code,
@@ -143,8 +144,7 @@ impl ChainSpec {
             (Err(err1), Err(err2))
                 if err1.is_function_not_found() && err2.is_function_not_found() =>
             {
-                // TODO: seems a bit risky to automatically fall back to this?
-                ChainInformationConsensus::AllAuthorized
+                ChainInformationConsensus::Unknown
             }
             (Err(error), _) => {
                 // Note that Babe might have produced an error as well, which is intentionally
@@ -179,19 +179,10 @@ impl ChainSpec {
             (finality, vm_prototype)
         };
 
-        let (state_version, vm_prototype) = {
-            match executor::core_version(vm_prototype) {
-                (Ok(runtime_spec), vm_prototype) => {
-                    let state_version = match runtime_spec.decode().state_version {
-                        Some(0) | None => trie::TrieEntryVersion::V0,
-                        Some(1) => trie::TrieEntryVersion::V1,
-                        Some(_) => return Err(FromGenesisStorageError::UnknownStateVersion),
-                    };
-
-                    (state_version, vm_prototype)
-                }
-                (Err(err), _) => return Err(FromGenesisStorageError::CoreVersionLoad(err)),
-            }
+        let state_version = match vm_prototype.runtime_version().decode().state_version {
+            Some(0) | None => trie::TrieEntryVersion::V0,
+            Some(1) => trie::TrieEntryVersion::V1,
+            Some(_) => return Err(FromGenesisStorageError::UnknownStateVersion),
         };
 
         let chain_info = ChainInformation {
@@ -264,12 +255,27 @@ impl ChainSpec {
         }
     }
 
+    /// Returns the number of bytes that the "block number" field of various data structures uses.
+    pub fn block_number_bytes(&self) -> u8 {
+        self.client_spec.block_number_bytes.unwrap_or(4)
+    }
+
     /// Returns true if the chain is of a type for which a live network is expected.
     pub fn has_live_network(&self) -> bool {
         match &self.client_spec.chain_type {
             structs::ChainType::Development | structs::ChainType::Custom(_) => false,
             structs::ChainType::Local | structs::ChainType::Live => true,
         }
+    }
+
+    /// Returns a list of hashes of block headers that should always be considered as invalid.
+    pub fn bad_blocks_hashes(&'_ self) -> impl Iterator<Item = &'_ [u8; 32]> + '_ {
+        self.client_spec
+            .bad_blocks
+            .as_ref()
+            .into_iter()
+            .flat_map(|l| l.iter())
+            .map(|h| &h.0)
     }
 
     /// Returns the list of bootnode addresses found in the chain spec.
@@ -358,7 +364,7 @@ impl ChainSpec {
             .as_ref()
             .map(|state| LightSyncState {
                 // We made sure at initialization that the decoding succeeds.
-                inner: state.decode().unwrap(),
+                inner: state.decode(self.block_number_bytes().into()).unwrap(),
             })
     }
 }
@@ -511,6 +517,7 @@ impl LightSyncState {
 
 /// Error that can happen when parsing a chain spec JSON.
 #[derive(Debug, derive_more::Display)]
+#[display(fmt = "Failed to parse chain spec")]
 pub struct ParseError(ParseErrorInner);
 
 #[derive(Debug, derive_more::Display)]
@@ -525,17 +532,20 @@ pub enum FromGenesisStorageError {
     /// Runtime couldn't be found in the storage.
     RuntimeNotFound,
     /// Failed to decode heap pages from the storage.
+    #[display(fmt = "Failed to decode heap pages from the storage: {}", _0)]
     HeapPagesDecode(executor::InvalidHeapPagesError),
     /// Error when initializing the virtual machine.
+    #[display(fmt = "Error when initializing the virtual machine: {}", _0)]
     VmInitialization(executor::host::NewErr),
     /// Error when retrieving the GrandPa configuration.
+    #[display(fmt = "Error when retrieving the GrandPa configuration: {}", _0)]
     GrandpaConfigLoad(grandpa_genesis_config::FromVmPrototypeError),
     /// Error when retrieving the Aura algorithm configuration.
+    #[display(fmt = "Error when retrieving the Aura configuration: {}", _0)]
     AuraConfigLoad(aura_config::FromVmPrototypeError),
     /// Error when retrieving the Babe algorithm configuration.
+    #[display(fmt = "Error when retrieving the Babe configuration: {}", _0)]
     BabeConfigLoad(babe_genesis_config::FromVmPrototypeError),
-    /// Failed to retrieve the core version of the runtime.
-    CoreVersionLoad(executor::CoreVersionError),
     /// State version in runtime specification is not supported.
     UnknownStateVersion,
     /// Multiple consensus algorithms have been detected.

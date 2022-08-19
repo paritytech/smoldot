@@ -56,6 +56,9 @@ pub struct Config<TPlat: Platform> {
     /// State of the finalized chain.
     pub chain_information: chain::chain_information::ValidChainInformation,
 
+    /// Number of bytes of the block number in the networking protocol.
+    pub block_number_bytes: usize,
+
     /// Closure that spawns background tasks.
     pub tasks_executor: Box<dyn FnMut(String, future::BoxFuture<'static, ()>) + Send>,
 
@@ -76,6 +79,9 @@ pub struct Config<TPlat: Platform> {
 pub struct ConfigParachain<TPlat: Platform> {
     /// Runtime service that synchronizes the relay chain of this parachain.
     pub relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
+
+    /// Number of bytes used by the block number in the relay chain.
+    pub relay_chain_block_number_bytes: usize,
 
     /// Id of the parachain within the relay chain.
     ///
@@ -99,6 +105,8 @@ pub struct SyncService<TPlat: Platform> {
     network_service: Arc<network_service::NetworkService<TPlat>>,
     /// See [`Config::network_service`].
     network_chain_index: usize,
+    /// See [`Config::block_number_bytes`].
+    block_number_bytes: usize,
 }
 
 impl<TPlat: Platform> SyncService<TPlat> {
@@ -113,7 +121,9 @@ impl<TPlat: Platform> SyncService<TPlat> {
                 Box::pin(parachain::start_parachain(
                     log_target,
                     config.chain_information,
+                    config.block_number_bytes,
                     config_parachain.relay_chain_sync.clone(),
+                    config_parachain.relay_chain_block_number_bytes,
                     config_parachain.parachain_id,
                     from_foreground,
                     config.network_service.1,
@@ -126,6 +136,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                 Box::pin(standalone::start_standalone_chain(
                     log_target,
                     config.chain_information,
+                    config.block_number_bytes,
                     from_foreground,
                     config.network_service.0.clone(),
                     config.network_service.1,
@@ -138,7 +149,13 @@ impl<TPlat: Platform> SyncService<TPlat> {
             to_background: Mutex::new(to_background),
             network_service: config.network_service.0,
             network_chain_index: config.network_service.1,
+            block_number_bytes: config.block_number_bytes,
         }
+    }
+
+    /// Returns the value initially passed as [`Config::block_number_bytes`̀].
+    pub fn block_number_bytes(&self) -> usize {
+        self.block_number_bytes
     }
 
     /// Returns the state of the finalized block of the chain, after passing it through
@@ -175,6 +192,9 @@ impl<TPlat: Platform> SyncService<TPlat> {
     /// If `runtime_interest` is `false`, then [`SubscribeAll::finalized_block_runtime`] will
     /// always be `None`. Since the runtime can only be provided to one call to this function,
     /// only one subscriber should use `runtime_interest` equal to `true`.
+    ///
+    /// While this function is asynchronous, it is guaranteed to finish relatively quickly. Only
+    /// CPU operations are performed.
     pub async fn subscribe_all(&self, buffer_size: usize, runtime_interest: bool) -> SubscribeAll {
         let (send_back, rx) = oneshot::channel();
 
@@ -407,11 +427,12 @@ impl<TPlat: Platform> SyncService<TPlat> {
                 .await
                 .map_err(StorageQueryErrorDetail::Network)
                 .and_then(|outcome| {
+                    let decoded = outcome.decode();
                     let mut result = Vec::with_capacity(requested_keys.clone().count());
                     for key in requested_keys.clone() {
                         result.push(
                             proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-                                proof: outcome.iter().map(|nv| &nv[..]),
+                                proof: decoded.iter().map(|nv| &nv[..]),
                                 requested_key: key.as_ref(),
                                 trie_root_hash: &storage_trie_root,
                             })
@@ -481,7 +502,8 @@ impl<TPlat: Platform> SyncService<TPlat> {
 
                 match result {
                     Ok(proof) => {
-                        match prefix_scan.resume(proof.iter().map(|v| &v[..])) {
+                        let decoded_proof = proof.decode();
+                        match prefix_scan.resume(decoded_proof.iter().map(|v| &v[..])) {
                             Ok(prefix_proof::ResumeOutcome::InProgress(scan)) => {
                                 // Continue next step of the proof.
                                 prefix_scan = scan;
@@ -521,7 +543,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
         total_attempts: u32,
         timeout_per_request: Duration,
         _max_parallel: NonZeroU32,
-    ) -> Result<Vec<Vec<u8>>, CallProofQueryError> {
+    ) -> Result<network_service::EncodedMerkleProof, CallProofQueryError> {
         let mut outcome_errors =
             Vec::with_capacity(usize::try_from(total_attempts).unwrap_or(usize::max_value()));
 
@@ -544,7 +566,7 @@ impl<TPlat: Platform> SyncService<TPlat> {
                 .await;
 
             match result {
-                Ok(value) if !value.is_empty() => return Ok(value),
+                Ok(value) if !value.decode().is_empty() => return Ok(value),
                 // TODO: this check of emptiness is a bit of a hack; it is necessary because Substrate responds to requests about blocks it doesn't know with an empty proof
                 Ok(_) => outcome_errors.push(network_service::CallProofRequestError::Request(
                     service::CallProofRequestError::Request(
@@ -726,6 +748,15 @@ pub enum Notification {
 
     /// A new block has been added to the list of unfinalized blocks.
     Block(BlockNotification),
+
+    /// The best block has changed to a different one.
+    BestBlockChanged {
+        /// Hash of the new best block.
+        ///
+        /// This can be either the hash of the latest finalized block or the hash of a
+        /// non-finalized block.
+        hash: [u8; 32],
+    },
 }
 
 /// Notification about a new block.

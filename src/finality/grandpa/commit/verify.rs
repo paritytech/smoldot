@@ -18,6 +18,9 @@
 use crate::finality::grandpa::commit::decode;
 
 use alloc::vec::Vec;
+use core::{cmp, iter, mem};
+use rand::Rng as _;
+use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
 /// Configuration for a commit verification process.
 #[derive(Debug)]
@@ -25,12 +28,20 @@ pub struct Config<C> {
     /// SCALE-encoded commit to verify.
     pub commit: C,
 
+    /// Number of bytes used for encoding the block number in the SCALE-encoded commit.
+    pub block_number_bytes: usize,
+
     // TODO: document
     pub expected_authorities_set_id: u64,
 
     /// Number of authorities that are allowed to emit pre-commits. Used to calculate the
     /// threshold of the number of required signatures.
     pub num_authorities: u32,
+
+    /// Seed for a PRNG used for various purposes during the verification.
+    ///
+    /// > **Note**: The verification is nonetheless deterministic.
+    pub randomness_seed: [u8; 32],
 }
 
 /// Commit verification in progress.
@@ -52,10 +63,11 @@ pub enum InProgress<C> {
 
 /// Verifies that a commit is valid.
 pub fn verify<C: AsRef<[u8]>>(config: Config<C>) -> InProgress<C> {
-    let decoded_commit = match decode::decode_grandpa_commit(config.commit.as_ref()) {
-        Ok(c) => c,
-        Err(_) => return InProgress::Finished(Err(Error::InvalidFormat)),
-    };
+    let decoded_commit =
+        match decode::decode_grandpa_commit(config.commit.as_ref(), config.block_number_bytes) {
+            Ok(c) => c,
+            Err(_) => return InProgress::Finished(Err(Error::InvalidFormat)),
+        };
 
     if decoded_commit.set_id != config.expected_authorities_set_id {
         return InProgress::Finished(Err(Error::BadSetId));
@@ -65,14 +77,34 @@ pub fn verify<C: AsRef<[u8]>>(config: Config<C>) -> InProgress<C> {
         return InProgress::Finished(Err(Error::InvalidFormat));
     }
 
+    let mut randomness = ChaCha20Rng::from_seed(config.randomness_seed);
+
+    // Make sure that there is no duplicate authority public key.
+    {
+        let mut unique = hashbrown::HashSet::with_capacity_and_hasher(
+            decoded_commit.message.auth_data.len(),
+            crate::util::SipHasherBuild::new(randomness.gen()),
+        );
+        if let Some((_, faulty_pub_key)) = decoded_commit
+            .message
+            .auth_data
+            .iter()
+            .find(|(_, pubkey)| !unique.insert(pubkey))
+        {
+            return InProgress::Finished(Err(Error::DuplicateSignature(**faulty_pub_key)));
+        }
+    }
+
     Verification {
         commit: config.commit,
+        block_number_bytes: config.block_number_bytes,
         next_precommit_index: 0,
         next_precommit_author_verified: false,
         next_precommit_block_verified: false,
         num_verified_signatures: 0,
         num_authorities: config.num_authorities,
         signatures_batch: ed25519_zebra::batch::Verifier::new(),
+        randomness,
     }
     .resume()
 }
@@ -88,7 +120,11 @@ impl<C: AsRef<[u8]>> IsAuthority<C> {
     /// Public key to verify.
     pub fn authority_public_key(&self) -> &[u8; 32] {
         debug_assert!(!self.inner.next_precommit_author_verified);
-        let decoded_commit = decode::decode_grandpa_commit(self.inner.commit.as_ref()).unwrap();
+        let decoded_commit = decode::decode_grandpa_commit(
+            self.inner.commit.as_ref(),
+            self.inner.block_number_bytes,
+        )
+        .unwrap();
         decoded_commit.message.auth_data[self.inner.next_precommit_index].1
     }
 
@@ -113,31 +149,43 @@ pub struct IsParent<C> {
     inner: Verification<C>,
     /// For performance reasons, the block number is copied here, but not the block hash. This
     /// hasn't actually been benchmarked, so feel free to do so.
-    block_number: u32,
+    block_number: u64,
 }
 
 impl<C: AsRef<[u8]>> IsParent<C> {
     /// Height of the block to check.
     pub fn block_number(&self) -> u64 {
-        u64::from(self.block_number)
+        self.block_number
     }
 
     /// Hash of the block to check.
     pub fn block_hash(&self) -> &[u8; 32] {
         debug_assert!(!self.inner.next_precommit_block_verified);
-        let decoded_commit = decode::decode_grandpa_commit(self.inner.commit.as_ref()).unwrap();
+        let decoded_commit = decode::decode_grandpa_commit(
+            self.inner.commit.as_ref(),
+            self.inner.block_number_bytes,
+        )
+        .unwrap();
         decoded_commit.message.precommits[self.inner.next_precommit_index].target_hash
     }
 
     /// Height of the block that must be the ancestor of the block to check.
     pub fn target_block_number(&self) -> u64 {
-        let decoded_commit = decode::decode_grandpa_commit(self.inner.commit.as_ref()).unwrap();
-        u64::from(decoded_commit.message.target_number)
+        let decoded_commit = decode::decode_grandpa_commit(
+            self.inner.commit.as_ref(),
+            self.inner.block_number_bytes,
+        )
+        .unwrap();
+        decoded_commit.message.target_number
     }
 
     /// Hash of the block that must be the ancestor of the block to check.
     pub fn target_block_hash(&self) -> &[u8; 32] {
-        let decoded_commit = decode::decode_grandpa_commit(self.inner.commit.as_ref()).unwrap();
+        let decoded_commit = decode::decode_grandpa_commit(
+            self.inner.commit.as_ref(),
+            self.inner.block_number_bytes,
+        )
+        .unwrap();
         decoded_commit.message.target_hash
     }
 
@@ -163,6 +211,9 @@ impl<C: AsRef<[u8]>> IsParent<C> {
 struct Verification<C> {
     /// Encoded commit message. Guaranteed to decode successfully.
     commit: C,
+
+    /// See [`Config::block_number_bytes`].
+    block_number_bytes: usize,
 
     /// Index of the next pre-commit to process within the commit.
     next_precommit_index: usize,
@@ -190,13 +241,17 @@ struct Verification<C> {
     /// See <https://docs.rs/ed25519-zebra/2.2.0/ed25519_zebra/batch/index.html> and
     /// <https://github.com/zcash/zips/blob/master/zip-0215.rst>
     signatures_batch: ed25519_zebra::batch::Verifier,
+
+    /// Randomness generator used during the batch verification.
+    randomness: ChaCha20Rng,
 }
 
 impl<C: AsRef<[u8]>> Verification<C> {
     fn resume(mut self) -> InProgress<C> {
         // The `verify` function that starts the verification performs the preliminary check that
         // the commit has the correct format.
-        let decoded_commit = decode::decode_grandpa_commit(self.commit.as_ref()).unwrap();
+        let decoded_commit =
+            decode::decode_grandpa_commit(self.commit.as_ref(), self.block_number_bytes).unwrap();
 
         loop {
             if let Some(precommit) = decoded_commit
@@ -225,22 +280,25 @@ impl<C: AsRef<[u8]>> Verification<C> {
                     decoded_commit.message.auth_data[self.next_precommit_index].1;
                 let signature = decoded_commit.message.auth_data[self.next_precommit_index].0;
 
-                if decoded_commit
-                    .message
-                    .auth_data
-                    .iter()
-                    .skip(self.next_precommit_index.saturating_add(1))
-                    .any(|pc| pc.1 == authority_public_key)
-                {
-                    return InProgress::Finished(Err(Error::DuplicateSignature(
-                        *authority_public_key,
-                    )));
-                }
-
-                let mut msg = Vec::with_capacity(1 + 32 + 4 + 8 + 8);
+                let mut msg = Vec::with_capacity(1 + 32 + self.block_number_bytes + 8 + 8);
                 msg.push(1u8); // This `1` indicates which kind of message is being signed.
                 msg.extend_from_slice(&precommit.target_hash[..]);
-                msg.extend_from_slice(&u32::to_le_bytes(precommit.target_number)[..]);
+                // The message contains the little endian block number. While simple in concept,
+                // in reality it is more complicated because we don't know the number of bytes of
+                // this block number at compile time. We thus copy as many bytes as appropriate and
+                // pad with 0s if necessary.
+                msg.extend_from_slice(
+                    &precommit.target_number.to_le_bytes()[..cmp::min(
+                        mem::size_of_val(&precommit.target_number),
+                        self.block_number_bytes,
+                    )],
+                );
+                msg.extend(
+                    iter::repeat(0).take(
+                        self.block_number_bytes
+                            .saturating_sub(mem::size_of_val(&precommit.target_number)),
+                    ),
+                );
                 msg.extend_from_slice(&u64::to_le_bytes(decoded_commit.round_number)[..]);
                 msg.extend_from_slice(&u64::to_le_bytes(decoded_commit.set_id)[..]);
                 debug_assert_eq!(msg.len(), msg.capacity());
@@ -270,8 +328,7 @@ impl<C: AsRef<[u8]>> Verification<C> {
                 }
 
                 // Actual signatures verification performed here.
-                // TODO: thread_rng()?!?! what to do here?
-                match self.signatures_batch.verify(rand::thread_rng()) {
+                match self.signatures_batch.verify(&mut self.randomness) {
                     Ok(()) => {}
                     Err(_) => return InProgress::Finished(Err(Error::BadSignature)),
                 }

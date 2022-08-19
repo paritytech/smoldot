@@ -131,7 +131,7 @@ pub struct TrieNodeInfoConfig<'a, K, I> {
 /// >           Only the minimum amount of information required is fetched from `proof`, and an
 /// >           error is returned if a problem happens during this process.
 pub fn trie_node_info<'a, 'b>(
-    config: TrieNodeInfoConfig<
+    mut config: TrieNodeInfoConfig<
         'a,
         impl Iterator<Item = nibble::Nibble>,
         impl Iterator<Item = &'b [u8]> + Clone,
@@ -242,7 +242,7 @@ pub fn trie_node_info<'a, 'b>(
                         match merkle_values.iter().position(|v| v[..] == *hash) {
                             None => StorageValue::HashKnownValueMissing(hash),
                             Some(idx) => {
-                                let value = config.proof.clone().nth(idx).unwrap();
+                                let value = config.proof.nth(idx).unwrap();
                                 StorageValue::Known(value)
                             }
                         }

@@ -46,14 +46,14 @@ fn benchmark_headers(c: &mut Criterion) {
     for header in &headers {
         group.throughput(Throughput::Bytes(header.len() as u64));
         group.bench_with_input(BenchmarkId::new("decode", header.len()), header, |b, i| {
-            b.iter(|| smoldot::header::decode(i).unwrap())
+            b.iter(|| smoldot::header::decode(i, 4).unwrap())
         });
         group.bench_with_input(
             BenchmarkId::new("decode_and_to_owned", header.len()),
             header,
             |b, i| {
                 b.iter(|| {
-                    let as_ref = smoldot::header::decode(i).unwrap();
+                    let as_ref = smoldot::header::decode(i, 4).unwrap();
                     smoldot::header::Header::from(as_ref)
                 })
             },

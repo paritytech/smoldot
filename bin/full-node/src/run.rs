@@ -103,6 +103,13 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             .expect("Failed to decode chain specs")
     };
 
+    // This warning message should be removed if/when the full node becomes mature.
+    tracing::warn!(
+        "Please note that this full node is experimental. It is not feature complete and is \
+        known to panic often. Please report any panic you might encounter to \
+        <https://github.com/paritytech/smoldot/issues>."
+    );
+
     // TODO: don't unwrap?
     let genesis_chain_information = chain_spec.as_chain_information().unwrap().0;
 
@@ -180,6 +187,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                     .unwrap()
             })
             .await,
+        chain_spec.block_number_bytes().into(),
     )
     .unwrap()
     .number;
@@ -209,6 +217,10 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     let local_peer_id =
         peer_id::PublicKey::Ed25519(*noise_key.libp2p_public_ed25519_key()).into_peer_id();
 
+    let genesis_block_hash = genesis_chain_information
+        .finalized_block_header
+        .hash(chain_spec.block_number_bytes().into());
+
     let jaeger_service = jaeger_service::JaegerService::new(jaeger_service::Config {
         tasks_executor: &mut |task| threads_pool.spawn_ok(task),
         service_name: local_peer_id.to_string(),
@@ -223,20 +235,24 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             num_events_receivers: 2 + if relay_chain_database.is_some() { 1 } else { 0 },
             chains: iter::once(network_service::ChainConfig {
                 protocol_id: chain_spec.protocol_id().to_owned(),
+                block_number_bytes: usize::from(chain_spec.block_number_bytes()),
                 database: database.clone(),
                 has_grandpa_protocol: matches!(
                     genesis_chain_information.finality,
                     chain::chain_information::ChainInformationFinality::Grandpa { .. }
                 ),
-                genesis_block_hash: genesis_chain_information.finalized_block_header.hash(),
-                best_block: database
-                    .with_database(|database| {
-                        let hash = database.finalized_block_hash().unwrap();
-                        let header = database.block_scale_encoded_header(&hash).unwrap().unwrap();
-                        let number = header::decode(&header).unwrap().number;
-                        (number, hash)
-                    })
-                    .await,
+                genesis_block_hash,
+                best_block: {
+                    let block_number_bytes = chain_spec.block_number_bytes();
+                    database
+                        .with_database(move |database| {
+                            let hash = database.finalized_block_hash().unwrap();
+                            let header = database.block_scale_encoded_header(&hash).unwrap().unwrap();
+                            let number = header::decode(&header, block_number_bytes.into(),).unwrap().number;
+                            (number, hash)
+                        })
+                        .await
+                },
                 bootstrap_nodes: {
                     let mut list = Vec::with_capacity(
                         chain_spec.boot_nodes().len() + cli_options.additional_bootnode.len(),
@@ -272,6 +288,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 if let Some(relay_chains_specs) = &relay_chain_spec {
                     Some(network_service::ChainConfig {
                         protocol_id: relay_chains_specs.protocol_id().to_owned(),
+                        block_number_bytes: usize::from(relay_chains_specs.block_number_bytes()),
                         database: relay_chain_database.clone().unwrap(),
                         has_grandpa_protocol: matches!(
                             relay_genesis_chain_information.as_ref().unwrap().finality,
@@ -281,15 +298,18 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                             .as_ref()
                             .unwrap()
                             .finalized_block_header
-                            .hash(),
+                            .hash(chain_spec.block_number_bytes().into(),),
                         best_block: relay_chain_database
                             .as_ref()
                             .unwrap()
-                            .with_database(|db| {
-                                let hash = db.finalized_block_hash().unwrap();
-                                let header = db.block_scale_encoded_header(&hash).unwrap().unwrap();
-                                let number = header::decode(&header).unwrap().number;
-                                (number, hash)
+                            .with_database({
+                                let block_number_bytes = chain_spec.block_number_bytes();
+                                move |db| {
+                                    let hash = db.finalized_block_hash().unwrap();
+                                    let header = db.block_scale_encoded_header(&hash).unwrap().unwrap();
+                                    let number = header::decode(&header, block_number_bytes.into()).unwrap().number;
+                                    (number, hash)
+                                }
                             })
                             .await,
                         bootstrap_nodes: {
@@ -342,9 +362,11 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
 
     let consensus_service = consensus_service::ConsensusService::new(consensus_service::Config {
         tasks_executor: &mut |task| threads_pool.spawn_ok(task),
+        genesis_block_hash,
         network_events_receiver: network_events_receivers.next().unwrap(),
         network_service: (network_service.clone(), 0),
         database,
+        block_number_bytes: usize::from(chain_spec.block_number_bytes()),
         keystore,
         jaeger_service: jaeger_service.clone(),
         slot_duration_author_ratio: 43691_u16,
@@ -356,9 +378,19 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
         Some(
             consensus_service::ConsensusService::new(consensus_service::Config {
                 tasks_executor: &mut |task| threads_pool.spawn_ok(task),
+                genesis_block_hash: relay_genesis_chain_information
+                    .as_ref()
+                    .unwrap()
+                    .finalized_block_header
+                    .hash(usize::from(
+                        relay_chain_spec.as_ref().unwrap().block_number_bytes(),
+                    )),
                 network_events_receiver: network_events_receivers.next().unwrap(),
                 network_service: (network_service.clone(), 1),
                 database: relay_chain_database,
+                block_number_bytes: usize::from(
+                    relay_chain_spec.as_ref().unwrap().block_number_bytes(),
+                ),
                 keystore: Arc::new(keystore::Keystore::new(rand::random())),
                 jaeger_service, // TODO: consider passing a different jaeger service with a different service name
                 slot_duration_author_ratio: 43691_u16,
@@ -378,14 +410,16 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     // are connected to the JSON-RPC endpoint of the node while they are in reality connected to
     // something else.
     let _json_rpc_service = if let Some(bind_address) = cli_options.json_rpc_address.0 {
-        Some(
-            json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
-                tasks_executor: { &mut move |task| threads_pool.spawn_ok(task) },
-                bind_address,
-            })
-            .await
-            .unwrap(),
-        )
+        let result = json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
+            tasks_executor: { &mut move |task| threads_pool.spawn_ok(task) },
+            bind_address,
+        })
+        .await;
+
+        Some(match result {
+            Ok(service) => service,
+            Err(err) => panic!("failed to initialize JSON-RPC endpoint: {}", err),
+        })
     } else {
         None
     };
@@ -490,11 +524,21 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 // We expect the network events channel to never shut down.
                 let network_event = network_event.unwrap();
 
-                if let network_service::Event::BlockAnnounce { chain_index: 0, header, .. } = network_event {
-                    match network_known_best {
-                        Some(n) if n >= header.number => {},
-                        _ => network_known_best = Some(header.number),
+                // Update `network_known_best`.
+                match network_event {
+                    network_service::Event::BlockAnnounce { chain_index: 0, header, .. } => {
+                        match network_known_best {
+                            Some(n) if n >= header.number => {},
+                            _ => network_known_best = Some(header.number),
+                        }
                     }
+                    network_service::Event::Connected { chain_index: 0, best_block_number, .. } => {
+                        match network_known_best {
+                            Some(n) if n >= best_block_number => {},
+                            _ => network_known_best = Some(best_block_number),
+                        }
+                    }
+                    _ => {}
                 }
             }
 
@@ -584,14 +628,20 @@ async fn open_database(
     };
 
     // The `unwrap()` here can panic for example in case of access denied.
-    match background_open_database(db_path.clone(), show_progress)
-        .await
-        .unwrap()
+    match background_open_database(
+        db_path.clone(),
+        chain_spec.block_number_bytes().into(),
+        show_progress,
+    )
+    .await
+    .unwrap()
     {
         // Database already exists and contains data.
         full_sqlite::DatabaseOpen::Open(database) => {
             if database.block_hash_by_number(0).unwrap().next().unwrap()
-                != genesis_chain_information.finalized_block_header.hash()
+                != genesis_chain_information
+                    .finalized_block_header
+                    .hash(chain_spec.block_number_bytes().into())
             {
                 panic!("Mismatch between database and chain specification. Shutting down node.");
             }
@@ -627,6 +677,7 @@ async fn open_database(
 #[tracing::instrument(level = "trace", skip(show_progress))]
 async fn background_open_database(
     path: Option<PathBuf>,
+    block_number_bytes: usize,
     show_progress: bool,
 ) -> Result<full_sqlite::DatabaseOpen, full_sqlite::InternalError> {
     let (tx, rx) = oneshot::channel();
@@ -636,6 +687,7 @@ async fn background_open_database(
         let path = path.clone();
         move || {
             let result = full_sqlite::open(full_sqlite::Config {
+                block_number_bytes,
                 ty: if let Some(path) = &path {
                     full_sqlite::ConfigTy::Disk(path)
                 } else {
@@ -649,6 +701,7 @@ async fn background_open_database(
     // Fall back to opening the database on the same thread if the thread spawn failed.
     if thread_spawn_result.is_err() {
         return full_sqlite::open(full_sqlite::Config {
+            block_number_bytes,
             ty: if let Some(path) = &path {
                 full_sqlite::ConfigTy::Disk(path)
             } else {

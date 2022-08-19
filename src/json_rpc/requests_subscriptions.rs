@@ -236,37 +236,7 @@ impl RequestsSubscriptions {
     /// [`ClientId`].
     pub async fn add_client(&self) -> Result<ClientId, AddClientError> {
         let mut clients = self.clients.lock().await;
-        if clients.list.len() == self.max_clients.load(Ordering::Relaxed) {
-            return Err(AddClientError::LimitReached);
-        }
-
-        let arc = Arc::new(ClientInner {
-            total_requests_in_fly_dec_or_dead: event_listener::Event::new(),
-            dead: AtomicBool::new(false),
-            total_requests_in_fly: AtomicUsize::new(0),
-            guarded: Mutex::new(ClientInnerGuarded {
-                pending_requests: hashbrown::HashSet::with_capacity_and_hasher(
-                    self.max_requests_per_client,
-                    Default::default(),
-                ),
-                responses_send_back: VecDeque::with_capacity(self.max_requests_per_client),
-                notification_messages: BTreeMap::new(),
-                responses_send_back_pushed_or_dead: event_listener::Event::new(),
-                notification_messages_popped_or_dead: event_listener::Event::new(),
-                active_subscriptions: hashbrown::HashMap::with_capacity_and_hasher(
-                    self.max_subscriptions_per_client,
-                    Default::default(),
-                ),
-                num_inactive_alive_subscriptions: 0,
-            }),
-        });
-
-        let new_client_id = clients.next_id;
-        clients.next_id += 1;
-
-        let ret = ClientId(new_client_id, Arc::downgrade(&arc));
-        clients.list.insert(new_client_id, arc);
-        Ok(ret)
+        self.add_client_inner(&mut *clients)
     }
 
     /// Similar to [`RequestsSubscriptions::add_client`], but non-async and takes `self` as `&mut`.
@@ -274,8 +244,13 @@ impl RequestsSubscriptions {
     /// > **Note**: This function is notably useful for adding clients at initialization, when
     /// >           outside of an asynchronous context.
     pub fn add_client_mut(&mut self) -> Result<ClientId, AddClientError> {
-        // TODO: DRY with add_client? not really an actual problem, just a bit annoying
-        let clients = self.clients.get_mut();
+        // Note that we don't use `clients.get_mut()`, as this would keep `self` mutably borrowed
+        // and prevent use from calling `add_client_inner`.
+        let mut clients = self.clients.try_lock().unwrap();
+        self.add_client_inner(&mut *clients)
+    }
+
+    fn add_client_inner(&self, clients: &mut Clients) -> Result<ClientId, AddClientError> {
         if clients.list.len() == self.max_clients.load(Ordering::Relaxed) {
             return Err(AddClientError::LimitReached);
         }
@@ -495,7 +470,7 @@ impl RequestsSubscriptions {
 
             // Try increment `total_requests_in_fly`, capping at a maximum of
             // `max_requests_per_client`.
-            if client
+            let could_increase = client
                 .total_requests_in_fly
                 .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |old_value| {
                     if old_value >= self.max_requests_per_client {
@@ -507,8 +482,8 @@ impl RequestsSubscriptions {
                     // There's no risk of overflow.
                     Some(old_value + 1)
                 })
-                .is_ok()
-            {
+                .is_ok();
+            if could_increase {
                 break;
             }
 
@@ -550,7 +525,7 @@ impl RequestsSubscriptions {
 
         // Try increment `total_requests_in_fly`, capping at a maximum of
         // `max_requests_per_client`.
-        if client
+        let failed_to_increase = client
             .total_requests_in_fly
             .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |old_value| {
                 if old_value >= self.max_requests_per_client {
@@ -562,8 +537,8 @@ impl RequestsSubscriptions {
                 // There's no risk of overflow.
                 Some(old_value + 1)
             })
-            .is_err()
-        {
+            .is_err();
+        if failed_to_increase {
             return Err(TryQueueClientRequestError { request });
         }
 

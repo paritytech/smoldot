@@ -92,14 +92,14 @@ impl<TSrc> AllForksSources<TSrc> {
         self.sources.is_empty()
     }
 
-    /// Iterates over all sources.
-    pub fn iter(&'_ self) -> impl Iterator<Item = SourceId> + '_ {
-        self.sources.keys().copied()
-    }
-
     /// Returns the number of sources in the data structure.
     pub fn len(&self) -> usize {
         self.sources.len()
+    }
+
+    /// Returns the list of all user datas of all sources.
+    pub fn user_data_iter_mut(&'_ mut self) -> impl ExactSizeIterator<Item = &'_ mut TSrc> + '_ {
+        self.sources.values_mut().map(|s| &mut s.user_data)
     }
 
     /// Returns the number of unique blocks in the data structure.

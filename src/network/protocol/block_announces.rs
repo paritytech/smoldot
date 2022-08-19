@@ -17,7 +17,7 @@
 
 use crate::header;
 
-use core::iter;
+use alloc::vec;
 use nom::Finish as _;
 
 /// Decoded handshake sent or received when opening a block announces notifications substream.
@@ -91,16 +91,21 @@ pub fn encode_block_announce(
 }
 
 /// Decodes a block announcement.
-pub fn decode_block_announce(bytes: &[u8]) -> Result<BlockAnnounceRef, DecodeBlockAnnounceError> {
+pub fn decode_block_announce(
+    bytes: &[u8],
+    block_number_bytes: usize,
+) -> Result<BlockAnnounceRef, DecodeBlockAnnounceError> {
     let result: Result<_, nom::error::Error<_>> =
-        nom::combinator::all_consuming(nom::combinator::map(
+        nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
             nom::sequence::tuple((
-                nom::combinator::recognize(|enc_hdr| match header::decode_partial(enc_hdr) {
-                    Ok((hdr, rest)) => Ok((rest, hdr)),
-                    Err(_) => Err(nom::Err::Failure(nom::error::make_error(
-                        enc_hdr,
-                        nom::error::ErrorKind::Verify,
-                    ))),
+                nom::combinator::recognize(|enc_hdr| {
+                    match header::decode_partial(enc_hdr, block_number_bytes) {
+                        Ok((hdr, rest)) => Ok((rest, hdr)),
+                        Err(_) => Err(nom::Err::Failure(nom::error::make_error(
+                            enc_hdr,
+                            nom::error::ErrorKind::Verify,
+                        ))),
+                    }
                 }),
                 nom::branch::alt((
                     nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| false),
@@ -112,7 +117,7 @@ pub fn decode_block_announce(bytes: &[u8]) -> Result<BlockAnnounceRef, DecodeBlo
                 scale_encoded_header,
                 is_best,
             },
-        ))(bytes)
+        )))(bytes)
         .finish();
 
     match result {
@@ -132,42 +137,45 @@ pub struct DecodeBlockAnnounceError(nom::error::ErrorKind);
 /// concatenation of the buffers.
 pub fn encode_block_announces_handshake(
     handshake: BlockAnnouncesHandshakeRef<'_>,
+    block_number_bytes: usize,
 ) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
-    let mut header = [0; 5];
+    let mut header = vec![0; 1 + block_number_bytes];
     header[0] = handshake.role.scale_encoding()[0];
+    // TODO: what to do if the best number doesn't fit in the given size? right now we just wrap around
+    header[1..].copy_from_slice(&handshake.best_number.to_le_bytes()[..block_number_bytes]);
 
-    // TODO: the message actually contains a u32, and doesn't use compact encoding; as such, any block height superior to 2^32 cannot be encoded
-    assert!(handshake.best_number < u64::from(u32::max_value()));
-    header[1..].copy_from_slice(&handshake.best_number.to_le_bytes()[..4]);
-
-    iter::once(either::Left(header))
-        .chain(iter::once(either::Right(handshake.best_hash)))
-        .chain(iter::once(either::Right(handshake.genesis_hash)))
+    [
+        either::Left(header),
+        either::Right(handshake.best_hash),
+        either::Right(handshake.genesis_hash),
+    ]
+    .into_iter()
 }
 
 /// Decodes a SCALE-encoded block announces handshake.
 pub fn decode_block_announces_handshake(
+    expected_block_number_bytes: usize,
     handshake: &[u8],
 ) -> Result<BlockAnnouncesHandshakeRef, BlockAnnouncesHandshakeDecodeError> {
     let result: Result<_, nom::error::Error<_>> =
-        nom::combinator::all_consuming(nom::combinator::map(
+        nom::combinator::all_consuming(nom::combinator::complete(nom::combinator::map(
             nom::sequence::tuple((
                 nom::branch::alt((
                     nom::combinator::map(nom::bytes::complete::tag(&[0b1]), |_| Role::Full),
                     nom::combinator::map(nom::bytes::complete::tag(&[0b10]), |_| Role::Light),
                     nom::combinator::map(nom::bytes::complete::tag(&[0b100]), |_| Role::Authority),
                 )),
-                nom::number::complete::le_u32,
+                crate::util::nom_varsize_number_decode_u64(expected_block_number_bytes),
                 nom::bytes::complete::take(32u32),
                 nom::bytes::complete::take(32u32),
             )),
             |(role, best_number, best_hash, genesis_hash)| BlockAnnouncesHandshakeRef {
                 role,
-                best_number: u64::from(best_number),
+                best_number,
                 best_hash: TryFrom::try_from(best_hash).unwrap(),
                 genesis_hash: TryFrom::try_from(genesis_hash).unwrap(),
             },
-        ))(handshake)
+        )))(handshake)
         .finish();
 
     match result {

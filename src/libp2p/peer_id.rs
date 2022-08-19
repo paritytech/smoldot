@@ -17,14 +17,10 @@
 
 use alloc::{string::String, vec::Vec};
 use core::{cmp, fmt, hash, str::FromStr};
-use prost::Message as _;
 use sha2::Digest as _;
 
 use super::multihash;
-
-mod keys_proto {
-    include!(concat!(env!("OUT_DIR"), "/keys_proto.rs"));
-}
+use crate::util::protobuf;
 
 /// Public key of a node's identity.
 ///
@@ -37,39 +33,69 @@ pub enum PublicKey {
 }
 
 impl PublicKey {
-    /// Encode the public key into a Protobuf structure for storage or
-    /// exchange with other nodes.
+    /// Encode the public key into a Protobuf structure for exchange with other nodes.
+    ///
+    /// As indicated in the libp2p specification, the encoding is done deterministically despite
+    /// the fact that the Protobuf format isn't deterministic.
+    ///
+    /// See https://github.com/libp2p/specs/blob/master/peer-ids/peer-ids.md#keys.
     pub fn to_protobuf_encoding(&self) -> Vec<u8> {
-        let public_key = match self {
-            PublicKey::Ed25519(key) => keys_proto::PublicKey {
-                r#type: keys_proto::KeyType::Ed25519 as i32,
-                data: key.to_vec(),
-            },
-        };
-
-        let mut buf = Vec::with_capacity(public_key.encoded_len());
-        public_key.encode(&mut buf).unwrap();
-        buf
+        match self {
+            PublicKey::Ed25519(key) => {
+                const CAPACITY: usize = 32 + 4;
+                let mut out = Vec::with_capacity(CAPACITY);
+                for slice in protobuf::enum_tag_encode(1, 1) {
+                    out.extend_from_slice(slice.as_ref());
+                }
+                for slice in protobuf::bytes_tag_encode(2, key) {
+                    out.extend_from_slice(slice.as_ref());
+                }
+                debug_assert_eq!(out.len(), CAPACITY);
+                out
+            }
+        }
     }
 
-    /// Decode a public key from a Protobuf structure, e.g. read from storage
-    /// or received from another node.
+    /// Decode a public key from a Protobuf structure, e.g. read from storage or received from
+    /// another node.
     pub fn from_protobuf_encoding(bytes: &[u8]) -> Result<PublicKey, FromProtobufEncodingError> {
-        let pubkey = keys_proto::PublicKey::decode(bytes)
-            .map_err(|_| FromProtobufEncodingError::ProtobufDecodeError)?;
-
-        let key_type = keys_proto::KeyType::from_i32(pubkey.r#type)
-            .ok_or(FromProtobufEncodingError::UnknownAlgorithm)?;
-
-        match key_type {
-            keys_proto::KeyType::Ed25519 => {
-                let pubkey = <&[u8; 32]>::try_from(&pubkey.data[..])
-                    .map_err(|_| FromProtobufEncodingError::BadEd25519Key)?;
-                Ok(PublicKey::Ed25519(*pubkey))
+        struct ErrorWrapper(FromProtobufEncodingError);
+        impl<'a> nom::error::ParseError<&'a [u8]> for ErrorWrapper {
+            fn from_error_kind(_: &'a [u8], _: nom::error::ErrorKind) -> Self {
+                ErrorWrapper(FromProtobufEncodingError::ProtobufDecodeError)
             }
-            keys_proto::KeyType::Rsa
-            | keys_proto::KeyType::Secp256k1
-            | keys_proto::KeyType::Ecdsa => Err(FromProtobufEncodingError::UnsupportedAlgorithm),
+            fn append(_: &'a [u8], _: nom::error::ErrorKind, other: Self) -> Self {
+                other
+            }
+        }
+        impl<'a> nom::error::FromExternalError<&'a [u8], FromProtobufEncodingError> for ErrorWrapper {
+            fn from_external_error(
+                _: &'a [u8],
+                _: nom::error::ErrorKind,
+                e: FromProtobufEncodingError,
+            ) -> Self {
+                ErrorWrapper(e)
+            }
+        }
+
+        // As indicated in the libp2p specification, the public key must be encoded
+        // deterministically, and thus the fields are decoded deterministically in a precise order.
+        let mut parser = nom::combinator::all_consuming::<_, _, ErrorWrapper, _>(
+            nom::combinator::complete(nom::sequence::tuple((
+                nom::combinator::map_res(protobuf::enum_tag_decode(1), |val| match val {
+                    0 | 1 | 2 | 3 => Ok(val),
+                    _ => Err(FromProtobufEncodingError::UnknownAlgorithm),
+                }),
+                nom::combinator::map_res(protobuf::bytes_tag_decode(2), |d| {
+                    <[u8; 32]>::try_from(d).map_err(|_| FromProtobufEncodingError::BadEd25519Key)
+                }),
+            ))),
+        );
+
+        match nom::Finish::finish(parser(bytes)) {
+            Ok((_, (1, key))) => Ok(PublicKey::Ed25519(key)),
+            Ok((_, (_, _))) => Err(FromProtobufEncodingError::UnsupportedAlgorithm),
+            Err(err) => Err(err.0),
         }
     }
 
@@ -284,6 +310,7 @@ pub enum FromBytesError {
     /// The algorithm used in the multihash isn't identity or SHA-256.
     InvalidMultihashAlgorithm,
     /// Multihash uses the identity algorithm, but the data isn't a valid public key.
+    #[display(fmt = "Failed to decode public key protobuf: {}", _0)]
     InvalidPublicKey(FromProtobufEncodingError),
 }
 
@@ -291,11 +318,26 @@ pub enum FromBytesError {
 #[derive(Debug, derive_more::Display)]
 pub enum ParseError {
     /// Error decoding the Base58 encoding.
+    #[display(fmt = "Base58 decoding error: {}", _0)]
     Bs58(Bs58DecodeError),
     /// Decoded bytes aren't a valid [`PeerId`].
+    #[display(fmt = "{}", _0)]
     NotPeerId(FromBytesError),
 }
 
 /// Error when decoding Base58 encoding.
 #[derive(Debug, derive_more::Display, derive_more::From)]
 pub struct Bs58DecodeError(bs58::decode::Error);
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn encode_decode_pubkey() {
+        let pub_key = super::PublicKey::Ed25519(rand::random());
+        let protobuf = pub_key.to_protobuf_encoding();
+        assert_eq!(
+            super::PublicKey::from_protobuf_encoding(&protobuf).unwrap(),
+            pub_key
+        );
+    }
+}

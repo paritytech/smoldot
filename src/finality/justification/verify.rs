@@ -18,12 +18,17 @@
 use crate::finality::justification::decode;
 
 use alloc::vec::Vec;
+use core::{cmp, iter, mem};
+use rand::Rng as _;
+use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
 /// Configuration for a justification verification process.
 #[derive(Debug)]
 pub struct Config<'a, I> {
     /// Justification to verify.
     pub justification: decode::GrandpaJustificationRef<'a>,
+
+    pub block_number_bytes: usize,
 
     // TODO: document
     pub authorities_set_id: u64,
@@ -32,21 +37,35 @@ pub struct Config<'a, I> {
     /// the justification. Must implement `Iterator<Item = impl AsRef<[u8]>> + Clone`, where
     /// each item is the public key of an authority.
     pub authorities_list: I,
+
+    /// Seed for a PRNG used for various purposes during the verification.
+    ///
+    /// > **Note**: The verification is nonetheless deterministic.
+    pub randomness_seed: [u8; 32],
 }
 
 // TODO: rewrite as a generator-style process?
 
 /// Verifies that a justification is valid.
 pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>) -> Result<(), Error> {
+    let num_precommits = config.justification.precommits.iter().count();
+
     // Check that justification contains a number of signatures equal to at least 2/3rd of the
     // number of authorities.
     // Duplicate signatures are checked below.
     // The logic of the check is `actual >= (expected * 2 / 3) + 1`.
-    if config.justification.precommits.iter().count()
-        < (config.authorities_list.clone().count() * 2 / 3) + 1
-    {
+    if num_precommits < (config.authorities_list.clone().count() * 2 / 3) + 1 {
         return Err(Error::NotEnoughSignatures);
     }
+
+    let mut randomness = ChaCha20Rng::from_seed(config.randomness_seed);
+
+    // Used to store the authority public keys that have been seen, in order to check for
+    // duplicates.
+    let mut seen_pub_keys = hashbrown::HashSet::with_capacity_and_hasher(
+        num_precommits,
+        crate::util::SipHasherBuild::new(randomness.gen()),
+    );
 
     // Verifying all the signatures together brings better performances than verifying them one
     // by one.
@@ -56,7 +75,7 @@ pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>) ->
     // https://github.com/zcash/zips/blob/master/zip-0215.rst
     let mut batch = ed25519_zebra::batch::Verifier::new();
 
-    for (precommit_num, precommit) in config.justification.precommits.iter().enumerate() {
+    for precommit in config.justification.precommits.iter() {
         if !config
             .authorities_list
             .clone()
@@ -65,13 +84,8 @@ pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>) ->
             return Err(Error::NotAuthority(*precommit.authority_public_key));
         }
 
-        if config
-            .justification
-            .precommits
-            .iter()
-            .skip(precommit_num.saturating_add(1))
-            .any(|pc| pc.authority_public_key == precommit.authority_public_key)
-        {
+        // Make sure that the public key isn't in `seen_pub_keys` yet, and insert it in there.
+        if !seen_pub_keys.insert(precommit.authority_public_key) {
             return Err(Error::DuplicateSignature(*precommit.authority_public_key));
         }
 
@@ -80,7 +94,23 @@ pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>) ->
         let mut msg = Vec::with_capacity(1 + 32 + 4 + 8 + 8);
         msg.push(1u8); // This `1` indicates which kind of message is being signed.
         msg.extend_from_slice(&precommit.target_hash[..]);
-        msg.extend_from_slice(&u32::to_le_bytes(precommit.target_number)[..]);
+        // The message contains the little endian block number. While simple in concept,
+        // in reality it is more complicated because we don't know the number of bytes of
+        // this block number at compile time. We thus copy as many bytes as appropriate and
+        // pad with 0s if necessary.
+        msg.extend_from_slice(
+            &precommit.target_number.to_le_bytes()[..cmp::min(
+                mem::size_of_val(&precommit.target_number),
+                config.block_number_bytes,
+            )],
+        );
+        msg.extend(
+            iter::repeat(0).take(
+                config
+                    .block_number_bytes
+                    .saturating_sub(mem::size_of_val(&precommit.target_number)),
+            ),
+        );
         msg.extend_from_slice(&u64::to_le_bytes(config.justification.round)[..]);
         msg.extend_from_slice(&u64::to_le_bytes(config.authorities_set_id)[..]);
         debug_assert_eq!(msg.len(), msg.capacity());
@@ -93,9 +123,8 @@ pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>) ->
     }
 
     // Actual signatures verification performed here.
-    // TODO: thread_rng()?!?! what to do here?
     batch
-        .verify(rand::thread_rng())
+        .verify(&mut randomness)
         .map_err(|_| Error::BadSignature)?;
 
     // TODO: must check that votes_ancestries doesn't contain any unused entry

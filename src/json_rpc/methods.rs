@@ -108,7 +108,7 @@ pub enum MethodError<'a> {
     },
     /// One of the parameters of the function call is invalid.
     #[display(
-        fmt = "Parameter #{} is invalid when calling {}: {}",
+        fmt = "Parameter of index {} is invalid when calling {}: {}",
         parameter_index,
         rpc_method,
         error
@@ -146,10 +146,6 @@ impl<'a> MethodError<'a> {
         )
     }
 }
-
-/// Could not parse the body of the message as a valid JSON-RPC message.
-#[derive(Debug, derive_more::Display)]
-pub struct JsonRpcParseError(serde_json::Error);
 
 /// The parameter of a function call is invalid.
 #[derive(Debug, derive_more::Display)]
@@ -369,8 +365,8 @@ define_methods! {
     payment_queryInfo(extrinsic: HexString, hash: Option<HashHexString>) -> RuntimeDispatchInfo,
     /// Returns a list of all JSON-RPC methods that are available.
     rpc_methods() -> RpcMethods,
-    state_call() -> () [state_callAt], // TODO:
-    state_getKeys() -> (), // TODO:
+    state_call(name: Cow<'a, str>, parameters: HexString, hash: Option<HashHexString>) -> HexString [state_callAt],
+    state_getKeys(prefix: HexString, hash: Option<HashHexString>) -> Vec<HexString>,
     state_getKeysPaged(prefix: Option<HexString>, count: u32, start_key: Option<HexString>, hash: Option<HashHexString>) -> Vec<HexString> [state_getKeysPagedAt],
     state_getMetadata(hash: Option<HashHexString>) -> HexString,
     state_getPairs() -> (), // TODO:
@@ -459,6 +455,11 @@ define_methods! {
 
     transaction_unstable_submitAndWatch(transaction: HexString) -> Cow<'a, str>,
     transaction_unstable_unwatch(subscription: Cow<'a, str>) -> (),
+
+    // This function is a custom addition in smoldot. As of the writing of this comment, there is
+    // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
+    network_unstable_subscribeEvents() -> Cow<'a, str>,
+    network_unstable_unsubscribeEvents(subscription: Cow<'a, str>) -> (),
 }
 
 define_methods! {
@@ -476,6 +477,10 @@ define_methods! {
     chainHead_unstable_followEvent(subscription: Cow<'a, str>, result: FollowEvent<'a>) -> (),
     chainHead_unstable_storageEvent(subscription: Cow<'a, str>, result: ChainHeadStorageEvent) -> (),
     transaction_unstable_watchEvent(subscription: Cow<'a, str>, result: TransactionWatchEvent<'a>) -> (),
+
+    // This function is a custom addition in smoldot. As of the writing of this comment, there is
+    // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
+    network_unstable_event(subscription: Cow<'a, str>, result: NetworkEvent<'a>) -> (),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -700,6 +705,94 @@ pub struct TransactionWatchEventBlock {
     pub index: NumberAsString,
 }
 
+/// Unstable event.
+/// See <https://github.com/paritytech/smoldot/issues/2245>.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event")]
+pub enum NetworkEvent<'a> {
+    #[serde(rename = "startConnect")]
+    StartConnect {
+        when: u64,
+        #[serde(rename = "connectionId")]
+        connection_id: u32,
+        multiaddr: Cow<'a, str>,
+    },
+    #[serde(rename = "connected")]
+    Connected {
+        when: u64,
+        #[serde(rename = "connectionId")]
+        connection_id: u32,
+    },
+    #[serde(rename = "handshakeFinished")]
+    HandshakeFinished {
+        when: u64,
+        #[serde(rename = "connectionId")]
+        connection_id: u32,
+        #[serde(rename = "peerId")]
+        peer_id: Cow<'a, str>,
+    },
+    #[serde(rename = "stop")]
+    Stop {
+        when: u64,
+        #[serde(rename = "connectionId")]
+        connection_id: u32,
+        reason: Cow<'a, str>,
+    },
+    #[serde(rename = "out-slot-assign")]
+    OutSlotAssign {
+        when: u64,
+        #[serde(rename = "peerId")]
+        peer_id: Cow<'a, str>,
+    },
+    #[serde(rename = "out-slot-unassign")]
+    OutSlotUnassign {
+        when: u64,
+        #[serde(rename = "peerId")]
+        peer_id: Cow<'a, str>,
+    },
+    #[serde(rename = "in-slot-assign")]
+    InSlotAssign {
+        when: u64,
+        #[serde(rename = "peerId")]
+        peer_id: Cow<'a, str>,
+    },
+    #[serde(rename = "in-slot-unassign")]
+    InSlotUnassign {
+        when: u64,
+        #[serde(rename = "peerId")]
+        peer_id: Cow<'a, str>,
+    },
+    #[serde(rename = "in-slot-to-out-slot")]
+    InSlotToOutSlot {
+        when: u64,
+        #[serde(rename = "peerId")]
+        peer_id: Cow<'a, str>,
+    },
+    #[serde(rename = "substream-out-open")]
+    SubstreamOutOpen {
+        when: u64,
+        #[serde(rename = "connectionId")]
+        connection_id: u32,
+        #[serde(rename = "substreamId")]
+        substream_id: u32,
+        #[serde(rename = "protocolName")]
+        protocol_name: Cow<'a, str>,
+    },
+    #[serde(rename = "substream-out-accept")]
+    SubstreamOutAccept {
+        when: u64,
+        #[serde(rename = "substreamId")]
+        substream_id: u32,
+    },
+    #[serde(rename = "substream-out-stop")]
+    SubstreamOutStop {
+        when: u64,
+        #[serde(rename = "substreamId")]
+        substream_id: u32,
+        reason: Cow<'a, str>,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct NumberAsString(pub u32);
 
@@ -745,8 +838,11 @@ impl Header {
     /// Creates a [`Header`] from a SCALE-encoded header.
     ///
     /// Returns an error if the encoding is incorrect.
-    pub fn from_scale_encoded_header(header: &[u8]) -> Result<Header, header::Error> {
-        let header = header::decode(header)?;
+    pub fn from_scale_encoded_header(
+        header: &[u8],
+        block_number_bytes: usize,
+    ) -> Result<Header, header::Error> {
+        let header = header::decode(header, block_number_bytes)?;
         Ok(Header {
             parent_hash: HashHexString(*header.parent_hash),
             extrinsics_root: HashHexString(*header.extrinsics_root),
@@ -757,10 +853,13 @@ impl Header {
                     .digest
                     .logs()
                     .map(|log| {
-                        HexString(log.scale_encoding().fold(Vec::new(), |mut a, b| {
-                            a.extend_from_slice(b.as_ref());
-                            a
-                        }))
+                        HexString(log.scale_encoding(block_number_bytes).fold(
+                            Vec::new(),
+                            |mut a, b| {
+                                a.extend_from_slice(b.as_ref());
+                                a
+                            },
+                        ))
                     })
                     .collect(),
             },

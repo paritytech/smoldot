@@ -24,7 +24,7 @@ use smoldot::{
     json_rpc::{methods, requests_subscriptions},
     network::protocol,
 };
-use std::{str, sync::Arc};
+use std::{num::NonZeroUsize, str, sync::Arc};
 
 impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::chain_getFinalizedHead`].
@@ -38,7 +38,7 @@ impl<TPlat: Platform> Background<TPlat> {
             header::hash_from_scale_encoded_header(
                 &self
                     .runtime_service
-                    .subscribe_all(16, 32)
+                    .subscribe_all("chain_getFinalizedHead", 16, NonZeroUsize::new(24).unwrap())
                     .await
                     .finalized_block_scale_encoded_header,
             ),
@@ -46,7 +46,7 @@ impl<TPlat: Platform> Background<TPlat> {
         .to_json_response(request_id);
 
         self.requests_subscriptions
-            .respond(&state_machine_request_id, response)
+            .respond(state_machine_request_id, response)
             .await;
     }
 
