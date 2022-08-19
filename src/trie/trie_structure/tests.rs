@@ -353,6 +353,7 @@ fn fuzzing() {
         // Create multiple tries, each with a different order of insertion for the nodes.
         let mut tries = Vec::new();
         for _ in 0..16 {
+            #[derive(Debug, Copy, Clone)]
             enum Op {
                 Insert,
                 Remove,
@@ -433,7 +434,7 @@ fn fuzzing() {
 
             // Create a trie and applies `operations` on it.
             let mut trie = TrieStructure::new();
-            for (key, op) in operations {
+            for (op_index, (key, op)) in operations.clone().into_iter().enumerate() {
                 match op {
                     Op::Insert => match trie.node(key.into_iter()) {
                         super::Entry::Vacant(e) => {
@@ -442,14 +443,20 @@ fn fuzzing() {
                         super::Entry::Occupied(super::NodeAccess::Branch(e)) => {
                             e.insert_storage_value();
                         }
-                        super::Entry::Occupied(super::NodeAccess::Storage(_)) => unreachable!(),
+                        super::Entry::Occupied(super::NodeAccess::Storage(_)) => {
+                            unreachable!("index: {}\nops:{:?}", op_index, operations)
+                        }
                     },
                     Op::Remove => match trie.node(key.into_iter()) {
                         super::Entry::Occupied(super::NodeAccess::Storage(e)) => {
                             e.remove();
                         }
-                        super::Entry::Vacant(_) => unreachable!(),
-                        super::Entry::Occupied(super::NodeAccess::Branch(_)) => unreachable!(),
+                        super::Entry::Vacant(_) => {
+                            unreachable!("index: {}\nops:{:?}", op_index, operations)
+                        }
+                        super::Entry::Occupied(super::NodeAccess::Branch(_)) => {
+                            unreachable!("index: {}\nops:{:?}", op_index, operations)
+                        }
                     },
                     Op::ClearPrefix => {
                         trie.remove_prefix(key.into_iter());
