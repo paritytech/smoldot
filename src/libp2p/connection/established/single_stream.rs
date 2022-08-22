@@ -345,6 +345,10 @@ where
                 buffers.push(buffer.as_ref().to_vec()); // TODO: copy
             }
 
+            if buffers.is_empty() {
+                break;
+            }
+
             let (_read, written) = self.encryption.encrypt(
                 buffers.into_iter(),
                 match read_write.outgoing_buffer.as_mut() {
