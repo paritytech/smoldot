@@ -56,6 +56,8 @@ use alloc::vec::Vec;
 use core::{cmp, fmt, mem, num::NonZeroU32};
 use hashbrown::hash_map::{Entry, OccupiedEntry};
 
+mod header;
+
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
 pub const PROTOCOL_NAME: &str = "/yamux/1.0.0";
 
@@ -397,182 +399,163 @@ impl<T> Yamux<T> {
                     }
 
                     // Full header available to decode in `incoming_header`.
+                    let decoded_header = match header::decode_yamux_header(&incoming_header) {
+                        Ok(h) => h,
+                        Err(err) => return Err(Error::HeaderDecode(err)),
+                    };
 
-                    // Byte 0 of the header is the yamux version number. Return an error if it
-                    // isn't 0.
-                    if incoming_header[0] != 0 {
-                        return Err(Error::UnknownVersion(incoming_header[0]));
-                    }
-
-                    // Decode the three other fields: flags, substream id, and length.
-                    let flags_field =
-                        u16::from_be_bytes(<[u8; 2]>::try_from(&incoming_header[2..4]).unwrap());
-                    let substream_id_field =
-                        u32::from_be_bytes(<[u8; 4]>::try_from(&incoming_header[4..8]).unwrap());
-                    let length_field =
-                        u32::from_be_bytes(<[u8; 4]>::try_from(&incoming_header[8..12]).unwrap());
-
-                    if (flags_field & !0b1111) != 0 {
-                        return Err(Error::UnknownFlags(flags_field));
-                    }
-
-                    // Byte 1 of the header indicates the type of message.
-                    match incoming_header[1] {
-                        2 => {
-                            // A ping or pong has been received.
-                            if (flags_field & 0b1) != 0 {
-                                if (flags_field & 0b1110) != 0 {
-                                    return Err(Error::BadPingFlags(flags_field));
-                                }
-
-                                // Ping. Write a pong message in `self.pending_out_header`.
-                                debug_assert!(self.pending_out_header.is_empty());
-                                self.pending_out_header
-                                    .try_extend_from_slice(
-                                        &[
-                                            0,
-                                            2,
-                                            0x0,
-                                            0x2,
-                                            0,
-                                            0,
-                                            0,
-                                            0,
-                                            incoming_header[8],
-                                            incoming_header[9],
-                                            incoming_header[10],
-                                            incoming_header[11],
-                                        ][..],
-                                    )
-                                    .unwrap();
-                                self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
-                                continue;
-                                // TODO: pong handling
-                            }
-                            return Err(Error::BadPingFlags(flags_field));
+                    // Handle any message other than data or window size.
+                    match decoded_header {
+                        header::DecodedYamuxHeader::PingRequest { .. } => {
+                            // Ping. Write a pong message in `self.pending_out_header`.
+                            debug_assert!(self.pending_out_header.is_empty());
+                            self.pending_out_header
+                                .try_extend_from_slice(
+                                    &[
+                                        0,
+                                        2,
+                                        0x0,
+                                        0x2,
+                                        0,
+                                        0,
+                                        0,
+                                        0,
+                                        incoming_header[8],
+                                        incoming_header[9],
+                                        incoming_header[10],
+                                        incoming_header[11],
+                                    ][..],
+                                )
+                                .unwrap();
+                            self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+                            continue;
                         }
-                        3 => {
+                        header::DecodedYamuxHeader::PingResponse { .. } => {
+                            // TODO: ping handling
+                            todo!()
+                        }
+                        header::DecodedYamuxHeader::GoAway { .. } => {
                             // TODO: go away
                             todo!()
                         }
-                        // Handled below.
-                        0 | 1 => {}
-                        _ => return Err(Error::BadFrameType(incoming_header[1])),
-                    }
-
-                    // The frame is now either a data (`0`) or window size (`1`) frame.
-                    let substream_id = match NonZeroU32::new(substream_id_field) {
-                        Some(i) => SubstreamId(i),
-                        None => return Err(Error::ZeroSubstreamId),
-                    };
-
-                    // Handle `RST` flag separately.
-                    if (flags_field & 0x8) != 0 {
-                        if incoming_header[1] == 0 && length_field != 0 {
-                            return Err(Error::DataWithRst);
+                        header::DecodedYamuxHeader::Data {
+                            syn,
+                            fin,
+                            rst,
+                            stream_id,
+                            length,
+                            ..
                         }
+                        | header::DecodedYamuxHeader::Window {
+                            syn,
+                            fin,
+                            rst,
+                            stream_id,
+                            length,
+                            ..
+                        } => {
+                            let is_data =
+                                matches!(decoded_header, header::DecodedYamuxHeader::Data { .. });
 
-                        self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+                            // Handle `RST` flag separately.
+                            if rst {
+                                if is_data && length != 0 {
+                                    return Err(Error::DataWithRst);
+                                }
 
-                        // The remote might have sent a RST frame concerning a substream for
-                        // which we have sent a RST frame earlier. Considering that we don't
-                        // keep traces of old substreams, we have no way to know whether this
-                        // is the case or not.
-                        if let Some(s) = self.substreams.get_mut(&substream_id.0) {
-                            s.local_write_closed = true;
-                            s.remote_write_closed = true;
-                            s.write_buffers.clear();
-                            s.first_write_buffer_offset = 0;
-                            s.was_reset = true;
-                        }
+                                self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
 
-                        continue;
-                    }
+                                // The remote might have sent a RST frame concerning a substream for
+                                // which we have sent a RST frame earlier. Considering that we don't
+                                // keep traces of old substreams, we have no way to know whether this
+                                // is the case or not.
+                                if let Some(s) = self.substreams.get_mut(&stream_id) {
+                                    s.local_write_closed = true;
+                                    s.remote_write_closed = true;
+                                    s.write_buffers.clear();
+                                    s.first_write_buffer_offset = 0;
+                                    s.was_reset = true;
+                                }
 
-                    // Find the element in `self.substreams` corresponding to the substream
-                    // requested by the remote.
-                    // It is possible that the remote is referring to a substream for which a RST
-                    // has been sent out. Since the local state machine doesn't keep track of
-                    // RST'ted substreams, any frame concerning a substream with an unknown id is
-                    // discarded and doesn't result in an error, under the presumption that we are
-                    // in this situation. When that is the case, the `substream` variable below is
-                    // `None`.
-                    let substream: Option<_> = if (flags_field & 0x1) == 0 {
-                        self.substreams.get_mut(&substream_id.0)
-                    } else {
-                        // Remote has sent a SYN flag.
-                        if self.substreams.contains_key(&substream_id.0) {
-                            return Err(Error::UnexpectedSyn(substream_id.0));
-                        }
-                        self.incoming = Incoming::PendingIncomingSubstream {
-                            substream_id,
-                            extra_window: if incoming_header[1] == 1 {
-                                length_field
-                            } else {
-                                0
-                            },
-                            data_frame_size: if incoming_header[1] == 0 {
-                                length_field
-                            } else {
-                                0
-                            },
-                            fin: (flags_field & 0x4) != 0,
-                        };
-
-                        return Ok(IncomingDataOutcome {
-                            yamux: self,
-                            bytes_read: total_read,
-                            detail: Some(IncomingDataDetail::IncomingSubstream),
-                        });
-                    };
-
-                    if incoming_header[1] == 0 {
-                        // Data frame.
-                        // Check whether the remote has the right to send that much data.
-                        // Note that the credits aren't checked in the case of an unknown
-                        // substream.
-                        if let Some(substream) = substream {
-                            if substream.remote_write_closed {
-                                return Err(Error::WriteAfterFin);
+                                continue;
                             }
 
-                            substream.remote_allowed_window = substream
-                                .remote_allowed_window
-                                .checked_sub(u64::from(length_field))
-                                .ok_or(Error::CreditsExceeded)?;
-
-                            substream.first_message_queued = true;
-                            substream.remote_window_pending_increase += 256 * 1024;
-                        }
-
-                        self.incoming = Incoming::DataFrame {
-                            substream_id,
-                            remaining_bytes: length_field,
-                            fin: (flags_field & 0x4) != 0,
-                        };
-                    } else if incoming_header[1] == 1 {
-                        // Window size frame.
-                        self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
-
-                        if let Some(substream) = substream {
-                            // Note that the specs are a unclear about whether the remote can or
-                            // should continue sending FIN flags on window size frames after their
-                            // side of the substream has already been closed before.
-                            if (flags_field & 0x4) != 0 {
-                                self.incoming = Incoming::DataFrame {
-                                    substream_id,
-                                    remaining_bytes: 0,
-                                    fin: true,
+                            // Find the element in `self.substreams` corresponding to the substream
+                            // requested by the remote.
+                            // It is possible that the remote is referring to a substream for which a RST
+                            // has been sent out. Since the local state machine doesn't keep track of
+                            // RST'ted substreams, any frame concerning a substream with an unknown id is
+                            // discarded and doesn't result in an error, under the presumption that we are
+                            // in this situation. When that is the case, the `substream` variable below is
+                            // `None`.
+                            let substream: Option<_> = if !syn {
+                                self.substreams.get_mut(&stream_id)
+                            } else {
+                                // Remote has sent a SYN flag.
+                                if self.substreams.contains_key(&stream_id) {
+                                    return Err(Error::UnexpectedSyn(stream_id));
+                                }
+                                self.incoming = Incoming::PendingIncomingSubstream {
+                                    substream_id: SubstreamId(stream_id),
+                                    extra_window: if !is_data { length } else { 0 },
+                                    data_frame_size: if is_data { length } else { 0 },
+                                    fin,
                                 };
-                            }
 
-                            substream.allowed_window = substream
-                                .allowed_window
-                                .checked_add(u64::from(length_field))
-                                .ok_or(Error::LocalCreditsOverflow)?;
+                                return Ok(IncomingDataOutcome {
+                                    yamux: self,
+                                    bytes_read: total_read,
+                                    detail: Some(IncomingDataDetail::IncomingSubstream),
+                                });
+                            };
+
+                            if is_data {
+                                // Data frame.
+                                // Check whether the remote has the right to send that much data.
+                                // Note that the credits aren't checked in the case of an unknown
+                                // substream.
+                                if let Some(substream) = substream {
+                                    if substream.remote_write_closed {
+                                        return Err(Error::WriteAfterFin);
+                                    }
+
+                                    substream.remote_allowed_window = substream
+                                        .remote_allowed_window
+                                        .checked_sub(u64::from(length))
+                                        .ok_or(Error::CreditsExceeded)?;
+
+                                    substream.first_message_queued = true;
+                                    substream.remote_window_pending_increase += 256 * 1024;
+                                }
+
+                                self.incoming = Incoming::DataFrame {
+                                    substream_id: SubstreamId(stream_id),
+                                    remaining_bytes: length,
+                                    fin,
+                                };
+                            } else {
+                                // Window size frame.
+                                self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+
+                                if let Some(substream) = substream {
+                                    // Note that the specs are a unclear about whether the remote can or
+                                    // should continue sending FIN flags on window size frames after their
+                                    // side of the substream has already been closed before.
+                                    if fin {
+                                        self.incoming = Incoming::DataFrame {
+                                            substream_id: SubstreamId(stream_id),
+                                            remaining_bytes: 0,
+                                            fin: true,
+                                        };
+                                    }
+
+                                    substream.allowed_window = substream
+                                        .allowed_window
+                                        .checked_add(u64::from(length))
+                                        .ok_or(Error::LocalCreditsOverflow)?;
+                                }
+                            }
                         }
-                    } else {
-                        unreachable!();
                     }
                 }
             }
@@ -1165,6 +1148,8 @@ pub enum IncomingDataDetail {
 /// Error while decoding the Yamux stream.
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
+    /// Failed to decode an incoming yamux header.
+    HeaderDecode(header::YamuxHeaderDecodeError),
     /// Unknown version number in a header.
     #[display(fmt = "Unknown version number in a header")]
     UnknownVersion(u8),
