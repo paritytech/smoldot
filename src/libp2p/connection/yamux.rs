@@ -53,7 +53,10 @@
 use crate::util::SipHasherBuild;
 
 use alloc::vec::Vec;
-use core::{cmp, fmt, mem, num::NonZeroU32};
+use core::{
+    cmp, fmt, mem,
+    num::{NonZeroU32, NonZeroUsize},
+};
 use hashbrown::hash_map::{Entry, OccupiedEntry};
 
 pub use header::GoAwayErrorCode;
@@ -72,22 +75,13 @@ pub struct Yamux<T> {
     /// What kind of data is expected on the socket next.
     incoming: Incoming,
 
+    /// What to write to the socket next.
+    outgoing: Outgoing,
+
     /// Id of the next outgoing substream to open.
     /// This implementation allocates identifiers linearly. Every time a substream is open, its
     /// value is incremented by two.
     next_outbound_substream: NonZeroU32,
-
-    /// Header currently being written out. Finishing to write this header is the first and
-    /// foremost priority of [`Yamux::extract_out`].
-    pending_out_header: arrayvec::ArrayVec<u8, 12>,
-
-    /// If `Some`, contains a substream ID and a number of bytes. A data frame header has been
-    /// written to the socket, and the number of bytes stored in there is the number of bytes
-    /// remaining in this frame.
-    ///
-    /// Writing out the data of this substream is the second most highest priority after writing
-    /// out [`Yamux::pending_out_header`].
-    writing_out_substream: Option<(SubstreamId, usize)>,
 }
 
 struct Substream<T> {
@@ -148,6 +142,37 @@ enum Incoming {
     },
 }
 
+enum Outgoing {
+    /// Nothing to write out.
+    Idle,
+
+    /// Writing out a header.
+    Header {
+        /// Bytes of the header to write out.
+        ///
+        /// The length of this buffer might not be equal to 12 in case some parts of the header have
+        /// already been written out but not all.
+        ///
+        /// Never empty (as otherwise the state must have been transitioned to something else).
+        header: arrayvec::ArrayVec<u8, 12>,
+
+        /// If `Some`, then the header is data frame header and we must then transition the
+        /// state to [`Outgoing::SubstreamData`].
+        substream_data_frame: Option<(SubstreamId, NonZeroUsize)>,
+    },
+
+    /// Writing out data from a substream.
+    ///
+    /// We have sent a data header in the past, and we must now send the associated data.
+    SubstreamData {
+        /// Which substream is being written out.
+        id: SubstreamId,
+
+        /// Number of bytes remaining to write.
+        remaining_bytes: NonZeroUsize,
+    },
+}
+
 impl<T> Yamux<T> {
     /// Initializes a new Yamux state machine.
     pub fn new(config: Config) -> Yamux<T> {
@@ -157,13 +182,12 @@ impl<T> Yamux<T> {
                 SipHasherBuild::new(config.randomness_seed),
             ),
             incoming: Incoming::Header(arrayvec::ArrayVec::new()),
+            outgoing: Outgoing::Idle,
             next_outbound_substream: if config.is_initiator {
                 NonZeroU32::new(1).unwrap()
             } else {
                 NonZeroU32::new(2).unwrap()
             },
-            pending_out_header: arrayvec::ArrayVec::new(),
-            writing_out_substream: None,
         }
     }
 
@@ -381,9 +405,9 @@ impl<T> Yamux<T> {
                 }
 
                 Incoming::Header(ref mut incoming_header) => {
-                    // The code below might require writing to it, and as such we can't proceed
-                    // with any reading if it isn't empty.
-                    if !self.pending_out_header.is_empty() {
+                    // The code below might require queuing a message, and as such we can't proceed
+                    // with any reading if there is still data to write out.
+                    if !matches!(self.outgoing, Outgoing::Idle) {
                         break;
                     }
 
@@ -409,26 +433,33 @@ impl<T> Yamux<T> {
                     // Handle any message other than data or window size.
                     match decoded_header {
                         header::DecodedYamuxHeader::PingRequest { .. } => {
-                            // Ping. Write a pong message in `self.pending_out_header`.
-                            debug_assert!(self.pending_out_header.is_empty());
-                            self.pending_out_header
-                                .try_extend_from_slice(
-                                    &[
-                                        0,
-                                        2,
-                                        0x0,
-                                        0x2,
-                                        0,
-                                        0,
-                                        0,
-                                        0,
-                                        incoming_header[8],
-                                        incoming_header[9],
-                                        incoming_header[10],
-                                        incoming_header[11],
-                                    ][..],
-                                )
-                                .unwrap();
+                            // Ping. Write a pong message in `self.outgoing`.
+                            debug_assert!(matches!(self.outgoing, Outgoing::Idle));
+                            self.outgoing = Outgoing::Header {
+                                header: {
+                                    let mut header = arrayvec::ArrayVec::new();
+                                    header
+                                        .try_extend_from_slice(
+                                            &[
+                                                0,
+                                                2,
+                                                0x0,
+                                                0x2,
+                                                0,
+                                                0,
+                                                0,
+                                                0,
+                                                incoming_header[8],
+                                                incoming_header[9],
+                                                incoming_header[10],
+                                                incoming_header[11],
+                                            ][..],
+                                        )
+                                        .unwrap();
+                                    header
+                                },
+                                substream_data_frame: None,
+                            };
                             self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                         }
                         header::DecodedYamuxHeader::PingResponse { .. } => {
@@ -700,11 +731,11 @@ impl<T> Yamux<T> {
         todo!()
     }
 
-    /// Writes a data frame header in `self.pending_out_header`.
+    /// Writes a data frame header in `self.outgoing`.
     ///
     /// # Panic
     ///
-    /// Panics if `!self.pending_out_header.is_empty()`.
+    /// Panics if `self.outgoing` is not `Idle`.
     ///
     fn queue_data_frame_header(
         &mut self,
@@ -713,7 +744,7 @@ impl<T> Yamux<T> {
         substream_id: NonZeroU32,
         data_length: u32,
     ) {
-        assert!(self.pending_out_header.is_empty());
+        assert!(matches!(self.outgoing, Outgoing::Idle));
 
         let mut flags: u16 = 0;
         if syn_ack_flag {
@@ -729,26 +760,35 @@ impl<T> Yamux<T> {
             flags |= 0x4;
         }
 
-        self.pending_out_header.push(0);
-        self.pending_out_header.push(0);
-        self.pending_out_header
-            .try_extend_from_slice(&flags.to_be_bytes())
-            .unwrap();
-        self.pending_out_header
+        let mut header = arrayvec::ArrayVec::new();
+        header.push(0);
+        header.push(0);
+        header.try_extend_from_slice(&flags.to_be_bytes()).unwrap();
+        header
             .try_extend_from_slice(&substream_id.get().to_be_bytes())
             .unwrap();
-        self.pending_out_header
+        header
             .try_extend_from_slice(&data_length.to_be_bytes())
             .unwrap();
+        debug_assert_eq!(header.len(), 12);
 
-        debug_assert_eq!(self.pending_out_header.len(), 12);
+        self.outgoing = Outgoing::Header {
+            header,
+            substream_data_frame: if let Some(length) =
+                NonZeroUsize::new(usize::try_from(data_length).unwrap())
+            {
+                Some((SubstreamId(substream_id), length))
+            } else {
+                None
+            },
+        };
     }
 
-    /// Writes a window size update frame header in `self.pending_out_header`.
+    /// Writes a window size update frame header in `self.outgoing`.
     ///
     /// # Panic
     ///
-    /// Panics if `!self.pending_out_header.is_empty()`.
+    /// Panics if `self.outgoing` is not `Idle`.
     ///
     fn queue_window_size_frame_header(
         &mut self,
@@ -756,7 +796,7 @@ impl<T> Yamux<T> {
         substream_id: NonZeroU32,
         window_size: u32,
     ) {
-        assert!(self.pending_out_header.is_empty());
+        assert!(matches!(self.outgoing, Outgoing::Idle));
 
         let mut flags: u16 = 0;
         if syn_ack_flag {
@@ -769,19 +809,22 @@ impl<T> Yamux<T> {
             }
         }
 
-        self.pending_out_header.push(0);
-        self.pending_out_header.push(1);
-        self.pending_out_header
-            .try_extend_from_slice(&flags.to_be_bytes())
-            .unwrap();
-        self.pending_out_header
+        let mut header = arrayvec::ArrayVec::new();
+        header.push(0);
+        header.push(1);
+        header.try_extend_from_slice(&flags.to_be_bytes()).unwrap();
+        header
             .try_extend_from_slice(&substream_id.get().to_be_bytes())
             .unwrap();
-        self.pending_out_header
+        header
             .try_extend_from_slice(&window_size.to_be_bytes())
             .unwrap();
+        debug_assert_eq!(header.len(), 12);
 
-        debug_assert_eq!(self.pending_out_header.len(), 12);
+        self.outgoing = Outgoing::Header {
+            header,
+            substream_data_frame: None,
+        };
     }
 }
 
@@ -986,115 +1029,131 @@ impl<'a, T> ExtractOut<'a, T> {
     /// Builds the next buffer to send out and returns it.
     pub fn next(&'_ mut self) -> Option<impl AsRef<[u8]> + '_> {
         while self.size_bytes != 0 {
-            // Finish writing `self.yamux.pending_out_header` if possible.
-            if !self.yamux.pending_out_header.is_empty() {
-                if self.size_bytes >= self.yamux.pending_out_header.len() {
-                    self.size_bytes -= self.yamux.pending_out_header.len();
-                    return Some(either::Left(mem::take(&mut self.yamux.pending_out_header)));
-                } else {
-                    let to_add = self.yamux.pending_out_header[..self.size_bytes].to_vec();
-                    for _ in 0..self.size_bytes {
-                        self.yamux.pending_out_header.remove(0);
+            match self.yamux.outgoing {
+                Outgoing::Header {
+                    ref mut header,
+                    ref substream_data_frame,
+                } => {
+                    // Finish writing the header.
+                    debug_assert!(!header.is_empty());
+                    if self.size_bytes >= header.len() {
+                        self.size_bytes -= header.len();
+                        let out = mem::take(header);
+                        self.yamux.outgoing =
+                            if let Some((id, remaining_bytes)) = substream_data_frame {
+                                Outgoing::SubstreamData {
+                                    id: *id,
+                                    remaining_bytes: *remaining_bytes,
+                                }
+                            } else {
+                                Outgoing::Idle
+                            };
+                        return Some(either::Left(out));
+                    } else {
+                        let to_add = header[..self.size_bytes].to_vec();
+                        for _ in 0..self.size_bytes {
+                            header.remove(0);
+                        }
+                        return Some(either::Right(VecWithOffset(to_add, 0)));
                     }
-                    return Some(either::Right(VecWithOffset(to_add, 0)));
                 }
-            }
 
-            // Now update `writing_out_substream`.
-            if let Some((substream, ref mut remain)) = self.yamux.writing_out_substream {
-                let mut substream = self.yamux.substreams.get_mut(&substream.0).unwrap();
+                Outgoing::SubstreamData {
+                    id: ref substream,
+                    remaining_bytes: ref mut remain,
+                } => {
+                    let mut substream = self.yamux.substreams.get_mut(&substream.0).unwrap();
 
-                let first_buf_avail =
-                    substream.write_buffers[0].len() - substream.first_write_buffer_offset;
-                let out = if first_buf_avail <= *remain && first_buf_avail <= self.size_bytes {
-                    let out = VecWithOffset(
-                        substream.write_buffers.remove(0),
-                        substream.first_write_buffer_offset,
-                    );
-                    self.size_bytes -= first_buf_avail;
-                    substream.first_write_buffer_offset = 0;
-                    *remain -= first_buf_avail;
-                    if *remain == 0 {
-                        self.yamux.writing_out_substream = None;
+                    let first_buf_avail =
+                        substream.write_buffers[0].len() - substream.first_write_buffer_offset;
+                    let out =
+                        if first_buf_avail <= remain.get() && first_buf_avail <= self.size_bytes {
+                            let out = VecWithOffset(
+                                substream.write_buffers.remove(0),
+                                substream.first_write_buffer_offset,
+                            );
+                            self.size_bytes -= first_buf_avail;
+                            substream.first_write_buffer_offset = 0;
+                            match NonZeroUsize::new(remain.get() - first_buf_avail) {
+                                Some(r) => *remain = r,
+                                None => self.yamux.outgoing = Outgoing::Idle,
+                            };
+                            either::Right(out)
+                        } else if remain.get() <= self.size_bytes {
+                            self.size_bytes -= remain.get();
+                            let out = VecWithOffset(
+                                substream.write_buffers[0][substream.first_write_buffer_offset..]
+                                    [..remain.get()]
+                                    .to_vec(),
+                                0,
+                            );
+                            substream.first_write_buffer_offset += remain.get();
+                            self.yamux.outgoing = Outgoing::Idle;
+                            either::Right(out)
+                        } else {
+                            let out = VecWithOffset(
+                                substream.write_buffers[0][substream.first_write_buffer_offset..]
+                                    [..self.size_bytes]
+                                    .to_vec(),
+                                0,
+                            );
+                            substream.first_write_buffer_offset += self.size_bytes;
+                            *remain = NonZeroUsize::new(remain.get() - self.size_bytes).unwrap();
+                            self.size_bytes = 0;
+                            either::Right(out)
+                        };
+
+                    return Some(out);
+                }
+
+                Outgoing::Idle => {
+                    // Send window update frames.
+                    // TODO: O(n)
+                    if let Some((id, sub)) = self
+                        .yamux
+                        .substreams
+                        .iter_mut()
+                        .find(|(_, s)| s.remote_window_pending_increase != 0)
+                        .map(|(id, sub)| (*id, sub))
+                    {
+                        let syn_ack_flag = !sub.first_message_queued;
+                        sub.first_message_queued = true;
+
+                        let update = u32::try_from(sub.remote_window_pending_increase)
+                            .unwrap_or(u32::max_value());
+                        sub.remote_window_pending_increase -= u64::from(update);
+                        sub.remote_allowed_window += u64::from(update);
+                        self.yamux
+                            .queue_window_size_frame_header(syn_ack_flag, id, update);
+                        continue;
                     }
-                    either::Right(out)
-                } else if *remain <= self.size_bytes {
-                    self.size_bytes -= *remain;
-                    let out = VecWithOffset(
-                        substream.write_buffers[0][substream.first_write_buffer_offset..]
-                            [..*remain]
-                            .to_vec(),
-                        0,
-                    );
-                    substream.first_write_buffer_offset += *remain;
-                    self.yamux.writing_out_substream = None;
-                    either::Right(out)
-                } else {
-                    let out = VecWithOffset(
-                        substream.write_buffers[0][substream.first_write_buffer_offset..]
-                            [..self.size_bytes]
-                            .to_vec(),
-                        0,
-                    );
-                    substream.first_write_buffer_offset += self.size_bytes;
-                    *remain -= self.size_bytes;
-                    self.size_bytes = 0;
-                    either::Right(out)
-                };
 
-                return Some(out);
-            }
-
-            // All frames in the process of being written have been written.
-            debug_assert!(self.yamux.pending_out_header.is_empty());
-            debug_assert!(self.yamux.writing_out_substream.is_none());
-
-            // Send window update frames.
-            // TODO: O(n)
-            if let Some((id, sub)) = self
-                .yamux
-                .substreams
-                .iter_mut()
-                .find(|(_, s)| s.remote_window_pending_increase != 0)
-                .map(|(id, sub)| (*id, sub))
-            {
-                let syn_ack_flag = !sub.first_message_queued;
-                sub.first_message_queued = true;
-
-                let update =
-                    u32::try_from(sub.remote_window_pending_increase).unwrap_or(u32::max_value());
-                sub.remote_window_pending_increase -= u64::from(update);
-                sub.remote_allowed_window += u64::from(update);
-                self.yamux
-                    .queue_window_size_frame_header(syn_ack_flag, id, update);
-                continue;
-            }
-
-            // Start writing more data from another substream.
-            // TODO: O(n)
-            // TODO: choose substreams in some sort of round-robin way
-            if let Some((id, sub)) = self
-                .yamux
-                .substreams
-                .iter_mut()
-                .find(|(_, s)| !s.write_buffers.is_empty())
-                .map(|(id, sub)| (*id, sub))
-            {
-                let pending_len = sub.write_buffers.iter().fold(0, |l, b| l + b.len());
-                let len_out = cmp::min(
-                    u32::try_from(pending_len).unwrap_or(u32::max_value()),
-                    u32::try_from(sub.allowed_window).unwrap_or(u32::max_value()),
-                );
-                let len_out_usize = usize::try_from(len_out).unwrap();
-                sub.allowed_window -= u64::from(len_out);
-                let syn_ack_flag = !sub.first_message_queued;
-                sub.first_message_queued = true;
-                let fin_flag = sub.local_write_closed && len_out_usize == pending_len;
-                self.yamux.writing_out_substream = Some((SubstreamId(id), len_out_usize));
-                self.yamux
-                    .queue_data_frame_header(syn_ack_flag, fin_flag, id, len_out);
-            } else {
-                break;
+                    // Start writing more data from another substream.
+                    // TODO: O(n)
+                    // TODO: choose substreams in some sort of round-robin way
+                    if let Some((id, sub)) = self
+                        .yamux
+                        .substreams
+                        .iter_mut()
+                        .find(|(_, s)| !s.write_buffers.is_empty())
+                        .map(|(id, sub)| (*id, sub))
+                    {
+                        let pending_len = sub.write_buffers.iter().fold(0, |l, b| l + b.len());
+                        let len_out = cmp::min(
+                            u32::try_from(pending_len).unwrap_or(u32::max_value()),
+                            u32::try_from(sub.allowed_window).unwrap_or(u32::max_value()),
+                        );
+                        let len_out_usize = usize::try_from(len_out).unwrap();
+                        sub.allowed_window -= u64::from(len_out);
+                        let syn_ack_flag = !sub.first_message_queued;
+                        sub.first_message_queued = true;
+                        let fin_flag = sub.local_write_closed && len_out_usize == pending_len;
+                        self.yamux
+                            .queue_data_frame_header(syn_ack_flag, fin_flag, id, len_out);
+                    } else {
+                        break;
+                    }
+                }
             }
         }
 
