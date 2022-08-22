@@ -56,6 +56,8 @@ use alloc::vec::Vec;
 use core::{cmp, fmt, mem, num::NonZeroU32};
 use hashbrown::hash_map::{Entry, OccupiedEntry};
 
+pub use header::GoAwayErrorCode;
+
 mod header;
 
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
@@ -433,9 +435,15 @@ impl<T> Yamux<T> {
                             // TODO: ping handling
                             todo!()
                         }
-                        header::DecodedYamuxHeader::GoAway { .. } => {
-                            // TODO: go away
-                            todo!()
+                        header::DecodedYamuxHeader::GoAway { error_code } => {
+                            // TODO: error if we have received one in the past before?
+                            // TODO: error if the remote then opens new substreams or something?
+                            self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+                            return Ok(IncomingDataOutcome {
+                                yamux: self,
+                                bytes_read: total_read,
+                                detail: Some(IncomingDataDetail::GoAway(error_code)),
+                            });
                         }
                         header::DecodedYamuxHeader::Data {
                             rst: true,
@@ -1138,6 +1146,8 @@ pub enum IncomingDataDetail {
         /// Substream that has been destroyed. No longer valid.
         substream_id: SubstreamId,
     },
+    /// Received a "go away" request.
+    GoAway(GoAwayErrorCode),
 }
 
 /// Error while decoding the Yamux stream.

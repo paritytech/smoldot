@@ -283,6 +283,10 @@ where
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
                 }
+
+                Some(yamux::IncomingDataDetail::GoAway(_)) => {
+                    todo!() // TODO: handle properly
+                }
             };
         }
 
