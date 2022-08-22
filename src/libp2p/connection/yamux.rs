@@ -579,8 +579,7 @@ impl<T> Yamux<T> {
                                     .checked_sub(u64::from(length))
                                     .ok_or(Error::CreditsExceeded)?;
 
-                                // TODO: uh?! why these two changes?
-                                substream.first_message_queued = true;
+                                // TODO: make this behavior tweakable by the user!
                                 substream.remote_window_pending_increase += 256 * 1024;
                             }
 
