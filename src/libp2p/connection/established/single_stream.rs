@@ -334,14 +334,15 @@ where
                 break;
             }
 
-            let mut buffers = self.inner.yamux.extract_out(bytes_out);
-            let mut buffers = buffers.buffers().peekable();
-            if buffers.peek().is_none() {
-                break;
+            // TODO: don't allocate an intermediary buffer, but instead pass them directly to the encryption
+            let mut buffers = Vec::with_capacity(32);
+            let mut extract_out = self.inner.yamux.extract_out(bytes_out);
+            while let Some(buffer) = extract_out.next() {
+                buffers.push(buffer.as_ref().to_vec()); // TODO: copy
             }
 
             let (_read, written) = self.encryption.encrypt(
-                buffers,
+                buffers.into_iter(),
                 match read_write.outgoing_buffer.as_mut() {
                     Some((a, b)) => (a, b),
                     None => (&mut [], &mut []),

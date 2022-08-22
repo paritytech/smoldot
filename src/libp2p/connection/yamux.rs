@@ -595,129 +595,9 @@ impl<T> Yamux<T> {
     /// >           however, this would be rather sub-optimal considering that buffers to send out
     /// >           are already stored in their final form in the state machine.
     pub fn extract_out(&mut self, size_bytes: usize) -> ExtractOut<T> {
-        // TODO: this function has a zero-cost API, but its body isn't really zero-cost due to laziness
-
-        // The implementation consists in filling a buffer of buffers, then calling `into_iter`.
-        let mut buffers = Vec::with_capacity(32);
-
-        // Copy of `size_bytes`, decremented over the iterations.
-        let mut size_bytes_iter = size_bytes;
-
-        while size_bytes_iter != 0 {
-            // Finish writing `self.pending_out_header` if possible.
-            if !self.pending_out_header.is_empty() {
-                if size_bytes_iter >= self.pending_out_header.len() {
-                    size_bytes_iter -= self.pending_out_header.len();
-                    buffers.push(either::Left(mem::take(&mut self.pending_out_header)));
-                } else {
-                    let to_add = self.pending_out_header[..size_bytes_iter].to_vec();
-                    for _ in 0..size_bytes_iter {
-                        self.pending_out_header.remove(0);
-                    }
-                    buffers.push(either::Right(VecWithOffset(to_add, 0)));
-                    break;
-                }
-            }
-
-            // Now update `writing_out_substream`.
-            if let Some((substream, ref mut remain)) = self.writing_out_substream {
-                let mut substream = self.substreams.get_mut(&substream.0).unwrap();
-
-                let first_buf_avail =
-                    substream.write_buffers[0].len() - substream.first_write_buffer_offset;
-                if first_buf_avail <= *remain && first_buf_avail <= size_bytes_iter {
-                    buffers.push(either::Right(VecWithOffset(
-                        substream.write_buffers.remove(0),
-                        substream.first_write_buffer_offset,
-                    )));
-                    size_bytes_iter -= first_buf_avail;
-                    substream.first_write_buffer_offset = 0;
-                    *remain -= first_buf_avail;
-                    if *remain == 0 {
-                        self.writing_out_substream = None;
-                    }
-                } else if *remain <= size_bytes_iter {
-                    size_bytes_iter -= *remain;
-                    buffers.push(either::Right(VecWithOffset(
-                        substream.write_buffers[0][substream.first_write_buffer_offset..]
-                            [..*remain]
-                            .to_vec(),
-                        0,
-                    )));
-                    substream.first_write_buffer_offset += *remain;
-                    self.writing_out_substream = None;
-                } else {
-                    buffers.push(either::Right(VecWithOffset(
-                        substream.write_buffers[0][substream.first_write_buffer_offset..]
-                            [..size_bytes_iter]
-                            .to_vec(),
-                        0,
-                    )));
-                    substream.first_write_buffer_offset += size_bytes_iter;
-                    *remain -= size_bytes_iter;
-                    size_bytes_iter = 0;
-                }
-
-                continue;
-            }
-
-            // All frames in the process of being written have been written.
-            debug_assert!(self.pending_out_header.is_empty());
-            debug_assert!(self.writing_out_substream.is_none());
-
-            // Send window update frames.
-            if let Some((id, sub)) = self
-                .substreams
-                .iter_mut()
-                .find(|(_, s)| s.remote_window_pending_increase != 0)
-                .map(|(id, sub)| (*id, sub))
-            {
-                let syn_ack_flag = !sub.first_message_queued;
-                sub.first_message_queued = true;
-
-                let update =
-                    u32::try_from(sub.remote_window_pending_increase).unwrap_or(u32::max_value());
-                sub.remote_window_pending_increase -= u64::from(update);
-                sub.remote_allowed_window += u64::from(update);
-                self.queue_window_size_frame_header(syn_ack_flag, id, update);
-                continue;
-            }
-
-            // Start writing more data from another substream.
-            // TODO: choose substreams in some sort of round-robin way
-            if let Some((id, sub)) = self
-                .substreams
-                .iter_mut()
-                .find(|(_, s)| !s.write_buffers.is_empty())
-                .map(|(id, sub)| (*id, sub))
-            {
-                let pending_len = sub.write_buffers.iter().fold(0, |l, b| l + b.len());
-                let len_out = cmp::min(
-                    u32::try_from(pending_len).unwrap_or(u32::max_value()),
-                    u32::try_from(sub.allowed_window).unwrap_or(u32::max_value()),
-                );
-                let len_out_usize = usize::try_from(len_out).unwrap();
-                sub.allowed_window -= u64::from(len_out);
-                let syn_ack_flag = !sub.first_message_queued;
-                sub.first_message_queued = true;
-                let fin_flag = sub.local_write_closed && len_out_usize == pending_len;
-                self.writing_out_substream = Some((SubstreamId(id), len_out_usize));
-                self.queue_data_frame_header(syn_ack_flag, fin_flag, id, len_out);
-            } else {
-                break;
-            }
-        }
-
-        debug_assert!(
-            buffers
-                .iter()
-                .fold(0, |n, b| n + AsRef::<[u8]>::as_ref(b).len())
-                <= size_bytes
-        );
-
         ExtractOut {
-            _connection: self,
-            buffers: Some(buffers),
+            yamux: self,
+            size_bytes,
         }
     }
 
@@ -1068,21 +948,127 @@ impl<'a, T> SubstreamMut<'a, T> {
 }
 
 pub struct ExtractOut<'a, T> {
-    _connection: &'a mut Yamux<T>, // TODO: unused field, replace with PhantomData?
-    buffers: Option<Vec<either::Either<arrayvec::ArrayVec<u8, 12>, VecWithOffset>>>,
+    yamux: &'a mut Yamux<T>,
+    size_bytes: usize,
 }
 
 impl<'a, T> ExtractOut<'a, T> {
-    /// Returns the list of buffers to write.
-    ///
-    /// Can only be called once.
-    ///
-    /// # Panic
-    ///
-    /// Panics if called multiple times.
-    ///
-    pub fn buffers(&mut self) -> impl Iterator<Item = impl AsRef<[u8]> + 'a> + 'a {
-        self.buffers.take().unwrap().into_iter()
+    /// Builds the next buffer to send out and returns it.
+    pub fn next(&'_ mut self) -> Option<impl AsRef<[u8]> + '_> {
+        while self.size_bytes != 0 {
+            // Finish writing `self.yamux.pending_out_header` if possible.
+            if !self.yamux.pending_out_header.is_empty() {
+                if self.size_bytes >= self.yamux.pending_out_header.len() {
+                    self.size_bytes -= self.yamux.pending_out_header.len();
+                    return Some(either::Left(mem::take(&mut self.yamux.pending_out_header)));
+                } else {
+                    let to_add = self.yamux.pending_out_header[..self.size_bytes].to_vec();
+                    for _ in 0..self.size_bytes {
+                        self.yamux.pending_out_header.remove(0);
+                    }
+                    return Some(either::Right(VecWithOffset(to_add, 0)));
+                }
+            }
+
+            // Now update `writing_out_substream`.
+            if let Some((substream, ref mut remain)) = self.yamux.writing_out_substream {
+                let mut substream = self.yamux.substreams.get_mut(&substream.0).unwrap();
+
+                let first_buf_avail =
+                    substream.write_buffers[0].len() - substream.first_write_buffer_offset;
+                let out = if first_buf_avail <= *remain && first_buf_avail <= self.size_bytes {
+                    let out = VecWithOffset(
+                        substream.write_buffers.remove(0),
+                        substream.first_write_buffer_offset,
+                    );
+                    self.size_bytes -= first_buf_avail;
+                    substream.first_write_buffer_offset = 0;
+                    *remain -= first_buf_avail;
+                    if *remain == 0 {
+                        self.yamux.writing_out_substream = None;
+                    }
+                    either::Right(out)
+                } else if *remain <= self.size_bytes {
+                    self.size_bytes -= *remain;
+                    let out = VecWithOffset(
+                        substream.write_buffers[0][substream.first_write_buffer_offset..]
+                            [..*remain]
+                            .to_vec(),
+                        0,
+                    );
+                    substream.first_write_buffer_offset += *remain;
+                    self.yamux.writing_out_substream = None;
+                    either::Right(out)
+                } else {
+                    let out = VecWithOffset(
+                        substream.write_buffers[0][substream.first_write_buffer_offset..]
+                            [..self.size_bytes]
+                            .to_vec(),
+                        0,
+                    );
+                    substream.first_write_buffer_offset += self.size_bytes;
+                    *remain -= self.size_bytes;
+                    self.size_bytes = 0;
+                    either::Right(out)
+                };
+
+                return Some(out);
+            }
+
+            // All frames in the process of being written have been written.
+            debug_assert!(self.yamux.pending_out_header.is_empty());
+            debug_assert!(self.yamux.writing_out_substream.is_none());
+
+            // Send window update frames.
+            // TODO: O(n)
+            if let Some((id, sub)) = self
+                .yamux
+                .substreams
+                .iter_mut()
+                .find(|(_, s)| s.remote_window_pending_increase != 0)
+                .map(|(id, sub)| (*id, sub))
+            {
+                let syn_ack_flag = !sub.first_message_queued;
+                sub.first_message_queued = true;
+
+                let update =
+                    u32::try_from(sub.remote_window_pending_increase).unwrap_or(u32::max_value());
+                sub.remote_window_pending_increase -= u64::from(update);
+                sub.remote_allowed_window += u64::from(update);
+                self.yamux
+                    .queue_window_size_frame_header(syn_ack_flag, id, update);
+                continue;
+            }
+
+            // Start writing more data from another substream.
+            // TODO: O(n)
+            // TODO: choose substreams in some sort of round-robin way
+            if let Some((id, sub)) = self
+                .yamux
+                .substreams
+                .iter_mut()
+                .find(|(_, s)| !s.write_buffers.is_empty())
+                .map(|(id, sub)| (*id, sub))
+            {
+                let pending_len = sub.write_buffers.iter().fold(0, |l, b| l + b.len());
+                let len_out = cmp::min(
+                    u32::try_from(pending_len).unwrap_or(u32::max_value()),
+                    u32::try_from(sub.allowed_window).unwrap_or(u32::max_value()),
+                );
+                let len_out_usize = usize::try_from(len_out).unwrap();
+                sub.allowed_window -= u64::from(len_out);
+                let syn_ack_flag = !sub.first_message_queued;
+                sub.first_message_queued = true;
+                let fin_flag = sub.local_write_closed && len_out_usize == pending_len;
+                self.yamux.writing_out_substream = Some((SubstreamId(id), len_out_usize));
+                self.yamux
+                    .queue_data_frame_header(syn_ack_flag, fin_flag, id, len_out);
+            } else {
+                break;
+            }
+        }
+
+        None
     }
 }
 
