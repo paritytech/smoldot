@@ -267,19 +267,13 @@ impl<T> Yamux<T> {
     }
 
     /// Process some incoming data.
-    ///
-    /// # Panic
-    ///
-    /// Panics if pending incoming substream.
-    ///
     // TODO: explain that reading might be blocked on writing
-    // TODO: reword panic reason
     pub fn incoming_data(mut self, mut data: &[u8]) -> Result<IncomingDataOutcome<T>, Error> {
         let mut total_read: usize = 0;
 
         while !data.is_empty() {
             match self.incoming {
-                Incoming::PendingIncomingSubstream { .. } => panic!(),
+                Incoming::PendingIncomingSubstream { .. } => break,
 
                 Incoming::DataFrame {
                     substream_id,
