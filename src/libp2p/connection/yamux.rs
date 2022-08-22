@@ -127,8 +127,12 @@ enum Incoming {
         /// data frame.
         fin: bool,
     },
+
     /// A header referring to a new substream has been received. The reception of any further data
     /// is blocked waiting for the API user to accept or reject this substream.
+    ///
+    /// Note that [`Yamux::outgoing`] must always be [`Outgoing::Idle`], in order to give the
+    /// possibility to send back a RST frame for the new substream.
     PendingIncomingSubstream {
         /// Identifier of the pending substream.
         substream_id: SubstreamId,
@@ -530,6 +534,7 @@ impl<T> Yamux<T> {
                                 return Err(Error::UnexpectedSyn(stream_id));
                             }
 
+                            debug_assert!(matches!(self.outgoing, Outgoing::Idle));
                             let is_data =
                                 matches!(decoded_header, header::DecodedYamuxHeader::Data { .. });
                             self.incoming = Incoming::PendingIncomingSubstream {
@@ -707,26 +712,41 @@ impl<T> Yamux<T> {
     }
 
     pub fn reject_pending_substream(&mut self) {
-        /*self.pending_out_header.push(0);
-        self.pending_out_header.push(1);
-        self.pending_out_header
-            .try_extend_from_slice(&0x8u16.to_be_bytes()[..])
-            .unwrap();
-        self.pending_out_header
-            .try_extend_from_slice(&pending_incoming_substream.0.get().to_be_bytes()[..])
-            .unwrap();
-        self.pending_out_header
-            .try_extend_from_slice(&0u32.to_be_bytes()[..])
-            .unwrap();
+        match self.incoming {
+            Incoming::PendingIncomingSubstream {
+                substream_id,
+                data_frame_size,
+                fin,
+                ..
+            } => {
+                self.incoming = if data_frame_size == 0 {
+                    Incoming::Header(arrayvec::ArrayVec::new())
+                } else {
+                    Incoming::DataFrame {
+                        substream_id,
+                        remaining_bytes: data_frame_size,
+                        fin,
+                    }
+                };
 
-        let to_write = cmp::min(self.pending_out_header.len(), out.len());
-        out[..to_write].copy_from_slice(&self.pending_out_header[..to_write]);
-        for _ in 0..to_write {
-            self.pending_out_header.remove(0);
+                let mut header = arrayvec::ArrayVec::new();
+                header.push(0);
+                header.push(1);
+                header.try_extend_from_slice(&0x8u16.to_be_bytes()).unwrap();
+                header
+                    .try_extend_from_slice(&substream_id.0.get().to_be_bytes())
+                    .unwrap();
+                header.try_extend_from_slice(&0u32.to_be_bytes()).unwrap();
+                debug_assert_eq!(header.len(), 12);
+
+                debug_assert!(matches!(self.outgoing, Outgoing::Idle));
+                self.outgoing = Outgoing::Header {
+                    header,
+                    substream_data_frame: None,
+                };
+            }
+            _ => panic!(),
         }
-        to_write*/
-        // TODO:
-        todo!()
     }
 
     /// Writes a data frame header in `self.outgoing`.
@@ -1009,6 +1029,7 @@ impl<'a, T> SubstreamMut<'a, T> {
     /// reset the substream in the past.
     ///
     pub fn reset(&mut self) {
+        // TODO: doesn't send the RST frame
         let substream = self.substream.get_mut();
         substream.local_write_closed = true;
         substream.remote_write_closed = true;
