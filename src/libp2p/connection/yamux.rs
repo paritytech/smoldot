@@ -428,7 +428,6 @@ impl<T> Yamux<T> {
                                 )
                                 .unwrap();
                             self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
-                            continue;
                         }
                         header::DecodedYamuxHeader::PingResponse { .. } => {
                             // TODO: ping handling
