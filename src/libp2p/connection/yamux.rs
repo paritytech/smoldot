@@ -401,7 +401,6 @@ impl<T> Yamux<T> {
                     if *remaining_bytes == 0 {
                         self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                     }
-                    continue;
                 }
 
                 Incoming::Header(ref mut incoming_header) => {
