@@ -110,6 +110,8 @@ struct Substream<T> {
     /// Number of bytes in `self.write_buffers[0]` has have already been written out to the
     /// socket.
     first_write_buffer_offset: usize,
+    /// `true` if a reset of the substreams has been performed, either locally or by the remote.
+    was_reset: bool,
     /// Data chosen by the user.
     user_data: T,
 }
@@ -192,6 +194,7 @@ impl<T> Yamux<T> {
             // Rather than naively incrementing the id by two and assuming that no substream with
             // this ID exists, the code below properly handles wrapping around and ignores IDs
             // already in use .
+            // TODO: simply skill whole connection if overflow
             let id_attempt = self.next_outbound_substream;
             self.next_outbound_substream = {
                 let mut id = self.next_outbound_substream.get();
@@ -224,6 +227,7 @@ impl<T> Yamux<T> {
             remote_write_closed: false,
             write_buffers: Vec::with_capacity(16),
             first_write_buffer_offset: 0,
+            was_reset: false,
             user_data,
         });
 
@@ -266,6 +270,37 @@ impl<T> Yamux<T> {
         }
     }
 
+    /// Finds a substream that .
+    // TODO: text
+    pub fn next_dead_substream(&mut self) -> Option<(SubstreamId, DeadSubstreamTy, T)> {
+        // TODO: O(n)
+        let id = self
+            .substreams
+            .iter()
+            .filter(|(_, substream)| {
+                substream.local_write_closed
+                    && substream.remote_write_closed
+                    && (substream.write_buffers.is_empty() // TODO: cumbersome
+                        || (substream.write_buffers.len() == 1
+                            && substream.write_buffers[0].len()
+                                <= substream.first_write_buffer_offset))
+            })
+            .map(|(id, _)| *id)
+            .next()?;
+
+        let substream = self.substreams.remove(&id).unwrap();
+
+        Some((
+            SubstreamId(id),
+            if substream.was_reset {
+                DeadSubstreamTy::Reset
+            } else {
+                DeadSubstreamTy::ClosedGracefully
+            },
+            substream.user_data,
+        ))
+    }
+
     /// Process some incoming data.
     // TODO: explain that reading might be blocked on writing
     pub fn incoming_data(mut self, mut data: &[u8]) -> Result<IncomingDataOutcome<T>, Error> {
@@ -289,24 +324,10 @@ impl<T> Yamux<T> {
 
                     substream.remote_write_closed = true;
 
-                    if substream.local_write_closed {
-                        let user_data = self.substreams.remove(&substream_id.0).unwrap().user_data;
-                        return Ok(IncomingDataOutcome {
-                            yamux: self,
-                            bytes_read: total_read,
-                            detail: Some(IncomingDataDetail::StreamClosed {
-                                substream_id,
-                                user_data: Some(user_data),
-                            }),
-                        });
-                    }
                     return Ok(IncomingDataOutcome {
                         yamux: self,
                         bytes_read: total_read,
-                        detail: Some(IncomingDataDetail::StreamClosed {
-                            substream_id,
-                            user_data: None,
-                        }),
+                        detail: Some(IncomingDataDetail::StreamClosed { substream_id }),
                     });
                 }
 
@@ -453,20 +474,18 @@ impl<T> Yamux<T> {
 
                         self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
 
-                        if let Some(removed) = self.substreams.remove(&substream_id.0) {
-                            return Ok(IncomingDataOutcome {
-                                yamux: self,
-                                bytes_read: total_read,
-                                detail: Some(IncomingDataDetail::StreamReset {
-                                    substream_id,
-                                    user_data: removed.user_data,
-                                }),
-                            });
-                        }
                         // The remote might have sent a RST frame concerning a substream for
                         // which we have sent a RST frame earlier. Considering that we don't
                         // keep traces of old substreams, we have no way to know whether this
                         // is the case or not.
+                        if let Some(s) = self.substreams.get_mut(&substream_id.0) {
+                            s.local_write_closed = true;
+                            s.remote_write_closed = true;
+                            s.write_buffers.clear();
+                            s.first_write_buffer_offset = 0;
+                            s.was_reset = true;
+                        }
+
                         continue;
                     }
 
@@ -728,6 +747,7 @@ impl<T> Yamux<T> {
                         remote_write_closed: data_frame_size == 0 && fin,
                         write_buffers: Vec::new(),
                         first_write_buffer_offset: 0,
+                        was_reset: false,
                         user_data,
                     },
                 );
@@ -1020,37 +1040,37 @@ impl<'a, T> SubstreamMut<'a, T> {
 
     /// Marks the substream as closed. It is no longer possible to write data on it.
     ///
-    /// If the remote writing side is still open, this method returns `None` and the remote can
-    /// continue to send data.
-    ///
-    /// If the remote writing side is already closed, this method returns `Some` with the user
-    /// data, and the substream is now destroyed.
-    ///
     /// # Panic
     ///
-    /// Panics if [`SubstreamMut::close`] has already been called on this substream.
+    /// Panics if the local writing side is already closed, which can happen if
+    /// [`SubstreamMut::close`] has already been called on this substream or if the remote has
+    /// reset the substream in the past.
     ///
-    pub fn close(mut self) -> Option<T> {
+    pub fn close(&mut self) {
         let substream = self.substream.get_mut();
         assert!(!substream.local_write_closed);
         substream.local_write_closed = true;
+        substream.remote_write_closed = true;
         // TODO: what is write_buffers is empty? need to send the close frame
-
-        if substream.remote_write_closed {
-            Some(self.substream.remove().user_data)
-        } else {
-            None
-        }
     }
 
-    /// Abruptly shuts down the substream. Its identifier is now invalid. Sends a frame with the
-    /// `RST` flag to the remote.
+    /// Abruptly shuts down the substream. Sends a frame with the `RST` flag to the remote.
     ///
     /// Use this method when a protocol error happens on a substream.
-    pub fn reset(self) -> T {
-        let value = self.substream.remove();
-        // TODO: finish
-        value.user_data
+    ///
+    /// # Panic
+    ///
+    /// Panics if the local writing side is already closed, which can happen if
+    /// [`SubstreamMut::close`] has already been called on this substream or if the remote has
+    /// reset the substream in the past.
+    ///
+    pub fn reset(&mut self) {
+        let substream = self.substream.get_mut();
+        substream.local_write_closed = true;
+        substream.remote_write_closed = true;
+        substream.write_buffers.clear();
+        substream.first_write_buffer_offset = 0;
+        substream.was_reset = true;
     }
 }
 
@@ -1106,13 +1126,13 @@ pub struct IncomingDataOutcome<T> {
     /// next time [`Yamux::incoming_data`] is called.
     pub bytes_read: usize,
     /// Detail about the incoming data. `None` if nothing of interest has happened.
-    pub detail: Option<IncomingDataDetail<T>>,
+    pub detail: Option<IncomingDataDetail>,
 }
 
 /// Details about the incoming data.
 #[must_use]
 #[derive(Debug)]
-pub enum IncomingDataDetail<T> {
+pub enum IncomingDataDetail {
     /// Remote has requested to open a new substream.
     ///
     /// After this has been received, either [`Yamux::accept_pending_substream`] or
@@ -1132,9 +1152,6 @@ pub enum IncomingDataDetail<T> {
     StreamClosed {
         /// Substream that got closed.
         substream_id: SubstreamId,
-        /// If `None`, the local writing side is still open and needs to be closed. If `Some`, the
-        /// local writing side is already closed and the substream is now considered destroyed.
-        user_data: Option<T>,
     },
     /// Remote has asked to reset a substream.
     ///
@@ -1142,8 +1159,6 @@ pub enum IncomingDataDetail<T> {
     StreamReset {
         /// Substream that has been destroyed. No longer valid.
         substream_id: SubstreamId,
-        /// User data that was associated to this substream.
-        user_data: T,
     },
 }
 
@@ -1175,6 +1190,12 @@ pub enum Error {
     WriteAfterFin,
     /// Remote has sent a data frame containing data at the same time as a `RST` flag.
     DataWithRst,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum DeadSubstreamTy {
+    ClosedGracefully,
+    Reset,
 }
 
 /// By default, all new substreams have this implicit window size.
