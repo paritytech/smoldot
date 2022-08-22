@@ -478,8 +478,10 @@ impl<T> Yamux<T> {
                                 s.was_reset = true;
                             }
                         }
+
+                        // Remote has sent a SYN flag. A new substream is to be opened.
                         header::DecodedYamuxHeader::Data {
-                            syn,
+                            syn: true,
                             fin,
                             rst: false,
                             stream_id,
@@ -487,91 +489,112 @@ impl<T> Yamux<T> {
                             ..
                         }
                         | header::DecodedYamuxHeader::Window {
-                            syn,
+                            syn: true,
                             fin,
                             rst: false,
                             stream_id,
                             length,
                             ..
                         } => {
+                            if self.substreams.contains_key(&stream_id) {
+                                return Err(Error::UnexpectedSyn(stream_id));
+                            }
+
                             let is_data =
                                 matches!(decoded_header, header::DecodedYamuxHeader::Data { .. });
-
-                            // Find the element in `self.substreams` corresponding to the substream
-                            // requested by the remote.
-                            // It is possible that the remote is referring to a substream for which a RST
-                            // has been sent out. Since the local state machine doesn't keep track of
-                            // RST'ted substreams, any frame concerning a substream with an unknown id is
-                            // discarded and doesn't result in an error, under the presumption that we are
-                            // in this situation. When that is the case, the `substream` variable below is
-                            // `None`.
-                            let substream: Option<_> = if !syn {
-                                self.substreams.get_mut(&stream_id)
-                            } else {
-                                // Remote has sent a SYN flag.
-                                if self.substreams.contains_key(&stream_id) {
-                                    return Err(Error::UnexpectedSyn(stream_id));
-                                }
-                                self.incoming = Incoming::PendingIncomingSubstream {
-                                    substream_id: SubstreamId(stream_id),
-                                    extra_window: if !is_data { length } else { 0 },
-                                    data_frame_size: if is_data { length } else { 0 },
-                                    fin,
-                                };
-
-                                return Ok(IncomingDataOutcome {
-                                    yamux: self,
-                                    bytes_read: total_read,
-                                    detail: Some(IncomingDataDetail::IncomingSubstream),
-                                });
+                            self.incoming = Incoming::PendingIncomingSubstream {
+                                substream_id: SubstreamId(stream_id),
+                                extra_window: if !is_data { length } else { 0 },
+                                data_frame_size: if is_data { length } else { 0 },
+                                fin,
                             };
 
-                            if is_data {
-                                // Data frame.
-                                // Check whether the remote has the right to send that much data.
-                                // Note that the credits aren't checked in the case of an unknown
-                                // substream.
-                                if let Some(substream) = substream {
-                                    if substream.remote_write_closed {
-                                        return Err(Error::WriteAfterFin);
-                                    }
+                            return Ok(IncomingDataOutcome {
+                                yamux: self,
+                                bytes_read: total_read,
+                                detail: Some(IncomingDataDetail::IncomingSubstream),
+                            });
+                        }
 
-                                    substream.remote_allowed_window = substream
-                                        .remote_allowed_window
-                                        .checked_sub(u64::from(length))
-                                        .ok_or(Error::CreditsExceeded)?;
+                        header::DecodedYamuxHeader::Data {
+                            syn: false,
+                            rst: false,
+                            stream_id,
+                            length,
+                            fin,
+                            ..
+                        } => {
+                            // Find the element in `self.substreams` corresponding to the substream
+                            // requested by the remote.
+                            // Note that it is possible that the remote is referring to a substream
+                            // for which a RST has been sent out by the local node. Since the
+                            // local state machine doesn't keep track of RST'ted substreams, any
+                            // frame concerning a substream with an unknown id is discarded and
+                            // doesn't result in an error, under the presumption that we are
+                            // in this situation. When that is the case, the `substream` variable
+                            // below is `None`.
+                            let substream = self.substreams.get_mut(&stream_id);
 
-                                    substream.first_message_queued = true;
-                                    substream.remote_window_pending_increase += 256 * 1024;
+                            // Data frame.
+                            // Check whether the remote has the right to send that much data.
+                            // Note that the credits aren't checked in the case of an unknown
+                            // substream.
+                            if let Some(substream) = substream {
+                                if substream.remote_write_closed {
+                                    return Err(Error::WriteAfterFin);
                                 }
 
-                                self.incoming = Incoming::DataFrame {
-                                    substream_id: SubstreamId(stream_id),
-                                    remaining_bytes: length,
-                                    fin,
-                                };
-                            } else {
-                                // Window size frame.
-                                self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+                                substream.remote_allowed_window = substream
+                                    .remote_allowed_window
+                                    .checked_sub(u64::from(length))
+                                    .ok_or(Error::CreditsExceeded)?;
 
-                                if let Some(substream) = substream {
-                                    // Note that the specs are a unclear about whether the remote can or
-                                    // should continue sending FIN flags on window size frames after their
-                                    // side of the substream has already been closed before.
-                                    if fin {
-                                        self.incoming = Incoming::DataFrame {
-                                            substream_id: SubstreamId(stream_id),
-                                            remaining_bytes: 0,
-                                            fin: true,
-                                        };
-                                    }
-
-                                    substream.allowed_window = substream
-                                        .allowed_window
-                                        .checked_add(u64::from(length))
-                                        .ok_or(Error::LocalCreditsOverflow)?;
-                                }
+                                // TODO: uh?! why these two changes?
+                                substream.first_message_queued = true;
+                                substream.remote_window_pending_increase += 256 * 1024;
                             }
+
+                            self.incoming = Incoming::DataFrame {
+                                substream_id: SubstreamId(stream_id),
+                                remaining_bytes: length,
+                                fin,
+                            };
+                        }
+
+                        header::DecodedYamuxHeader::Window {
+                            syn: false,
+                            rst: false,
+                            stream_id,
+                            length,
+                            fin,
+                            ..
+                        } => {
+                            // Note that it is possible that the remote is referring to a substream
+                            // for which a RST has been sent out by the local node. Since the
+                            // local state machine doesn't keep track of RST'ted substreams, any
+                            // frame concerning a substream with an unknown id is discarded and
+                            // doesn't result in an error, under the presumption that we are
+                            // in this situation.
+                            if let Some(substream) = self.substreams.get_mut(&stream_id) {
+                                // Note that the specs are a unclear about whether the remote
+                                // can or should continue sending FIN flags on window size
+                                // frames after their side of the substream has already been
+                                //closed before.
+                                if fin {
+                                    self.incoming = Incoming::DataFrame {
+                                        substream_id: SubstreamId(stream_id),
+                                        remaining_bytes: 0,
+                                        fin: true,
+                                    };
+                                }
+
+                                substream.allowed_window = substream
+                                    .allowed_window
+                                    .checked_add(u64::from(length))
+                                    .ok_or(Error::LocalCreditsOverflow)?;
+                            }
+
+                            self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                         }
                     }
                 }
