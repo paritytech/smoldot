@@ -439,9 +439,42 @@ impl<T> Yamux<T> {
                             todo!()
                         }
                         header::DecodedYamuxHeader::Data {
+                            rst: true,
+                            stream_id,
+                            length,
+                            ..
+                        }
+                        | header::DecodedYamuxHeader::Window {
+                            rst: true,
+                            stream_id,
+                            length,
+                            ..
+                        } => {
+                            // Handle `RST` flag separately.
+                            if matches!(decoded_header, header::DecodedYamuxHeader::Data { .. })
+                                && length != 0
+                            {
+                                return Err(Error::DataWithRst);
+                            }
+
+                            self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+
+                            // The remote might have sent a RST frame concerning a substream for
+                            // which we have sent a RST frame earlier. Considering that we don't
+                            // keep traces of old substreams, we have no way to know whether this
+                            // is the case or not.
+                            if let Some(s) = self.substreams.get_mut(&stream_id) {
+                                s.local_write_closed = true;
+                                s.remote_write_closed = true;
+                                s.write_buffers.clear();
+                                s.first_write_buffer_offset = 0;
+                                s.was_reset = true;
+                            }
+                        }
+                        header::DecodedYamuxHeader::Data {
                             syn,
                             fin,
-                            rst,
+                            rst: false,
                             stream_id,
                             length,
                             ..
@@ -449,36 +482,13 @@ impl<T> Yamux<T> {
                         | header::DecodedYamuxHeader::Window {
                             syn,
                             fin,
-                            rst,
+                            rst: false,
                             stream_id,
                             length,
                             ..
                         } => {
                             let is_data =
                                 matches!(decoded_header, header::DecodedYamuxHeader::Data { .. });
-
-                            // Handle `RST` flag separately.
-                            if rst {
-                                if is_data && length != 0 {
-                                    return Err(Error::DataWithRst);
-                                }
-
-                                self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
-
-                                // The remote might have sent a RST frame concerning a substream for
-                                // which we have sent a RST frame earlier. Considering that we don't
-                                // keep traces of old substreams, we have no way to know whether this
-                                // is the case or not.
-                                if let Some(s) = self.substreams.get_mut(&stream_id) {
-                                    s.local_write_closed = true;
-                                    s.remote_write_closed = true;
-                                    s.write_buffers.clear();
-                                    s.first_write_buffer_offset = 0;
-                                    s.was_reset = true;
-                                }
-
-                                continue;
-                            }
 
                             // Find the element in `self.substreams` corresponding to the substream
                             // requested by the remote.
