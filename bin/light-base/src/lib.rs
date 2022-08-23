@@ -15,6 +15,55 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+//! Smoldot light client library.
+//!
+//! This library provides an easy way to create a light client.
+//!
+//! This light client is opinionated towards certain aspects: what it downloads, how much memory
+//! and CPU it is willing to consume, etc.
+//!
+//! # Usage
+//!
+//! ## Initialization
+//!
+//! In order to use the light client, call [`Client::new`], passing a [`ClientConfig`]. See the
+//! documentation of [`ClientConfig`] for information about what to provide.
+//!
+//! The [`Client`] contains two generic parameters:
+//!
+//! - An implementation of the [`platform::Platform`] trait. This is how the client will
+//! communicate with the outside, such as getting the current time.
+//! - An opaque user data. If you do not use this, you can simply pass `()`.
+//!
+//! ## Adding a chain
+//!
+//! After the client has been initialized, use [`Client::add_chain`] to ask the client to connect
+//! to said chain. See the documentation of [`AddChainConfig`] for information about what to
+//! provide.
+//!
+//! [`Client::add_chain`] returns a [`ChainId`], which identifies the chain within the [`Client`].
+//! A [`Client`] can be thought of as a collection of chain connections, each identified by their
+//! [`ClientId`]. If [`Chain`] was a `Vec`, then [`ChainId`] would be a `usize`.
+//!
+//! A chain can be removed at any time using [`Client::remove_chain`]. This will cause the client
+//! to stop all connections and clean up its internal services. The [`ChainId`] is instantly
+//! considered as invalid as soon as the method is called.
+//!
+//! ## JSON-RPC requests and responses
+//!
+//! Once a chain has been added, one can send JSON-RPC requests using [`Client::json_rpc_request`].
+//!
+//! The request parameter of this function must be a JSON-RPC request in its text form. For
+//! example: `{"id":53,"jsonrpc":"2.0","method":"system_name","params":[]}`.
+//!
+//! Calling [`Client::json_rpc_request`] queues the request in the internals of the client. Later,
+//! the client will process it.
+//!
+//! Responses are sent back by the client using the [`AddChainConfig::json_rpc_responses`] that
+//! was provided when creating the chain.
+//!
+// TODO: talk about the fact that a randomness environment is assumed?
+
 #![recursion_limit = "512"]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
@@ -127,6 +176,7 @@ impl From<ChainId> for u32 {
     }
 }
 
+/// Holds a list of chains, connections, and JSON-RPC services.
 pub struct Client<TChain, TPlat: platform::Platform> {
     /// Tasks can be spawned by sending it on this channel. The first tuple element is the name
     /// of the task used for debugging purposes.
@@ -254,6 +304,14 @@ impl<TChain, TPlat: platform::Platform> Client<TChain, TPlat> {
     }
 
     /// Adds a new chain to the list of chains smoldot tries to synchronize.
+    ///
+    /// This function does not return a `Result`, despite the fact that the chain creation process
+    /// can fail. If the chain creation fails, a chain is added anyway, but it is set to an
+    /// "erroneous" mode.
+    /// Use [`Client::chain_is_erroneous`] to determine whether the chain is in this erroneous
+    /// mode.
+    /// Chain in erroneous mode must be cleaned up using [`Client::remove_chain`].
+    // TODO: this erroneous chain system was added to make it easier to implement the Wasm node; it should eventually be removed
     pub fn add_chain(
         &mut self,
         config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
@@ -825,8 +883,8 @@ impl<TChain, TPlat: platform::Platform> Client<TChain, TPlat> {
     /// Removes the chain from smoldot. This instantaneously and silently cancels all on-going
     /// JSON-RPC requests and subscriptions.
     ///
-    /// Be aware that the [`ChainId`] might be reused if [`Client::add_chain`] is called again
-    /// later.
+    /// The provided [`ChainId`] is now considered dead. Be aware that this same [`ChainId`] might
+    /// later be reused if [`Client::add_chain`] is called again.
     ///
     /// While from the API perspective it will look like the chain no longer exists, calling this
     /// function will not actually immediately disconnect from the given chain if it is still used
@@ -873,11 +931,13 @@ impl<TChain, TPlat: platform::Platform> Client<TChain, TPlat> {
     ///
     /// Since most JSON-RPC requests can only be answered asynchronously, the request is only
     /// queued and will be decoded and processed later.
-    /// Requests that are not valid JSON-RPC will be silently ignored.
     ///
     /// Returns an error if the node is overloaded and is capable of processing more JSON-RPC
     /// requests before some time has passed or the [`AddChainConfig::json_rpc_responses`] channel
     /// emptied.
+    ///
+    /// Also returns an error if the request could not be parsed as a valid JSON-RPC request, as
+    /// in that situation smoldot is unable to send back a corresponding JSON-RPC error message.
     ///
     /// # Panic
     ///
