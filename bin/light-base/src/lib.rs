@@ -56,6 +56,7 @@ pub struct ClientConfig {
     /// In order for the client to function, it needs to be able to spawn tasks in the background
     /// that will run indefinitely. To do so, it will send a task on this channel. The first tuple
     /// element is the name of the task, used for debugging purposes.
+    // TODO: don't expose channels from the `futures` library in the public API
     pub tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
 
     /// Value returned when a JSON-RPC client requests the name of the client. Reasonable value
@@ -102,6 +103,7 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     ///
     /// If `None`, then no JSON-RPC service is started for this chain. This saves up a lot of
     /// resources, but will cause all JSON-RPC requests targeting this chain to fail.
+    // TODO: don't expose channels from the `futures` library in the public API
     pub json_rpc_responses: Option<mpsc::Sender<String>>,
 }
 
