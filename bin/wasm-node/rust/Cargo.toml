@@ -22,4 +22,4 @@ pin-project = "1.0.12"
 rand = "0.8.5"
 slab = { version = "0.4.7", default-features = false }
 smoldot = { version = "0.2.0", path = "../../..", default-features = false }
-smoldot-light-base = { version = "0.1.0", path = "../../light-base" }
+smoldot-light = { version = "0.1.0", path = "../../light-base" }

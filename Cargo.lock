@@ -2360,7 +2360,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "smoldot-light-base"
+name = "smoldot-light"
 version = "0.1.0"
 dependencies = [
  "blake2-rfc",
@@ -2395,7 +2395,7 @@ dependencies = [
  "rand",
  "slab",
  "smoldot",
- "smoldot-light-base",
+ "smoldot-light",
 ]
 
 [[package]]
