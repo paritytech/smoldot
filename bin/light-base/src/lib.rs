@@ -177,7 +177,7 @@ impl From<ChainId> for u32 {
 }
 
 /// Holds a list of chains, connections, and JSON-RPC services.
-pub struct Client<TChain, TPlat: platform::Platform> {
+pub struct Client<TPlat: platform::Platform, TChain = ()> {
     /// Tasks can be spawned by sending it on this channel. The first tuple element is the name
     /// of the task used for debugging purposes.
     new_task_tx: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
@@ -290,7 +290,7 @@ impl<TPlat: platform::Platform> Clone for ChainServices<TPlat> {
     }
 }
 
-impl<TChain, TPlat: platform::Platform> Client<TChain, TPlat> {
+impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     /// Initializes the smoldot client.
     pub fn new(config: ClientConfig) -> Self {
         let expected_chains = 8;

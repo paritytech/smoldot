@@ -34,17 +34,17 @@ use std::{
     task,
 };
 
-pub(crate) struct Client<TChain, TPlat: smoldot_light::platform::Platform> {
-    pub(crate) smoldot: smoldot_light::Client<TChain, TPlat>,
+pub(crate) struct Client<TPlat: smoldot_light::platform::Platform, TChain> {
+    pub(crate) smoldot: smoldot_light::Client<TPlat, TChain>,
 
     pub(crate) new_tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
 }
 
-pub(crate) fn init<TChain, TPlat: smoldot_light::platform::Platform>(
+pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
     max_log_level: u32,
     enable_current_task: bool,
     cpu_rate_limit: u32,
-) -> Client<TChain, TPlat> {
+) -> Client<TPlat, TChain> {
     // Try initialize the logging and the panic hook.
     let _ = log::set_boxed_logger(Box::new(Logger)).map(|()| {
         log::set_max_level(match max_log_level {

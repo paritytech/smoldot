@@ -114,7 +114,7 @@ impl Sub<Instant> for Instant {
 }
 
 lazy_static::lazy_static! {
-    static ref CLIENT: Mutex<Option<init::Client<Vec<future::AbortHandle>, platform::Platform>>> = Mutex::new(None);
+    static ref CLIENT: Mutex<Option<init::Client<platform::Platform, Vec<future::AbortHandle>>>> = Mutex::new(None);
 }
 
 fn init(max_log_level: u32, enable_current_task: u32, cpu_rate_limit: u32) {
