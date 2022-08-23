@@ -136,16 +136,16 @@ fn decode<'a>(bytes: &'a [u8]) -> nom::IResult<&'a [u8], DecodedYamuxHeader> {
             nom::combinator::map(
                 nom::sequence::tuple((
                     nom::bytes::complete::tag(&[3]),
-                    nom::bytes::complete::tag(&[0]),
+                    nom::bytes::complete::tag(&[0, 0]),
                     nom::bytes::complete::tag(&[0, 0, 0, 0]),
                     nom::branch::alt((
-                        nom::combinator::map(nom::bytes::complete::tag(&[0]), |_| {
+                        nom::combinator::map(nom::bytes::complete::tag(0u32.to_be_bytes()), |_| {
                             GoAwayErrorCode::NormalTermination
                         }),
-                        nom::combinator::map(nom::bytes::complete::tag(&[1]), |_| {
+                        nom::combinator::map(nom::bytes::complete::tag(1u32.to_be_bytes()), |_| {
                             GoAwayErrorCode::ProtocolError
                         }),
-                        nom::combinator::map(nom::bytes::complete::tag(&[2]), |_| {
+                        nom::combinator::map(nom::bytes::complete::tag(2u32.to_be_bytes()), |_| {
                             GoAwayErrorCode::InternalError
                         }),
                     )),
