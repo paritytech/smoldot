@@ -54,8 +54,23 @@
 //! large, the subscription is force-killed by the [`RuntimeService`].
 //!
 
-use crate::{network_service, sync_service, Platform};
+use crate::{network_service, platform::Platform, sync_service};
 
+use alloc::{
+    boxed::Box,
+    collections::BTreeMap,
+    format,
+    string::{String, ToString as _},
+    sync::{Arc, Weak},
+    vec,
+    vec::Vec,
+};
+use core::{
+    iter, mem,
+    num::{NonZeroU32, NonZeroUsize},
+    pin::Pin,
+    time::Duration,
+};
 use futures::{
     channel::mpsc,
     lock::{Mutex, MutexGuard},
@@ -68,14 +83,6 @@ use smoldot::{
     informant::{BytesDisplay, HashDisplay},
     network::protocol,
     trie::{self, proof_verify},
-};
-use std::{
-    collections::BTreeMap,
-    iter, mem,
-    num::{NonZeroU32, NonZeroUsize},
-    pin::Pin,
-    sync::{Arc, Weak},
-    time::Duration,
 };
 
 /// Configuration for a runtime service.

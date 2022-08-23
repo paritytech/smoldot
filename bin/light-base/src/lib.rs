@@ -15,11 +15,75 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+//! Smoldot light client library.
+//!
+//! This library provides an easy way to create a light client.
+//!
+//! This light client is opinionated towards certain aspects: what it downloads, how much memory
+//! and CPU it is willing to consume, etc.
+//!
+//! # Usage
+//!
+//! ## Initialization
+//!
+//! In order to use the light client, call [`Client::new`], passing a [`ClientConfig`]. See the
+//! documentation of [`ClientConfig`] for information about what to provide.
+//!
+//! The [`Client`] contains two generic parameters:
+//!
+//! - An implementation of the [`platform::Platform`] trait. This is how the client will
+//! communicate with the outside, such as getting the current time.
+//! - An opaque user data. If you do not use this, you can simply pass `()`.
+//!
+//! ## Adding a chain
+//!
+//! After the client has been initialized, use [`Client::add_chain`] to ask the client to connect
+//! to said chain. See the documentation of [`AddChainConfig`] for information about what to
+//! provide.
+//!
+//! [`Client::add_chain`] returns a [`ChainId`], which identifies the chain within the [`Client`].
+//! A [`Client`] can be thought of as a collection of chain connections, each identified by their
+//! [`ChainId`]. If [`Client`] was a `Vec`, then [`ChainId`] would be a `usize`.
+//!
+//! A chain can be removed at any time using [`Client::remove_chain`]. This will cause the client
+//! to stop all connections and clean up its internal services. The [`ChainId`] is instantly
+//! considered as invalid as soon as the method is called.
+//!
+//! ## JSON-RPC requests and responses
+//!
+//! Once a chain has been added, one can send JSON-RPC requests using [`Client::json_rpc_request`].
+//!
+//! The request parameter of this function must be a JSON-RPC request in its text form. For
+//! example: `{"id":53,"jsonrpc":"2.0","method":"system_name","params":[]}`.
+//!
+//! Calling [`Client::json_rpc_request`] queues the request in the internals of the client. Later,
+//! the client will process it.
+//!
+//! Responses are sent back by the client using the [`AddChainConfig::json_rpc_responses`] that
+//! was provided when creating the chain.
+//!
+// TODO: talk about the fact that a randomness environment is assumed?
+
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![recursion_limit = "512"]
 #![deny(rustdoc::broken_intra_doc_links)]
-#![deny(unused_crate_dependencies)]
+// TODO: the `unused_crate_dependencies` lint is disabled because of dev-dependencies, see <https://github.com/rust-lang/rust/issues/95513>
+// #![deny(unused_crate_dependencies)]
 
+extern crate alloc;
+
+use alloc::{
+    borrow::ToOwned as _,
+    boxed::Box,
+    format,
+    string::{String, ToString as _},
+    sync::Arc,
+    vec,
+    vec::Vec,
+};
+use core::{cmp, num::NonZeroU32, pin::Pin};
 use futures::{channel::mpsc, prelude::*};
+use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use smoldot::{
     chain, chain_spec,
@@ -27,16 +91,6 @@ use smoldot::{
     header,
     informant::HashDisplay,
     libp2p::{connection, multiaddr, peer_id},
-};
-use std::{
-    cmp,
-    collections::{hash_map::Entry, HashMap},
-    num::NonZeroU32,
-    ops,
-    pin::Pin,
-    str,
-    sync::Arc,
-    time::Duration,
 };
 
 mod json_rpc_service;
@@ -46,8 +100,29 @@ mod sync_service;
 mod transactions_service;
 mod util;
 
+pub mod platform;
+
 pub use json_rpc_service::HandleRpcError;
 pub use peer_id::PeerId;
+
+/// Configuration for a client.
+///
+/// See [`Client::new`].
+pub struct ClientConfig {
+    /// In order for the client to function, it needs to be able to spawn tasks in the background
+    /// that will run indefinitely. To do so, it will send a task on this channel. The first tuple
+    /// element is the name of the task, used for debugging purposes.
+    // TODO: don't expose channels from the `futures` library in the public API
+    pub tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
+
+    /// Value returned when a JSON-RPC client requests the name of the client. Reasonable value
+    /// is `env!("CARGO_PKG_NAME")`.
+    pub system_name: String,
+
+    /// Value returned when a JSON-RPC client requests the version of the client. Reasonable value
+    /// is `env!("CARGO_PKG_VERSION")`.
+    pub system_version: String,
+}
 
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
@@ -84,142 +159,8 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     ///
     /// If `None`, then no JSON-RPC service is started for this chain. This saves up a lot of
     /// resources, but will cause all JSON-RPC requests targeting this chain to fail.
+    // TODO: don't expose channels from the `futures` library in the public API
     pub json_rpc_responses: Option<mpsc::Sender<String>>,
-}
-
-/// Access to a platform's capabilities.
-pub trait Platform: Send + 'static {
-    type Delay: Future<Output = ()> + Unpin + Send + 'static;
-    type Instant: Clone
-        + ops::Add<Duration, Output = Self::Instant>
-        + ops::Sub<Self::Instant, Output = Duration>
-        + PartialOrd
-        + Ord
-        + PartialEq
-        + Eq
-        + Send
-        + Sync
-        + 'static;
-
-    /// A multi-stream connection.
-    ///
-    /// This object is merely a handle. The underlying connection should be dropped only after
-    /// the `Connection` and all its associated substream objects ([`Platform::Stream`]) have
-    /// been dropped.
-    type Connection: Send + Sync + 'static;
-    type Stream: Send + Sync + 'static;
-    type ConnectFuture: Future<Output = Result<PlatformConnection<Self::Stream, Self::Connection>, ConnectError>>
-        + Unpin
-        + Send
-        + 'static;
-    type StreamDataFuture: Future<Output = ()> + Unpin + Send + 'static;
-    type NextSubstreamFuture: Future<Output = Option<(Self::Stream, PlatformSubstreamDirection)>>
-        + Unpin
-        + Send
-        + 'static;
-
-    /// Returns the time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time)
-    /// (i.e. 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the system time is configured to be below the UNIX epoch. This situation is a
-    /// very very niche edge case that isn't worth handling.
-    ///
-    fn now_from_unix_epoch() -> Duration;
-
-    /// Returns an object that represents "now".
-    fn now() -> Self::Instant;
-
-    /// Creates a future that becomes ready after at least the given duration has elapsed.
-    fn sleep(duration: Duration) -> Self::Delay;
-
-    /// Creates a future that becomes ready after the given instant has been reached.
-    fn sleep_until(when: Self::Instant) -> Self::Delay;
-
-    /// Starts a connection attempt to the given multiaddress.
-    ///
-    /// The multiaddress is passed as a string. If the string can't be parsed, an error should be
-    /// returned where [`ConnectError::is_bad_addr`] is `true`.
-    fn connect(url: &str) -> Self::ConnectFuture;
-
-    /// Queues the opening of an additional outbound substream.
-    ///
-    /// The substream, once opened, must be yielded by [`Platform::next_substream`].
-    fn open_out_substream(connection: &mut Self::Connection);
-
-    /// Waits until a new incoming substream arrives on the connection.
-    ///
-    /// This returns both inbound and outbound substreams. Outbound substreams should only be
-    /// yielded once for every call to [`Platform::open_out_substream`].
-    ///
-    /// The future can also return `None` if the connection has been killed by the remote. If
-    /// the future returns `None`, the user of the `Platform` should drop the `Connection` and
-    /// all its associated `Stream`s as soon as possible.
-    fn next_substream(connection: &mut Self::Connection) -> Self::NextSubstreamFuture;
-
-    /// Returns a future that becomes ready when either the read buffer of the given stream
-    /// contains data, or the remote has closed their sending side.
-    ///
-    /// The future is immediately ready if data is already available or the remote has already
-    /// closed their sending side.
-    ///
-    /// This function can be called multiple times with the same stream, in which case all
-    /// the futures must be notified. The user of this function, however, is encouraged to
-    /// maintain only one active future.
-    ///
-    /// If the future is polled after the stream object has been dropped, the behavior is
-    /// not specified. The polling might panic, or return `Ready`, or return `Pending`.
-    fn wait_more_data(stream: &mut Self::Stream) -> Self::StreamDataFuture;
-
-    /// Gives access to the content of the read buffer of the given stream.
-    ///
-    /// Returns `None` if the remote has closed their sending side or if the stream has been
-    /// reset.
-    fn read_buffer(stream: &mut Self::Stream) -> Option<&[u8]>;
-
-    /// Discards the first `bytes` bytes of the read buffer of this stream. This makes it
-    /// possible for the remote to send more data.
-    ///
-    /// # Panic
-    ///
-    /// Panics if there aren't enough bytes to discard in the buffer.
-    ///
-    fn advance_read_cursor(stream: &mut Self::Stream, bytes: usize);
-
-    /// Queues the given bytes to be sent out on the given connection.
-    // TODO: back-pressure
-    // TODO: allow closing sending side
-    fn send(stream: &mut Self::Stream, data: &[u8]);
-}
-
-/// Type of opened connection. See [`Platform::connect`].
-#[derive(Debug)]
-pub enum PlatformConnection<TStream, TConnection> {
-    /// The connection is a single stream on top of which encryption and multiplexing should be
-    /// negotiated. The division in multiple substreams is handled internally.
-    SingleStream(TStream),
-    /// The connection is made of multiple substreams. The encryption and multiplexing are handled
-    /// externally.
-    MultiStream(TConnection, PeerId),
-}
-
-/// Direction in which a substream has been opened. See [`Platform::next_substream`].
-#[derive(Debug)]
-pub enum PlatformSubstreamDirection {
-    /// Substream has been opened by the remote.
-    Inbound,
-    /// Substream has been opened locally in response to [`Platform::open_out_substream`].
-    Outbound,
-}
-
-/// Error potentially returned by [`Platform::connect`].
-pub struct ConnectError {
-    /// Human-readable error message.
-    pub message: String,
-
-    /// `true` if the error is caused by the address to connect to being forbidden or unsupported.
-    pub is_bad_addr: bool,
 }
 
 /// Chain registered in a [`Client`].
@@ -242,7 +183,8 @@ impl From<ChainId> for u32 {
     }
 }
 
-pub struct Client<TChain, TPlat: Platform> {
+/// Holds a list of chains, connections, and JSON-RPC services.
+pub struct Client<TPlat: platform::Platform, TChain = ()> {
     /// Tasks can be spawned by sending it on this channel. The first tuple element is the name
     /// of the task used for debugging purposes.
     new_task_tx: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
@@ -259,7 +201,8 @@ pub struct Client<TChain, TPlat: Platform> {
     ///
     /// The [`ChainServices`] is within a `MaybeDone`. The variant will be `MaybeDone::Future` if
     /// initialization is still in progress.
-    chains_by_key: HashMap<ChainKey, RunningChain<TPlat>>,
+    // TODO: use SipHasher
+    chains_by_key: HashMap<ChainKey, RunningChain<TPlat>, fnv::FnvBuildHasher>,
 
     /// Value to return when the `system_name` RPC is called. Should be set to the name of the
     /// final executable.
@@ -319,7 +262,7 @@ struct ChainKey {
     protocol_id: String,
 }
 
-struct RunningChain<TPlat: Platform> {
+struct RunningChain<TPlat: platform::Platform> {
     /// Services that are dedicated to this chain. Wrapped within a `MaybeDone` because the
     /// initialization is performed asynchronously.
     services: future::MaybeDone<future::Shared<future::RemoteHandle<ChainServices<TPlat>>>>,
@@ -333,7 +276,7 @@ struct RunningChain<TPlat: Platform> {
     num_references: NonZeroU32,
 }
 
-struct ChainServices<TPlat: Platform> {
+struct ChainServices<TPlat: platform::Platform> {
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_identity: peer_id::PeerId,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
@@ -342,7 +285,7 @@ struct ChainServices<TPlat: Platform> {
     block_number_bytes: usize,
 }
 
-impl<TPlat: Platform> Clone for ChainServices<TPlat> {
+impl<TPlat: platform::Platform> Clone for ChainServices<TPlat> {
     fn clone(&self) -> Self {
         ChainServices {
             network_service: self.network_service.clone(),
@@ -355,33 +298,28 @@ impl<TPlat: Platform> Clone for ChainServices<TPlat> {
     }
 }
 
-impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
+impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     /// Initializes the smoldot client.
-    ///
-    /// In order for the client to function, it needs to be able to spawn tasks in the background
-    /// that will run indefinitely. To do so, the `tasks_spawner` channel must be provided and that
-    /// the clients can send tasks to run to. The first tuple element is the name of the task used
-    /// for debugging purposes.
-    ///
-    /// `system_name` and `system_version` are the values returned when a JSON-RPC client requests
-    /// the name and/or version of the client. Reasonable values are `env!("CARGO_PKG_NAME")` and
-    /// `env!("CARGO_PKG_VERSION")`.
-    pub fn new(
-        tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
-        system_name: impl Into<String>,
-        system_version: impl Into<String>,
-    ) -> Self {
+    pub fn new(config: ClientConfig) -> Self {
         let expected_chains = 8;
         Client {
-            new_task_tx: tasks_spawner,
+            new_task_tx: config.tasks_spawner,
             public_api_chains: slab::Slab::with_capacity(expected_chains),
-            chains_by_key: HashMap::with_capacity(expected_chains),
-            system_name: system_name.into(),
-            system_version: system_version.into(),
+            chains_by_key: HashMap::with_capacity_and_hasher(expected_chains, Default::default()),
+            system_name: config.system_name,
+            system_version: config.system_version,
         }
     }
 
     /// Adds a new chain to the list of chains smoldot tries to synchronize.
+    ///
+    /// This function does not return a `Result`, despite the fact that the chain creation process
+    /// can fail. If the chain creation fails, a chain is added anyway, but it is set to an
+    /// "erroneous" mode.
+    /// Use [`Client::chain_is_erroneous`] to determine whether the chain is in this erroneous
+    /// mode.
+    /// Chain in erroneous mode must be cleaned up using [`Client::remove_chain`].
+    // TODO: this erroneous chain system was added to make it easier to implement the Wasm node; it should eventually be removed
     pub fn add_chain(
         &mut self,
         config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
@@ -953,8 +891,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     /// Removes the chain from smoldot. This instantaneously and silently cancels all on-going
     /// JSON-RPC requests and subscriptions.
     ///
-    /// Be aware that the [`ChainId`] might be reused if [`Client::add_chain`] is called again
-    /// later.
+    /// The provided [`ChainId`] is now considered dead. Be aware that this same [`ChainId`] might
+    /// later be reused if [`Client::add_chain`] is called again.
     ///
     /// While from the API perspective it will look like the chain no longer exists, calling this
     /// function will not actually immediately disconnect from the given chain if it is still used
@@ -1001,11 +939,13 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
     ///
     /// Since most JSON-RPC requests can only be answered asynchronously, the request is only
     /// queued and will be decoded and processed later.
-    /// Requests that are not valid JSON-RPC will be silently ignored.
     ///
     /// Returns an error if the node is overloaded and is capable of processing more JSON-RPC
     /// requests before some time has passed or the [`AddChainConfig::json_rpc_responses`] channel
     /// emptied.
+    ///
+    /// Also returns an error if the request could not be parsed as a valid JSON-RPC request, as
+    /// in that situation smoldot is unable to send back a corresponding JSON-RPC error message.
     ///
     /// # Panic
     ///
@@ -1082,7 +1022,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
 ///
 /// Returns some of the services that have been started. If these service get shut down, all the
 /// other services will later shut down as well.
-async fn start_services<TPlat: Platform>(
+async fn start_services<TPlat: platform::Platform>(
     log_name: String,
     new_task_tx: mpsc::UnboundedSender<(
         String,
@@ -1243,7 +1183,7 @@ async fn start_services<TPlat: Platform>(
     }
 }
 
-async fn encode_database<TPlat: Platform>(
+async fn encode_database<TPlat: platform::Platform>(
     services: &ChainServices<TPlat>,
     max_size: usize,
 ) -> String {
