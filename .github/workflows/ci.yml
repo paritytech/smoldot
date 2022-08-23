@@ -106,6 +106,8 @@ jobs:
     - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features database-sqlite
     - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features std
     - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features database-sqlite --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot-light-base --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot-light-base --locked --no-default-features --features std
 
   fuzzing-binaries-compile:
     runs-on: ubuntu-latest
