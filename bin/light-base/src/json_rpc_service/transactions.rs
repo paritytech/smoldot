@@ -21,12 +21,10 @@ use super::{Background, Platform, SubscriptionTy};
 
 use crate::transactions_service;
 
+use alloc::{borrow::ToOwned as _, boxed::Box, str, string::ToString as _, sync::Arc, vec::Vec};
+use core::sync::atomic;
 use futures::prelude::*;
 use smoldot::json_rpc::{self, methods, requests_subscriptions};
-use std::{
-    str,
-    sync::{atomic, Arc},
-};
 
 impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::author_pendingExtrinsics`].

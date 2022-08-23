@@ -16,9 +16,16 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::ToBackground;
-use crate::{network_service, runtime_service, Platform};
+use crate::{network_service, platform::Platform, runtime_service};
 
+use alloc::{borrow::ToOwned as _, string::String, sync::Arc, vec::Vec};
+use core::{
+    iter,
+    num::{NonZeroU32, NonZeroUsize},
+    time::Duration,
+};
 use futures::{channel::mpsc, prelude::*};
+use hashbrown::HashMap;
 use itertools::Itertools as _;
 use smoldot::{
     chain::{self, async_tree},
@@ -28,13 +35,6 @@ use smoldot::{
     libp2p::PeerId,
     network::protocol,
     sync::{all_forks::sources, para},
-};
-use std::{
-    collections::HashMap,
-    iter,
-    num::{NonZeroU32, NonZeroUsize},
-    sync::Arc,
-    time::Duration,
 };
 
 /// Starts a sync service background task to synchronize a parachain.
@@ -69,7 +69,8 @@ pub(super) async fn start_parachain<TPlat: Platform>(
             .number,
     );
     // Maps `PeerId`s to their indices within `sync_sources`.
-    let mut sync_sources_map = HashMap::new();
+    // TODO: use SipHasher
+    let mut sync_sources_map = HashMap::with_capacity_and_hasher(0, fnv::FnvBuildHasher::default());
 
     // This function contains two loops within each other. If the relay chain syncing service has
     // a gap in its blocks, or if the node is overloaded and can't process blocks in time, then
