@@ -1,6 +1,6 @@
 [package]
 name = "smoldot"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Parity Technologies <admin@parity.io>", "Pierre Krieger <pierre.krieger1708@gmail.com>"]
 description = "Primitives to build a client for Substrate-based blockchains"
 repository = "https://github.com/paritytech/smoldot"
@@ -9,6 +9,7 @@ license = "GPL-3.0-or-later WITH Classpath-exception-2.0"
 edition = "2021"
 readme = "README.md"
 keywords = ["blockchain", "peer-to-peer"]
+exclude = [".github", "bin"]  # TODO: we might need to reorganize the repo to avoid including unwanted files
 
 [workspace]
 default-members = [".", "bin/full-node"]
