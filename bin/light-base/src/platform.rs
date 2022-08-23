@@ -20,6 +20,8 @@ use core::{ops, str, time::Duration};
 use futures::prelude::*;
 use smoldot::libp2p::peer_id::PeerId;
 
+pub mod async_std;
+
 /// Access to a platform's capabilities.
 pub trait Platform: Send + 'static {
     type Delay: Future<Output = ()> + Unpin + Send + 'static;
@@ -40,7 +42,7 @@ pub trait Platform: Send + 'static {
     /// the `Connection` and all its associated substream objects ([`Platform::Stream`]) have
     /// been dropped.
     type Connection: Send + Sync + 'static;
-    type Stream: Send + Sync + 'static;
+    type Stream: Send + 'static;
     type ConnectFuture: Future<Output = Result<PlatformConnection<Self::Stream, Self::Connection>, ConnectError>>
         + Unpin
         + Send
