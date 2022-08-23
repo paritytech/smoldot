@@ -54,7 +54,7 @@
 //! large, the subscription is force-killed by the [`RuntimeService`].
 //!
 
-use crate::{network_service, sync_service, Platform};
+use crate::{network_service, platform::Platform, sync_service};
 
 use futures::{
     channel::mpsc,

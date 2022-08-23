@@ -32,11 +32,9 @@ use std::{
     cmp,
     collections::{hash_map::Entry, HashMap},
     num::NonZeroU32,
-    ops,
     pin::Pin,
     str,
     sync::Arc,
-    time::Duration,
 };
 
 mod json_rpc_service;
@@ -45,6 +43,8 @@ mod runtime_service;
 mod sync_service;
 mod transactions_service;
 mod util;
+
+pub mod platform;
 
 pub use json_rpc_service::HandleRpcError;
 pub use peer_id::PeerId;
@@ -87,141 +87,6 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     pub json_rpc_responses: Option<mpsc::Sender<String>>,
 }
 
-/// Access to a platform's capabilities.
-pub trait Platform: Send + 'static {
-    type Delay: Future<Output = ()> + Unpin + Send + 'static;
-    type Instant: Clone
-        + ops::Add<Duration, Output = Self::Instant>
-        + ops::Sub<Self::Instant, Output = Duration>
-        + PartialOrd
-        + Ord
-        + PartialEq
-        + Eq
-        + Send
-        + Sync
-        + 'static;
-
-    /// A multi-stream connection.
-    ///
-    /// This object is merely a handle. The underlying connection should be dropped only after
-    /// the `Connection` and all its associated substream objects ([`Platform::Stream`]) have
-    /// been dropped.
-    type Connection: Send + Sync + 'static;
-    type Stream: Send + Sync + 'static;
-    type ConnectFuture: Future<Output = Result<PlatformConnection<Self::Stream, Self::Connection>, ConnectError>>
-        + Unpin
-        + Send
-        + 'static;
-    type StreamDataFuture: Future<Output = ()> + Unpin + Send + 'static;
-    type NextSubstreamFuture: Future<Output = Option<(Self::Stream, PlatformSubstreamDirection)>>
-        + Unpin
-        + Send
-        + 'static;
-
-    /// Returns the time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time)
-    /// (i.e. 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the system time is configured to be below the UNIX epoch. This situation is a
-    /// very very niche edge case that isn't worth handling.
-    ///
-    fn now_from_unix_epoch() -> Duration;
-
-    /// Returns an object that represents "now".
-    fn now() -> Self::Instant;
-
-    /// Creates a future that becomes ready after at least the given duration has elapsed.
-    fn sleep(duration: Duration) -> Self::Delay;
-
-    /// Creates a future that becomes ready after the given instant has been reached.
-    fn sleep_until(when: Self::Instant) -> Self::Delay;
-
-    /// Starts a connection attempt to the given multiaddress.
-    ///
-    /// The multiaddress is passed as a string. If the string can't be parsed, an error should be
-    /// returned where [`ConnectError::is_bad_addr`] is `true`.
-    fn connect(url: &str) -> Self::ConnectFuture;
-
-    /// Queues the opening of an additional outbound substream.
-    ///
-    /// The substream, once opened, must be yielded by [`Platform::next_substream`].
-    fn open_out_substream(connection: &mut Self::Connection);
-
-    /// Waits until a new incoming substream arrives on the connection.
-    ///
-    /// This returns both inbound and outbound substreams. Outbound substreams should only be
-    /// yielded once for every call to [`Platform::open_out_substream`].
-    ///
-    /// The future can also return `None` if the connection has been killed by the remote. If
-    /// the future returns `None`, the user of the `Platform` should drop the `Connection` and
-    /// all its associated `Stream`s as soon as possible.
-    fn next_substream(connection: &mut Self::Connection) -> Self::NextSubstreamFuture;
-
-    /// Returns a future that becomes ready when either the read buffer of the given stream
-    /// contains data, or the remote has closed their sending side.
-    ///
-    /// The future is immediately ready if data is already available or the remote has already
-    /// closed their sending side.
-    ///
-    /// This function can be called multiple times with the same stream, in which case all
-    /// the futures must be notified. The user of this function, however, is encouraged to
-    /// maintain only one active future.
-    ///
-    /// If the future is polled after the stream object has been dropped, the behavior is
-    /// not specified. The polling might panic, or return `Ready`, or return `Pending`.
-    fn wait_more_data(stream: &mut Self::Stream) -> Self::StreamDataFuture;
-
-    /// Gives access to the content of the read buffer of the given stream.
-    ///
-    /// Returns `None` if the remote has closed their sending side or if the stream has been
-    /// reset.
-    fn read_buffer(stream: &mut Self::Stream) -> Option<&[u8]>;
-
-    /// Discards the first `bytes` bytes of the read buffer of this stream. This makes it
-    /// possible for the remote to send more data.
-    ///
-    /// # Panic
-    ///
-    /// Panics if there aren't enough bytes to discard in the buffer.
-    ///
-    fn advance_read_cursor(stream: &mut Self::Stream, bytes: usize);
-
-    /// Queues the given bytes to be sent out on the given connection.
-    // TODO: back-pressure
-    // TODO: allow closing sending side
-    fn send(stream: &mut Self::Stream, data: &[u8]);
-}
-
-/// Type of opened connection. See [`Platform::connect`].
-#[derive(Debug)]
-pub enum PlatformConnection<TStream, TConnection> {
-    /// The connection is a single stream on top of which encryption and multiplexing should be
-    /// negotiated. The division in multiple substreams is handled internally.
-    SingleStream(TStream),
-    /// The connection is made of multiple substreams. The encryption and multiplexing are handled
-    /// externally.
-    MultiStream(TConnection, PeerId),
-}
-
-/// Direction in which a substream has been opened. See [`Platform::next_substream`].
-#[derive(Debug)]
-pub enum PlatformSubstreamDirection {
-    /// Substream has been opened by the remote.
-    Inbound,
-    /// Substream has been opened locally in response to [`Platform::open_out_substream`].
-    Outbound,
-}
-
-/// Error potentially returned by [`Platform::connect`].
-pub struct ConnectError {
-    /// Human-readable error message.
-    pub message: String,
-
-    /// `true` if the error is caused by the address to connect to being forbidden or unsupported.
-    pub is_bad_addr: bool,
-}
-
 /// Chain registered in a [`Client`].
 //
 // Implementation detail: corresponds to indices within [`Client::public_api_chains`].
@@ -242,7 +107,7 @@ impl From<ChainId> for u32 {
     }
 }
 
-pub struct Client<TChain, TPlat: Platform> {
+pub struct Client<TChain, TPlat: platform::Platform> {
     /// Tasks can be spawned by sending it on this channel. The first tuple element is the name
     /// of the task used for debugging purposes.
     new_task_tx: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
@@ -319,7 +184,7 @@ struct ChainKey {
     protocol_id: String,
 }
 
-struct RunningChain<TPlat: Platform> {
+struct RunningChain<TPlat: platform::Platform> {
     /// Services that are dedicated to this chain. Wrapped within a `MaybeDone` because the
     /// initialization is performed asynchronously.
     services: future::MaybeDone<future::Shared<future::RemoteHandle<ChainServices<TPlat>>>>,
@@ -333,7 +198,7 @@ struct RunningChain<TPlat: Platform> {
     num_references: NonZeroU32,
 }
 
-struct ChainServices<TPlat: Platform> {
+struct ChainServices<TPlat: platform::Platform> {
     network_service: Arc<network_service::NetworkService<TPlat>>,
     network_identity: peer_id::PeerId,
     sync_service: Arc<sync_service::SyncService<TPlat>>,
@@ -342,7 +207,7 @@ struct ChainServices<TPlat: Platform> {
     block_number_bytes: usize,
 }
 
-impl<TPlat: Platform> Clone for ChainServices<TPlat> {
+impl<TPlat: platform::Platform> Clone for ChainServices<TPlat> {
     fn clone(&self) -> Self {
         ChainServices {
             network_service: self.network_service.clone(),
@@ -355,7 +220,7 @@ impl<TPlat: Platform> Clone for ChainServices<TPlat> {
     }
 }
 
-impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
+impl<TChain, TPlat: platform::Platform> Client<TChain, TPlat> {
     /// Initializes the smoldot client.
     ///
     /// In order for the client to function, it needs to be able to spawn tasks in the background
@@ -1082,7 +947,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
 ///
 /// Returns some of the services that have been started. If these service get shut down, all the
 /// other services will later shut down as well.
-async fn start_services<TPlat: Platform>(
+async fn start_services<TPlat: platform::Platform>(
     log_name: String,
     new_task_tx: mpsc::UnboundedSender<(
         String,
@@ -1243,7 +1108,7 @@ async fn start_services<TPlat: Platform>(
     }
 }
 
-async fn encode_database<TPlat: Platform>(
+async fn encode_database<TPlat: platform::Platform>(
     services: &ChainServices<TPlat>,
     max_size: usize,
 ) -> String {

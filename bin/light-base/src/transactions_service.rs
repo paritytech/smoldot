@@ -67,7 +67,7 @@
 //! transaction.
 //!
 
-use crate::{network_service, runtime_service, sync_service, Platform};
+use crate::{network_service, platform::Platform, runtime_service, sync_service};
 
 use futures::{channel::mpsc, lock::Mutex, prelude::*, stream::FuturesUnordered};
 use itertools::Itertools as _;

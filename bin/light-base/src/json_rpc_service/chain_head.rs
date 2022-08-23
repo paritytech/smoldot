@@ -17,9 +17,9 @@
 
 //! All JSON-RPC method handlers that related to the `chainHead` API.
 
-use super::{Background, FollowSubscription, Platform, SubscriptionTy};
+use super::{Background, FollowSubscription, SubscriptionTy};
 
-use crate::{runtime_service, sync_service};
+use crate::{platform::Platform, runtime_service, sync_service};
 
 use futures::prelude::*;
 use smoldot::{

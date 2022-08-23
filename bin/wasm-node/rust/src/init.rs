@@ -34,13 +34,13 @@ use std::{
     task,
 };
 
-pub(crate) struct Client<TChain, TPlat: smoldot_light::Platform> {
+pub(crate) struct Client<TChain, TPlat: smoldot_light::platform::Platform> {
     pub(crate) smoldot: smoldot_light::Client<TChain, TPlat>,
 
     pub(crate) new_tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
 }
 
-pub(crate) fn init<TChain, TPlat: smoldot_light::Platform>(
+pub(crate) fn init<TChain, TPlat: smoldot_light::platform::Platform>(
     max_log_level: u32,
     enable_current_task: bool,
     cpu_rate_limit: u32,

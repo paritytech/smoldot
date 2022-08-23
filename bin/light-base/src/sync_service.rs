@@ -26,7 +26,7 @@
 //!
 //! Use [`SyncService::subscribe_all`] to get notified about updates to the state of the chain.
 
-use crate::{network_service, runtime_service, Platform};
+use crate::{network_service, platform::Platform, runtime_service};
 
 use futures::{
     channel::{mpsc, oneshot},

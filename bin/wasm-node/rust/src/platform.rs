@@ -17,7 +17,7 @@
 
 use crate::{bindings, timers::Delay};
 
-use smoldot_light::{ConnectError, PlatformSubstreamDirection};
+use smoldot_light::platform::{ConnectError, PlatformSubstreamDirection};
 
 use core::{cmp, mem, slice, str, time::Duration};
 use futures::prelude::*;
@@ -38,19 +38,25 @@ pub static TOTAL_BYTES_SENT: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) struct Platform;
 
-impl smoldot_light::Platform for Platform {
+impl smoldot_light::platform::Platform for Platform {
     type Delay = Delay;
     type Instant = crate::Instant;
     type Connection = ConnectionWrapper; // Entry in the ̀`CONNECTIONS` map.
     type Stream = StreamWrapper; // Entry in the ̀`STREAMS` map and a read buffer.
     type ConnectFuture = future::BoxFuture<
         'static,
-        Result<smoldot_light::PlatformConnection<Self::Stream, Self::Connection>, ConnectError>,
+        Result<
+            smoldot_light::platform::PlatformConnection<Self::Stream, Self::Connection>,
+            ConnectError,
+        >,
     >;
     type StreamDataFuture = future::BoxFuture<'static, ()>;
     type NextSubstreamFuture = future::BoxFuture<
         'static,
-        Option<(Self::Stream, smoldot_light::PlatformSubstreamDirection)>,
+        Option<(
+            Self::Stream,
+            smoldot_light::platform::PlatformSubstreamDirection,
+        )>,
     >;
 
     fn now_from_unix_epoch() -> Duration {
@@ -143,7 +149,7 @@ impl smoldot_light::Platform for Platform {
                         buffer_first_offset: 0,
                     };
 
-                    Ok(smoldot_light::PlatformConnection::SingleStream(
+                    Ok(smoldot_light::platform::PlatformConnection::SingleStream(
                         StreamWrapper((connection_id, 0), read_buffer),
                     ))
                 }
@@ -153,7 +159,7 @@ impl smoldot_light::Platform for Platform {
                     ..
                 } => {
                     *connection_handles_alive += 1;
-                    Ok(smoldot_light::PlatformConnection::MultiStream(
+                    Ok(smoldot_light::platform::PlatformConnection::MultiStream(
                         ConnectionWrapper(connection_id),
                         peer_id.clone(),
                     ))

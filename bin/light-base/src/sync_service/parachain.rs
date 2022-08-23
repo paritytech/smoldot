@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::ToBackground;
-use crate::{network_service, runtime_service, Platform};
+use crate::{network_service, platform::Platform, runtime_service};
 
 use futures::{channel::mpsc, prelude::*};
 use itertools::Itertools as _;

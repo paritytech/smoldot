@@ -19,8 +19,8 @@
 //! by the JSON-RPC service.
 
 use crate::{
+    platform::Platform,
     runtime_service::{Notification, RuntimeError, RuntimeService},
-    Platform,
 };
 
 use futures::prelude::*;

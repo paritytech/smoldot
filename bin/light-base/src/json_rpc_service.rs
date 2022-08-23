@@ -42,7 +42,9 @@ mod getters;
 mod state_chain;
 mod transactions;
 
-use crate::{network_service, runtime_service, sync_service, transactions_service, Platform};
+use crate::{
+    network_service, platform::Platform, runtime_service, sync_service, transactions_service,
+};
 
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
 use smoldot::{

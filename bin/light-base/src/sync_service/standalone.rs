@@ -16,7 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{BlockNotification, FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground};
-use crate::{network_service, Platform};
+use crate::{network_service, platform::Platform};
 
 use futures::{channel::mpsc, prelude::*};
 use smoldot::{

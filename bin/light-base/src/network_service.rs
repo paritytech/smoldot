@@ -36,7 +36,7 @@
 //! [`NetworkService::new`]. These channels inform the foreground about updates to the network
 //! connectivity.
 
-use crate::{Platform, PlatformConnection, PlatformSubstreamDirection};
+use crate::platform::{Platform, PlatformConnection, PlatformSubstreamDirection};
 
 use core::{cmp, iter, num::NonZeroUsize, task::Poll, time::Duration};
 use futures::{
