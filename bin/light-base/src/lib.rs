@@ -49,6 +49,24 @@ pub mod platform;
 pub use json_rpc_service::HandleRpcError;
 pub use peer_id::PeerId;
 
+/// Configuration for a client.
+///
+/// See [`Client::new`].
+pub struct ClientConfig {
+    /// In order for the client to function, it needs to be able to spawn tasks in the background
+    /// that will run indefinitely. To do so, it will send a task on this channel. The first tuple
+    /// element is the name of the task, used for debugging purposes.
+    pub tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
+
+    /// Value returned when a JSON-RPC client requests the name of the client. Reasonable value
+    /// is `env!("CARGO_PKG_NAME")`.
+    pub system_name: String,
+
+    /// Value returned when a JSON-RPC client requests the version of the client. Reasonable value
+    /// is `env!("CARGO_PKG_VERSION")`.
+    pub system_version: String,
+}
+
 /// See [`Client::add_chain`].
 #[derive(Debug, Clone)]
 pub struct AddChainConfig<'a, TChain, TRelays> {
@@ -222,27 +240,14 @@ impl<TPlat: platform::Platform> Clone for ChainServices<TPlat> {
 
 impl<TChain, TPlat: platform::Platform> Client<TChain, TPlat> {
     /// Initializes the smoldot client.
-    ///
-    /// In order for the client to function, it needs to be able to spawn tasks in the background
-    /// that will run indefinitely. To do so, the `tasks_spawner` channel must be provided and that
-    /// the clients can send tasks to run to. The first tuple element is the name of the task used
-    /// for debugging purposes.
-    ///
-    /// `system_name` and `system_version` are the values returned when a JSON-RPC client requests
-    /// the name and/or version of the client. Reasonable values are `env!("CARGO_PKG_NAME")` and
-    /// `env!("CARGO_PKG_VERSION")`.
-    pub fn new(
-        tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
-        system_name: impl Into<String>,
-        system_version: impl Into<String>,
-    ) -> Self {
+    pub fn new(config: ClientConfig) -> Self {
         let expected_chains = 8;
         Client {
-            new_task_tx: tasks_spawner,
+            new_task_tx: config.tasks_spawner,
             public_api_chains: slab::Slab::with_capacity(expected_chains),
             chains_by_key: HashMap::with_capacity(expected_chains),
-            system_name: system_name.into(),
-            system_version: system_version.into(),
+            system_name: config.system_name,
+            system_version: config.system_version,
         }
     }
 
