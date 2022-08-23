@@ -43,7 +43,7 @@
 //!
 //! [`Client::add_chain`] returns a [`ChainId`], which identifies the chain within the [`Client`].
 //! A [`Client`] can be thought of as a collection of chain connections, each identified by their
-//! [`ClientId`]. If [`Chain`] was a `Vec`, then [`ChainId`] would be a `usize`.
+//! [`ChainId`]. If [`Client`] was a `Vec`, then [`ChainId`] would be a `usize`.
 //!
 //! A chain can be removed at any time using [`Client::remove_chain`]. This will cause the client
 //! to stop all connections and clean up its internal services. The [`ChainId`] is instantly

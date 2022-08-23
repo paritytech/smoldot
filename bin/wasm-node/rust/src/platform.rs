@@ -463,8 +463,8 @@ enum ConnectionInner {
         /// Peer id we're connected to.
         peer_id: smoldot_light::PeerId,
         /// List of substreams that the host (i.e. JavaScript side) has reported have been opened,
-        /// but that haven't been reported through [`smoldot_light::Platform::next_substream`]
-        /// yet.
+        /// but that haven't been reported through
+        /// [`smoldot_light::platform::Platform::next_substream`] yet.
         opened_substreams_to_pick_up: VecDeque<(u32, PlatformSubstreamDirection)>,
         /// Number of objects (connections and streams) in the [`Platform`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
