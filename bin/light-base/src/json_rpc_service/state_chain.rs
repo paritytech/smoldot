@@ -21,6 +21,21 @@ use super::{Background, Platform, RuntimeCallError, SubscriptionTy};
 
 use crate::runtime_service;
 
+use alloc::{
+    borrow::ToOwned as _,
+    boxed::Box,
+    format,
+    string::{String, ToString as _},
+    sync::Arc,
+    vec,
+    vec::Vec,
+};
+use core::{
+    iter,
+    num::{NonZeroU32, NonZeroUsize},
+    sync::atomic,
+    time::Duration,
+};
 use futures::{lock::MutexGuard, prelude::*};
 use smoldot::{
     header,
@@ -28,13 +43,6 @@ use smoldot::{
     json_rpc::{self, methods, requests_subscriptions},
     network::protocol,
     remove_metadata_length_prefix,
-};
-use std::{
-    iter,
-    num::{NonZeroU32, NonZeroUsize},
-    str,
-    sync::{atomic, Arc},
-    time::Duration,
 };
 
 mod sub_utils;

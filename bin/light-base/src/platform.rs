@@ -15,6 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use alloc::string::String;
 use core::{ops, str, time::Duration};
 use futures::prelude::*;
 use smoldot::libp2p::peer_id::PeerId;

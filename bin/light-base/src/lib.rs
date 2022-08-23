@@ -64,11 +64,25 @@
 //!
 // TODO: talk about the fact that a randomness environment is assumed?
 
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![recursion_limit = "512"]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(unused_crate_dependencies)]
 
+extern crate alloc;
+
+use alloc::{
+    borrow::ToOwned as _,
+    boxed::Box,
+    format,
+    string::{String, ToString as _},
+    sync::Arc,
+    vec,
+    vec::Vec,
+};
+use core::{cmp, num::NonZeroU32, pin::Pin};
 use futures::{channel::mpsc, prelude::*};
+use hashbrown::{hash_map::Entry, HashMap};
 use itertools::Itertools as _;
 use smoldot::{
     chain, chain_spec,
@@ -76,14 +90,6 @@ use smoldot::{
     header,
     informant::HashDisplay,
     libp2p::{connection, multiaddr, peer_id},
-};
-use std::{
-    cmp,
-    collections::{hash_map::Entry, HashMap},
-    num::NonZeroU32,
-    pin::Pin,
-    str,
-    sync::Arc,
 };
 
 mod json_rpc_service;
@@ -194,7 +200,8 @@ pub struct Client<TPlat: platform::Platform, TChain = ()> {
     ///
     /// The [`ChainServices`] is within a `MaybeDone`. The variant will be `MaybeDone::Future` if
     /// initialization is still in progress.
-    chains_by_key: HashMap<ChainKey, RunningChain<TPlat>>,
+    // TODO: use SipHasher
+    chains_by_key: HashMap<ChainKey, RunningChain<TPlat>, fnv::FnvBuildHasher>,
 
     /// Value to return when the `system_name` RPC is called. Should be set to the name of the
     /// final executable.
@@ -297,7 +304,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
         Client {
             new_task_tx: config.tasks_spawner,
             public_api_chains: slab::Slab::with_capacity(expected_chains),
-            chains_by_key: HashMap::with_capacity(expected_chains),
+            chains_by_key: HashMap::with_capacity_and_hasher(expected_chains, Default::default()),
             system_name: config.system_name,
             system_version: config.system_version,
         }

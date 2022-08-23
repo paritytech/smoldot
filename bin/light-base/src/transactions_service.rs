@@ -69,6 +69,20 @@
 
 use crate::{network_service, platform::Platform, runtime_service, sync_service};
 
+use alloc::{
+    borrow::ToOwned as _,
+    boxed::Box,
+    format,
+    string::{String, ToString as _},
+    sync::Arc,
+    vec::Vec,
+};
+use core::{
+    cmp, iter,
+    marker::PhantomData,
+    num::{NonZeroU32, NonZeroUsize},
+    time::Duration,
+};
 use futures::{channel::mpsc, lock::Mutex, prelude::*, stream::FuturesUnordered};
 use itertools::Itertools as _;
 use smoldot::{
@@ -77,13 +91,6 @@ use smoldot::{
     libp2p::peer_id::PeerId,
     network::protocol,
     transactions::{light_pool, validate},
-};
-use std::{
-    cmp, iter,
-    marker::PhantomData,
-    num::{NonZeroU32, NonZeroUsize},
-    sync::Arc,
-    time::Duration,
 };
 
 /// Configuration for a [`TransactionsService`].

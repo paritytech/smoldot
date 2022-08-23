@@ -21,22 +21,21 @@ use super::{Background, FollowSubscription, SubscriptionTy};
 
 use crate::{platform::Platform, runtime_service, sync_service};
 
+use alloc::{borrow::ToOwned as _, boxed::Box, format, string::ToString as _, sync::Arc, vec::Vec};
+use core::{
+    cmp, iter,
+    num::{NonZeroU32, NonZeroUsize},
+    sync::atomic,
+    time::Duration,
+};
 use futures::prelude::*;
+use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,
     executor::{self, runtime_host},
     header,
     json_rpc::{self, methods, requests_subscriptions},
     network::protocol,
-};
-use std::{
-    cmp,
-    collections::HashMap,
-    iter,
-    num::{NonZeroU32, NonZeroUsize},
-    str,
-    sync::{atomic, Arc},
-    time::Duration,
 };
 
 impl<TPlat: Platform> Background<TPlat> {

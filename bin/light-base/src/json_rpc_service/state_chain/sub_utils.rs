@@ -23,9 +23,10 @@ use crate::{
     runtime_service::{Notification, RuntimeError, RuntimeService},
 };
 
+use alloc::{sync::Arc, vec::Vec};
+use core::num::NonZeroUsize;
 use futures::prelude::*;
 use smoldot::{executor, header};
-use std::{num::NonZeroUsize, sync::Arc};
 
 /// Returns the current runtime version, plus an unlimited stream that produces one item every
 /// time the specs of the runtime of the best block are changed.

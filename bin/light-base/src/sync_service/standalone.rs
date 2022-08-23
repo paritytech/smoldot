@@ -18,7 +18,15 @@
 use super::{BlockNotification, FinalizedBlockRuntime, Notification, SubscribeAll, ToBackground};
 use crate::{network_service, platform::Platform};
 
+use alloc::{borrow::ToOwned as _, string::String, sync::Arc, vec::Vec};
+use core::{
+    iter,
+    marker::PhantomData,
+    num::{NonZeroU32, NonZeroU64},
+    time::Duration,
+};
 use futures::{channel::mpsc, prelude::*};
+use hashbrown::{HashMap, HashSet};
 use smoldot::{
     chain, header,
     informant::HashDisplay,
@@ -26,14 +34,6 @@ use smoldot::{
     network::{self, protocol},
     sync::all,
     trie::proof_verify,
-};
-use std::{
-    collections::{HashMap, HashSet},
-    iter,
-    marker::PhantomData,
-    num::{NonZeroU32, NonZeroU64},
-    sync::Arc,
-    time::Duration,
 };
 
 /// Starts a sync service background task to synchronize a standalone chain (relay chain or not).
@@ -91,7 +91,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
         log_target,
         network_service,
         network_chain_index,
-        peers_source_id_map: HashMap::new(),
+        peers_source_id_map: HashMap::with_capacity_and_hasher(0, Default::default()),
         platform: PhantomData,
     };
 
@@ -365,7 +365,8 @@ struct Task<TPlat: Platform> {
     known_finalized_runtime: Option<FinalizedBlockRuntime>,
 
     /// For each networking peer, the index of the corresponding peer within the [`Task::sync`].
-    peers_source_id_map: HashMap<libp2p::PeerId, all::SourceId>,
+    // TODO: use SipHasher
+    peers_source_id_map: HashMap<libp2p::PeerId, all::SourceId, fnv::FnvBuildHasher>,
 
     /// `false` after the best block in the [`Task::sync`] has changed. Set back to `true`
     /// after the networking has been notified of this change.

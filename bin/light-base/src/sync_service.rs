@@ -28,6 +28,8 @@
 
 use crate::{network_service, platform::Platform, runtime_service};
 
+use alloc::{borrow::ToOwned as _, boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use core::{fmt, num::NonZeroU32, time::Duration};
 use futures::{
     channel::{mpsc, oneshot},
     lock::Mutex,
@@ -40,7 +42,6 @@ use smoldot::{
     network::{protocol, service},
     trie::{self, prefix_proof, proof_verify},
 };
-use std::{fmt, num::NonZeroU32, sync::Arc, time::Duration};
 
 mod parachain;
 mod standalone;
