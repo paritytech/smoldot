@@ -1,6 +1,6 @@
 [package]
 name = "smoldot"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Parity Technologies <admin@parity.io>", "Pierre Krieger <pierre.krieger1708@gmail.com>"]
 description = "Primitives to build a client for Substrate-based blockchains"
 repository = "https://github.com/paritytech/smoldot"
