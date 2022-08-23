@@ -883,7 +883,6 @@ pub struct Config {
 }
 
 /// Reference to a substream within the [`Yamux`].
-// TODO: Debug
 pub struct SubstreamRef<'a, T> {
     id: SubstreamId,
     substream: &'a Substream<T>,
@@ -924,8 +923,16 @@ impl<'a, T> SubstreamRef<'a, T> {
     }
 }
 
+impl<'a, T> fmt::Debug for SubstreamRef<'a, T>
+where
+    T: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Substream").field(self.user_data()).finish()
+    }
+}
+
 /// Reference to a substream within the [`Yamux`].
-// TODO: Debug
 pub struct SubstreamMut<'a, T> {
     substream: OccupiedEntry<'a, NonZeroU32, Substream<T>, SipHasherBuild>,
 }
@@ -937,7 +944,12 @@ impl<'a, T> SubstreamMut<'a, T> {
     }
 
     /// Returns the user data associated to this substream.
-    pub fn user_data(&mut self) -> &mut T {
+    pub fn user_data(&self) -> &T {
+        &self.substream.get().user_data
+    }
+
+    /// Returns the user data associated to this substream.
+    pub fn user_data_mut(&mut self) -> &mut T {
         &mut self.substream.get_mut().user_data
     }
 
@@ -1036,6 +1048,15 @@ impl<'a, T> SubstreamMut<'a, T> {
         substream.write_buffers.clear();
         substream.first_write_buffer_offset = 0;
         substream.was_reset = true;
+    }
+}
+
+impl<'a, T> fmt::Debug for SubstreamMut<'a, T>
+where
+    T: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Substream").field(self.user_data()).finish()
     }
 }
 

@@ -412,7 +412,7 @@ where
         loop {
             let mut substream = inner.yamux.substream_by_id_mut(substream_id).unwrap();
 
-            let state_machine = match substream.user_data().take() {
+            let state_machine = match substream.user_data_mut().take() {
                 Some(s) => s,
                 None => break (total_read, None),
             };
@@ -457,7 +457,7 @@ where
             }
 
             match substream_update {
-                Some(s) => *substream.user_data() = Some(s),
+                Some(s) => *substream.user_data_mut() = Some(s),
                 None => {
                     // TODO: only reset if not already closed
                     inner
