@@ -66,6 +66,21 @@ mod header;
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
 pub const PROTOCOL_NAME: &str = "/yamux/1.0.0";
 
+/// Configuration for a new [`Yamux`].
+#[derive(Debug)]
+pub struct Config {
+    /// `true` if the local machine has initiated the connection. Otherwise, `false`.
+    pub is_initiator: bool,
+
+    /// Expected number of substreams simultaneously open, both inbound and outbound substreams
+    /// combined.
+    pub capacity: usize,
+
+    /// Seed used for the randomness. Used to avoid HashDoS attack and determines the order in
+    /// which the data on substreams is sent out.
+    pub randomness_seed: [u8; 16],
+}
+
 pub struct Yamux<T> {
     /// List of substreams currently open in the Yamux state machine.
     ///
@@ -867,19 +882,6 @@ where
             .field("substreams", &List(self))
             .finish()
     }
-}
-
-/// Configuration for a new [`Yamux`].
-#[derive(Debug)]
-pub struct Config {
-    /// `true` if the local machine has initiated the connection. Otherwise, `false`.
-    pub is_initiator: bool,
-    /// Expected number of substreams simultaneously open, both inbound and outbound substreams
-    /// combined.
-    pub capacity: usize,
-    /// Seed used for the randomness. Used to avoid HashDoS attack and determines the order in
-    /// which the data on substreams is sent out.
-    pub randomness_seed: [u8; 16],
 }
 
 /// Reference to a substream within the [`Yamux`].
