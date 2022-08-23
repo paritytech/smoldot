@@ -9,6 +9,7 @@ license = "GPL-3.0-or-later WITH Classpath-exception-2.0"
 edition = "2021"
 readme = "README.md"
 keywords = ["blockchain", "peer-to-peer"]
+exclude = [".github", "bin"]  # TODO: we might need to reorganize the repo to avoid including unwanted files
 
 [workspace]
 default-members = [".", "bin/full-node"]
