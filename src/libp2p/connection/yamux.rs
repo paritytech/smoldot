@@ -107,6 +107,13 @@ pub struct Yamux<T> {
     /// contains the opaque value that has been sent out and that must be matched by the remote.
     pings_waiting_reply: VecDeque<u32>,
 
+    /// List of substream IDs that have been reset locally. For each entry, a RST header should
+    /// be sent to the remote and the entry removed.
+    ///
+    /// The FNV hasher is used because the substream IDs are allocated locally, and as such there
+    /// is no risk of HashDoS attack.
+    rsts_to_send: VecDeque<NonZeroU32>,
+
     /// Source of randomness used for various purposes.
     randomness: ChaCha20Rng,
 }
@@ -256,6 +263,7 @@ impl<T> Yamux<T> {
             pings_to_send: 0,
             // We leave the initial capacity at 0, as it is likely that no ping is sent at all.
             pings_waiting_reply: VecDeque::new(),
+            rsts_to_send: VecDeque::with_capacity(config.capacity),
             randomness,
         }
     }
@@ -333,6 +341,7 @@ impl<T> Yamux<T> {
             Entry::Occupied(e) => SubstreamMut {
                 substream: e,
                 outgoing: &mut self.outgoing,
+                rsts_to_send: &mut self.rsts_to_send,
             },
             _ => unreachable!(),
         }
@@ -368,6 +377,7 @@ impl<T> Yamux<T> {
             Some(SubstreamMut {
                 substream: e,
                 outgoing: &mut self.outgoing,
+                rsts_to_send: &mut self.rsts_to_send,
             })
         } else {
             None
@@ -944,6 +954,7 @@ impl<T> Yamux<T> {
                         _ => unreachable!(),
                     },
                     outgoing: &mut self.outgoing,
+                    rsts_to_send: &mut self.rsts_to_send,
                 }
             }
             _ => panic!(),
@@ -1230,6 +1241,7 @@ where
 pub struct SubstreamMut<'a, T> {
     substream: OccupiedEntry<'a, NonZeroU32, Substream<T>, SipHasherBuild>,
     outgoing: &'a mut Outgoing,
+    rsts_to_send: &'a mut VecDeque<NonZeroU32>,
 }
 
 impl<'a, T> SubstreamMut<'a, T> {
@@ -1379,6 +1391,11 @@ impl<'a, T> SubstreamMut<'a, T> {
     pub fn reset(&mut self) {
         let substream_id = SubstreamId(*self.substream.key());
 
+        // Add an entry to the list of RST headers to send to the remote.
+        if let SubstreamState::Healthy { .. } = self.substream.get().state {
+            self.rsts_to_send.push_back(substream_id.0);
+        }
+
         // We might be currently writing a frame of data of the substream being reset.
         // If that happens, we need to update some internal state regarding this frame of data.
         match (
@@ -1521,6 +1538,25 @@ impl<'a, T> ExtractOut<'a, T> {
                 }
 
                 Outgoing::Idle => {
+                    // Send RST frames.
+                    if let Some(substream_id) = self.yamux.rsts_to_send.pop_front() {
+                        let mut header = arrayvec::ArrayVec::new();
+                        header.push(0);
+                        header.push(1);
+                        header.try_extend_from_slice(&8u16.to_be_bytes()).unwrap();
+                        header
+                            .try_extend_from_slice(&substream_id.get().to_be_bytes())
+                            .unwrap();
+                        header.try_extend_from_slice(&0u32.to_be_bytes()).unwrap();
+                        debug_assert_eq!(header.len(), 12);
+
+                        self.yamux.outgoing = Outgoing::Header {
+                            header,
+                            substream_data_frame: None,
+                        };
+                        continue;
+                    }
+
                     // Send outgoing pings.
                     if self.yamux.pings_to_send > 0 {
                         self.yamux.pings_to_send -= 1;
@@ -1591,8 +1627,6 @@ impl<'a, T> ExtractOut<'a, T> {
                             first_message_queued,
                             allowed_window,
                             local_write,
-                            remote_window_pending_increase,
-                            remote_allowed_window,
                             write_buffers,
                             ..
                         } = &mut sub.state
