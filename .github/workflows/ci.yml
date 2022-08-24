@@ -168,7 +168,7 @@ jobs:
             components: clippy
             override: true
       - uses: Swatinem/rust-cache@6720f05bc48b77f96918929a9019fb2203ff71f8 # v2.0.0  # Note that this is done after switching the compiler version to nightly
-      - uses: actions-rs/clippy@v1
+      - uses: actions-rs/clippy@master # action is in development stage
         with:
           args: --all-features --all-targets
 
