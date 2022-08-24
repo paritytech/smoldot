@@ -317,8 +317,7 @@ impl<T> Yamux<T> {
         }
     }
 
-    /// Finds a substream that .
-    // TODO: text
+    /// Finds a substream that has been closed or reset, and removes it from this state machine.
     pub fn next_dead_substream(&mut self) -> Option<(SubstreamId, DeadSubstreamTy, T)> {
         // TODO: O(n)
         let id = self
@@ -349,7 +348,25 @@ impl<T> Yamux<T> {
     }
 
     /// Process some incoming data.
-    // TODO: explain that reading might be blocked on writing
+    ///
+    /// This function takes ownership of `self` and yields it back if everything goes well. If,
+    /// on the other hand, a malformed packet is received, an error is yielded and `self` is
+    /// destroyed.
+    ///
+    /// This function might not process all the data available for one of the following reasons:
+    ///
+    /// - Not all outgoing data has been extracted. In order to process incoming messages, the
+    /// Yamux might have to queue data to be written out. For example, incoming pings must be
+    /// replied to. In order to avoid queue an infinite amount of data, processing incoming
+    /// messages might be blocked if there is data to be sent out.
+    /// - It is currently waiting for either [`Yamux::accept_pending_substream`] or
+    /// [`Yamux::reject_pending_substream`] to be called.
+    ///
+    /// If the return value contains [`IncomingDataDetail::IncomingSubstream`], then either
+    /// [`Yamux::accept_pending_substream`] or [`Yamux::reject_pending_substream`] must be called
+    /// in order to accept or reject the pending substream. API users are encouraged to enforce a
+    /// limit to the total number of substreams in order to clamp the memory usage of this state
+    /// machine.
     pub fn incoming_data(mut self, mut data: &[u8]) -> Result<IncomingDataOutcome<T>, Error> {
         let mut total_read: usize = 0;
 
@@ -680,6 +697,20 @@ impl<T> Yamux<T> {
         }
     }
 
+    /// Accepts an incoming substream.
+    ///
+    /// Either [`Yamux::accept_pending_substream`] or [`Yamux::reject_pending_substream`] must be
+    /// called after [`IncomingDataDetail::IncomingSubstream`] is returned.
+    ///
+    /// Note that there is no expiration window after [`IncomingDataDetail::IncomingSubstream`]
+    /// is returned until the substream is no longer valid. However, reading will be blocked until
+    /// the substream is either accepted or rejected. This function should thus be called as
+    /// soon as possible.
+    ///
+    /// # Panic
+    ///
+    /// Panics if no incoming substream is currently pending.
+    ///
     pub fn accept_pending_substream(&mut self, user_data: T) -> SubstreamMut<T> {
         match self.incoming {
             Incoming::PendingIncomingSubstream {
@@ -726,6 +757,20 @@ impl<T> Yamux<T> {
         }
     }
 
+    /// Rejects an incoming substream.
+    ///
+    /// Either [`Yamux::accept_pending_substream`] or [`Yamux::reject_pending_substream`] must be
+    /// called after [`IncomingDataDetail::IncomingSubstream`] is returned.
+    ///
+    /// Note that there is no expiration window after [`IncomingDataDetail::IncomingSubstream`]
+    /// is returned until the substream is no longer valid. However, reading will be blocked until
+    /// the substream is either accepted or rejected. This function should thus be called as
+    /// soon as possible.
+    ///
+    /// # Panic
+    ///
+    /// Panics if no incoming substream is currently pending.
+    ///
     pub fn reject_pending_substream(&mut self) {
         match self.incoming {
             Incoming::PendingIncomingSubstream {
