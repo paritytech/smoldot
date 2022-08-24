@@ -189,27 +189,24 @@ enum Outgoing {
 
         /// If `Some`, then the header is data frame header and we must then transition the
         /// state to [`Outgoing::SubstreamData`].
-        substream_data_frame: Option<(SubstreamId, NonZeroUsize)>,
+        substream_data_frame: Option<(SubstreamData, NonZeroUsize)>,
     },
 
     /// Writing out data from a substream.
     ///
     /// We have sent a data header in the past, and we must now send the associated data.
     SubstreamData {
-        /// Which substream is being written out.
-        id: SubstreamId,
+        /// Source of the data to write out.
+        data: SubstreamData,
 
         /// Number of bytes remaining to write.
         remaining_bytes: NonZeroUsize,
     },
+}
 
-    /// Writing out data from a substream that has been reset.
-    ///
-    /// We have sent a data header in the past, and we must now send the associated data.
-    ObsoleteSubstreamData {
-        /// Number of bytes remaining to write.
-        remaining_bytes: NonZeroUsize,
-
+enum SubstreamData {
+    Healthy(SubstreamId),
+    Obsolete {
         /// Buffer of buffers to be written out to the socket.
         write_buffers: Vec<Vec<u8>>,
 
@@ -920,7 +917,7 @@ impl<T> Yamux<T> {
             substream_data_frame: if let Some(length) =
                 NonZeroUsize::new(usize::try_from(data_length).unwrap())
             {
-                Some((SubstreamId(substream_id), length))
+                Some((SubstreamData::Healthy(SubstreamId(substream_id)), length))
             } else {
                 None
             },
@@ -1209,7 +1206,7 @@ impl<'a, T> ExtractOut<'a, T> {
             match self.yamux.outgoing {
                 Outgoing::Header {
                     ref mut header,
-                    ref substream_data_frame,
+                    ref mut substream_data_frame,
                 } => {
                     // Finish writing the header.
                     debug_assert!(!header.is_empty());
@@ -1217,10 +1214,10 @@ impl<'a, T> ExtractOut<'a, T> {
                         self.size_bytes -= header.len();
                         let out = mem::take(header);
                         self.yamux.outgoing =
-                            if let Some((id, remaining_bytes)) = substream_data_frame {
+                            if let Some((data, remaining_bytes)) = substream_data_frame.take() {
                                 Outgoing::SubstreamData {
-                                    id: *id,
-                                    remaining_bytes: *remaining_bytes,
+                                    data,
+                                    remaining_bytes,
                                 }
                             } else {
                                 Outgoing::Idle
@@ -1235,30 +1232,23 @@ impl<'a, T> ExtractOut<'a, T> {
                     }
                 }
 
-                Outgoing::SubstreamData { .. } | Outgoing::ObsoleteSubstreamData { .. } => {
-                    // We handle these two states together. The first step is to extract
-                    // corresponding fields.
-                    let (remain, write_buffers, first_write_buffer_offset) =
-                        match self.yamux.outgoing {
-                            Outgoing::SubstreamData {
-                                id: ref substream,
-                                ref mut remaining_bytes,
-                            } => {
-                                let substream =
-                                    self.yamux.substreams.get_mut(&substream.0).unwrap();
-                                (
-                                    remaining_bytes,
-                                    &mut substream.write_buffers,
-                                    &mut substream.first_write_buffer_offset,
-                                )
-                            }
-                            Outgoing::ObsoleteSubstreamData {
-                                ref mut remaining_bytes,
-                                ref mut write_buffers,
-                                ref mut first_write_buffer_offset,
-                            } => (remaining_bytes, write_buffers, first_write_buffer_offset),
-                            _ => unreachable!(),
-                        };
+                Outgoing::SubstreamData {
+                    remaining_bytes: ref mut remain,
+                    ref mut data,
+                } => {
+                    let (write_buffers, first_write_buffer_offset) = match data {
+                        SubstreamData::Healthy(id) => {
+                            let substream = self.yamux.substreams.get_mut(&id.0).unwrap();
+                            (
+                                &mut substream.write_buffers,
+                                &mut substream.first_write_buffer_offset,
+                            )
+                        }
+                        SubstreamData::Obsolete {
+                            ref mut write_buffers,
+                            ref mut first_write_buffer_offset,
+                        } => (write_buffers, first_write_buffer_offset),
+                    };
 
                     let first_buf_avail = write_buffers[0].len() - *first_write_buffer_offset;
                     let out = if first_buf_avail <= remain.get()
