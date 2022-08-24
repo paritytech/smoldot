@@ -440,12 +440,6 @@ impl<T> Yamux<T> {
                 }
 
                 Incoming::Header(ref mut incoming_header) => {
-                    // The code below might require queuing a message, and as such we can't proceed
-                    // with any reading if there is still data to write out.
-                    if !matches!(self.outgoing, Outgoing::Idle) {
-                        break;
-                    }
-
                     // Try to copy as much as possible from `data` to `incoming_header`.
                     while !data.is_empty() && incoming_header.len() < 12 {
                         incoming_header.push(data[0]);
@@ -468,8 +462,13 @@ impl<T> Yamux<T> {
                     // Handle any message other than data or window size.
                     match decoded_header {
                         header::DecodedYamuxHeader::PingRequest { .. } => {
-                            // Ping. Write a pong message in `self.outgoing`.
-                            debug_assert!(matches!(self.outgoing, Outgoing::Idle));
+                            // Ping. In order to queue the pong message, the outgoing queue must
+                            // be empty. If it is not the case, we simply leave the ping header
+                            // there and prevent any further data from being read.
+                            if !matches!(self.outgoing, Outgoing::Idle) {
+                                break;
+                            }
+
                             self.outgoing = Outgoing::Header {
                                 header: {
                                     let mut header = arrayvec::ArrayVec::new();
@@ -495,6 +494,7 @@ impl<T> Yamux<T> {
                                 },
                                 substream_data_frame: None,
                             };
+
                             self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                         }
                         header::DecodedYamuxHeader::PingResponse { .. } => {
@@ -566,7 +566,15 @@ impl<T> Yamux<T> {
                                 return Err(Error::UnexpectedSyn(stream_id));
                             }
 
-                            debug_assert!(matches!(self.outgoing, Outgoing::Idle));
+                            // As documented, when in the `Incoming::PendingIncomingSubstream`
+                            // state, the outgoing state must always be `Outgoing::Idle`, in
+                            // order to potentially queue the substream rejection message later.
+                            // If it is not the case, we simply leave the header there and prevent
+                            // any further data from being read.
+                            if !matches!(self.outgoing, Outgoing::Idle) {
+                                break;
+                            }
+
                             let is_data =
                                 matches!(decoded_header, header::DecodedYamuxHeader::Data { .. });
                             self.incoming = Incoming::PendingIncomingSubstream {
