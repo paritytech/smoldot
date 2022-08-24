@@ -189,7 +189,7 @@ enum Outgoing {
 
         /// If `Some`, then the header is data frame header and we must then transition the
         /// state to [`Outgoing::SubstreamData`].
-        substream_data_frame: Option<(SubstreamData, NonZeroUsize)>,
+        substream_data_frame: Option<(OutgoingSubstreamData, NonZeroUsize)>,
     },
 
     /// Writing out data from a substream.
@@ -197,15 +197,22 @@ enum Outgoing {
     /// We have sent a data header in the past, and we must now send the associated data.
     SubstreamData {
         /// Source of the data to write out.
-        data: SubstreamData,
+        data: OutgoingSubstreamData,
 
         /// Number of bytes remaining to write.
+        ///
+        /// Always superior or equal to the total length of the data in `write_buffers`.
         remaining_bytes: NonZeroUsize,
     },
 }
 
-enum SubstreamData {
+enum OutgoingSubstreamData {
+    /// Data is coming from the given substream.
+    ///
+    /// The substream must **not** be in a "reset" state.
     Healthy(SubstreamId),
+
+    /// Data is coming from a substream in a reset state.
     Obsolete {
         /// Buffer of buffers to be written out to the socket.
         write_buffers: Vec<Vec<u8>>,
@@ -355,7 +362,7 @@ impl<T> Yamux<T> {
     /// Finds a substream that has been closed or reset, and removes it from this state machine.
     pub fn next_dead_substream(&mut self) -> Option<(SubstreamId, DeadSubstreamTy, T)> {
         // TODO: O(n)
-        let id = self
+        let id_to_remove = self
             .substreams
             .iter()
             .filter(|(_, substream)| {
@@ -369,10 +376,22 @@ impl<T> Yamux<T> {
             .map(|(id, _)| *id)
             .next()?;
 
-        let substream = self.substreams.remove(&id).unwrap();
+        debug_assert!(match self.outgoing {
+            Outgoing::Header {
+                substream_data_frame: Some((OutgoingSubstreamData::Healthy(id), _)),
+                ..
+            }
+            | Outgoing::SubstreamData {
+                data: OutgoingSubstreamData::Healthy(id),
+                ..
+            } if id.0 == id_to_remove => false,
+            _ => true,
+        });
+
+        let substream = self.substreams.remove(&id_to_remove).unwrap();
 
         Some((
-            SubstreamId(id),
+            SubstreamId(id_to_remove),
             if substream.was_reset {
                 DeadSubstreamTy::Reset
             } else {
@@ -917,7 +936,10 @@ impl<T> Yamux<T> {
             substream_data_frame: if let Some(length) =
                 NonZeroUsize::new(usize::try_from(data_length).unwrap())
             {
-                Some((SubstreamData::Healthy(SubstreamId(substream_id)), length))
+                Some((
+                    OutgoingSubstreamData::Healthy(SubstreamId(substream_id)),
+                    length,
+                ))
             } else {
                 None
             },
@@ -1237,14 +1259,14 @@ impl<'a, T> ExtractOut<'a, T> {
                     ref mut data,
                 } => {
                     let (write_buffers, first_write_buffer_offset) = match data {
-                        SubstreamData::Healthy(id) => {
+                        OutgoingSubstreamData::Healthy(id) => {
                             let substream = self.yamux.substreams.get_mut(&id.0).unwrap();
                             (
                                 &mut substream.write_buffers,
                                 &mut substream.first_write_buffer_offset,
                             )
                         }
-                        SubstreamData::Obsolete {
+                        OutgoingSubstreamData::Obsolete {
                             ref mut write_buffers,
                             ref mut first_write_buffer_offset,
                         } => (write_buffers, first_write_buffer_offset),
