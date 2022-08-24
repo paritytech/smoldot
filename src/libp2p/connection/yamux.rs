@@ -446,6 +446,8 @@ impl<T> Yamux<T> {
     /// messages might be blocked if there is data to be sent out.
     /// - It is currently waiting for either [`Yamux::accept_pending_substream`] or
     /// [`Yamux::reject_pending_substream`] to be called.
+    /// - If the remote opens a substream whose ID is equal to a previous substream that is now
+    /// dead. Use [`Yamux::next_dead_substream`] to remove dead substreams before continuing.
     ///
     /// If the return value contains [`IncomingDataDetail::IncomingSubstream`], then either
     /// [`Yamux::accept_pending_substream`] or [`Yamux::reject_pending_substream`] must be called
@@ -713,8 +715,24 @@ impl<T> Yamux<T> {
                             length,
                             ..
                         } => {
-                            if self.substreams.contains_key(&stream_id) {
-                                return Err(Error::UnexpectedSyn(stream_id));
+                            match self.substreams.get(&stream_id) {
+                                Some(Substream {
+                                    state: SubstreamState::Healthy { .. },
+                                    ..
+                                }) => {
+                                    // TODO: also check whether substream is still open
+                                    return Err(Error::UnexpectedSyn(stream_id));
+                                }
+                                Some(Substream {
+                                    state: SubstreamState::Reset,
+                                    ..
+                                }) => {
+                                    // Because we don't immediately destroy substreams, the remote
+                                    // might decide to re-use a substream ID that is still
+                                    // allocated locally. If that happens, we block the reading.
+                                    break;
+                                }
+                                None => {}
                             }
 
                             // As documented, when in the `Incoming::PendingIncomingSubstream`
