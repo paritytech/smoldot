@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Decodes yamux headers.
+//! Decodes Yamux headers.
 //!
 //! See <https://github.com/hashicorp/yamux/blob/master/spec.md>
 

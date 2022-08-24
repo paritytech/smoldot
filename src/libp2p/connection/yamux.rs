@@ -1736,7 +1736,7 @@ pub enum IncomingDataDetail {
 /// Error while decoding the Yamux stream.
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
-    /// Failed to decode an incoming yamux header.
+    /// Failed to decode an incoming Yamux header.
     HeaderDecode(header::YamuxHeaderDecodeError),
     /// Received a SYN flag with a known substream ID.
     #[display(fmt = "Received a SYN flag with a known substream ID")]
