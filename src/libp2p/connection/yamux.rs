@@ -52,12 +52,14 @@
 
 use crate::util::SipHasherBuild;
 
-use alloc::vec::Vec;
+use alloc::{collections::VecDeque, vec::Vec};
 use core::{
     cmp, fmt, mem,
     num::{NonZeroU32, NonZeroUsize},
 };
 use hashbrown::hash_map::{Entry, OccupiedEntry};
+use rand::Rng as _;
+use rand_chacha::{rand_core::SeedableRng as _, ChaCha20Rng};
 
 pub use header::GoAwayErrorCode;
 
@@ -78,7 +80,7 @@ pub struct Config {
 
     /// Seed used for the randomness. Used to avoid HashDoS attack and determines the order in
     /// which the data on substreams is sent out.
-    pub randomness_seed: [u8; 16],
+    pub randomness_seed: [u8; 32],
 }
 
 pub struct Yamux<T> {
@@ -97,6 +99,16 @@ pub struct Yamux<T> {
     /// This implementation allocates identifiers linearly. Every time a substream is open, its
     /// value is incremented by two.
     next_outbound_substream: NonZeroU32,
+
+    /// Number of pings to send out that haven't been queued yet.
+    pings_to_send: u32,
+
+    /// List of pings that have been sent out but haven't been replied yet. For each ping,
+    /// contains the opaque value that has been sent out and that must be matched by the remote.
+    pings_waiting_reply: VecDeque<u32>,
+
+    /// Source of randomness used for various purposes.
+    randomness: ChaCha20Rng,
 }
 
 struct Substream<T> {
@@ -195,10 +207,12 @@ enum Outgoing {
 impl<T> Yamux<T> {
     /// Initializes a new Yamux state machine.
     pub fn new(config: Config) -> Yamux<T> {
+        let mut randomness = ChaCha20Rng::from_seed(config.randomness_seed);
+
         Yamux {
             substreams: hashbrown::HashMap::with_capacity_and_hasher(
                 config.capacity,
-                SipHasherBuild::new(config.randomness_seed),
+                SipHasherBuild::new(randomness.gen()),
             ),
             incoming: Incoming::Header(arrayvec::ArrayVec::new()),
             outgoing: Outgoing::Idle,
@@ -207,6 +221,10 @@ impl<T> Yamux<T> {
             } else {
                 NonZeroU32::new(2).unwrap()
             },
+            pings_to_send: 0,
+            // We leave the initial capacity at 0, as it is likely that no ping is sent at all.
+            pings_waiting_reply: VecDeque::new(),
+            randomness,
         }
     }
 
@@ -315,6 +333,11 @@ impl<T> Yamux<T> {
         } else {
             None
         }
+    }
+
+    /// Queues sending out a ping to the remote.
+    pub fn queue_ping(&mut self) {
+        self.pings_to_send += 1;
     }
 
     /// Finds a substream that has been closed or reset, and removes it from this state machine.
@@ -497,9 +520,23 @@ impl<T> Yamux<T> {
 
                             self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                         }
-                        header::DecodedYamuxHeader::PingResponse { .. } => {
-                            // TODO: ping handling
-                            todo!()
+                        header::DecodedYamuxHeader::PingResponse { opaque_value } => {
+                            let pos = match self
+                                .pings_waiting_reply
+                                .iter()
+                                .position(|v| *v == opaque_value)
+                            {
+                                Some(p) => p,
+                                None => return Err(Error::PingResponseNotMatching),
+                            };
+
+                            self.pings_waiting_reply.remove(pos);
+                            self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+                            return Ok(IncomingDataOutcome {
+                                yamux: self,
+                                bytes_read: total_read,
+                                detail: Some(IncomingDataDetail::PingResponse),
+                            });
                         }
                         header::DecodedYamuxHeader::GoAway { error_code } => {
                             // TODO: error if we have received one in the past before?
@@ -912,6 +949,31 @@ impl<T> Yamux<T> {
             substream_data_frame: None,
         };
     }
+
+    /// Writes a ping frame header in `self.outgoing`.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `self.outgoing` is not `Idle`.
+    ///
+    fn queue_ping_request_header(&mut self, opaque_value: u32) {
+        assert!(matches!(self.outgoing, Outgoing::Idle));
+
+        let mut header = arrayvec::ArrayVec::new();
+        header.push(0);
+        header.push(2);
+        header.try_extend_from_slice(&[0, 1]).unwrap();
+        header.try_extend_from_slice(&[0, 0, 0, 0]).unwrap();
+        header
+            .try_extend_from_slice(&opaque_value.to_be_bytes())
+            .unwrap();
+        debug_assert_eq!(header.len(), 12);
+
+        self.outgoing = Outgoing::Header {
+            header,
+            substream_data_frame: None,
+        };
+    }
 }
 
 impl<T> fmt::Debug for Yamux<T>
@@ -1202,6 +1264,15 @@ impl<'a, T> ExtractOut<'a, T> {
                 }
 
                 Outgoing::Idle => {
+                    // Send outgoing pings.
+                    if self.yamux.pings_to_send > 0 {
+                        self.yamux.pings_to_send -= 1;
+                        let opaque_value: u32 = self.yamux.randomness.gen();
+                        self.yamux.queue_ping_request_header(opaque_value);
+                        self.yamux.pings_waiting_reply.push_back(opaque_value);
+                        continue;
+                    }
+
                     // Send window update frames.
                     // TODO: O(n)
                     if let Some((id, sub)) = self
@@ -1325,6 +1396,9 @@ pub enum IncomingDataDetail {
     },
     /// Received a "go away" request.
     GoAway(GoAwayErrorCode),
+    /// Received a response to a ping that has been sent out earlier.
+    // TODO: associate some data with the ping? in case they're answered in a different order?
+    PingResponse,
 }
 
 /// Error while decoding the Yamux stream.
@@ -1343,6 +1417,9 @@ pub enum Error {
     WriteAfterFin,
     /// Remote has sent a data frame containing data at the same time as a `RST` flag.
     DataWithRst,
+    /// Remote has sent a ping response, but its opaque data didn't match any of the ping that
+    /// have been sent out in the past.
+    PingResponseNotMatching,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]

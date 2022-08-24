@@ -287,6 +287,11 @@ where
                 Some(yamux::IncomingDataDetail::GoAway(_)) => {
                     todo!() // TODO: handle properly
                 }
+
+                Some(yamux::IncomingDataDetail::PingResponse) => {
+                    // Can only happen if we send out pings, which we never do.
+                    unreachable!()
+                }
             };
         }
 
