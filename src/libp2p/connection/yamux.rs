@@ -817,6 +817,11 @@ impl<T> Yamux<T> {
     /// Panics if no incoming substream is currently pending.
     ///
     pub fn reject_pending_substream(&mut self) {
+        // Implementation note: the rejection mechanism could alternatively be implemented by
+        // queuing the substream rejection, rather than immediately putting it in `self.outgoing`.
+        // However, this could open a DoS attack vector, as the remote could send a huge number
+        // of substream open request which would inevitably increase the memory consumption of the
+        // local node.
         match self.incoming {
             Incoming::PendingIncomingSubstream {
                 substream_id,
