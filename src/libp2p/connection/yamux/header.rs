@@ -15,22 +15,35 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+//! Decodes yamux headers.
+//!
+//! See <https://github.com/hashicorp/yamux/blob/master/spec.md>
+
 use core::num::NonZeroU32;
 
+/// A Yamux header in its decoded form.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum DecodedYamuxHeader {
     Data {
+        /// Value of the SYN flag.
         syn: bool,
+        /// Value of the ACK flag.
         ack: bool,
+        /// Value of the FIN flag.
         fin: bool,
+        /// Value of the RST flag.
         rst: bool,
         stream_id: NonZeroU32,
         length: u32,
     },
     Window {
+        /// Value of the SYN flag.
         syn: bool,
+        /// Value of the ACK flag.
         ack: bool,
+        /// Value of the FIN flag.
         fin: bool,
+        /// Value of the RST flag.
         rst: bool,
         stream_id: NonZeroU32,
         length: u32,
@@ -53,30 +66,22 @@ pub enum GoAwayErrorCode {
     InternalError = 0x2,
 }
 
+/// Decodes a Yamux header.
 pub fn decode_yamux_header(bytes: &[u8]) -> Result<DecodedYamuxHeader, YamuxHeaderDecodeError> {
     match nom::combinator::all_consuming(nom::combinator::complete(decode))(bytes) {
         Ok((_, h)) => Ok(h),
-        Err(_) => todo!(), // TODO: /!\
+        Err(nom::Err::Incomplete(_)) => unreachable!(),
+        Err(nom::Err::Failure(err) | nom::Err::Error(err)) => Err(YamuxHeaderDecodeError {
+            offset: err.input.as_ptr() as usize - bytes.as_ptr() as usize,
+        }),
     }
 }
 
 /// Error while decoding a Yamux header.
 #[derive(Debug, derive_more::Display)]
-pub enum YamuxHeaderDecodeError {
-    /// Unknown version number in a header.
-    #[display(fmt = "Unknown version number in a header")]
-    UnknownVersion(u8),
-    /// Unrecognized value for the type of frame as indicated in the header.
-    #[display(fmt = "Unrecognized value for the type of frame as indicated in the header")]
-    BadFrameType(u8),
-    /// Received flags whose meaning is unknown.
-    #[display(fmt = "Received flags whose meaning is unknown")]
-    UnknownFlags(u16),
-    /// Received a PING frame with invalid flags.
-    #[display(fmt = "Received a PING frame with invalid flags")]
-    BadPingFlags(u16),
-    /// Substream ID was zero in a data of window update frame.
-    ZeroSubstreamId,
+#[display(fmt = "Error at offset {}", offset)]
+pub struct YamuxHeaderDecodeError {
+    offset: usize,
 }
 
 fn decode<'a>(bytes: &'a [u8]) -> nom::IResult<&'a [u8], DecodedYamuxHeader> {
