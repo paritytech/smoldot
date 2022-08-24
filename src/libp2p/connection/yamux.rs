@@ -218,6 +218,7 @@ enum Outgoing {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum OutgoingSubstreamData {
     /// Data is coming from the given substream.
     ///
@@ -329,7 +330,10 @@ impl<T> Yamux<T> {
         });
 
         match self.substreams.entry(substream_id.0) {
-            Entry::Occupied(e) => SubstreamMut { substream: e },
+            Entry::Occupied(e) => SubstreamMut {
+                substream: e,
+                outgoing: &mut self.outgoing,
+            },
             _ => unreachable!(),
         }
     }
@@ -361,7 +365,10 @@ impl<T> Yamux<T> {
     /// is open.
     pub fn substream_by_id_mut(&mut self, id: SubstreamId) -> Option<SubstreamMut<T>> {
         if let Entry::Occupied(e) = self.substreams.entry(id.0) {
-            Some(SubstreamMut { substream: e })
+            Some(SubstreamMut {
+                substream: e,
+                outgoing: &mut self.outgoing,
+            })
         } else {
             None
         }
@@ -650,9 +657,43 @@ impl<T> Yamux<T> {
                             // always keep traces of old substreams, we have no way to know whether
                             // this is the case or not.
                             if let Some(s) = self.substreams.get_mut(&stream_id) {
-                                // TODO: must transition other states
-                                s.state = SubstreamState::Reset;
+                                // We might be currently writing a frame of data of the substream
+                                // being reset. If that happens, we need to update some internal
+                                // state regarding this frame of data.
+                                match (
+                                    &mut self.outgoing,
+                                    mem::replace(&mut s.state, SubstreamState::Reset),
+                                ) {
+                                    (
+                                        Outgoing::Header {
+                                            substream_data_frame:
+                                                Some((data @ OutgoingSubstreamData::Healthy(_), _)),
+                                            ..
+                                        }
+                                        | Outgoing::SubstreamData {
+                                            data: data @ OutgoingSubstreamData::Healthy(_),
+                                            ..
+                                        },
+                                        SubstreamState::Healthy {
+                                            write_buffers,
+                                            first_write_buffer_offset,
+                                            ..
+                                        },
+                                    ) if *data
+                                        == OutgoingSubstreamData::Healthy(SubstreamId(
+                                            stream_id,
+                                        )) =>
+                                    {
+                                        *data = OutgoingSubstreamData::Obsolete {
+                                            write_buffers,
+                                            first_write_buffer_offset,
+                                        };
+                                    }
+                                    _ => {}
+                                }
                             }
+
+                            // TODO: should return an event
                         }
 
                         // Remote has sent a SYN flag. A new substream is to be opened.
@@ -884,6 +925,7 @@ impl<T> Yamux<T> {
                         Entry::Occupied(e) => e,
                         _ => unreachable!(),
                     },
+                    outgoing: &mut self.outgoing,
                 }
             }
             _ => panic!(),
@@ -1169,6 +1211,7 @@ where
 /// Reference to a substream within the [`Yamux`].
 pub struct SubstreamMut<'a, T> {
     substream: OccupiedEntry<'a, NonZeroU32, Substream<T>, SipHasherBuild>,
+    outgoing: &'a mut Outgoing,
 }
 
 impl<'a, T> SubstreamMut<'a, T> {
@@ -1316,19 +1359,38 @@ impl<'a, T> SubstreamMut<'a, T> {
     /// reset the substream in the past.
     ///
     pub fn reset(&mut self) {
-        let substream = self.substream.get_mut();
-        match &mut substream.state {
-            SubstreamState::Reset => {}
-            SubstreamState::Healthy {
-                write_buffers,
-                first_write_buffer_offset,
-                ..
-            } => {
-                // TODO: must transition other state
-                substream.state = SubstreamState::Reset;
-                // TODO: doesn't send the RST frame
+        let substream_id = SubstreamId(*self.substream.key());
+
+        // We might be currently writing a frame of data of the substream being reset.
+        // If that happens, we need to update some internal state regarding this frame of data.
+        match (
+            &mut self.outgoing,
+            mem::replace(&mut self.substream.get_mut().state, SubstreamState::Reset),
+        ) {
+            (
+                Outgoing::Header {
+                    substream_data_frame: Some((data @ OutgoingSubstreamData::Healthy(_), _)),
+                    ..
+                }
+                | Outgoing::SubstreamData {
+                    data: data @ OutgoingSubstreamData::Healthy(_),
+                    ..
+                },
+                SubstreamState::Healthy {
+                    write_buffers,
+                    first_write_buffer_offset,
+                    ..
+                },
+            ) if *data == OutgoingSubstreamData::Healthy(substream_id) => {
+                *data = OutgoingSubstreamData::Obsolete {
+                    write_buffers,
+                    first_write_buffer_offset,
+                };
             }
+            _ => {}
         }
+
+        // TODO: doesn't write the RST flag
     }
 }
 
