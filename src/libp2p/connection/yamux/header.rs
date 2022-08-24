@@ -173,3 +173,94 @@ fn flags<'a>(bytes: &'a [u8]) -> nom::IResult<&'a [u8], (bool, bool, bool, bool)
         Some((syn, ack, fin, rst))
     })(bytes)
 }
+
+#[cfg(test)]
+mod tests {
+    use core::num::NonZeroU32;
+
+    #[test]
+    fn basic_data() {
+        assert_eq!(
+            super::decode_yamux_header(&[0, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2, 65]).unwrap(),
+            super::DecodedYamuxHeader::Data {
+                syn: true,
+                ack: false,
+                fin: false,
+                rst: false,
+                stream_id: NonZeroU32::new(15).unwrap(),
+                length: 577
+            }
+        );
+    }
+
+    #[test]
+    fn basic_ping() {
+        assert_eq!(
+            super::decode_yamux_header(&[0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 1, 12]).unwrap(),
+            super::DecodedYamuxHeader::PingRequest { opaque_value: 268 }
+        );
+
+        assert_eq!(
+            super::decode_yamux_header(&[0, 2, 0, 2, 0, 0, 0, 0, 0, 0, 1, 12]).unwrap(),
+            super::DecodedYamuxHeader::PingResponse { opaque_value: 268 }
+        );
+
+        assert!(super::decode_yamux_header(&[0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
+
+        assert!(super::decode_yamux_header(&[0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]).is_ok());
+        assert!(super::decode_yamux_header(&[0, 2, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0]).is_err());
+
+        assert!(super::decode_yamux_header(&[0, 2, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]).is_ok());
+        assert!(super::decode_yamux_header(&[0, 2, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0]).is_err());
+
+        assert!(super::decode_yamux_header(&[0, 2, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0]).is_err());
+        assert!(super::decode_yamux_header(&[0, 2, 0, 5, 0, 0, 0, 1, 0, 0, 0, 0]).is_err());
+        assert!(super::decode_yamux_header(&[0, 2, 0, 9, 0, 0, 0, 1, 0, 0, 0, 0]).is_err());
+        assert!(super::decode_yamux_header(&[0, 2, 0, 17, 0, 0, 0, 1, 0, 0, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn basic_goaway() {
+        assert_eq!(
+            super::decode_yamux_header(&[0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            super::DecodedYamuxHeader::GoAway {
+                error_code: super::GoAwayErrorCode::NormalTermination,
+            }
+        );
+
+        assert_eq!(
+            super::decode_yamux_header(&[0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]).unwrap(),
+            super::DecodedYamuxHeader::GoAway {
+                error_code: super::GoAwayErrorCode::ProtocolError,
+            }
+        );
+
+        assert_eq!(
+            super::decode_yamux_header(&[0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]).unwrap(),
+            super::DecodedYamuxHeader::GoAway {
+                error_code: super::GoAwayErrorCode::InternalError,
+            }
+        );
+
+        assert!(super::decode_yamux_header(&[0, 3, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
+        assert!(super::decode_yamux_header(&[0, 3, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
+        assert!(super::decode_yamux_header(&[0, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
+        assert!(super::decode_yamux_header(&[0, 3, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]).is_err());
+        assert!(super::decode_yamux_header(&[0, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]).is_err());
+        assert!(super::decode_yamux_header(&[0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]).is_err());
+        assert!(super::decode_yamux_header(&[0, 3, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn version_check() {
+        assert!(super::decode_yamux_header(&[0, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2, 65]).is_ok());
+        assert!(super::decode_yamux_header(&[2, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2, 65]).is_err());
+    }
+
+    #[test]
+    fn length_check() {
+        assert!(super::decode_yamux_header(&[0, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2, 65]).is_ok());
+        assert!(super::decode_yamux_header(&[0, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2, 65, 0]).is_err());
+        assert!(super::decode_yamux_header(&[0, 0, 0, 1, 0, 0, 0, 15, 0, 0, 2]).is_err());
+    }
+}
