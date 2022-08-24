@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      packages: write  # TODO: problematic, as a malicious action could hijack the packages
     steps:
     - uses: docker/setup-qemu-action@v2
     - uses: docker/setup-buildx-action@v2
@@ -41,7 +41,7 @@ jobs:
       with:
         registry: docker.pkg.github.com
         username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}  # TODO: problematic in case the login-action gets hijacked
+        password: ${{ secrets.GITHUB_TOKEN }}
     - uses: docker/build-push-action@v3.1.1
       with:
         context: .
