@@ -23,9 +23,14 @@ on:
     branches:
       - main
 
+permissions: read-all
+
 jobs:
   build-push-docker-image:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
     - uses: docker/setup-qemu-action@v2
     - uses: docker/setup-buildx-action@v2
@@ -36,7 +41,7 @@ jobs:
       with:
         registry: docker.pkg.github.com
         username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        password: ${{ secrets.GITHUB_TOKEN }}  # TODO: problematic in case the login-action gets hijacked
     - uses: docker/build-push-action@v3.1.1
       with:
         context: .
@@ -71,12 +76,14 @@ jobs:
         # Warning: this GitHub action doesn't seem to run prepublish scripts, hence
         # the `npm publish --dry-run` done right above is important to ensure this.
         with:
-          token: ${{ secrets.NPM_TOKEN }}
+          token: ${{ secrets.NPM_TOKEN }}   # TODO: problematic to pass this, in case the npm-publish action gets hijacked
           package: ./bin/wasm-node/javascript/package.json
           access: public
 
   deno-publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # Necessary because Deno publication works by pushing tags.   # TODO: improve security here by doing everything manually
     # This action checks if a certain git tag exists. If not, it compiles the JavaScript package,
     # then commits the compilation artifacts, tags the commit, and pushes the tag.
     steps:

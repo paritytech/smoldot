@@ -23,6 +23,9 @@ on:
     branches:
       - main   # Running the CI on the main branch is important in order to fill the caches that pull requests will pick up.
 
+# Disables all permissions apart from reading. While no secret is used anywhere, disabling just in case doesn't hurt.
+permissions: read-all
+
 jobs:
   test-64bits:
     runs-on: ubuntu-latest

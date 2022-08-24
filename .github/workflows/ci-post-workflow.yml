@@ -6,6 +6,8 @@ on:
     types:
       - completed
 
+permissions: read-all
+
 jobs:
   # This job is run after a pull request workflow has completed, potentially from a fork
   # repository. It downloads the artifact output of the workflow, then comments in the pull
@@ -18,6 +20,12 @@ jobs:
   wasm-node-size-diff:
     runs-on: ubuntu-latest
     if: ${{ github.event.workflow_run.event == 'pull_request' }}
+    permissions:
+      - actions: read
+      # Giving write access to PRs means that a malicious action could be a nuisance, but in
+      # practice this is unlikely to happen, would have no major consequences, and would likely
+      # be quickly detected.
+      - pull-requests: write
     steps:
       # TODO: use download-artifact action
       - uses: actions/github-script@v3.1.0
