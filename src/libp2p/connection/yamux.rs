@@ -112,33 +112,42 @@ pub struct Yamux<T> {
 }
 
 struct Substream<T> {
-    /// True if a message on this substream has already been sent since it has been opened. The
-    /// first message on a substream must contain either a SYN or `ACK` flag.
-    first_message_queued: bool,
-    /// Amount of data the remote is allowed to transmit to the local node.
-    remote_allowed_window: u64,
-    /// If non-zero, a window update frame must be sent to the remote to grant this number of
-    /// bytes.
-    remote_window_pending_increase: u64,
-    /// Amount of data the local node is allowed to transmit to the remote.
-    allowed_window: u64,
-    /// True if the writing side of the local node is closed for this substream.
-    /// Note that the data queued in [`Substream::write_buffers`] must still be sent out,
-    /// alongside with a frame with a FIN flag.
-    local_write_closed: bool,
-    /// True if the writing side of the remote node is closed for this substream.
-    remote_write_closed: bool,
-    /// Buffer of buffers to be written out to the socket.
-    // TODO: is it a good idea to have an unbounded Vec?
-    // TODO: call shrink_to_fit from time to time?
-    write_buffers: Vec<Vec<u8>>,
-    /// Number of bytes in `self.write_buffers[0]` has have already been written out to the
-    /// socket.
-    first_write_buffer_offset: usize,
-    /// `true` if a reset of the substreams has been performed, either locally or by the remote.
-    was_reset: bool,
+    /// State of the substream.
+    state: SubstreamState,
     /// Data chosen by the user.
     user_data: T,
+}
+
+enum SubstreamState {
+    Healthy {
+        /// True if a message on this substream has already been sent since it has been opened. The
+        /// first message on a substream must contain either a SYN or `ACK` flag.
+        first_message_queued: bool,
+        /// Amount of data the remote is allowed to transmit to the local node.
+        remote_allowed_window: u64,
+        /// If non-zero, a window update frame must be sent to the remote to grant this number of
+        /// bytes.
+        remote_window_pending_increase: u64,
+        /// Amount of data the local node is allowed to transmit to the remote.
+        allowed_window: u64,
+        /// True if the writing side of the local node is closed for this substream.
+        /// Note that the data queued in [`Substream::write_buffers`] must still be sent out,
+        /// alongside with a frame with a FIN flag.
+        local_write_closed: bool,
+        /// True if the writing side of the remote node is closed for this substream.
+        remote_write_closed: bool,
+        /// Buffer of buffers to be written out to the socket.
+        // TODO: is it a good idea to have an unbounded Vec?
+        // TODO: call shrink_to_fit from time to time?
+        write_buffers: Vec<Vec<u8>>,
+        /// Number of bytes in `self.write_buffers[0]` has have already been written out to the
+        /// socket.
+        first_write_buffer_offset: usize,
+    },
+
+    /// The substream has been reset, either locally or by the remote. Its entire purpose is to
+    /// be removed by the API user.
+    Reset,
 }
 
 enum Incoming {
@@ -303,15 +312,16 @@ impl<T> Yamux<T> {
         let substream_id = SubstreamId(*entry.key());
 
         entry.insert(Substream {
-            first_message_queued: false,
-            remote_allowed_window: DEFAULT_FRAME_SIZE,
-            remote_window_pending_increase: 0,
-            allowed_window: DEFAULT_FRAME_SIZE,
-            local_write_closed: false,
-            remote_write_closed: false,
-            write_buffers: Vec::with_capacity(16),
-            first_write_buffer_offset: 0,
-            was_reset: false,
+            state: SubstreamState::Healthy {
+                first_message_queued: false,
+                remote_allowed_window: DEFAULT_FRAME_SIZE,
+                remote_window_pending_increase: 0,
+                allowed_window: DEFAULT_FRAME_SIZE,
+                local_write_closed: false,
+                remote_write_closed: false,
+                write_buffers: Vec::with_capacity(16),
+                first_write_buffer_offset: 0,
+            },
             user_data,
         });
 
@@ -366,12 +376,23 @@ impl<T> Yamux<T> {
             .substreams
             .iter()
             .filter(|(_, substream)| {
-                substream.local_write_closed
-                    && substream.remote_write_closed
-                    && (substream.write_buffers.is_empty() // TODO: cumbersome
-                        || (substream.write_buffers.len() == 1
-                            && substream.write_buffers[0].len()
-                                <= substream.first_write_buffer_offset))
+                match &substream.state {
+                    SubstreamState::Reset => true,
+                    SubstreamState::Healthy {
+                        local_write_closed,
+                        remote_write_closed,
+                        write_buffers,
+                        first_write_buffer_offset,
+                        ..
+                    } => {
+                        *local_write_closed
+                            && *remote_write_closed
+                            && (write_buffers.is_empty() // TODO: cumbersome
+                            || (write_buffers.len() == 1
+                                && write_buffers[0].len()
+                                    <= *first_write_buffer_offset))
+                    }
+                }
             })
             .map(|(id, _)| *id)
             .next()?;
@@ -392,7 +413,7 @@ impl<T> Yamux<T> {
 
         Some((
             SubstreamId(id_to_remove),
-            if substream.was_reset {
+            if let SubstreamState::Reset = substream.state {
                 DeadSubstreamTy::Reset
             } else {
                 DeadSubstreamTy::ClosedGracefully
@@ -435,18 +456,23 @@ impl<T> Yamux<T> {
                 } => {
                     self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
 
-                    let substream = match self.substreams.get_mut(&substream_id.0) {
-                        Some(s) => s,
-                        None => continue,
-                    };
+                    if let Some(Substream {
+                        state:
+                            SubstreamState::Healthy {
+                                remote_write_closed,
+                                ..
+                            },
+                        ..
+                    }) = self.substreams.get_mut(&substream_id.0)
+                    {
+                        *remote_write_closed = true;
 
-                    substream.remote_write_closed = true;
-
-                    return Ok(IncomingDataOutcome {
-                        yamux: self,
-                        bytes_read: total_read,
-                        detail: Some(IncomingDataDetail::StreamClosed { substream_id }),
-                    });
+                        return Ok(IncomingDataOutcome {
+                            yamux: self,
+                            bytes_read: total_read,
+                            detail: Some(IncomingDataDetail::StreamClosed { substream_id }),
+                        });
+                    }
                 }
 
                 Incoming::DataFrame {
@@ -466,14 +492,29 @@ impl<T> Yamux<T> {
                     total_read += pulled_data_usize;
                     data = &data[pulled_data_usize..];
 
-                    if let Some(substream) = self.substreams.get_mut(&substream_id.0) {
-                        debug_assert!(!substream.remote_write_closed);
+                    // Note that it is possible that we are receiving data corresponding to a
+                    // substream for which a RST has been sent out by the local node. Since the
+                    // local state machine doesn't keep track of RST'ted substreams, any
+                    // frame concerning a substream that has been RST or doesn't exist is
+                    // discarded and doesn't result in an error, under the presumption that we
+                    // are in this situation.
+                    if let Some(Substream {
+                        state:
+                            SubstreamState::Healthy {
+                                remote_write_closed,
+                                ..
+                            },
+                        ..
+                    }) = self.substreams.get_mut(&substream_id.0)
+                    {
+                        debug_assert!(!*remote_write_closed);
                         if *remaining_bytes == 0 {
                             if fin {
                                 // If `fin`, leave `incoming` as `DataFrame`, so that it gets
                                 // picked at the next iteration and a `StreamClosed` gets
                                 // returned.
-                                substream.remote_write_closed = true;
+                                // TODO: hack ^ fix
+                                *remote_write_closed = true;
                             } else {
                                 self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                             }
@@ -488,6 +529,7 @@ impl<T> Yamux<T> {
                             }),
                         });
                     }
+
                     if *remaining_bytes == 0 {
                         self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                     }
@@ -602,14 +644,11 @@ impl<T> Yamux<T> {
 
                             // The remote might have sent a RST frame concerning a substream for
                             // which we have sent a RST frame earlier. Considering that we don't
-                            // keep traces of old substreams, we have no way to know whether this
-                            // is the case or not.
+                            // always keep traces of old substreams, we have no way to know whether
+                            // this is the case or not.
                             if let Some(s) = self.substreams.get_mut(&stream_id) {
-                                s.local_write_closed = true;
-                                s.remote_write_closed = true;
-                                s.write_buffers.clear();
-                                s.first_write_buffer_offset = 0;
-                                s.was_reset = true;
+                                // TODO: must transition other states
+                                s.state = SubstreamState::Reset;
                             }
                         }
 
@@ -667,33 +706,36 @@ impl<T> Yamux<T> {
                             fin,
                             ..
                         } => {
-                            // Find the element in `self.substreams` corresponding to the substream
-                            // requested by the remote.
                             // Note that it is possible that the remote is referring to a substream
                             // for which a RST has been sent out by the local node. Since the
                             // local state machine doesn't keep track of RST'ted substreams, any
-                            // frame concerning a substream with an unknown id is discarded and
-                            // doesn't result in an error, under the presumption that we are
-                            // in this situation. When that is the case, the `substream` variable
-                            // below is `None`.
-                            let substream = self.substreams.get_mut(&stream_id);
-
-                            // Data frame.
-                            // Check whether the remote has the right to send that much data.
-                            // Note that the credits aren't checked in the case of an unknown
-                            // substream.
-                            if let Some(substream) = substream {
-                                if substream.remote_write_closed {
+                            // frame concerning a substream that has been RST or with an unknown
+                            // id is discarded and doesn't result in an error, under the
+                            // presumption that we are in this situation.
+                            if let Some(Substream {
+                                state:
+                                    SubstreamState::Healthy {
+                                        remote_write_closed,
+                                        remote_allowed_window,
+                                        remote_window_pending_increase,
+                                        ..
+                                    },
+                                ..
+                            }) = self.substreams.get_mut(&stream_id)
+                            {
+                                if *remote_write_closed {
                                     return Err(Error::WriteAfterFin);
                                 }
 
-                                substream.remote_allowed_window = substream
-                                    .remote_allowed_window
+                                // Check whether the remote has the right to send that much data.
+                                // Note that the credits aren't checked in the case of an unknown
+                                // substream.
+                                *remote_allowed_window = remote_allowed_window
                                     .checked_sub(u64::from(length))
                                     .ok_or(Error::CreditsExceeded)?;
 
                                 // TODO: make this behavior tweakable by the user!
-                                substream.remote_window_pending_increase += 256 * 1024;
+                                *remote_window_pending_increase += 256 * 1024;
                             }
 
                             self.incoming = Incoming::DataFrame {
@@ -714,29 +756,40 @@ impl<T> Yamux<T> {
                             // Note that it is possible that the remote is referring to a substream
                             // for which a RST has been sent out by the local node. Since the
                             // local state machine doesn't keep track of RST'ted substreams, any
-                            // frame concerning a substream with an unknown id is discarded and
-                            // doesn't result in an error, under the presumption that we are
-                            // in this situation.
-                            if let Some(substream) = self.substreams.get_mut(&stream_id) {
+                            // frame concerning a substream that has been RST or with an unknown
+                            // id is discarded and doesn't result in an error, under the
+                            // presumption that we are in this situation.
+                            if let Some(Substream {
+                                state:
+                                    SubstreamState::Healthy {
+                                        allowed_window,
+                                        remote_write_closed,
+                                        ..
+                                    },
+                                ..
+                            }) = self.substreams.get_mut(&stream_id)
+                            {
+                                *allowed_window = allowed_window
+                                    .checked_add(u64::from(length))
+                                    .ok_or(Error::LocalCreditsOverflow)?;
+
+                                self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+
                                 // Note that the specs are a unclear about whether the remote
                                 // can or should continue sending FIN flags on window size
                                 // frames after their side of the substream has already been
-                                //closed before.
+                                // closed before.
                                 if fin {
-                                    self.incoming = Incoming::DataFrame {
-                                        substream_id: SubstreamId(stream_id),
-                                        remaining_bytes: 0,
-                                        fin: true,
-                                    };
+                                    *remote_write_closed = true;
+                                    return Ok(IncomingDataOutcome {
+                                        yamux: self,
+                                        bytes_read: total_read,
+                                        detail: Some(IncomingDataDetail::StreamClosed {
+                                            substream_id: SubstreamId(stream_id),
+                                        }),
+                                    });
                                 }
-
-                                substream.allowed_window = substream
-                                    .allowed_window
-                                    .checked_add(u64::from(length))
-                                    .ok_or(Error::LocalCreditsOverflow)?;
                             }
-
-                            self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                         }
                     }
                 }
@@ -798,15 +851,16 @@ impl<T> Yamux<T> {
                 let _was_before = self.substreams.insert(
                     substream_id.0,
                     Substream {
-                        first_message_queued: false,
-                        remote_allowed_window: DEFAULT_FRAME_SIZE,
-                        remote_window_pending_increase: 0,
-                        allowed_window: DEFAULT_FRAME_SIZE + u64::from(extra_window),
-                        local_write_closed: false,
-                        remote_write_closed: data_frame_size == 0 && fin,
-                        write_buffers: Vec::new(),
-                        first_write_buffer_offset: 0,
-                        was_reset: false,
+                        state: SubstreamState::Healthy {
+                            first_message_queued: false,
+                            remote_allowed_window: DEFAULT_FRAME_SIZE,
+                            remote_window_pending_increase: 0,
+                            allowed_window: DEFAULT_FRAME_SIZE + u64::from(extra_window),
+                            local_write_closed: false,
+                            remote_write_closed: data_frame_size == 0 && fin,
+                            write_buffers: Vec::new(),
+                            first_write_buffer_offset: 0,
+                        },
                         user_data,
                     },
                 );
@@ -1061,21 +1115,41 @@ impl<'a, T> SubstreamRef<'a, T> {
     }
 
     /// Returns the number of bytes queued for writing on this substream.
+    ///
+    /// Returns 0 if the substream is in a reset state.
     pub fn queued_bytes(&self) -> usize {
-        self.substream
-            .write_buffers
-            .iter()
-            .fold(0, |n, buf| n + buf.len())
+        match &self.substream.state {
+            SubstreamState::Healthy {
+                write_buffers,
+                first_write_buffer_offset,
+                ..
+            } => write_buffers.iter().fold(0, |n, buf| n + buf.len()) - first_write_buffer_offset,
+            SubstreamState::Reset => 0,
+        }
     }
 
-    /// Returns `true` if the remote has closed their writing side of this substream.
-    pub fn is_remote_closed(&self) -> bool {
-        self.substream.remote_write_closed
+    /// Returns `false` if the remote has closed their writing side of this substream, or if
+    /// [`SubstreamMut::reset`] has been called on this substream, or if the substream has been
+    /// reset by the remote.
+    pub fn can_receive(&self) -> bool {
+        match self.substream.state {
+            SubstreamState::Healthy {
+                remote_write_closed,
+                ..
+            } => !remote_write_closed,
+            SubstreamState::Reset => false,
+        }
     }
 
-    /// Returns `true` if [`SubstreamMut::close`] has been called on this substream.
-    pub fn is_closed(&self) -> bool {
-        self.substream.local_write_closed
+    /// Returns `false` if [`SubstreamMut::close`] or [`SubstreamMut::reset`] has been called on
+    /// this substream, or if the remote has .
+    pub fn can_send(&self) -> bool {
+        match self.substream.state {
+            SubstreamState::Healthy {
+                local_write_closed, ..
+            } => !local_write_closed,
+            SubstreamState::Reset => false,
+        }
     }
 }
 
@@ -1120,13 +1194,24 @@ impl<'a, T> SubstreamMut<'a, T> {
     ///
     /// Panics if [`SubstreamMut::close`] has already been called on this substream.
     ///
+    // TODO: doc obsolete
     pub fn write(&mut self, data: Vec<u8>) {
         let substream = self.substream.get_mut();
-        assert!(!substream.local_write_closed);
-        debug_assert!(
-            !substream.write_buffers.is_empty() || substream.first_write_buffer_offset == 0
-        );
-        substream.write_buffers.push(data);
+        match &mut substream.state {
+            SubstreamState::Reset => {}
+            SubstreamState::Healthy {
+                local_write_closed,
+                write_buffers,
+                first_write_buffer_offset,
+                ..
+            } => {
+                debug_assert!(!write_buffers.is_empty() || *first_write_buffer_offset == 0);
+
+                if !*local_write_closed {
+                    write_buffers.push(data);
+                }
+            }
+        }
     }
 
     /// Allow the remote to send up to `bytes` bytes at once in the next packet.
@@ -1146,28 +1231,51 @@ impl<'a, T> SubstreamMut<'a, T> {
     /// to be.
     ///
     pub fn reserve_window(&mut self, bytes: u64) {
-        let substream = self.substream.get_mut();
-        substream.remote_window_pending_increase =
-            cmp::max(substream.remote_window_pending_increase, bytes);
+        if let SubstreamState::Healthy {
+            remote_window_pending_increase,
+            ..
+        } = &mut self.substream.get_mut().state
+        {
+            *remote_window_pending_increase = cmp::max(*remote_window_pending_increase, bytes);
+        }
     }
 
     /// Returns the number of bytes queued for writing on this substream.
+    ///
+    /// Returns 0 if the substream is in a reset state.
     pub fn queued_bytes(&self) -> usize {
-        let substream = self.substream.get();
-        substream
-            .write_buffers
-            .iter()
-            .fold(0, |n, buf| n + buf.len())
+        match &self.substream.get().state {
+            SubstreamState::Healthy {
+                write_buffers,
+                first_write_buffer_offset,
+                ..
+            } => write_buffers.iter().fold(0, |n, buf| n + buf.len()) - first_write_buffer_offset,
+            SubstreamState::Reset => 0,
+        }
     }
 
-    /// Returns `true` if the remote has closed their writing side of this substream.
-    pub fn is_remote_closed(&self) -> bool {
-        self.substream.get().remote_write_closed
+    /// Returns `false` if the remote has closed their writing side of this substream, or if
+    /// [`SubstreamMut::reset`] has been called on this substream, or if the substream has been
+    /// reset by the remote.
+    pub fn can_receive(&self) -> bool {
+        match self.substream.get().state {
+            SubstreamState::Healthy {
+                remote_write_closed,
+                ..
+            } => !remote_write_closed,
+            SubstreamState::Reset => false,
+        }
     }
 
-    /// Returns `true` if [`SubstreamMut::close`] has been called on this substream.
-    pub fn is_closed(&self) -> bool {
-        self.substream.get().local_write_closed
+    /// Returns `false` if [`SubstreamMut::close`] or [`SubstreamMut::reset`] has been called on
+    /// this substream, or if the remote has .
+    pub fn can_send(&self) -> bool {
+        match self.substream.get().state {
+            SubstreamState::Healthy {
+                local_write_closed, ..
+            } => !local_write_closed,
+            SubstreamState::Reset => false,
+        }
     }
 
     /// Marks the substream as closed. It is no longer possible to write data on it.
@@ -1178,12 +1286,21 @@ impl<'a, T> SubstreamMut<'a, T> {
     /// [`SubstreamMut::close`] has already been called on this substream or if the remote has
     /// reset the substream in the past.
     ///
+    // TODO: doc obsolete
     pub fn close(&mut self) {
-        let substream = self.substream.get_mut();
-        assert!(!substream.local_write_closed);
-        substream.local_write_closed = true;
-        substream.remote_write_closed = true;
         // TODO: what is write_buffers is empty? need to send the close frame
+        let substream = self.substream.get_mut();
+        match &mut substream.state {
+            SubstreamState::Reset => {}
+            SubstreamState::Healthy {
+                local_write_closed,
+                remote_write_closed,
+                ..
+            } => {
+                *local_write_closed = true;
+                *remote_write_closed = true;
+            }
+        }
     }
 
     /// Abruptly shuts down the substream. Sends a frame with the `RST` flag to the remote.
@@ -1197,13 +1314,19 @@ impl<'a, T> SubstreamMut<'a, T> {
     /// reset the substream in the past.
     ///
     pub fn reset(&mut self) {
-        // TODO: doesn't send the RST frame
         let substream = self.substream.get_mut();
-        substream.local_write_closed = true;
-        substream.remote_write_closed = true;
-        substream.write_buffers.clear();
-        substream.first_write_buffer_offset = 0;
-        substream.was_reset = true;
+        match &mut substream.state {
+            SubstreamState::Reset => {}
+            SubstreamState::Healthy {
+                write_buffers,
+                first_write_buffer_offset,
+                ..
+            } => {
+                // TODO: must transition other state
+                substream.state = SubstreamState::Reset;
+                // TODO: doesn't send the RST frame
+            }
+        }
     }
 }
 
@@ -1261,10 +1384,16 @@ impl<'a, T> ExtractOut<'a, T> {
                     let (write_buffers, first_write_buffer_offset) = match data {
                         OutgoingSubstreamData::Healthy(id) => {
                             let substream = self.yamux.substreams.get_mut(&id.0).unwrap();
-                            (
-                                &mut substream.write_buffers,
-                                &mut substream.first_write_buffer_offset,
-                            )
+                            if let SubstreamState::Healthy {
+                                ref mut write_buffers,
+                                ref mut first_write_buffer_offset,
+                                ..
+                            } = &mut substream.state
+                            {
+                                (write_buffers, first_write_buffer_offset)
+                            } else {
+                                unreachable!()
+                            }
                         }
                         OutgoingSubstreamData::Obsolete {
                             ref mut write_buffers,
@@ -1325,19 +1454,35 @@ impl<'a, T> ExtractOut<'a, T> {
                         .yamux
                         .substreams
                         .iter_mut()
-                        .find(|(_, s)| s.remote_window_pending_increase != 0)
+                        .find(|(_, s)| match &s.state {
+                            SubstreamState::Healthy {
+                                remote_window_pending_increase,
+                                ..
+                            } if *remote_window_pending_increase != 0 => true,
+                            _ => false,
+                        })
                         .map(|(id, sub)| (*id, sub))
                     {
-                        let syn_ack_flag = !sub.first_message_queued;
-                        sub.first_message_queued = true;
+                        if let SubstreamState::Healthy {
+                            first_message_queued,
+                            remote_window_pending_increase,
+                            remote_allowed_window,
+                            ..
+                        } = &mut sub.state
+                        {
+                            let syn_ack_flag = !*first_message_queued;
+                            *first_message_queued = true;
 
-                        let update = u32::try_from(sub.remote_window_pending_increase)
-                            .unwrap_or(u32::max_value());
-                        sub.remote_window_pending_increase -= u64::from(update);
-                        sub.remote_allowed_window += u64::from(update);
-                        self.yamux
-                            .queue_window_size_frame_header(syn_ack_flag, id, update);
-                        continue;
+                            let update = u32::try_from(*remote_window_pending_increase)
+                                .unwrap_or(u32::max_value());
+                            *remote_window_pending_increase -= u64::from(update);
+                            *remote_allowed_window += u64::from(update);
+                            self.yamux
+                                .queue_window_size_frame_header(syn_ack_flag, id, update);
+                            continue;
+                        } else {
+                            unreachable!()
+                        }
                     }
 
                     // Start writing more data from another substream.
@@ -1347,21 +1492,39 @@ impl<'a, T> ExtractOut<'a, T> {
                         .yamux
                         .substreams
                         .iter_mut()
-                        .find(|(_, s)| !s.write_buffers.is_empty())
+                        .find(|(_, s)| match &s.state {
+                            SubstreamState::Healthy { write_buffers, .. } => {
+                                !write_buffers.is_empty()
+                            }
+                            _ => false,
+                        })
                         .map(|(id, sub)| (*id, sub))
                     {
-                        let pending_len = sub.write_buffers.iter().fold(0, |l, b| l + b.len());
-                        let len_out = cmp::min(
-                            u32::try_from(pending_len).unwrap_or(u32::max_value()),
-                            u32::try_from(sub.allowed_window).unwrap_or(u32::max_value()),
-                        );
-                        let len_out_usize = usize::try_from(len_out).unwrap();
-                        sub.allowed_window -= u64::from(len_out);
-                        let syn_ack_flag = !sub.first_message_queued;
-                        sub.first_message_queued = true;
-                        let fin_flag = sub.local_write_closed && len_out_usize == pending_len;
-                        self.yamux
-                            .queue_data_frame_header(syn_ack_flag, fin_flag, id, len_out);
+                        if let SubstreamState::Healthy {
+                            first_message_queued,
+                            allowed_window,
+                            local_write_closed,
+                            remote_window_pending_increase,
+                            remote_allowed_window,
+                            write_buffers,
+                            ..
+                        } = &mut sub.state
+                        {
+                            let pending_len = write_buffers.iter().fold(0, |l, b| l + b.len());
+                            let len_out = cmp::min(
+                                u32::try_from(pending_len).unwrap_or(u32::max_value()),
+                                u32::try_from(*allowed_window).unwrap_or(u32::max_value()),
+                            );
+                            let len_out_usize = usize::try_from(len_out).unwrap();
+                            *allowed_window -= u64::from(len_out);
+                            let syn_ack_flag = !*first_message_queued;
+                            *first_message_queued = true;
+                            let fin_flag = *local_write_closed && len_out_usize == pending_len;
+                            self.yamux
+                                .queue_data_frame_header(syn_ack_flag, fin_flag, id, len_out);
+                        } else {
+                            unreachable!()
+                        }
                     } else {
                         break;
                     }
@@ -1434,10 +1597,8 @@ pub enum IncomingDataDetail {
         substream_id: SubstreamId,
     },
     /// Remote has asked to reset a substream.
-    ///
-    /// The substream is now considered destroyed.
     StreamReset {
-        /// Substream that has been destroyed. No longer valid.
+        /// Substream that has been reset.
         substream_id: SubstreamId,
     },
     /// Received a "go away" request.

@@ -422,8 +422,8 @@ where
                 None => break (total_read, None),
             };
 
-            let read_is_closed = substream.is_remote_closed();
-            let write_is_closed = substream.is_closed();
+            let read_is_closed = !substream.can_receive();
+            let write_is_closed = !substream.can_send();
 
             let mut substream_read_write = ReadWrite {
                 now: outer_read_write.now.clone(),
