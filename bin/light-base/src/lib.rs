@@ -33,7 +33,7 @@
 //!
 //! - An implementation of the [`platform::Platform`] trait. This is how the client will
 //! communicate with the outside, such as getting the current time.
-//! - An opaque user data. If you do not use this, you can simply pass `()`.
+//! - An opaque user data. If you do not use this, you can simply use `()`.
 //!
 //! ## Adding a chain
 //!
@@ -43,7 +43,7 @@
 //!
 //! [`Client::add_chain`] returns a [`ChainId`], which identifies the chain within the [`Client`].
 //! A [`Client`] can be thought of as a collection of chain connections, each identified by their
-//! [`ChainId`]. If [`Client`] was a `Vec`, then [`ChainId`] would be a `usize`.
+//! [`ChainId`], akin to a `HashMap<ChainId, ...>`.
 //!
 //! A chain can be removed at any time using [`Client::remove_chain`]. This will cause the client
 //! to stop all connections and clean up its internal services. The [`ChainId`] is instantly
