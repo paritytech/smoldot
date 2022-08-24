@@ -202,6 +202,21 @@ enum Outgoing {
         /// Number of bytes remaining to write.
         remaining_bytes: NonZeroUsize,
     },
+
+    /// Writing out data from a substream that has been reset.
+    ///
+    /// We have sent a data header in the past, and we must now send the associated data.
+    ObsoleteSubstreamData {
+        /// Number of bytes remaining to write.
+        remaining_bytes: NonZeroUsize,
+
+        /// Buffer of buffers to be written out to the socket.
+        write_buffers: Vec<Vec<u8>>,
+
+        /// Number of bytes in `self.write_buffers[0]` has have already been written out to the
+        /// socket.
+        first_write_buffer_offset: usize,
+    },
 }
 
 impl<T> Yamux<T> {
@@ -1220,50 +1235,64 @@ impl<'a, T> ExtractOut<'a, T> {
                     }
                 }
 
-                Outgoing::SubstreamData {
-                    id: ref substream,
-                    remaining_bytes: ref mut remain,
-                } => {
-                    let mut substream = self.yamux.substreams.get_mut(&substream.0).unwrap();
-
-                    let first_buf_avail =
-                        substream.write_buffers[0].len() - substream.first_write_buffer_offset;
-                    let out =
-                        if first_buf_avail <= remain.get() && first_buf_avail <= self.size_bytes {
-                            let out = VecWithOffset(
-                                substream.write_buffers.remove(0),
-                                substream.first_write_buffer_offset,
-                            );
-                            self.size_bytes -= first_buf_avail;
-                            substream.first_write_buffer_offset = 0;
-                            match NonZeroUsize::new(remain.get() - first_buf_avail) {
-                                Some(r) => *remain = r,
-                                None => self.yamux.outgoing = Outgoing::Idle,
-                            };
-                            either::Right(out)
-                        } else if remain.get() <= self.size_bytes {
-                            self.size_bytes -= remain.get();
-                            let out = VecWithOffset(
-                                substream.write_buffers[0][substream.first_write_buffer_offset..]
-                                    [..remain.get()]
-                                    .to_vec(),
-                                0,
-                            );
-                            substream.first_write_buffer_offset += remain.get();
-                            self.yamux.outgoing = Outgoing::Idle;
-                            either::Right(out)
-                        } else {
-                            let out = VecWithOffset(
-                                substream.write_buffers[0][substream.first_write_buffer_offset..]
-                                    [..self.size_bytes]
-                                    .to_vec(),
-                                0,
-                            );
-                            substream.first_write_buffer_offset += self.size_bytes;
-                            *remain = NonZeroUsize::new(remain.get() - self.size_bytes).unwrap();
-                            self.size_bytes = 0;
-                            either::Right(out)
+                Outgoing::SubstreamData { .. } | Outgoing::ObsoleteSubstreamData { .. } => {
+                    // We handle these two states together. The first step is to extract
+                    // corresponding fields.
+                    let (remain, write_buffers, first_write_buffer_offset) =
+                        match self.yamux.outgoing {
+                            Outgoing::SubstreamData {
+                                id: ref substream,
+                                ref mut remaining_bytes,
+                            } => {
+                                let substream =
+                                    self.yamux.substreams.get_mut(&substream.0).unwrap();
+                                (
+                                    remaining_bytes,
+                                    &mut substream.write_buffers,
+                                    &mut substream.first_write_buffer_offset,
+                                )
+                            }
+                            Outgoing::ObsoleteSubstreamData {
+                                ref mut remaining_bytes,
+                                ref mut write_buffers,
+                                ref mut first_write_buffer_offset,
+                            } => (remaining_bytes, write_buffers, first_write_buffer_offset),
+                            _ => unreachable!(),
                         };
+
+                    let first_buf_avail = write_buffers[0].len() - *first_write_buffer_offset;
+                    let out = if first_buf_avail <= remain.get()
+                        && first_buf_avail <= self.size_bytes
+                    {
+                        let out =
+                            VecWithOffset(write_buffers.remove(0), *first_write_buffer_offset);
+                        self.size_bytes -= first_buf_avail;
+                        *first_write_buffer_offset = 0;
+                        match NonZeroUsize::new(remain.get() - first_buf_avail) {
+                            Some(r) => *remain = r,
+                            None => self.yamux.outgoing = Outgoing::Idle,
+                        };
+                        either::Right(out)
+                    } else if remain.get() <= self.size_bytes {
+                        self.size_bytes -= remain.get();
+                        let out = VecWithOffset(
+                            write_buffers[0][*first_write_buffer_offset..][..remain.get()].to_vec(),
+                            0,
+                        );
+                        *first_write_buffer_offset += remain.get();
+                        self.yamux.outgoing = Outgoing::Idle;
+                        either::Right(out)
+                    } else {
+                        let out = VecWithOffset(
+                            write_buffers[0][*first_write_buffer_offset..][..self.size_bytes]
+                                .to_vec(),
+                            0,
+                        );
+                        *first_write_buffer_offset += self.size_bytes;
+                        *remain = NonZeroUsize::new(remain.get() - self.size_bytes).unwrap();
+                        self.size_bytes = 0;
+                        either::Right(out)
+                    };
 
                     return Some(out);
                 }
