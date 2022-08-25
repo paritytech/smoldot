@@ -572,15 +572,18 @@ impl<'a> serde::Deserialize<'a> for AccountId {
             Err(_) => return Err(serde::de::Error::custom("AccountId isn't in base58 format")),
         };
 
-        // TODO: soon might be 36 bytes as well
-        if decoded.len() != 35 {
+        // TODO: retrieve the actual prefix length of the current chain
+        if decoded.len() < 35 {
             return Err(serde::de::Error::custom("unexpected length for AccountId"));
         }
 
         // TODO: finish implementing this properly ; must notably check checksum
         // see https://github.com/paritytech/substrate/blob/74a50abd6cbaad1253daf3585d5cdaa4592e9184/primitives/core/src/crypto.rs#L228
 
-        let account_id = <[u8; 32]>::try_from(&decoded[1..33]).unwrap();
+        // TODO: retrieve and use the actual prefix length of the current chain
+        let account_id =
+            <[u8; 32]>::try_from(&decoded[(decoded.len() - 34)..(decoded.len() - 2)]).unwrap();
+
         Ok(AccountId(account_id))
     }
 }
