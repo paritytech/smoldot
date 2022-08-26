@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fix inability to decode addresses with prefixes longer than 1 byte in the RPC. ([#2686](https://github.com/paritytech/smoldot/pull/2686))
+- Fix inability to decode addresses with prefixes longer than 1 byte when calling `system_accountNextIndex`. ([#2686](https://github.com/paritytech/smoldot/pull/2686))
 
 ## 0.6.30 - 2022-08-12
 
