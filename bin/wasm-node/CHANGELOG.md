@@ -6,6 +6,10 @@
 
 - In case of protocol error, or if a peer refuses a block announces substream, no new substream with the same peer will be attempted for 20 seconds. This avoids loops where the same peer is tried over and over again.
 
+### Fixed
+
+- Fix inability to decode addresses with prefixes longer than 1 byte when calling `system_accountNextIndex`. ([#2686](https://github.com/paritytech/smoldot/pull/2686))
+
 ## 0.6.30 - 2022-08-12
 
 ### Fixed
