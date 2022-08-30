@@ -2,9 +2,11 @@
 
 ## Unreleased
 
+## 0.6.31 - 2022-08-30
+
 ### Changed
 
-- In case of protocol error, or if a peer refuses a block announces substream, no new substream with the same peer will be attempted for 20 seconds. This avoids loops where the same peer is tried over and over again.
+- In case of protocol error, or if a peer refuses a block announces substream, no new substream with the same peer will be attempted for 20 seconds. This avoids loops where the same peer is tried over and over again. ([#2633](https://github.com/paritytech/smoldot/pull/2633))
 
 ### Fixed
 
