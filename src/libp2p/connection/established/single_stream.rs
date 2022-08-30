@@ -312,7 +312,11 @@ where
                 }
 
                 Some(yamux::IncomingDataDetail::GoAway(_)) => {
-                    todo!() // TODO: handle properly
+                    // TODO: somehow report the content of the GoAway on the external API?
+                    self.encryption
+                        .consume_inbound_data(yamux_decode.bytes_read);
+                    // TODO: also forbid new substreams from being opened
+                    return Ok((self, Some(Event::NewOutboundSubstreamsForbidden)));
                 }
 
                 Some(yamux::IncomingDataDetail::PingResponse) => {

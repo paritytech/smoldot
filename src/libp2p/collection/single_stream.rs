@@ -488,6 +488,20 @@ where
                     }
 
                     match event {
+                        Some(established::Event::NewOutboundSubstreamsForbidden) => {
+                            // TODO: handle properly
+                            self.pending_messages.push_back(
+                                ConnectionToCoordinatorInner::StartShutdown(Some(
+                                    ShutdownCause::CleanShutdown,
+                                )),
+                            );
+                            self.pending_messages
+                                .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
+                            self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
+                                initiator: ShutdownInitiator::Remote,
+                            };
+                            return;
+                        }
                         Some(established::Event::InboundError(err)) => {
                             self.pending_messages
                                 .push_back(ConnectionToCoordinatorInner::InboundError(err));
