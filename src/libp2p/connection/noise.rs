@@ -70,7 +70,7 @@ use crate::{
 };
 
 use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
-use core::{cmp, fmt, iter};
+use core::{cmp, fmt};
 
 /// Name of the protocol, typically used when negotiated it using *multistream-select*.
 pub const PROTOCOL_NAME: &str = "/noise";
@@ -151,7 +151,7 @@ impl UnsignedNoiseKey {
 
     /// Returns the data that has to be signed.
     pub fn payload_to_sign(&'_ self) -> impl Iterator<Item = impl AsRef<[u8]> + '_> + '_ {
-        iter::once(&b"noise-libp2p-static-key:"[..]).chain(iter::once(&self.key.public[..]))
+        [&b"noise-libp2p-static-key:"[..], &self.key.public[..]].into_iter()
     }
 
     /// Returns the data that has to be signed.

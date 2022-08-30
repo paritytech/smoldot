@@ -93,6 +93,19 @@ impl Addresses {
         }
     }
 
+    /// If the given address is in the list, sets its state to "pending".
+    ///
+    /// # Panic
+    ///
+    /// Panics if the state of this address was already pending.
+    ///
+    pub(super) fn set_pending(&mut self, addr: &multiaddr::Multiaddr) {
+        if let Some(index) = self.list.iter().position(|(a, _)| a == addr) {
+            assert!(!matches!(self.list[index].1, State::PendingConnect));
+            self.list[index].1 = State::PendingConnect;
+        }
+    }
+
     /// If the given address is in the list, sets its state to "disconnected".
     ///
     /// # Panic

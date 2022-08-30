@@ -93,21 +93,30 @@ enum SingleStreamConnectionTaskInner<TNow> {
     /// Connection has finished its shutdown. A [`ConnectionToCoordinatorInner::ShutdownFinished`]
     /// message has been sent and is waiting to be acknowledged.
     ShutdownWaitingAck {
-        /// If true, [`SingleStreamConnectionTask::reset`] has been called. This doesn't modify
-        /// any of the behavior but is used to make sure that the API is used correctly.
-        was_api_reset: bool,
+        /// What has initiated the shutdown.
+        initiator: ShutdownInitiator,
     },
 
     /// Connection has finished its shutdown and its shutdown has been acknowledged. There is
     /// nothing more to do except stop the connection task.
     ShutdownAcked {
-        /// If true, [`SingleStreamConnectionTask::reset`] has been called. This doesn't modify
-        /// any of the behavior but is used to make sure that the API is used correctly.
-        was_api_reset: bool,
+        /// What has initiated the shutdown.
+        initiator: ShutdownInitiator,
     },
 
     /// Temporary state used to satisfy the borrow checker during state transitions.
     Poisoned,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum ShutdownInitiator {
+    /// The coordinator sent a [`CoordinatorToConnectionInner::StartShutdown`] message.
+    Coordinator,
+    /// [`SingleStreamConnectionTask::reset`] has been called.
+    Api,
+    /// The shutdown has been initiated due to a protocol error or because the connection has been
+    /// shut down cleanly by the remote.
+    Remote,
 }
 
 impl<TNow> SingleStreamConnectionTask<TNow>
@@ -332,7 +341,7 @@ where
                 self.pending_messages
                     .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
                 self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
-                    was_api_reset: false,
+                    initiator: ShutdownInitiator::Coordinator,
                 };
             }
             (
@@ -359,7 +368,7 @@ where
             | (
                 CoordinatorToConnectionInner::StartShutdown,
                 SingleStreamConnectionTaskInner::ShutdownWaitingAck {
-                    was_api_reset: true,
+                    initiator: ShutdownInitiator::Api | ShutdownInitiator::Remote,
                 },
             ) => {
                 // There might still be some messages coming from the coordinator after the
@@ -369,17 +378,18 @@ where
             }
             (
                 CoordinatorToConnectionInner::ShutdownFinishedAck,
-                SingleStreamConnectionTaskInner::ShutdownWaitingAck {
-                    was_api_reset: was_reset,
-                },
+                SingleStreamConnectionTaskInner::ShutdownWaitingAck { initiator },
             ) => {
                 self.connection = SingleStreamConnectionTaskInner::ShutdownAcked {
-                    was_api_reset: *was_reset,
+                    initiator: *initiator,
                 };
             }
             (
                 CoordinatorToConnectionInner::StartShutdown,
-                SingleStreamConnectionTaskInner::ShutdownWaitingAck { .. }
+                SingleStreamConnectionTaskInner::ShutdownWaitingAck {
+                    initiator: ShutdownInitiator::Coordinator,
+                    ..
+                }
                 | SingleStreamConnectionTaskInner::ShutdownAcked { .. },
             ) => unreachable!(),
             (CoordinatorToConnectionInner::ShutdownFinishedAck, _) => unreachable!(),
@@ -404,26 +414,33 @@ where
     /// Panics if [`SingleStreamConnectionTask::reset`] has been called in the past.
     ///
     pub fn reset(&mut self) {
-        // It is illegal to call `reset` a second time. Verify that the user didn't do this.
-        if let SingleStreamConnectionTaskInner::ShutdownWaitingAck {
-            was_api_reset: true,
+        match self.connection {
+            SingleStreamConnectionTaskInner::ShutdownWaitingAck {
+                initiator: ShutdownInitiator::Api,
+            }
+            | SingleStreamConnectionTaskInner::ShutdownAcked {
+                initiator: ShutdownInitiator::Api,
+            } => {
+                // It is illegal to call `reset` a second time.
+                panic!()
+            }
+            SingleStreamConnectionTaskInner::ShutdownWaitingAck { ref mut initiator }
+            | SingleStreamConnectionTaskInner::ShutdownAcked { ref mut initiator } => {
+                // Mark the initiator as being the API in order to track proper API usage.
+                *initiator = ShutdownInitiator::Api;
+            }
+            _ => {
+                self.pending_messages
+                    .push_back(ConnectionToCoordinatorInner::StartShutdown(Some(
+                        ShutdownCause::RemoteReset,
+                    )));
+                self.pending_messages
+                    .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
+                self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
+                    initiator: ShutdownInitiator::Api,
+                };
+            }
         }
-        | SingleStreamConnectionTaskInner::ShutdownAcked {
-            was_api_reset: true,
-        } = self.connection
-        {
-            panic!()
-        }
-
-        self.pending_messages
-            .push_back(ConnectionToCoordinatorInner::StartShutdown(Some(
-                ShutdownCause::RemoteReset,
-            )));
-        self.pending_messages
-            .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
-        self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
-            was_api_reset: true,
-        };
     }
 
     /// Reads data coming from the connection, updates the internal state machine, and writes data
@@ -465,7 +482,7 @@ where
                         self.pending_messages
                             .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
                         self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
-                            was_api_reset: false,
+                            initiator: ShutdownInitiator::Remote,
                         };
                         return;
                     }
@@ -586,7 +603,7 @@ where
                     self.pending_messages
                         .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
                     self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
-                        was_api_reset: false,
+                        initiator: ShutdownInitiator::Remote,
                     };
                 }
             },
@@ -619,7 +636,7 @@ where
                     self.pending_messages
                         .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
                     self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
-                        was_api_reset: false,
+                        initiator: ShutdownInitiator::Remote,
                     };
                     return;
                 }
@@ -643,7 +660,7 @@ where
                             self.pending_messages
                                 .push_back(ConnectionToCoordinatorInner::ShutdownFinished);
                             self.connection = SingleStreamConnectionTaskInner::ShutdownWaitingAck {
-                                was_api_reset: false,
+                                initiator: ShutdownInitiator::Remote,
                             };
                             return;
                         }
@@ -714,10 +731,10 @@ where
             }
 
             c @ (SingleStreamConnectionTaskInner::ShutdownWaitingAck {
-                was_api_reset: false,
+                initiator: ShutdownInitiator::Coordinator | ShutdownInitiator::Remote,
             }
             | SingleStreamConnectionTaskInner::ShutdownAcked {
-                was_api_reset: false,
+                initiator: ShutdownInitiator::Coordinator | ShutdownInitiator::Remote,
             }) => {
                 // The user might legitimately call this function after the connection has
                 // already shut down. In that case, just do nothing.
@@ -729,10 +746,10 @@ where
             }
 
             SingleStreamConnectionTaskInner::ShutdownWaitingAck {
-                was_api_reset: true,
+                initiator: ShutdownInitiator::Api,
             }
             | SingleStreamConnectionTaskInner::ShutdownAcked {
-                was_api_reset: true,
+                initiator: ShutdownInitiator::Api,
             } => {
                 // As documented, it is illegal to call this function after calling `reset()`.
                 panic!()

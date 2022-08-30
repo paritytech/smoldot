@@ -55,6 +55,7 @@ use alloc::{
 };
 use core::{
     hash::Hash,
+    iter,
     num::NonZeroU32,
     ops::{self, Add, Sub},
     time::Duration,
@@ -64,7 +65,7 @@ use rand::{Rng as _, SeedableRng as _};
 pub use collection::{
     ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionToCoordinator,
     CoordinatorToConnection, InboundError, MultiStreamConnectionTask, NotificationProtocolConfig,
-    NotificationsInClosedErr, NotificationsOutErr, ReadWrite, RequestError,
+    NotificationsInClosedErr, NotificationsOutErr, ReadWrite, RequestError, ShutdownCause,
     SingleStreamConnectionTask, SubstreamId,
 };
 
@@ -152,13 +153,6 @@ pub struct Peers<TConn, TNow> {
     /// function.
     // TODO: explain why it can't grow unbounded
     pending_desired_out_notifs: VecDeque<(DesiredOutNotificationId, usize, usize)>,
-
-    /// List of so-called "fake outgoing requests" for which an event about their failure should
-    /// be reported as soon as possible.
-    fake_out_requests_to_report: VecDeque<u64>,
-
-    /// Identifier to assign to the next fake outgoing requests. Increased one by one.
-    next_fake_out_request_id: u64,
 }
 
 /// See [`Peers::peers_notifications_out`].
@@ -192,12 +186,8 @@ struct Connection<TConn> {
     /// - If the handshake is in progress and the connection is inbound, contains `None`.
     peer_index: Option<usize>,
 
-    /// List of so-called fake outgoing requests that [`Peers::start_request`] has created
-    /// regarding this connection. Always empty unless the connection is currently shutting down.
-    /// The API user thinks that the connection is currently executing this request, but in
-    /// reality it is not. When the connection finishes its shutdown, these fake requests are
-    /// pushed to [`Peers::fake_out_requests_to_report`] in order to be reported as having failed.
-    fake_out_requests: Vec<u64>,
+    /// `true` if the connection is outgoing.
+    outbound: bool,
 
     /// Opaque data decided by the API user.
     user_data: TConn,
@@ -237,8 +227,6 @@ where
             pending_desired_out_notifs: VecDeque::new(), // TODO: capacity?
             desired_in_notifications: slab::Slab::new(), // TODO: capacity?
             desired_out_notifications: slab::Slab::new(), // TODO: capacity?
-            fake_out_requests_to_report: VecDeque::with_capacity(8),
-            next_fake_out_request_id: 0,
         }
     }
 
@@ -301,16 +289,6 @@ where
     /// Returns the next event produced by the service.
     pub fn next_event(&mut self) -> Option<Event<TConn>> {
         loop {
-            if let Some(fake_out_request_to_report) = self.fake_out_requests_to_report.pop_front() {
-                if self.fake_out_requests_to_report.is_empty() {
-                    self.fake_out_requests_to_report.shrink_to(8)
-                };
-                return Some(Event::Response {
-                    request_id: OutRequestId(OutRequestIdInner::Fake(fake_out_request_to_report)),
-                    response: Err(RequestError::ConnectionShutdown),
-                });
-            }
-
             let event = match self.inner.next_event() {
                 Some(ev) => ev,
                 None => return None,
@@ -324,29 +302,33 @@ where
                     let actual_peer_index = self.peer_index_or_insert(&peer_id);
                     let peer_id = self.peers[actual_peer_index].peer_id.clone();
 
-                    if let Some(expected_peer_index) = self.inner[connection_id].peer_index {
-                        if expected_peer_index != actual_peer_index {
-                            let _was_in = self
-                                .connections_by_peer
-                                .remove(&(expected_peer_index, connection_id));
-                            debug_assert!(_was_in);
+                    let expected_peer_id =
+                        if let Some(expected_peer_index) = self.inner[connection_id].peer_index {
+                            if expected_peer_index != actual_peer_index {
+                                let _was_in = self
+                                    .connections_by_peer
+                                    .remove(&(expected_peer_index, connection_id));
+                                debug_assert!(_was_in);
+                                let _inserted = self
+                                    .connections_by_peer
+                                    .insert((actual_peer_index, connection_id));
+                                debug_assert!(_inserted);
+                                self.inner[connection_id].peer_index = Some(actual_peer_index);
+
+                                // TODO: report some kind of error on the outer API layers?
+                            }
+
+                            Some(self.peers[actual_peer_index].peer_id.clone())
+                        } else {
                             let _inserted = self
                                 .connections_by_peer
                                 .insert((actual_peer_index, connection_id));
                             debug_assert!(_inserted);
                             self.inner[connection_id].peer_index = Some(actual_peer_index);
+                            None
+                        };
 
-                            // TODO: report some kind of error on the outer API layers?
-                        }
-                    } else {
-                        let _inserted = self
-                            .connections_by_peer
-                            .insert((actual_peer_index, connection_id));
-                        debug_assert!(_inserted);
-                        self.inner[connection_id].peer_index = Some(actual_peer_index);
-                    }
-
-                    let num_peer_connections = {
+                    let num_healthy_peer_connections = {
                         let num = self
                             .connections_by_peer
                             .range(
@@ -354,10 +336,8 @@ where
                                     ..=(actual_peer_index, collection::ConnectionId::max_value()),
                             )
                             .filter(|(_, connection_id)| {
-                                // Note that connections that are shutting down are still counted,
-                                // as we report the disconnected event only at the end of the
-                                // shutdown.
-                                self.inner.connection_state(*connection_id).established
+                                let state = self.inner.connection_state(*connection_id);
+                                state.established && !state.shutting_down
                             })
                             .count();
                         NonZeroU32::new(u32::try_from(num).unwrap()).unwrap()
@@ -365,49 +345,19 @@ where
 
                     // If there isn't any other connection with this peer yet, check the desired
                     // substreams and open them.
-                    if num_peer_connections.get() == 1 {
-                        let notification_protocols_indices = self
-                            .peers_notifications_out
-                            .range(
-                                (actual_peer_index, usize::min_value())
-                                    ..=(actual_peer_index, usize::max_value()),
-                            )
-                            .filter(|(_, v)| {
-                                // Since this check happens only at the first connection, all
-                                // substreams are necessarily closed.
-                                debug_assert!(matches!(v.open, NotificationsOutOpenState::Closed));
-                                v.desired
-                            })
-                            .map(|((_, index), _)| *index)
-                            .collect::<Vec<_>>();
-
-                        for idx in notification_protocols_indices {
-                            let id = DesiredOutNotificationId(
-                                self.desired_out_notifications.insert(Some((
-                                    actual_peer_index,
-                                    connection_id,
-                                    idx,
-                                ))),
-                            );
-
-                            self.peers_notifications_out
-                                .get_mut(&(actual_peer_index, idx))
-                                .unwrap()
-                                .open = NotificationsOutOpenState::ApiHandshakeWait(id);
-
-                            self.pending_desired_out_notifs
-                                .push_back((id, actual_peer_index, idx));
-                        }
+                    if num_healthy_peer_connections.get() == 1 {
+                        self.open_desired_notifications_out(actual_peer_index);
                     }
 
-                    return Some(Event::Connected {
-                        num_peer_connections,
+                    return Some(Event::HandshakeFinished {
+                        connection_id,
+                        num_healthy_peer_connections,
                         peer_id,
+                        expected_peer_id,
                     });
                 }
 
-                collection::Event::StartShutdown { id, .. } => {
-                    // TODO: report the shutdown reason in the API; should be done after https://github.com/paritytech/smoldot/issues/2370
+                collection::Event::StartShutdown { id, reason } => {
                     // TODO: this is O(n)
                     for (_, item) in &mut self.desired_out_notifications {
                         if let Some((_, connection_id, _)) = item.as_ref() {
@@ -416,6 +366,48 @@ where
                             }
                         }
                     }
+
+                    let connection_state = self.inner.connection_state(id);
+                    debug_assert!(connection_state.shutting_down);
+
+                    let peer = if let Some(peer_index) = self.inner[id].peer_index {
+                        let peer_id = self.peers[peer_index].peer_id.clone();
+
+                        if connection_state.established {
+                            let num_healthy_peer_connections = {
+                                let num = self
+                                    .connections_by_peer
+                                    .range(
+                                        (peer_index, collection::ConnectionId::min_value())
+                                            ..=(peer_index, collection::ConnectionId::max_value()),
+                                    )
+                                    .filter(|(_, connection_id)| {
+                                        let state = self.inner.connection_state(*connection_id);
+                                        state.established && !state.shutting_down
+                                    })
+                                    .count();
+                                u32::try_from(num).unwrap()
+                            };
+
+                            ShutdownPeer::Established {
+                                peer_id,
+                                num_healthy_peer_connections,
+                            }
+                        } else {
+                            ShutdownPeer::OutgoingHandshake {
+                                expected_peer_id: peer_id,
+                            }
+                        }
+                    } else {
+                        debug_assert!(!connection_state.established);
+                        ShutdownPeer::IngoingHandshake
+                    };
+
+                    return Some(Event::StartShutdown {
+                        connection_id: id,
+                        peer,
+                        reason,
+                    });
                 }
 
                 collection::Event::Shutdown {
@@ -424,8 +416,8 @@ where
                     user_data:
                         Connection {
                             peer_index: Some(expected_peer_index),
-                            fake_out_requests,
                             user_data,
+                            ..
                         },
                 } => {
                     // `expected_peer_index` is `None` iff the connection was an incoming
@@ -438,7 +430,7 @@ where
 
                     let peer_id = self.peers[expected_peer_index].peer_id.clone();
 
-                    let num_peer_connections = {
+                    let num_healthy_peer_connections = {
                         let num = self
                             .connections_by_peer
                             .range(
@@ -446,10 +438,8 @@ where
                                     ..=(expected_peer_index, collection::ConnectionId::max_value()),
                             )
                             .filter(|(_, connection_id)| {
-                                // Note that connections that are shutting down are still counted,
-                                // as we report the disconnected event only at the end of the
-                                // shutdown.
-                                self.inner.connection_state(*connection_id).established
+                                let state = self.inner.connection_state(*connection_id);
+                                state.established && !state.shutting_down
                             })
                             .count();
                         u32::try_from(num).unwrap()
@@ -457,30 +447,35 @@ where
 
                     self.try_clean_up_peer(expected_peer_index);
 
-                    self.fake_out_requests_to_report.extend(fake_out_requests);
-
-                    // Only produce a `Disconnected` event if connection wasn't handshaking.
-                    if was_established {
-                        return Some(Event::Disconnected {
-                            num_peer_connections,
-                            peer_id,
-                            user_data,
-                        });
-                    }
+                    return Some(Event::Shutdown {
+                        peer: if was_established {
+                            ShutdownPeer::Established {
+                                num_healthy_peer_connections,
+                                peer_id,
+                            }
+                        } else {
+                            ShutdownPeer::OutgoingHandshake {
+                                expected_peer_id: peer_id,
+                            }
+                        },
+                        user_data,
+                    });
                 }
 
                 collection::Event::Shutdown {
                     user_data:
                         Connection {
                             peer_index: None,
-                            fake_out_requests,
+                            user_data,
                             ..
                         },
                     ..
                 } => {
                     // Connection was incoming but its handshake wasn't finished yet.
-                    // The shutdown isn't reported.
-                    debug_assert!(fake_out_requests.is_empty());
+                    return Some(Event::Shutdown {
+                        peer: ShutdownPeer::IngoingHandshake,
+                        user_data,
+                    });
                 }
 
                 collection::Event::InboundError {
@@ -504,7 +499,7 @@ where
                     response,
                 } => {
                     return Some(Event::Response {
-                        request_id: OutRequestId(OutRequestIdInner::Real(substream_id)),
+                        request_id: OutRequestId(substream_id),
                         response,
                     });
                 }
@@ -738,6 +733,49 @@ where
                             }
                         }
                     }
+
+                    // TODO: DRY with StartShutdown event
+                    let connection_state = self.inner.connection_state(id);
+                    debug_assert!(connection_state.shutting_down);
+
+                    let peer = if let Some(peer_index) = self.inner[id].peer_index {
+                        let peer_id = self.peers[peer_index].peer_id.clone();
+
+                        if connection_state.established {
+                            let num_healthy_peer_connections = {
+                                let num = self
+                                    .connections_by_peer
+                                    .range(
+                                        (peer_index, collection::ConnectionId::min_value())
+                                            ..=(peer_index, collection::ConnectionId::max_value()),
+                                    )
+                                    .filter(|(_, connection_id)| {
+                                        let state = self.inner.connection_state(*connection_id);
+                                        state.established && !state.shutting_down
+                                    })
+                                    .count();
+                                u32::try_from(num).unwrap()
+                            };
+
+                            ShutdownPeer::Established {
+                                peer_id,
+                                num_healthy_peer_connections,
+                            }
+                        } else {
+                            ShutdownPeer::OutgoingHandshake {
+                                expected_peer_id: peer_id,
+                            }
+                        }
+                    } else {
+                        debug_assert!(!connection_state.established);
+                        ShutdownPeer::IngoingHandshake
+                    };
+
+                    return Some(Event::StartShutdown {
+                        connection_id: id,
+                        peer,
+                        reason: ShutdownCause::RemoteReset, // TODO: no
+                    });
                 }
             }
         }
@@ -760,8 +798,8 @@ where
             false,
             Connection {
                 peer_index: None,
-                fake_out_requests: Vec::new(),
                 user_data,
+                outbound: false,
             },
         )
     }
@@ -788,8 +826,8 @@ where
             true,
             Connection {
                 peer_index: Some(peer_index),
-                fake_out_requests: Vec::new(),
                 user_data,
+                outbound: true,
             },
         );
 
@@ -806,8 +844,8 @@ where
     /// [`PeerId`] will no longer be part of the return value of
     /// [`Peers::unfulfilled_desired_peers`].
     ///
-    /// No [`Event::Connected`] will be generated. Calling this function implicitly acts as if
-    /// this event was generated.
+    /// No [`Event::HandshakeFinished`] will be generated. Calling this function implicitly acts
+    /// as if this event had been implicitly generated.
     pub fn add_multi_stream_outgoing_connection<TSubId>(
         &mut self,
         now: TNow,
@@ -823,17 +861,82 @@ where
             now,
             Connection {
                 peer_index: Some(peer_index),
-                fake_out_requests: Vec::new(),
                 user_data,
+                outbound: true,
             },
         );
 
         let _inserted = self.connections_by_peer.insert((peer_index, connection_id));
         debug_assert!(_inserted);
 
-        // TODO: must immediately open all desired substreams
+        self.open_desired_notifications_out(peer_index);
 
         (connection_id, connection_task)
+    }
+
+    /// Returns all the non-handshaking connections that are connected to the given peer. The list
+    /// also includes connections that are shutting down.
+    pub fn established_peer_connections(
+        &'_ self,
+        peer_id: &PeerId,
+    ) -> impl Iterator<Item = ConnectionId> + '_ {
+        let peer_index = match self.peer_indices.get(peer_id) {
+            Some(idx) => *idx,
+            None => return either::Right(iter::empty()),
+        };
+
+        either::Left(
+            self.connections_by_peer
+                .range(
+                    (peer_index, ConnectionId::min_value())
+                        ..=(peer_index, ConnectionId::max_value()),
+                )
+                .map(|(_, connection_id)| *connection_id)
+                .filter(move |connection_id| {
+                    self.inner.connection_state(*connection_id).established
+                }),
+        )
+    }
+
+    /// Returns all the handshaking connections that are expected to reach the given peer. The
+    /// list also includes connections that are shutting down.
+    pub fn handshaking_peer_connections(
+        &'_ self,
+        peer_id: &PeerId,
+    ) -> impl Iterator<Item = ConnectionId> + '_ {
+        let peer_index = match self.peer_indices.get(peer_id) {
+            Some(idx) => *idx,
+            None => return either::Right(iter::empty()),
+        };
+
+        either::Left(
+            self.connections_by_peer
+                .range(
+                    (peer_index, ConnectionId::min_value())
+                        ..=(peer_index, ConnectionId::max_value()),
+                )
+                .map(|(_, connection_id)| *connection_id)
+                .filter(move |connection_id| {
+                    !self.inner.connection_state(*connection_id).established
+                }),
+        )
+    }
+
+    /// Returns the state of the given connection.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the identifier is invalid or corresponds to a connection that has already
+    /// entirely shut down.
+    ///
+    pub fn connection_state(&self, connection_id: ConnectionId) -> ConnectionState {
+        let inner_state = self.inner.connection_state(connection_id);
+
+        ConnectionState {
+            established: inner_state.established,
+            shutting_down: inner_state.shutting_down,
+            outbound: self.inner[connection_id].outbound,
+        }
     }
 
     /// Returns the list of [`PeerId`]s that have been marked as desired, but that don't have any
@@ -1214,9 +1317,9 @@ where
     ///
     /// A [`Event::Response`] event will later be generated containing the result of the request.
     ///
-    /// It is invalid to start a request on a peer before an [`Event::Connected`] has been
-    /// generated, or after a [`Event::Disconnected`] has been generated where
-    /// [`Event::Disconnected::num_peer_connections`] is 0.
+    /// It is invalid to start a request on a peer before an [`Event::HandshakeFinished`] event
+    /// has been generated, or after a [`Event::StartShutdown`] event has been generated where
+    /// [`ShutdownPeer::Established::num_healthy_peer_connections`] is 0.
     ///
     /// Returns a newly-allocated identifier for this request.
     ///
@@ -1256,28 +1359,16 @@ where
     ) -> OutRequestId {
         let target_connection_id = match self.connection_id_for_peer(target) {
             ConnectionIdForPeer::Connected(id) => id,
-            ConnectionIdForPeer::NotConnected => panic!(), // As documented.
-            ConnectionIdForPeer::ConnectedButShuttingDown(id) => {
-                // The situation where we are connected to the peer but only through a connection
-                // that is shutting down is a bit complicated. We can't start a request, as that
-                // would be invalid, so we generate a so-called "fake request" and when we
-                // connection later shuts down we report about the request failure.
-                // Note that we don't immediately report the failure, as that could cause an upper
-                // layer to immediately try the request again before it has processed the relevant
-                // `Disconnect` event.
-                let fake_id = self.next_fake_out_request_id;
-                self.next_fake_out_request_id += 1;
-                self.inner[id].fake_out_requests.push(fake_id);
-                return OutRequestId(OutRequestIdInner::Fake(fake_id));
-            }
+            ConnectionIdForPeer::NotConnected
+            | ConnectionIdForPeer::ConnectedButShuttingDown(_) => panic!(), // As documented.
         };
 
-        OutRequestId(OutRequestIdInner::Real(self.inner.start_request(
+        OutRequestId(self.inner.start_request(
             target_connection_id,
             protocol_index,
             request_data,
             timeout,
-        )))
+        ))
     }
 
     /// Responds to a previously-emitted [`Event::RequestIn`].
@@ -1292,6 +1383,7 @@ where
     }
 
     /// Returns `true` if there exists an established connection with the given peer.
+    // TODO: revisit this API as it's a duplicate of established_peer_connections
     pub fn has_established_connection(&self, peer_id: &PeerId) -> bool {
         // Connections that are shutting down are still counted, as we report the disconnected
         // event only at the end of the shutdown.
@@ -1424,6 +1516,53 @@ where
         let _index = self.peer_indices.remove(&peer_id).unwrap();
         debug_assert_eq!(_index, peer_index);
     }
+
+    /// Opens all the outbound notification substreams that have been marked as desired for the
+    /// given peer.
+    ///
+    /// Has no effect if the peer doesn't have any established non-shutting-down connection.
+    fn open_desired_notifications_out(&mut self, peer_index: usize) {
+        let connection_id = self
+            .connections_by_peer
+            .range(
+                (peer_index, collection::ConnectionId::min_value())
+                    ..=(peer_index, collection::ConnectionId::max_value()),
+            )
+            .map(|(_, connection_id)| *connection_id)
+            .filter(|connection_id| {
+                let state = self.inner.connection_state(*connection_id);
+                state.established && !state.shutting_down
+            })
+            .next();
+
+        let connection_id = match connection_id {
+            Some(c) => c,
+            None => return,
+        };
+
+        let notification_protocols_indices = self
+            .peers_notifications_out
+            .range((peer_index, usize::min_value())..=(peer_index, usize::max_value()))
+            .filter(|(_, v)| v.desired)
+            .map(|((_, index), _)| *index)
+            .collect::<Vec<_>>();
+
+        for idx in notification_protocols_indices {
+            let id = DesiredOutNotificationId(self.desired_out_notifications.insert(Some((
+                peer_index,
+                connection_id,
+                idx,
+            ))));
+
+            self.peers_notifications_out
+                .get_mut(&(peer_index, idx))
+                .unwrap()
+                .open = NotificationsOutOpenState::ApiHandshakeWait(id);
+
+            self.pending_desired_out_notifs
+                .push_back((id, peer_index, idx));
+        }
+    }
 }
 
 impl<TConn, TNow> ops::Index<ConnectionId> for Peers<TConn, TNow> {
@@ -1441,8 +1580,22 @@ impl<TConn, TNow> ops::IndexMut<ConnectionId> for Peers<TConn, TNow> {
 
 enum ConnectionIdForPeer {
     Connected(ConnectionId),
+    // TODO: is the distinction with NotConnected still useful?
     ConnectedButShuttingDown(ConnectionId),
     NotConnected,
+}
+
+/// See [`Peers::connection_state`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ConnectionState {
+    /// If `true`, the connection has finished its handshaking phase.
+    pub established: bool,
+
+    /// If `true`, the connection is shutting down.
+    pub shutting_down: bool,
+
+    /// `true` if the connection is outgoing.
+    pub outbound: bool,
 }
 
 /// See [`Event::DesiredInNotification`].
@@ -1459,39 +1612,48 @@ pub struct InRequestId(collection::SubstreamId);
 
 /// See [`Peers::start_request`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OutRequestId(OutRequestIdInner);
-
-/// There are two kinds of outgoing requests: "real" ones, and "fake" ones. Fake requests exist for
-/// API consistency purposes: when a connection is shutting down and the user starts an outgoing
-/// request, we create a fake request then report its failure.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum OutRequestIdInner {
-    Real(collection::SubstreamId),
-    Fake(u64),
-}
+pub struct OutRequestId(collection::SubstreamId);
 
 /// Event happening over the network. See [`Peers::next_event`].
 // TODO: in principle we could return `&PeerId` instead of `PeerId` most of the time, but this causes many borrow checker issues in the upper layer and I'm not motivated enough to deal with that
 #[derive(Debug)]
 pub enum Event<TConn> {
-    /// Established a new connection to the given peer.
-    Connected {
+    /// Connection has finished its handshake.
+    ///
+    /// Only generated for single-stream connections. The handshake of multi-stream connections is
+    /// considered to be already finished.
+    HandshakeFinished {
+        /// Identifier of the connection that has finished its handshake.
+        connection_id: ConnectionId,
+
         /// Identity of the peer on the other side of the connection.
         peer_id: PeerId,
 
-        /// Number of other established connections with the same peer, including the one that
-        /// has just been established.
-        num_peer_connections: NonZeroU32,
+        /// Identity of the peer that was expected to be reached.
+        ///
+        /// Always `Some` for outgoing connections and always `None` for incoming connections.
+        expected_peer_id: Option<PeerId>,
+
+        /// Number of established not-shutting-down connections with the same peer, including the
+        /// one that has just been established.
+        num_healthy_peer_connections: NonZeroU32,
+    },
+
+    StartShutdown {
+        /// Identifier of the connection that has started shutting down.
+        connection_id: ConnectionId,
+
+        /// State of the connection and identity of the remote.
+        peer: ShutdownPeer,
+
+        /// Reason for the shutdown.
+        reason: ShutdownCause,
     },
 
     /// A connection has stopped.
-    Disconnected {
-        /// Identity of the peer on the other side of the connection.
-        peer_id: PeerId,
-
-        /// Number of other established connections with the same peer remaining after the
-        /// disconnection.
-        num_peer_connections: u32,
+    Shutdown {
+        /// State of the connection and identity of the remote.
+        peer: ShutdownPeer,
 
         /// User data that was associated to this connection.
         // TODO: ?!
@@ -1627,6 +1789,29 @@ pub enum Event<TConn> {
         notifications_protocol_index: usize,
         /// If `Ok`, the substream has been closed gracefully. If `Err`, a problem happened.
         outcome: Result<(), NotificationsInClosedErr>,
+    },
+}
+
+/// See [`Event::StartShutdown`] and [`Event::Shutdown`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShutdownPeer {
+    /// Connection was fully established.
+    Established {
+        /// Identity of the peer on the other side of the connection.
+        peer_id: PeerId,
+
+        /// Number of other established not-shutting-down connections with the same peer remaining
+        /// after the disconnection.
+        num_healthy_peer_connections: u32,
+    },
+
+    /// Connection was still handshaking and was incoming.
+    IngoingHandshake,
+
+    /// Connection was still handshaking and was outgoing.
+    OutgoingHandshake {
+        /// Identity of the peer that was expected to be reached after the handshake.
+        expected_peer_id: PeerId,
     },
 }
 

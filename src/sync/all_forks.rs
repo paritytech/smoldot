@@ -84,6 +84,7 @@
 
 use crate::{
     chain::{blocks_tree, chain_information},
+    finality::grandpa,
     header, verify,
 };
 
@@ -99,7 +100,7 @@ pub use pending_blocks::{RequestId, RequestParams, SourceId};
 
 /// Configuration for the [`AllForksSync`].
 #[derive(Debug)]
-pub struct Config<TBannedBlocksIter> {
+pub struct Config {
     /// Information about the latest finalized block and its ancestors.
     pub chain_information: chain_information::ValidChainInformation,
 
@@ -160,13 +161,6 @@ pub struct Config<TBannedBlocksIter> {
 
     /// If true, the block bodies and storage are also synchronized.
     pub full: bool,
-
-    /// List of block hashes that are known to be bad and shouldn't be downloaded or verified.
-    ///
-    /// > **Note**: This list is typically filled with a list of blocks found in the chain
-    /// >           specification. It is part of the "trusted setup" of the node, in other words
-    /// >           the information that is passed by the user and blindly assumed to be true.
-    pub banned_blocks: TBannedBlocksIter,
 }
 
 pub struct AllForksSync<TBl, TRq, TSrc> {
@@ -182,9 +176,6 @@ pub struct AllForksSync<TBl, TRq, TSrc> {
 /// Extra fields. In a separate structure in order to be moved around.
 struct Inner<TBl, TRq, TSrc> {
     blocks: pending_blocks::PendingBlocks<PendingBlock<TBl>, TRq, Source<TSrc>>,
-
-    /// Same value as [`Config::banned_blocks`].
-    banned_blocks: hashbrown::HashSet<[u8; 32], fnv::FnvBuildHasher>,
 }
 
 struct PendingBlock<TBl> {
@@ -418,7 +409,7 @@ struct Block<TBl> {
 
 impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
     /// Initializes a new [`AllForksSync`].
-    pub fn new(config: Config<impl Iterator<Item = [u8; 32]>>) -> Self {
+    pub fn new(config: Config) -> Self {
         let finalized_block_height = config
             .chain_information
             .as_ref()
@@ -442,7 +433,6 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
                     sources_capacity: config.sources_capacity,
                     verify_bodies: config.full,
                 }),
-                banned_blocks: config.banned_blocks.collect(),
             },
         }
     }
@@ -920,60 +910,34 @@ impl<TBl, TRq, TSrc> AllForksSync<TBl, TRq, TSrc> {
 
     /// Update the state machine with a Grandpa commit message received from the network.
     ///
-    /// On success, the finalized block has been updated.
+    /// This function only inserts the commit message into the state machine, and does not
+    /// immediately verify it.
     ///
     /// # Panic
     ///
     /// Panics if `source_id` is invalid.
     ///
-    // TODO: return which blocks are removed as finalized
-    // TODO: this should probably just insert the commit in the state machine and not verify it immediately
     pub fn grandpa_commit_message(
         &mut self,
         source_id: SourceId,
-        scale_encoded_commit: &[u8],
-    ) -> Result<(), blocks_tree::CommitVerifyError> {
-        // Grabbing the source is done early on in order to panic if the `source_id` is invalid.
+        scale_encoded_commit: Vec<u8>,
+    ) -> GrandpaCommitMessageOutcome {
         let source = &mut self.inner.blocks[source_id];
 
-        let block_number = match self
-            .chain
-            .verify_grandpa_commit_message(scale_encoded_commit)
-        {
-            Ok(apply) => {
-                apply.apply();
-                return Ok(());
-            }
-            // In case where the commit message concerns a block older or equal to the finalized
-            // block, the operation is silently considered successful.
-            Err(blocks_tree::CommitVerifyError::FinalityVerify(
-                blocks_tree::FinalityVerifyError::EqualToFinalized
-                | blocks_tree::FinalityVerifyError::BelowFinalized,
-            )) => return Ok(()),
-            Err(
-                blocks_tree::CommitVerifyError::FinalityVerify(
-                    blocks_tree::FinalityVerifyError::UnknownTargetBlock { block_number, .. },
-                )
-                | blocks_tree::CommitVerifyError::FinalityVerify(
-                    blocks_tree::FinalityVerifyError::TooFarAhead {
-                        justification_block_number: block_number,
-                        ..
-                    },
-                )
-                | blocks_tree::CommitVerifyError::NotEnoughKnownBlocks {
-                    target_block_number: block_number,
-                },
-            ) => block_number,
-            Err(err) => return Err(err),
+        let block_number = match grandpa::commit::decode::decode_grandpa_commit(
+            &scale_encoded_commit,
+            self.chain.block_number_bytes(),
+        ) {
+            Ok(msg) => msg.message.target_number,
+            Err(_) => return GrandpaCommitMessageOutcome::ParseError,
         };
 
-        // If we reach here, the commit can't be verified yet. The commit is stored for later.
-        source.pending_finality_proofs.insert(
+        source.unverified_finality_proofs.insert(
             block_number,
-            FinalityProofs::GrandpaCommit(scale_encoded_commit.to_vec()),
+            FinalityProofs::GrandpaCommit(scale_encoded_commit),
         );
 
-        Ok(())
+        GrandpaCommitMessageOutcome::Queued
     }
 
     /// Process the next block in the queue of verification.
@@ -1421,19 +1385,6 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
                 );
         }
 
-        if self
-            .inner
-            .inner
-            .inner
-            .banned_blocks
-            .contains(&self.inner.expected_next_hash)
-        {
-            self.inner.inner.inner.blocks.mark_unverified_block_as_bad(
-                self.decoded_header.number,
-                &self.inner.expected_next_hash,
-            );
-        }
-
         // If there are too many blocks stored in the blocks list, remove unnecessary ones.
         // Not doing this could lead to an explosion of the size of the collections.
         // TODO: removing blocks should only be done explicitly through an API endpoint, because we want to store user datas in unverified blocks too; see https://github.com/paritytech/smoldot/issues/1572
@@ -1664,21 +1615,6 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
             },
         );
 
-        // Make sure that block isn't banned and that it is part of the finalized chain.
-        if self
-            .inner
-            .inner
-            .banned_blocks
-            .contains(&self.announced_header_hash)
-            || self.announced_header_number == self.inner.chain.finalized_block_header().number + 1
-                && self.announced_header_parent_hash != self.inner.chain.finalized_block_hash()
-        {
-            self.inner.inner.blocks.mark_unverified_block_as_bad(
-                self.announced_header_number,
-                &self.announced_header_hash,
-            );
-        }
-
         // If there are too many blocks stored in the blocks list, remove unnecessary ones.
         // Not doing this could lead to an explosion of the size of the collections.
         // TODO: removing blocks should only be done explicitly through an API endpoint, because we want to store user datas in unverified blocks too; see https://github.com/paritytech/smoldot/issues/1572
@@ -1879,18 +1815,6 @@ impl<'a, TBl, TRq, TSrc> AddSourceUnknown<'a, TBl, TRq, TSrc> {
             },
         );
 
-        if self
-            .inner
-            .inner
-            .banned_blocks
-            .contains(&self.best_block_hash)
-        {
-            self.inner
-                .inner
-                .blocks
-                .mark_unverified_block_as_bad(self.best_block_number, &self.best_block_hash);
-        }
-
         source_id
     }
 }
@@ -2035,8 +1959,12 @@ pub struct FinalityProofVerify<TBl, TRq, TSrc> {
 
 impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
     /// Perform the verification.
+    ///
+    /// A randomness seed must be provided and will be used during the verification. Note that the
+    /// verification is nonetheless deterministic.
     pub fn perform(
         mut self,
+        randomness_seed: [u8; 32],
     ) -> (
         AllForksSync<TBl, TRq, TSrc>,
         FinalityProofVerifyOutcome<TBl>,
@@ -2046,7 +1974,7 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                 match self
                     .parent
                     .chain
-                    .verify_grandpa_commit_message(&scale_encoded_commit)
+                    .verify_grandpa_commit_message(&scale_encoded_commit, randomness_seed)
                 {
                     Ok(success) => {
                         // TODO: DRY
@@ -2099,11 +2027,11 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
                 }
             }
             FinalityProof::Justification((consensus_engine_id, scale_encoded_justification)) => {
-                match self
-                    .parent
-                    .chain
-                    .verify_justification(consensus_engine_id, &scale_encoded_justification)
-                {
+                match self.parent.chain.verify_justification(
+                    consensus_engine_id,
+                    &scale_encoded_justification,
+                    randomness_seed,
+                ) {
                     Ok(success) => {
                         let finalized_blocks_iter = success.apply();
                         let updates_best_block = finalized_blocks_iter.updates_best_block();
@@ -2140,6 +2068,15 @@ impl<TBl, TRq, TSrc> FinalityProofVerify<TBl, TRq, TSrc> {
     pub fn cancel(self) -> AllForksSync<TBl, TRq, TSrc> {
         self.parent
     }
+}
+
+/// See [`AllForksSync::grandpa_commit_message`].
+#[derive(Debug, Clone)]
+pub enum GrandpaCommitMessageOutcome {
+    /// Failed to parse message. Commit has been silently discarded.
+    ParseError, // TODO: should probably contain the error, but difficult due to lifetimes in said error
+    /// Message has been queued for later verification.
+    Queued,
 }
 
 /// State of the processing of blocks.

@@ -60,6 +60,12 @@ pub struct Config<'a> {
     /// Number of bytes of the block number in the networking protocol.
     pub block_number_bytes: usize,
 
+    /// Hash of the genesis block.
+    ///
+    /// > **Note**: At the time of writing of this comment, the value in this field is used only
+    /// >           to compare against a known genesis hash and print a warning.
+    pub genesis_block_hash: [u8; 32],
+
     /// Stores of key to use for all block-production-related purposes.
     pub keystore: Arc<keystore::Keystore>,
 
@@ -166,6 +172,25 @@ impl ConsensusService {
                 }
             })
             .await;
+
+        // The Kusama chain contains a fork hardcoded in the official Polkadot client.
+        // See <https://github.com/paritytech/polkadot/blob/93f45f996a3d5592a57eba02f91f2fc2bc5a07cf/node/service/src/grandpa_support.rs#L111-L216>
+        // Because we don't want to support this in smoldot, a warning is printed instead if we
+        // recognize Kusama.
+        // See also <https://github.com/paritytech/smoldot/issues/1866>.
+        if config.genesis_block_hash
+            == [
+                176, 168, 212, 147, 40, 92, 45, 247, 50, 144, 223, 183, 230, 31, 135, 15, 23, 180,
+                24, 1, 25, 122, 20, 156, 169, 54, 84, 73, 158, 163, 218, 254,
+            ]
+            && finalized_block_number <= 1500988
+        {
+            tracing::warn!(
+                "The Kusama chain is known to be borked at block #1491596. The official Polkadot \
+                client works around this issue by hardcoding a fork in its source code. Smoldot \
+                does not support this hardcoded fork and will thus fail to sync past this block."
+            );
+        }
 
         let sync_state = Arc::new(Mutex::new(SyncState {
             best_block_number,
@@ -533,10 +558,6 @@ impl SyncBackground {
                             | all::ResponseOutcome::NotFinalizedChain { .. }
                             | all::ResponseOutcome::AllAlreadyInChain { .. } => {
                             }
-                            all::ResponseOutcome::WarpSyncError { .. } |
-                            all::ResponseOutcome::WarpSyncFinished { .. } => {
-                                unreachable!()
-                            }
                         }
                     }
                 },
@@ -802,7 +823,7 @@ impl SyncBackground {
                             // Locally-authored blocks source.
                             match (request_details, &self.authored_block) {
                                 (
-                                    all::RequestDetail::BlocksRequest {
+                                    all::DesiredRequest::BlocksRequest {
                                         first_block_hash: None,
                                         first_block_height,
                                         ..
@@ -810,7 +831,7 @@ impl SyncBackground {
                                     Some((authored_height, _, _, _)),
                                 ) if first_block_height == authored_height => true,
                                 (
-                                    all::RequestDetail::BlocksRequest {
+                                    all::DesiredRequest::BlocksRequest {
                                         first_block_hash: Some(first_block_hash),
                                         first_block_height,
                                         ..
@@ -834,7 +855,7 @@ impl SyncBackground {
             request_info.num_blocks_clamp(NonZeroU64::new(64).unwrap());
 
             match request_info {
-                all::RequestDetail::BlocksRequest { .. }
+                all::DesiredRequest::BlocksRequest { .. }
                     if source_id == self.block_author_sync_source =>
                 {
                     tracing::debug!("queue-locally-authored-block-for-import");
@@ -847,7 +868,7 @@ impl SyncBackground {
                     // Create a request that is immediately answered right below.
                     let request_id = self.sync.add_request(
                         source_id,
-                        request_info,
+                        request_info.into(),
                         future::AbortHandle::new_pair().0, // Temporary dummy.
                     );
 
@@ -863,7 +884,7 @@ impl SyncBackground {
                     );
                 }
 
-                all::RequestDetail::BlocksRequest {
+                all::DesiredRequest::BlocksRequest {
                     first_block_hash,
                     first_block_height,
                     ascending,
@@ -905,15 +926,14 @@ impl SyncBackground {
                     );
 
                     let (request, abort) = future::abortable(request);
-                    let request_id = self
-                        .sync
-                        .add_request(source_id, request_info.clone(), abort);
+                    let request_id = self.sync.add_request(source_id, request_info.into(), abort);
 
                     self.block_requests_finished
                         .push(request.map(move |r| (request_id, r)).boxed());
                 }
-                all::RequestDetail::GrandpaWarpSync { .. }
-                | all::RequestDetail::StorageGet { .. } => {
+                all::DesiredRequest::GrandpaWarpSync { .. }
+                | all::DesiredRequest::StorageGet { .. }
+                | all::DesiredRequest::RuntimeCallMerkleProof { .. } => {
                     // Not used in "full" mode.
                     unreachable!()
                 }
@@ -937,7 +957,9 @@ impl SyncBackground {
                     self.sync = idle;
                     break;
                 }
-                all::ProcessOne::VerifyWarpSyncFragment(_) => unreachable!(),
+                all::ProcessOne::VerifyWarpSyncFragment(_)
+                | all::ProcessOne::WarpSyncError { .. }
+                | all::ProcessOne::WarpSyncFinished { .. } => unreachable!(),
                 all::ProcessOne::VerifyBodyHeader(verify) => {
                     let hash_to_verify = verify.hash();
                     let height_to_verify = verify.height();
@@ -953,6 +975,7 @@ impl SyncBackground {
                     let _jaeger_span = self.jaeger_service.block_body_verify_span(&hash_to_verify);
 
                     let mut verify = verify.start(unix_time, ());
+                    // TODO: check this block against the chain spec's badBlocks
                     loop {
                         match verify {
                             all::BlockVerification::Error {
@@ -1096,6 +1119,9 @@ impl SyncBackground {
                                     .map(|(k, _)| k);
                                 verify = req.inject_keys_ordered(keys);
                             }
+                            all::BlockVerification::RuntimeCompilation(rt) => {
+                                verify = rt.build();
+                            }
                         }
                     }
                 }
@@ -1108,7 +1134,7 @@ impl SyncBackground {
                     );
                     let _enter = span.enter();
 
-                    match verify.perform() {
+                    match verify.perform(rand::random()) {
                         (
                             sync_out,
                             all::FinalityProofVerifyOutcome::NewFinalized {

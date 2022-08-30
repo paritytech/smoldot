@@ -17,26 +17,25 @@
 
 //! All JSON-RPC method handlers that related to the `chainHead` API.
 
-use super::{Background, FollowSubscription, Platform, SubscriptionTy};
+use super::{Background, FollowSubscription, SubscriptionTy};
 
-use crate::{runtime_service, sync_service};
+use crate::{platform::Platform, runtime_service, sync_service};
 
+use alloc::{borrow::ToOwned as _, boxed::Box, format, string::ToString as _, sync::Arc, vec::Vec};
+use core::{
+    cmp, iter,
+    num::{NonZeroU32, NonZeroUsize},
+    sync::atomic,
+    time::Duration,
+};
 use futures::prelude::*;
+use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,
     executor::{self, runtime_host},
     header,
     json_rpc::{self, methods, requests_subscriptions},
     network::protocol,
-};
-use std::{
-    cmp,
-    collections::HashMap,
-    iter,
-    num::{NonZeroU32, NonZeroUsize},
-    str,
-    sync::{atomic, Arc},
-    time::Duration,
 };
 
 impl<TPlat: Platform> Background<TPlat> {
@@ -100,11 +99,10 @@ impl<TPlat: Platform> Background<TPlat> {
                             return;
                         }
 
-                        Some(
-                            me.runtime_service
-                                .pinned_block_runtime_lock(runtime_service_subscribe_all, &hash.0)
-                                .await,
-                        )
+                        me.runtime_service
+                            .pinned_block_runtime_lock(runtime_service_subscribe_all, &hash.0)
+                            .await
+                            .ok()
                     } else {
                         None
                     }
@@ -381,7 +379,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let (mut subscribe_all, runtime_subscribe_all) = if runtime_updates {
             let subscribe_all = self
                 .runtime_service
-                .subscribe_all(32, NonZeroUsize::new(32).unwrap())
+                .subscribe_all("chainHead_follow", 32, NonZeroUsize::new(32).unwrap())
                 .await;
             let id = subscribe_all.new_blocks.id();
             (either::Left(subscribe_all), Some(id))

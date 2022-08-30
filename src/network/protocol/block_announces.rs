@@ -18,7 +18,6 @@
 use crate::header;
 
 use alloc::vec;
-use core::iter;
 use nom::Finish as _;
 
 /// Decoded handshake sent or received when opening a block announces notifications substream.
@@ -145,9 +144,12 @@ pub fn encode_block_announces_handshake(
     // TODO: what to do if the best number doesn't fit in the given size? right now we just wrap around
     header[1..].copy_from_slice(&handshake.best_number.to_le_bytes()[..block_number_bytes]);
 
-    iter::once(either::Left(header))
-        .chain(iter::once(either::Right(handshake.best_hash)))
-        .chain(iter::once(either::Right(handshake.genesis_hash)))
+    [
+        either::Left(header),
+        either::Right(handshake.best_hash),
+        either::Right(handshake.genesis_hash),
+    ]
+    .into_iter()
 }
 
 /// Decodes a SCALE-encoded block announces handshake.

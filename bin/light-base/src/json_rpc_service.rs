@@ -42,9 +42,26 @@ mod getters;
 mod state_chain;
 mod transactions;
 
-use crate::{network_service, runtime_service, sync_service, transactions_service, Platform};
+use crate::{
+    network_service, platform::Platform, runtime_service, sync_service, transactions_service,
+};
 
+use alloc::{
+    borrow::ToOwned as _,
+    boxed::Box,
+    format,
+    string::{String, ToString as _},
+    sync::Arc,
+    vec::Vec,
+};
+use core::{
+    iter,
+    num::{NonZeroU32, NonZeroUsize},
+    sync::atomic,
+    time::Duration,
+};
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
+use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,
     chain_spec,
@@ -53,14 +70,6 @@ use smoldot::{
     json_rpc::{self, methods, requests_subscriptions},
     libp2p::{multiaddr, PeerId},
     network::protocol,
-};
-use std::{
-    collections::HashMap,
-    iter,
-    num::{NonZeroU32, NonZeroUsize},
-    str,
-    sync::{atomic, Arc},
-    time::Duration,
 };
 
 /// Configuration for [`service`].
@@ -602,7 +611,11 @@ impl<TPlat: Platform> Background<TPlat> {
                     // malicious.
                     let mut subscribe_all = me
                         .runtime_service
-                        .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
+                        .subscribe_all(
+                            "json-rpc-blocks-cache",
+                            32,
+                            NonZeroUsize::new(usize::max_value()).unwrap(),
+                        )
                         .await;
 
                     cache.subscription_id = Some(subscribe_all.new_blocks.id());
@@ -1303,21 +1316,22 @@ impl<TPlat: Platform> Background<TPlat> {
 
             // Try to find the block in the cache of recent blocks. Most of the time, the call target
             // should be in there.
-            if cache_lock.recent_pinned_blocks.contains(block_hash) {
+            let lock = if cache_lock.recent_pinned_blocks.contains(block_hash) {
                 // The runtime service has the block pinned, meaning that we can ask the runtime
                 // service to perform the call.
-                let runtime_call_lock = self
-                    .runtime_service
+                self.runtime_service
                     .pinned_block_runtime_lock(
                         cache_lock.subscription_id.clone().unwrap(),
                         block_hash,
                     )
-                    .await;
+                    .await
+                    .ok()
+            } else {
+                None
+            };
 
-                // Make sure to unlock the cache, in order to not block the other requests.
-                drop::<futures::lock::MutexGuard<_>>(cache_lock);
-
-                runtime_call_lock
+            if let Some(lock) = lock {
+                lock
             } else {
                 // Second situation: the block is not in the cache of recent blocks. This isn't great.
                 drop::<futures::lock::MutexGuard<_>>(cache_lock);

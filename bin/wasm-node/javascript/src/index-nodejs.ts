@@ -15,11 +15,15 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+// Note: if you modify these imports, please test both the ModuleJS and CommonJS generated
+// bindings. JavaScript being JavaScript, some libraries (such as `websocket`) have issues working
+// with both at the same time.
+
 import { Client, ClientOptions, start as innerStart } from './client.js'
 import { Connection, ConnectionError, ConnectionConfig } from './instance/instance.js';
 
-import Websocket from 'websocket';
-import pako from 'pako';
+import { WebSocket } from 'ws';
+import { inflate } from 'pako';
 
 import { hrtime } from 'node:process';
 import { createConnection as nodeCreateConnection } from 'node:net';
@@ -50,8 +54,8 @@ export function start(options?: ClientOptions): Client {
   options = options || {};
 
   return innerStart(options || {}, {
-    base64DecodeAndZlibInflate: (input) => {
-        return Promise.resolve(pako.inflate(Buffer.from(input, 'base64')))
+    trustedBase64DecodeAndZlibInflate: (input) => {
+        return Promise.resolve(inflate(Buffer.from(input, 'base64')))
     },
     performanceNow: () => {
       const time = hrtime();
@@ -96,22 +100,31 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
             (proto + "://[" + wsParsed[2] + "]:" + wsParsed[3]) :
             (proto + "://" + wsParsed[2] + ":" + wsParsed[3]);
 
-        connection = {
-            ty: 'websocket',
-            socket: new Websocket.w3cwebsocket(url)
-        };
-        connection.socket.binaryType = 'arraybuffer';
-
-        connection.socket.onopen = () => {
+        const socket = new WebSocket(url);
+        socket.binaryType = 'arraybuffer';
+        socket.onopen = () => {
             config.onOpen({ type: 'single-stream' });
         };
-        connection.socket.onclose = (event) => {
+        socket.onclose = (event) => {
             const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
             config.onConnectionClose(message);
+            socket.onopen = () => { };
+            socket.onclose = () => { };
+            socket.onmessage = () => { };
+            socket.onerror = () => { };
         };
-        connection.socket.onmessage = (msg) => {
+        socket.onerror = (event) => {
+            config.onConnectionClose(event.message);
+            socket.onopen = () => { };
+            socket.onclose = () => { };
+            socket.onmessage = () => { };
+            socket.onerror = () => { };
+        };
+        socket.onmessage = (msg) => {
             config.onMessage(new Uint8Array(msg.data as ArrayBuffer));
         };
+
+        connection = { ty: 'websocket', socket };
 
     } else if (tcpParsed != null) {
         // `net` module will be missing when we're not in NodeJS.
@@ -186,5 +199,5 @@ interface TcpWrapped {
 
 interface WebSocketWrapped {
     ty: 'websocket',
-    socket: Websocket.w3cwebsocket,
+    socket: WebSocket,
 }

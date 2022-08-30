@@ -42,6 +42,9 @@ pub struct Config<'a> {
     /// Configuration items related to the consensus engine.
     pub consensus: ConfigConsensus<'a>,
 
+    /// Configuration items related to the finality engine.
+    pub finality: ConfigFinality,
+
     /// If `false`, digest items with an unknown consensus engine lead to an error.
     ///
     /// Passing `true` can lead to blocks being considered as valid when they shouldn't. However,
@@ -88,6 +91,19 @@ pub enum ConfigConsensus<'a> {
     },
 }
 
+/// Extra items of [`Config`] that are dependant on the finality engine of the chain.
+pub enum ConfigFinality {
+    /// Blocks themselves don't contain any information concerning finality. Finality is provided
+    /// by a mechanism that is entirely external to the chain.
+    ///
+    /// > **Note**: This is the mechanism used for parachains. Finality is provided entirely by
+    /// >           the relay chain.
+    Outsourced,
+
+    /// Chain uses the Grandpa finality algorithm.
+    Grandpa,
+}
+
 /// Block successfully verified.
 pub enum Success {
     /// Chain is using the Aura consensus engine.
@@ -128,12 +144,16 @@ pub enum Error {
     UnknownConsensusEngine { engine: [u8; 4] },
     /// Block header contains items relevant to multiple consensus engines at the same time.
     MultipleConsensusEngines,
+    /// Block header contains items that don't match the finality engine of the chain.
+    FinalityEngineMismatch,
     /// Failed to verify the authenticity of the block with the AURA algorithm.
     #[display(fmt = "{}", _0)]
     AuraVerification(aura::VerifyError),
     /// Failed to verify the authenticity of the block with the BABE algorithm.
     #[display(fmt = "{}", _0)]
     BabeVerification(babe::VerifyError),
+    /// Block schedules a Grandpa authorities change while another change is still in progress.
+    GrandpaChangesOverlap,
 }
 
 /// Verifies whether a block is valid.
@@ -178,8 +198,21 @@ pub fn verify(config: Config) -> Result<Success, Error> {
         }
     }
 
-    // TODO: need to verify that there's no grandpa scheduled change header if there's already an active grandpa scheduled change
-    // TODO: verify that there's no grandpa header items if the chain doesn't use grandpa
+    // Check whether the log items respect the finality engine.
+    match config.finality {
+        ConfigFinality::Grandpa => {}
+        ConfigFinality::Outsourced => {
+            // TODO: we iterate through the log items, which is O(n), is it worth optimizing this?
+            for item in config.block_header.digest.logs() {
+                match item {
+                    header::DigestItemRef::GrandpaConsensus(_) => {
+                        return Err(Error::FinalityEngineMismatch)
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 
     match config.consensus {
         ConfigConsensus::Aura {

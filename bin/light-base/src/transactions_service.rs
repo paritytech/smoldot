@@ -67,8 +67,22 @@
 //! transaction.
 //!
 
-use crate::{network_service, runtime_service, sync_service, Platform};
+use crate::{network_service, platform::Platform, runtime_service, sync_service};
 
+use alloc::{
+    borrow::ToOwned as _,
+    boxed::Box,
+    format,
+    string::{String, ToString as _},
+    sync::Arc,
+    vec::Vec,
+};
+use core::{
+    cmp, iter,
+    marker::PhantomData,
+    num::{NonZeroU32, NonZeroUsize},
+    time::Duration,
+};
 use futures::{channel::mpsc, lock::Mutex, prelude::*, stream::FuturesUnordered};
 use itertools::Itertools as _;
 use smoldot::{
@@ -77,13 +91,6 @@ use smoldot::{
     libp2p::peer_id::PeerId,
     network::protocol,
     transactions::{light_pool, validate},
-};
-use std::{
-    cmp, iter,
-    marker::PhantomData,
-    num::{NonZeroU32, NonZeroUsize},
-    sync::Arc,
-    time::Duration,
 };
 
 /// Configuration for a [`TransactionsService`].
@@ -278,6 +285,12 @@ enum InvalidOrError {
     ValidateError(ValidateTransactionError),
 }
 
+#[derive(Debug, Clone)]
+enum ValidationError {
+    InvalidOrError(InvalidOrError),
+    ObsoleteSubscription,
+}
+
 /// Message sent from the foreground service to the background.
 enum ToBackground {
     SubmitTransaction {
@@ -332,7 +345,11 @@ async fn background_task<TPlat: Platform>(
         // malicious behaviors. This code is by definition not considered malicious.
         let mut subscribe_all = worker
             .runtime_service
-            .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
+            .subscribe_all(
+                "transactions-service",
+                32,
+                NonZeroUsize::new(usize::max_value()).unwrap(),
+            )
             .await;
         let initial_finalized_block_hash = header::hash_from_scale_encoded_header(
             &subscribe_all.finalized_block_scale_encoded_header,
@@ -734,7 +751,7 @@ async fn background_task<TPlat: Platform>(
                         .clone()
                         .announce_transaction(
                             worker.network_chain_index,
-                            &worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap()
+                            worker.pending_transactions.scale_encoding(maybe_reannounce_tx_id).unwrap()
                         )
                         .await;
                     log::debug!(
@@ -787,7 +804,7 @@ async fn background_task<TPlat: Platform>(
                         continue;
                     }
 
-                    match &validation_result {
+                    let validation_result = match validation_result {
                         Ok(result) => {
                             log::debug!(
                                 target: &log_target,
@@ -809,8 +826,15 @@ async fn background_task<TPlat: Platform>(
                             worker.next_reannounce.push(async move {
                                 maybe_validated_tx_id
                             }.boxed());
+
+                            Ok(result)
                         }
-                        Err(InvalidOrError::Invalid(error)) => {
+                        Err(ValidationError::ObsoleteSubscription) => {
+                            // Runtime service subscription is obsolete. Throw away everything and
+                            // rebuild it.
+                            continue 'channels_rebuild
+                        }
+                        Err(ValidationError::InvalidOrError(InvalidOrError::Invalid(error))) => {
                             log::debug!(
                                 target: &log_target,
                                 "TxValidations => Invalid(tx={}, block={}, error={:?})",
@@ -826,8 +850,10 @@ async fn background_task<TPlat: Platform>(
                                 HashDisplay(&block_hash),
                                 error,
                             );
+
+                            Err(InvalidOrError::Invalid(error))
                         }
-                        Err(InvalidOrError::ValidateError(error)) => {
+                        Err(ValidationError::InvalidOrError(InvalidOrError::ValidateError(error))) => {
                             log::debug!(
                                 target: &log_target,
                                 "TxValidations => Error(tx={}, block={}, error={:?})",
@@ -842,8 +868,10 @@ async fn background_task<TPlat: Platform>(
                                 HashDisplay(&tx_hash),
                                 error
                             );
+
+                            Err(InvalidOrError::ValidateError(error))
                         }
-                    }
+                    };
 
                     // No matter whether the validation is successful, we store the result in
                     // the transactions pool. This will later be picked up by the code that removes
@@ -1046,7 +1074,10 @@ struct PendingTransaction<TPlat: Platform> {
 
     /// If `Some`, will receive the result of the validation of the transaction.
     validation_in_progress: Option<
-        future::RemoteHandle<([u8; 32], Result<validate::ValidTransaction, InvalidOrError>)>,
+        future::RemoteHandle<(
+            [u8; 32],
+            Result<validate::ValidTransaction, ValidationError>,
+        )>,
     >,
 }
 
@@ -1085,10 +1116,16 @@ async fn validate_transaction<TPlat: Platform>(
     block_scale_encoded_header: &[u8],
     scale_encoded_transaction: impl AsRef<[u8]> + Clone,
     source: validate::TransactionSource,
-) -> Result<validate::ValidTransaction, InvalidOrError> {
-    let runtime_lock = relay_chain_sync
+) -> Result<validate::ValidTransaction, ValidationError> {
+    let runtime_lock = match relay_chain_sync
         .pinned_block_runtime_lock(relay_chain_sync_subscription_id, &block_hash)
-        .await;
+        .await
+    {
+        Ok(l) => l,
+        Err(runtime_service::PinnedBlockRuntimeLockError::ObsoleteSubscription) => {
+            return Err(ValidationError::ObsoleteSubscription)
+        }
+    };
 
     log::debug!(
         target: log_target,
@@ -1120,7 +1157,8 @@ async fn validate_transaction<TPlat: Platform>(
         )
         .await
         .map_err(ValidateTransactionError::Call)
-        .map_err(InvalidOrError::ValidateError)?;
+        .map_err(InvalidOrError::ValidateError)
+        .map_err(ValidationError::InvalidOrError)?;
 
     let mut validation_in_progress = validate::validate_transaction(validate::Config {
         runtime,
@@ -1144,15 +1182,17 @@ async fn validate_transaction<TPlat: Platform>(
                 virtual_machine,
             } => {
                 runtime_call_lock.unlock(virtual_machine);
-                break Err(InvalidOrError::Invalid(invalid));
+                break Err(ValidationError::InvalidOrError(InvalidOrError::Invalid(
+                    invalid,
+                )));
             }
             validate::Query::Finished {
                 result: Err(error),
                 virtual_machine,
             } => {
                 runtime_call_lock.unlock(virtual_machine);
-                break Err(InvalidOrError::ValidateError(
-                    ValidateTransactionError::Validation(error),
+                break Err(ValidationError::InvalidOrError(
+                    InvalidOrError::ValidateError(ValidateTransactionError::Validation(error)),
                 ));
             }
             validate::Query::StorageGet(get) => {
@@ -1160,8 +1200,8 @@ async fn validate_transaction<TPlat: Platform>(
                     Ok(v) => v,
                     Err(err) => {
                         runtime_call_lock.unlock(validate::Query::StorageGet(get).into_prototype());
-                        return Err(InvalidOrError::ValidateError(
-                            ValidateTransactionError::Call(err),
+                        return Err(ValidationError::InvalidOrError(
+                            InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
                         ));
                     }
                 };
@@ -1170,8 +1210,8 @@ async fn validate_transaction<TPlat: Platform>(
             validate::Query::NextKey(nk) => {
                 // TODO:
                 runtime_call_lock.unlock(validate::Query::NextKey(nk).into_prototype());
-                break Err(InvalidOrError::ValidateError(
-                    ValidateTransactionError::NextKeyForbidden,
+                break Err(ValidationError::InvalidOrError(
+                    InvalidOrError::ValidateError(ValidateTransactionError::NextKeyForbidden),
                 ));
             }
             validate::Query::PrefixKeys(prefix) => {
@@ -1185,8 +1225,8 @@ async fn validate_transaction<TPlat: Platform>(
                     Err(err) => {
                         runtime_call_lock
                             .unlock(validate::Query::PrefixKeys(prefix).into_prototype());
-                        return Err(InvalidOrError::ValidateError(
-                            ValidateTransactionError::Call(err),
+                        return Err(ValidationError::InvalidOrError(
+                            InvalidOrError::ValidateError(ValidateTransactionError::Call(err)),
                         ));
                     }
                 }

@@ -17,6 +17,8 @@
 
 import { PlatformBindings, start as startInstance } from './instance/instance.js';
 
+export { CrashError } from './instance/instance.js';
+
 /**
  * Thrown in case of a problem when initializing the chain.
  */
@@ -45,17 +47,6 @@ export class JsonRpcDisabledError extends Error {
   constructor() {
     super()
     this.name = "JsonRpcDisabledError"
-  }
-}
-
-/**
- * Thrown in case the underlying client encounters an unexpected crash.
- *
- * This is always an internal bug in smoldot and is never supposed to happen.
- */
-export class CrashError extends Error {
-  constructor(message: string) {
-    super(message);
   }
 }
 
@@ -113,7 +104,7 @@ export interface Chain {
    * as the responses.
    *
    * No response is generated if the request isn't a valid JSON-RPC request or if the request is
-   * unreasonably large (8 MiB at the time of writing of this comment). The request is then
+   * unreasonably large (64 MiB at the time of writing of this comment). The request is then
    * silently discarded.
    * If, however, the request is a valid JSON-RPC request but that concerns an unknown method, a
    * error response is properly generated.
