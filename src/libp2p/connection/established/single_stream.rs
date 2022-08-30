@@ -642,22 +642,27 @@ where
             }
         };
 
-        let substream = self
-            .inner
-            .yamux
-            .open_substream(Some(substream::Substream::request_out(
-                self.inner.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
-                timeout,
-                if has_length_prefix {
-                    Some(request)
-                } else {
-                    None
-                },
-                self.inner.request_protocols[protocol_index].max_response_size,
-                user_data,
-            )));
+        let mut substream =
+            self.inner
+                .yamux
+                .open_substream(Some(substream::Substream::request_out(
+                    self.inner.request_protocols[protocol_index].name.clone(), // TODO: clone :-/
+                    timeout,
+                    if has_length_prefix {
+                        Some(request)
+                    } else {
+                        None
+                    },
+                    self.inner.request_protocols[protocol_index].max_response_size,
+                    user_data,
+                )));
 
-        // TODO: ? do this? substream.reserve_window(128 * 1024 * 1024 + 128); // TODO: proper max size
+        // TODO: we add some bytes due to the length prefix, this is a bit hacky as we should ask this information from the substream
+        substream.reserve_window(
+            u64::try_from(self.inner.request_protocols[protocol_index].max_response_size)
+                .unwrap_or(u64::max_value())
+                .saturating_add(64),
+        );
 
         SubstreamId(SubstreamIdInner::SingleStream(substream.id()))
     }
