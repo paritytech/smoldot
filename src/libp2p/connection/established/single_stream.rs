@@ -312,10 +312,9 @@ where
                 }
 
                 Some(yamux::IncomingDataDetail::GoAway(_)) => {
-                    // TODO: somehow report the content of the GoAway on the external API?
+                    // TODO: somehow report the GoAway error code on the external API?
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
-                    // TODO: also forbid new substreams from being opened
                     return Ok((self, Some(Event::NewOutboundSubstreamsForbidden)));
                 }
 
@@ -626,6 +625,11 @@ where
     /// The timeout is the time between the moment the substream is opened and the moment the
     /// response is sent back. If the emitter doesn't send the request or if the receiver doesn't
     /// answer during this time window, the request is considered failed.
+    ///
+    /// # Panic
+    ///
+    /// Panics if a [`Event::NewOutboundSubstreamsForbidden`] event has been generated in the past.
+    ///
     pub fn add_request(
         &mut self,
         protocol_index: usize,
@@ -705,6 +709,10 @@ where
     ///
     /// Assuming that the remote is using the same implementation, an
     /// [`Event::NotificationsInOpen`] will be generated on its side.
+    ///
+    /// # Panic
+    ///
+    /// Panics if a [`Event::NewOutboundSubstreamsForbidden`] event has been generated in the past.
     ///
     pub fn open_notifications_substream(
         &mut self,

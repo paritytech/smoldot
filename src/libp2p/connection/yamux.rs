@@ -89,6 +89,9 @@ pub struct Yamux<T> {
     /// A `SipHasher` is used in order to avoid hash collision attacks on substream IDs.
     substreams: hashbrown::HashMap<NonZeroU32, Substream<T>, SipHasherBuild>,
 
+    /// `Some` if a "GoAway" frame has been received in the past.
+    received_goaway: Option<GoAwayErrorCode>,
+
     /// What kind of data is expected on the socket next.
     incoming: Incoming,
 
@@ -253,6 +256,7 @@ impl<T> Yamux<T> {
                 config.capacity,
                 SipHasherBuild::new(randomness.gen()),
             ),
+            received_goaway: None,
             incoming: Incoming::Header(arrayvec::ArrayVec::new()),
             outgoing: Outgoing::Idle,
             next_outbound_substream: if config.is_initiator {
@@ -284,10 +288,16 @@ impl<T> Yamux<T> {
     /// # Panic
     ///
     /// Panics if all possible substream IDs are already taken. This happen if there exists more
-    /// than approximately `2^31` substreams, which is very unlikely to happen unless there exists a
-    /// bug in the code.
+    /// than approximately `2^31` substreams, which is very unlikely to happen unless there exists
+    /// a bug in the code.
+    ///
+    /// Panics if a [`IncomingDataDetail::GoAway`] event has been generated. This can also be
+    /// checked by calling [`Yamux::received_goaway`].
     ///
     pub fn open_substream(&mut self, user_data: T) -> SubstreamMut<T> {
+        // It is forbidden to open new substreams if a "GoAway" frame has been received.
+        assert!(self.received_goaway.is_none());
+
         // Make sure that the `loop` below can finish.
         assert!(usize::try_from(u32::max_value() / 2 - 1)
             .map_or(true, |full_len| self.substreams.len() < full_len));
@@ -345,6 +355,14 @@ impl<T> Yamux<T> {
             },
             _ => unreachable!(),
         }
+    }
+
+    /// Returns `Some` if a [`IncomingDataDetail::GoAway`] event has been generated in the past,
+    /// in which case the code is returned.
+    ///
+    /// If `Some` is returned, it is forbidden to open new outbound substreams.
+    pub fn received_goaway(&self) -> Option<GoAwayErrorCode> {
+        self.received_goaway
     }
 
     /// Returns an iterator to the list of all substream user datas.
@@ -634,9 +652,9 @@ impl<T> Yamux<T> {
                             });
                         }
                         header::DecodedYamuxHeader::GoAway { error_code } => {
-                            // TODO: error if we have received one in the past before?
-                            // TODO: error if the remote then opens new substreams or something?
                             self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
+                            // TODO: error if we have received one in the past before?
+                            self.received_goaway = Some(error_code);
                             return Ok(IncomingDataOutcome {
                                 yamux: self,
                                 bytes_read: total_read,
@@ -1726,7 +1744,9 @@ pub enum IncomingDataDetail {
         /// Substream that has been reset.
         substream_id: SubstreamId,
     },
-    /// Received a "go away" request.
+    /// Received a "go away" request. This means that it is now forbidden to open new outbound
+    /// substreams. It is still allowed to send and receive data on existing substreams, and the
+    /// remote is still allowed to open substreams.
     GoAway(GoAwayErrorCode),
     /// Received a response to a ping that has been sent out earlier.
     // TODO: associate some data with the ping? in case they're answered in a different order?
