@@ -161,11 +161,17 @@ where
 
         // First, update all the internal substreams.
         // This doesn't read data from `read_write`, but can potential write out data.
+        for substream_id in self
+            .inner
+            .yamux
+            .user_datas()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>()
         {
-            let read_bytes_before = read_write.read_bytes;
-            let out = self.update_all(read_write);
-            debug_assert_eq!(read_bytes_before, read_write.read_bytes);
-            if let Some(event) = out {
+            let (_num_read, event) =
+                Self::process_substream(&mut self.inner, substream_id, read_write, &[]);
+            debug_assert_eq!(_num_read, 0);
+            if let Some(event) = event {
                 return Ok((self, Some(event)));
             }
         }
@@ -373,29 +379,6 @@ where
         }
 
         Ok((self, None))
-    }
-
-    /// Updates all the inner substreams. This doesn't read from `read_write`.
-    ///
-    /// Optionally returns an event that happened as a result of writing out data or of the
-    /// passage of time.
-    fn update_all(&mut self, read_write: &mut ReadWrite<TNow>) -> Option<Event<TRqUd, TNotifUd>> {
-        for substream_id in self
-            .inner
-            .yamux
-            .user_datas()
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>()
-        {
-            let (_num_read, event) =
-                Self::process_substream(&mut self.inner, substream_id, read_write, &[]);
-            debug_assert_eq!(_num_read, 0);
-            if let Some(event) = event {
-                return Some(event);
-            }
-        }
-
-        None
     }
 
     /// Advances a single substream.
