@@ -106,9 +106,6 @@ struct Inner<TNow, TRqUd, TNotifUd> {
     /// substream might not be found in [`Inner::yamux`]. When that happens, all outgoing pings
     /// are immediately considered as failed.
     outgoing_pings: yamux::SubstreamId,
-    /// If the API user desires an outgoing ping, but the ping substream is closed, this counter
-    /// is incremented. Ping failed events are later reported as long as it is non-zero.
-    num_ping_failed_events: u32,
     /// When to start the next ping attempt.
     next_ping: TNow,
     /// Source of randomness to generate ping payloads.
@@ -164,11 +161,6 @@ where
         ),
         Error,
     > {
-        if self.inner.num_ping_failed_events != 0 {
-            self.inner.num_ping_failed_events -= 1;
-            return Ok((self, Some(Event::PingOutFailed)));
-        }
-
         // First, update all the internal substreams.
         // This doesn't read data from `read_write`, but can potential write out data.
         for substream_id in self
@@ -188,8 +180,27 @@ where
 
         // Start any outgoing ping if necessary.
         if read_write.now >= self.inner.next_ping {
-            self.queue_ping(read_write.now.clone() + self.inner.ping_timeout);
             self.inner.next_ping = read_write.now.clone() + self.inner.ping_interval;
+
+            // It might be that the remote has reset the ping substream, in which case the out ping
+            // substream no longer exists and we immediately consider the ping as failed.
+            if let Some(substream) = self
+                .inner
+                .yamux
+                .substream_by_id_mut(self.inner.outgoing_pings)
+            {
+                let payload = self
+                    .inner
+                    .ping_payload_randomness
+                    .sample(rand::distributions::Standard);
+                substream
+                    .into_user_data()
+                    .as_mut()
+                    .unwrap()
+                    .queue_ping(&payload, read_write.now.clone() + self.inner.ping_timeout);
+            } else {
+                return Ok((self, Some(Event::PingOutFailed)));
+            }
         }
         read_write.wake_up_after(&self.inner.next_ping);
 
@@ -913,30 +924,6 @@ where
             .unwrap()
             .respond_in_request(response)
     }
-
-    /// Queues an outgoing ping. Must be passed the moment when this ping will be considered as
-    /// failed.
-    fn queue_ping(&mut self, timeout: TNow) {
-        // It might be that the remote has reset the ping substream, in which case the out ping
-        // substream no longer exists and we immediately consider the ping as failed.
-        if let Some(substream) = self
-            .inner
-            .yamux
-            .substream_by_id_mut(self.inner.outgoing_pings)
-        {
-            let payload = self
-                .inner
-                .ping_payload_randomness
-                .sample(rand::distributions::Standard);
-            substream
-                .into_user_data()
-                .as_mut()
-                .unwrap()
-                .queue_ping(&payload, timeout);
-        } else {
-            self.inner.num_ping_failed_events += 1;
-        }
-    }
 }
 
 impl<TNow, TRqUd, TNotifUd> fmt::Debug for SingleStream<TNow, TRqUd, TNotifUd>
@@ -1004,7 +991,6 @@ impl ConnectionPrototype {
         SingleStream {
             encryption: self.encryption,
             inner: Inner {
-                num_ping_failed_events: 0,
                 yamux,
                 current_data_frame: None,
                 outgoing_pings,
