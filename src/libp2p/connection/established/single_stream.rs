@@ -60,6 +60,7 @@ use super::{
 use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
 use core::{
     fmt, iter,
+    num::NonZeroUsize,
     ops::{Add, Sub},
     time::Duration,
 };
@@ -89,6 +90,15 @@ struct Inner<TNow, TRqUd, TNotifUd> {
     /// Also includes, for each substream, a collection of buffers whose data is to be written
     /// out.
     yamux: yamux::Yamux<Option<substream::Substream<TNow, TRqUd, TNotifUd>>>,
+
+    /// If `Some`, contains the substream and number of bytes that [`Inner::yamux`] has already
+    /// processed but haven't been consumed from the buffer of decrypted data in
+    /// [`SingleStream::encryption`] yet.
+    ///
+    /// After yamux indicates that it has just processed a frame of data belonging to a certain
+    /// substream, we set this value to `Some` but leave the data in the buffer. This way, we can
+    /// process the data at a slower pace than yamux.
+    current_data_frame: Option<(yamux::SubstreamId, NonZeroUsize)>,
 
     /// Substream in [`Inner::yamux`] used for outgoing pings.
     ///
@@ -189,6 +199,37 @@ where
                 return Ok((self, Some(event)));
             }
 
+            // If `self.inner.current_data_frame` is `Some`, that means that yamux has already
+            // processed some of the data in the buffer of decrypted data and has determined that
+            // it was data belonging to a certain substream. We now pass over this data again,
+            // but this time update the state machine specific to that substream.
+            if let Some((substream_id, bytes_remaining)) = self.inner.current_data_frame {
+                // It might be that the substream has been closed in `process_substream`.
+                if self.inner.yamux.substream_by_id_mut(substream_id).is_none() {
+                    self.encryption.consume_inbound_data(bytes_remaining.get());
+                    self.inner.current_data_frame = None;
+                    continue;
+                }
+
+                let data = &self.encryption.decoded_inbound_data()[..bytes_remaining.get()];
+
+                let (num_read, event) =
+                    Self::process_substream(&mut self.inner, substream_id, read_write, data);
+
+                if let Some(more_remaining) = NonZeroUsize::new(bytes_remaining.get() - num_read) {
+                    self.inner.current_data_frame = Some((substream_id, more_remaining))
+                } else {
+                    self.inner.current_data_frame = None;
+                }
+
+                // Discard the data from the decrypted data buffer.
+                self.encryption.consume_inbound_data(num_read);
+
+                if let Some(event) = event {
+                    return Ok((self, Some(event)));
+                }
+            }
+
             // Transfer data from `incoming_data` to the internal buffer in `self.encryption`.
             if let Some(incoming_data) = read_write.incoming_buffer.as_mut() {
                 let num_read = self
@@ -202,6 +243,7 @@ where
             }
 
             // Ask the Yamux state machine to decode the buffer present in `self.encryption`.
+            debug_assert!(self.inner.current_data_frame.is_none());
             let yamux_decode = self
                 .inner
                 .yamux
@@ -258,36 +300,16 @@ where
                 }
 
                 Some(yamux::IncomingDataDetail::DataFrame {
-                    mut start_offset,
+                    start_offset,
                     substream_id,
                 }) => {
-                    while start_offset != yamux_decode.bytes_read {
-                        // Data belonging to a substream has been decoded.
-                        let data = &self.encryption.decoded_inbound_data()
-                            [start_offset..yamux_decode.bytes_read];
+                    // Discard the data in `self.encryption` up to where the data frame starts.
+                    self.encryption.consume_inbound_data(start_offset);
 
-                        let (num_read, event) = Self::process_substream(
-                            &mut self.inner,
-                            substream_id,
-                            read_write,
-                            data,
-                        );
-
-                        start_offset += num_read;
-
-                        if let Some(event) = event {
-                            self.inner.pending_events.push_back(event);
-                        }
-
-                        // It might be that the substream has been closed in `process_substream`.
-                        if self.inner.yamux.substream_by_id_mut(substream_id).is_none() {
-                            break;
-                        }
+                    debug_assert!(self.inner.current_data_frame.is_none());
+                    if let Some(len) = NonZeroUsize::new(yamux_decode.bytes_read - start_offset) {
+                        self.inner.current_data_frame = Some((substream_id, len));
                     }
-
-                    // Discard this data in `self.encryption`.
-                    self.encryption
-                        .consume_inbound_data(yamux_decode.bytes_read);
                 }
 
                 Some(yamux::IncomingDataDetail::GoAway(_)) => {
@@ -968,6 +990,7 @@ impl ConnectionPrototype {
             inner: Inner {
                 pending_events: Default::default(),
                 yamux,
+                current_data_frame: None,
                 outgoing_pings,
                 next_ping: config.first_out_ping,
                 ping_payload_randomness: randomness,
