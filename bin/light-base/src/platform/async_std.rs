@@ -210,13 +210,15 @@ impl Platform for AsyncStdTcpWebSocket {
                     }
                 }
 
-                if lock.write_queue.is_empty() {
-                    if let Poll::Ready(Err(_)) = Pin::new(&mut socket).poll_flush(cx) {
-                        // End the task
-                        return Poll::Ready(());
-                    }
-                } else {
-                    loop {
+                loop {
+                    if lock.write_queue.is_empty() {
+                        if let Poll::Ready(Err(_)) = Pin::new(&mut socket).poll_flush(cx) {
+                            // End the task
+                            return Poll::Ready(());
+                        }
+
+                        break;
+                    } else {
                         let write_queue_slices = lock.write_queue.as_slices();
                         if let Poll::Ready(result) = Pin::new(&mut socket).poll_write_vectored(
                             cx,
