@@ -57,7 +57,7 @@ use super::{
     SubstreamId, SubstreamIdInner,
 };
 
-use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use core::{
     fmt, iter,
     num::NonZeroUsize,
@@ -80,10 +80,6 @@ pub struct SingleStream<TNow, TRqUd, TNotifUd> {
 
 /// Extra fields. Segregated in order to solve borrowing questions.
 struct Inner<TNow, TRqUd, TNotifUd> {
-    /// Events that should be yielded from [`SingleStream::read_write`] as soon as possible.
-    // TODO: remove this field; it is necessary because of limitations in the yamux implementation
-    pending_events: VecDeque<Event<TRqUd, TNotifUd>>,
-
     /// State of the various substreams of the connection.
     /// Consists in a collection of substreams, each of which holding a [`substream::Substream`]
     /// object, or `None` if the substream has been reset.
@@ -110,6 +106,9 @@ struct Inner<TNow, TRqUd, TNotifUd> {
     /// substream might not be found in [`Inner::yamux`]. When that happens, all outgoing pings
     /// are immediately considered as failed.
     outgoing_pings: yamux::SubstreamId,
+    /// If the API user desires an outgoing ping, but the ping substream is closed, this counter
+    /// is incremented. Ping failed events are later reported as long as it is non-zero.
+    num_ping_failed_events: u32,
     /// When to start the next ping attempt.
     next_ping: TNow,
     /// Source of randomness to generate ping payloads.
@@ -165,8 +164,9 @@ where
         ),
         Error,
     > {
-        if let Some(event) = self.inner.pending_events.pop_front() {
-            return Ok((self, Some(event)));
+        if self.inner.num_ping_failed_events != 0 {
+            self.inner.num_ping_failed_events -= 1;
+            return Ok((self, Some(Event::PingOutFailed)));
         }
 
         // First, update all the internal substreams.
@@ -195,10 +195,6 @@ where
 
         // Decoding the incoming data.
         loop {
-            if let Some(event) = self.inner.pending_events.pop_front() {
-                return Ok((self, Some(event)));
-            }
-
             // If `self.inner.current_data_frame` is `Some`, that means that yamux has already
             // processed some of the data in the buffer of decrypted data and has determined that
             // it was data belonging to a certain substream. We now pass over this data again,
@@ -306,6 +302,9 @@ where
                     // Discard the data in `self.encryption` up to where the data frame starts.
                     self.encryption.consume_inbound_data(start_offset);
 
+                    // The substream's data isn't immediately processed. Instead, we leave this
+                    // data in the buffer and update our internal state so that it gets processed
+                    // during the next loop.
                     debug_assert!(self.inner.current_data_frame.is_none());
                     if let Some(len) = NonZeroUsize::new(yamux_decode.bytes_read - start_offset) {
                         self.inner.current_data_frame = Some((substream_id, len));
@@ -918,7 +917,7 @@ where
                 .unwrap()
                 .queue_ping(&payload, timeout);
         } else {
-            self.inner.pending_events.push_back(Event::PingOutFailed);
+            self.inner.num_ping_failed_events += 1;
         }
     }
 }
@@ -988,7 +987,7 @@ impl ConnectionPrototype {
         SingleStream {
             encryption: self.encryption,
             inner: Inner {
-                pending_events: Default::default(),
+                num_ping_failed_events: 0,
                 yamux,
                 current_data_frame: None,
                 outgoing_pings,
