@@ -295,6 +295,8 @@ where
             };
         }
 
+        // Substreams that have been closed or reset aren't immediately removed the yamux state
+        // machine. They must be removed manually, which is what is done here.
         while let Some((dead_substream_id, death_ty, state_machine)) =
             self.inner.yamux.next_dead_substream()
         {
@@ -336,16 +338,20 @@ where
         // The yamux state machine contains the data that needs to be written out.
         // Try to flush it.
         loop {
-            let bytes_out = self
+            // Calculate number of bytes that we can extract from yamux. This is similar but not
+            // exactly the same as the size of the outgoing buffer, as noise adds some headers to
+            // the data.
+            let unencrypted_bytes_to_extract = self
                 .encryption
                 .encrypt_size_conv(read_write.outgoing_buffer_available());
-            if bytes_out == 0 {
+            if unencrypted_bytes_to_extract == 0 {
                 break;
             }
 
+            // Extract outgoing data that is buffered within yamux.
             // TODO: don't allocate an intermediary buffer, but instead pass them directly to the encryption
             let mut buffers = Vec::with_capacity(32);
-            let mut extract_out = self.inner.yamux.extract_out(bytes_out);
+            let mut extract_out = self.inner.yamux.extract_out(unencrypted_bytes_to_extract);
             while let Some(buffer) = extract_out.next() {
                 buffers.push(buffer.as_ref().to_vec()); // TODO: copy
             }
@@ -354,6 +360,7 @@ where
                 break;
             }
 
+            // Pass the data to the encryption layer.
             let (_read, written) = self.encryption.encrypt(
                 buffers.into_iter(),
                 match read_write.outgoing_buffer.as_mut() {
@@ -361,7 +368,7 @@ where
                     None => (&mut [], &mut []),
                 },
             );
-            debug_assert!(_read <= bytes_out);
+            debug_assert!(_read <= unencrypted_bytes_to_extract);
             read_write.advance_write(written);
         }
 
