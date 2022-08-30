@@ -46,8 +46,7 @@ use smoldot::{
         connection,
         multiaddr::{Multiaddr, ProtocolRef},
         peer_id::{self, PeerId},
-        peers,
-        websocket::websocket_client_handshake,
+        peers, websocket,
     },
     network::{protocol, service},
 };
@@ -1412,35 +1411,38 @@ fn multiaddr_to_socket(
     // TODO: doesn't support WebSocket secure connections
 
     // Ensure ahead of time that the multiaddress is supported.
-    let (addr, is_websocket) = match (&proto1, &proto2, &proto3) {
+    let (addr, host_if_websocket) = match (&proto1, &proto2, &proto3) {
         (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), None) => (
             either::Left(SocketAddr::new(IpAddr::V4((*ip).into()), *port)),
-            false,
+            None,
         ),
         (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), None) => (
             either::Left(SocketAddr::new(IpAddr::V6((*ip).into()), *port)),
-            false,
+            None,
         ),
-        (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => (
-            either::Left(SocketAddr::new(IpAddr::V4((*ip).into()), *port)),
-            true,
-        ),
-        (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => (
-            either::Left(SocketAddr::new(IpAddr::V6((*ip).into()), *port)),
-            true,
-        ),
+        (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => {
+            let addr = SocketAddr::new(IpAddr::V4((*ip).into()), *port);
+            (either::Left(addr), Some(addr.to_string()))
+        }
+        (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => {
+            let addr = SocketAddr::new(IpAddr::V6((*ip).into()), *port);
+            (either::Left(addr), Some(addr.to_string()))
+        }
 
         // TODO: we don't care about the differences between Dns, Dns4, and Dns6
         (
             ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
             ProtocolRef::Tcp(port),
             None,
-        ) => (either::Right((addr.to_string(), *port)), false),
+        ) => (either::Right((addr.to_string(), *port)), None),
         (
             ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
             ProtocolRef::Tcp(port),
             Some(ProtocolRef::Ws),
-        ) => (either::Right((addr.to_string(), *port)), true),
+        ) => (
+            either::Right((addr.to_string(), *port)),
+            Some(format!("{}:{}", addr, *port)),
+        ),
 
         _ => return Err(()),
     };
@@ -1464,11 +1466,17 @@ fn multiaddr_to_socket(
             let _ = tcp_socket.set_nodelay(true);
         }
 
-        match (tcp_socket, is_websocket) {
-            (Ok(tcp_socket), true) => websocket_client_handshake(tcp_socket)
+        match (tcp_socket, host_if_websocket) {
+            (Ok(tcp_socket), Some(host)) => {
+                websocket::websocket_client_handshake(websocket::Config {
+                    tcp_socket,
+                    host: &host,
+                    url: "/",
+                })
                 .await
-                .map(future::Either::Right),
-            (Ok(tcp_socket), false) => Ok(future::Either::Left(tcp_socket)),
+                .map(future::Either::Right)
+            }
+            (Ok(tcp_socket), None) => Ok(future::Either::Left(tcp_socket)),
             (Err(err), _) => Err(err),
         }
     })
