@@ -192,14 +192,15 @@ impl Platform for AsyncStdTcpWebSocket {
                 loop {
                     match Pin::new(&mut read_data_tx).poll_ready(cx) {
                         Poll::Ready(Ok(())) => {
-                            if let Poll::Ready(result) =
-                                Pin::new(&mut socket).poll_read(cx, &mut read_buffer)
-                            {
-                                match result {
-                                    Ok(0) | Err(_) => return Poll::Ready(()), // End the task
-                                    Ok(bytes) => {
-                                        let _ =
-                                            read_data_tx.try_send(read_buffer[..bytes].to_vec());
+                            match Pin::new(&mut socket).poll_read(cx, &mut read_buffer) {
+                                Poll::Pending => break,
+                                Poll::Ready(result) => {
+                                    match result {
+                                        Ok(0) | Err(_) => return Poll::Ready(()), // End the task
+                                        Ok(bytes) => {
+                                            let _ = read_data_tx
+                                                .try_send(read_buffer[..bytes].to_vec());
+                                        }
                                     }
                                 }
                             }
