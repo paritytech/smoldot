@@ -176,7 +176,7 @@ where
             }
         }
 
-        // Start any outgoing peer if necessary.
+        // Start any outgoing ping if necessary.
         if read_write.now >= self.inner.next_ping {
             self.queue_ping(read_write.now.clone() + self.inner.ping_timeout);
             self.inner.next_ping = read_write.now.clone() + self.inner.ping_interval;
