@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix parachain initialization unnecessarily waiting for its corresponding relay chain initialization to be finished.
+
 ## 0.6.31 - 2022-08-30
 
 ### Changed
