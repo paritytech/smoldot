@@ -260,16 +260,16 @@ impl Platform for AsyncStdTcpWebSocket {
         })
     }
 
-    fn open_out_substream(_: &mut Self::Connection) {
+    fn open_out_substream(c: &mut Self::Connection) {
         // This function can only be called with so-called "multi-stream" connections. We never
         // open such connection.
-        unreachable!()
+        match *c {}
     }
 
-    fn next_substream(_: &mut Self::Connection) -> Self::NextSubstreamFuture {
+    fn next_substream(c: &mut Self::Connection) -> Self::NextSubstreamFuture {
         // This function can only be called with so-called "multi-stream" connections. We never
         // open such connection.
-        unreachable!()
+        match *c {}
     }
 
     fn wait_more_data(stream: &mut Self::Stream) -> Self::StreamDataFuture {
