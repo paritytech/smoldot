@@ -1917,11 +1917,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 finalized_block,
                 ..
             } => {
-                // TODO: this if is a small hack because the sync service currently sends multiple identical finalized notifications
-                if finalized_block.hash == hash_to_finalize {
-                    return;
-                }
-
+                debug_assert_ne!(finalized_block.hash, hash_to_finalize);
                 let node_to_finalize = tree
                     .input_iter_unordered()
                     .find(|block| block.user_data.hash == hash_to_finalize)
