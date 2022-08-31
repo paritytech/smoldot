@@ -591,13 +591,24 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                                                 None
                                                             }
                                                         })
-                                                        .unwrap_or_else(|| header::hash_from_scale_encoded_header(&finalized_parahead));
+                                                        .or_else(|| {
+                                                            let finalized_parahash = header::hash_from_scale_encoded_header(&finalized_parahead);
+                                                            if finalized_parahash != parablock_hash {
+                                                                Some(finalized_parahash)
+                                                            } else {
+                                                                None
+                                                            }
+                                                        });
 
-                                                    entry.insert(super::BlockNotification {
-                                                        is_new_best: relay_block.is_output_best,
-                                                        scale_encoded_header: parablock.clone(),
-                                                        parent_hash,
-                                                    });
+                                                    // `parent_hash` is `None` if the parablock is
+                                                    // the same as the finalized parablock.
+                                                    if let Some(parent_hash) = parent_hash {
+                                                        entry.insert(super::BlockNotification {
+                                                            is_new_best: relay_block.is_output_best,
+                                                            scale_encoded_header: parablock.clone(),
+                                                            parent_hash,
+                                                        });
+                                                    }
                                                 }
                                             }
                                         }
