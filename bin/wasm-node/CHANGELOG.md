@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix occasional panic when connecting to a parachain with forks and/or missed slots.
+
 ## 0.6.31 - 2022-08-30
 
 ### Changed
