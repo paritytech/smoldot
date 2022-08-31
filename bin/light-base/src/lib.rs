@@ -1150,7 +1150,7 @@ async fn start_services<TPlat: platform::Platform>(
     let transactions_service = Arc::new(
         transactions_service::TransactionsService::new(transactions_service::Config {
             log_name,
-            tasks_executor: Box::new({ move |name, fut| spawn_new_task(name, fut) }),
+            tasks_executor: Box::new(move |name, fut| spawn_new_task(name, fut)),
             sync_service: sync_service.clone(),
             runtime_service: runtime_service.clone(),
             network_service: (network_service.clone(), 0),
