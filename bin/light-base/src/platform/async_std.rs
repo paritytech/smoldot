@@ -189,50 +189,64 @@ impl Platform for AsyncStdTcpWebSocket {
             async_std::task::spawn(future::poll_fn(move |cx| {
                 let mut lock = shared.guarded.lock();
 
-                match Pin::new(&mut read_data_tx).poll_ready(cx) {
-                    Poll::Ready(Ok(())) => {
-                        if let Poll::Ready(result) =
-                            Pin::new(&mut socket).poll_read(cx, &mut read_buffer)
-                        {
+                loop {
+                    match Pin::new(&mut read_data_tx).poll_ready(cx) {
+                        Poll::Ready(Ok(())) => {
+                            match Pin::new(&mut socket).poll_read(cx, &mut read_buffer) {
+                                Poll::Pending => break,
+                                Poll::Ready(result) => {
+                                    match result {
+                                        Ok(0) | Err(_) => return Poll::Ready(()), // End the task
+                                        Ok(bytes) => {
+                                            let _ = read_data_tx
+                                                .try_send(read_buffer[..bytes].to_vec());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Poll::Ready(Err(_)) => return Poll::Ready(()), // End the task
+                        Poll::Pending => break,
+                    }
+                }
+
+                loop {
+                    if lock.write_queue.is_empty() {
+                        if let Poll::Ready(Err(_)) = Pin::new(&mut socket).poll_flush(cx) {
+                            // End the task
+                            return Poll::Ready(());
+                        }
+
+                        break;
+                    } else {
+                        let write_queue_slices = lock.write_queue.as_slices();
+                        if let Poll::Ready(result) = Pin::new(&mut socket).poll_write_vectored(
+                            cx,
+                            &[
+                                IoSlice::new(write_queue_slices.0),
+                                IoSlice::new(write_queue_slices.1),
+                            ],
+                        ) {
                             match result {
-                                Ok(0) | Err(_) => return Poll::Ready(()), // End the task
                                 Ok(bytes) => {
-                                    let _ = read_data_tx.try_send(read_buffer[..bytes].to_vec());
+                                    for _ in 0..bytes {
+                                        lock.write_queue.pop_front();
+                                    }
                                 }
+                                Err(_) => return Poll::Ready(()), // End the task
                             }
-                        }
-                    }
-                    Poll::Ready(Err(_)) => return Poll::Ready(()), // End the task
-                    Poll::Pending => {}
-                }
-
-                if lock.write_queue.is_empty() {
-                    if let Poll::Ready(Err(_)) = Pin::new(&mut socket).poll_flush(cx) {
-                        // End the task
-                        return Poll::Ready(());
-                    }
-                } else {
-                    let write_queue_slices = lock.write_queue.as_slices();
-                    if let Poll::Ready(result) = Pin::new(&mut socket).poll_write_vectored(
-                        cx,
-                        &[
-                            IoSlice::new(write_queue_slices.0),
-                            IoSlice::new(write_queue_slices.1),
-                        ],
-                    ) {
-                        match result {
-                            Ok(bytes) => {
-                                for _ in 0..bytes {
-                                    lock.write_queue.pop_front();
-                                }
-                            }
-                            Err(_) => return Poll::Ready(()), // End the task
+                        } else {
+                            break;
                         }
                     }
                 }
 
-                if let Poll::Ready(()) = Pin::new(&mut write_queue_pushed_listener).poll(cx) {
-                    write_queue_pushed_listener = shared.write_queue_pushed.listen();
+                loop {
+                    if let Poll::Ready(()) = Pin::new(&mut write_queue_pushed_listener).poll(cx) {
+                        write_queue_pushed_listener = shared.write_queue_pushed.listen();
+                    } else {
+                        break;
+                    }
                 }
 
                 Poll::Pending

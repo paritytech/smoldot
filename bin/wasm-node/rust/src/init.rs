@@ -173,7 +173,10 @@ pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
         .unwrap();
 
     let client = smoldot_light::Client::new(smoldot_light::ClientConfig {
-        tasks_spawner: new_task_tx.clone(),
+        tasks_spawner: {
+            let new_task_tx = new_task_tx.clone();
+            Box::new(move |name, task| new_task_tx.unbounded_send((name, task)).unwrap())
+        },
         system_name: env!("CARGO_PKG_NAME").into(),
         system_version: env!("CARGO_PKG_VERSION").into(),
     });

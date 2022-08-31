@@ -24,26 +24,7 @@ fn main() {
     // See also <https://docs.rs/log>.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    // The smoldot client will need to spawn tasks that run in the background. In order to do so,
-    // we will need to provide a "tasks spawner" to the client. This block of code initializes
-    // this "tasks spawner".
-    // The tasks sent (by the client) to `tasks_spawner` will be received by `tasks_receiver`.
-    // The `tasks_receiver`.
-    let (tasks_spawner, mut tasks_receiver) = mpsc::unbounded();
-    async_std::task::spawn(async move {
-        let mut all_tasks = stream::FuturesUnordered::new();
-        loop {
-            futures::select! {
-                (_, new_task) = tasks_receiver.select_next_some() => {
-                    all_tasks.push(new_task);
-                },
-                () = all_tasks.select_next_some() => {},
-            }
-        }
-    });
-
-    // Now properly initialize the client. This does nothing except allocate resources.
-    // We pass the "tasks spawner" created above.
+    // Now initialize the client. This does nothing except allocate resources.
     // The `Client` struct requires a generic parameter that provides platform bindings. In this
     // example, we provide `AsyncStdTcpWebSocket`, which are the "plug and play" default platform.
     // Any advance usage, such as embedding a client in WebAssembly, will likely require a custom
@@ -51,7 +32,11 @@ fn main() {
     let mut client = smoldot_light::Client::<
         smoldot_light::platform::async_std::AsyncStdTcpWebSocket,
     >::new(smoldot_light::ClientConfig {
-        tasks_spawner,
+        // The smoldot client will need to spawn tasks that run in the background. In order to do
+        // so, we need to provide a "tasks spawner".
+        tasks_spawner: Box::new(move |_name, task| {
+            async_std::task::spawn(task);
+        }),
         system_name: env!("CARGO_PKG_NAME").into(),
         system_version: env!("CARGO_PKG_VERSION").into(),
     });
