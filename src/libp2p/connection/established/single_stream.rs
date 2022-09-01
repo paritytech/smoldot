@@ -88,12 +88,12 @@ struct Inner<TNow, TRqUd, TNotifUd> {
     yamux: yamux::Yamux<Option<substream::Substream<TNow, TRqUd, TNotifUd>>>,
 
     /// If `Some`, contains the substream and number of bytes that [`Inner::yamux`] has already
-    /// processed but haven't been consumed from the buffer of decrypted data in
+    /// processed but haven't been consumed from the buffer of decoded data in
     /// [`SingleStream::encryption`] yet.
     ///
-    /// After yamux indicates that it has just processed a frame of data belonging to a certain
+    /// After Yamux indicates that it has just processed a frame of data belonging to a certain
     /// substream, we set this value to `Some` but leave the data in the buffer. This way, we can
-    /// process the data at a slower pace than yamux.
+    /// process the data at a slower pace than Yamux.
     current_data_frame: Option<(yamux::SubstreamId, NonZeroUsize)>,
 
     /// Substream in [`Inner::yamux`] used for outgoing pings.
@@ -675,7 +675,7 @@ where
     /// # Panic
     ///
     /// Panic if this function has been called before. It is illegal to call
-    /// [`SingleStream::close_incoming_substreams`] more than one on the same connections.
+    /// [`SingleStream::deny_new_incoming_substreams`] more than one on the same connections.
     ///
     pub fn deny_new_incoming_substreams(&mut self) {
         // TODO: arbitrary yamux error code

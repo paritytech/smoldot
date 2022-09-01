@@ -89,7 +89,7 @@ pub struct Yamux<T> {
     /// A `SipHasher` is used in order to avoid hash collision attacks on substream IDs.
     substreams: hashbrown::HashMap<NonZeroU32, Substream<T>, SipHasherBuild>,
 
-    /// `Some` if a "GoAway" frame has been received in the past.
+    /// `Some` if a `GoAway` frame has been received in the past.
     received_goaway: Option<GoAwayErrorCode>,
 
     /// What kind of data is expected on the socket next.
@@ -98,7 +98,7 @@ pub struct Yamux<T> {
     /// What to write to the socket next.
     outgoing: Outgoing,
 
-    /// Whether to send out a "GoAway" frame.
+    /// Whether to send out a `GoAway` frame.
     outgoing_goaway: OutgoingGoAway,
 
     /// Id of the next outgoing substream to open.
@@ -235,14 +235,14 @@ enum Outgoing {
 }
 
 enum OutgoingGoAway {
-    /// No "GoAway" frame has been sent or requested. Normal mode of operations.
+    /// No `GoAway` frame has been sent or requested. Normal mode of operations.
     NotRequired,
 
-    /// API user has asked to send a "GoAway" frame. This frame hasn't been queued into
-    /// [`Yamux::Outgoing`] yet.
+    /// API user has asked to send a `GoAway` frame. This frame hasn't been queued into
+    /// [`Yamux::outgoing`] yet.
     Required(GoAwayErrorCode),
 
-    /// A "GoAway" frame has been queued into [`Yamux::Outgoing`] in the past. It has been
+    /// A `GoAway` frame has been queued into [`Yamux::outgoing`] in the past. It has been
     /// possibly sent out, but this isn't tracked by this enum.
     QueuedOrSent,
 }
@@ -323,7 +323,7 @@ impl<T> Yamux<T> {
     /// checked by calling [`Yamux::received_goaway`].
     ///
     pub fn open_substream(&mut self, user_data: T) -> SubstreamMut<T> {
-        // It is forbidden to open new substreams if a "GoAway" frame has been received.
+        // It is forbidden to open new substreams if a `GoAway` frame has been received.
         assert!(self.received_goaway.is_none());
 
         // Make sure that the `loop` below can finish.
@@ -438,13 +438,13 @@ impl<T> Yamux<T> {
 
     /// Returns `true` if [`Yamux::send_goaway`] has been called in the past.
     ///
-    /// In other words, returns `true` if a "GoAway" frame has been either queued for sending
+    /// In other words, returns `true` if a `GoAway` frame has been either queued for sending
     /// (and is available through [`Yamux::extract_out`]) or has already been sent out.
     pub fn goaway_queued_or_sent(&self) -> bool {
         !matches!(self.outgoing_goaway, OutgoingGoAway::NotRequired)
     }
 
-    /// Queues a "GoAway" frame, requesting the remote to no longer open any substream.
+    /// Queues a `GoAway` frame, requesting the remote to no longer open any substream.
     ///
     /// If the state of [`Yamux`] is currently waiting for a confirmation to accept/reject a
     /// substream, then this function automatically implies calling
@@ -1705,7 +1705,7 @@ impl<'a, T> ExtractOut<'a, T> {
                 }
 
                 Outgoing::Idle => {
-                    // Send a "GoAway" frame if demanded.
+                    // Send a `GoAway` frame if demanded.
                     if let OutgoingGoAway::Required(code) = self.yamux.outgoing_goaway {
                         let mut header = arrayvec::ArrayVec::new();
                         header.push(0);
@@ -1933,8 +1933,9 @@ pub enum IncomingDataDetail {
     GoAway {
         /// Error code sent by the remote.
         code: GoAwayErrorCode,
-        /// List of all outgoing substreams that haven't been ACK'ed by the remote yet. These
-        /// substreams are considered as reset, similar to [`IncomingDataDetail::StreamReset`].
+        /// List of all outgoing substreams that haven't been acknowledged by the remote yet.
+        /// These substreams are considered as reset, similar to
+        /// [`IncomingDataDetail::StreamReset`].
         reset_substreams: Vec<SubstreamId>,
     },
 
