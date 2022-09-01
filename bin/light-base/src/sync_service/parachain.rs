@@ -644,22 +644,58 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                 let _ = send_back.send(super::SubscribeAll {
                                     finalized_block_scale_encoded_header: finalized_parahead.clone(),
                                     finalized_block_runtime: None,
-                                    non_finalized_blocks_ancestry_order: async_tree.input_iter_unordered().filter_map(|block| {
-                                        // `async_op_user_data` is `Some` only if this block has
-                                        // already been reported on the output. In order to
-                                        // maintain consistency, only these blocks should be
-                                        // reported.
-                                        let parahead = block.async_op_user_data?.as_ref().unwrap();
-                                        let parent_hash = async_tree.parent(block.id)
-                                            .map(|idx| header::hash_from_scale_encoded_header(&async_tree.block_async_user_data(idx).unwrap().as_ref().unwrap()))
-                                            .unwrap_or_else(|| header::hash_from_scale_encoded_header(&finalized_parahead));
+                                    non_finalized_blocks_ancestry_order: {
+                                        let mut list = HashMap::<_, super::BlockNotification, _>::with_capacity_and_hasher(async_tree.num_input_non_finalized_blocks(), fnv::FnvBuildHasher::default());
 
-                                        Some(super::BlockNotification {
-                                            is_new_best: block.is_output_best,
-                                            scale_encoded_header: parahead.clone(),
-                                            parent_hash,
-                                        })
-                                    }).collect(),
+                                        for relay_block in async_tree.input_iter_unordered() {
+                                            let parablock = match relay_block.async_op_user_data {
+                                                Some(b) => b.as_ref().unwrap(),
+                                                None => continue,
+                                            };
+
+                                            let parablock_hash = header::hash_from_scale_encoded_header(&parablock);
+
+                                            match list.entry(parablock_hash) {
+                                                hashbrown::hash_map::Entry::Occupied(entry) => {
+                                                    if relay_block.is_output_best {
+                                                        entry.into_mut().is_new_best = true;
+                                                    }
+                                                }
+                                                hashbrown::hash_map::Entry::Vacant(entry) => {
+                                                    let parent_hash = async_tree
+                                                        .ancestors(relay_block.id)
+                                                        .find_map(|idx| {
+                                                            let hash = header::hash_from_scale_encoded_header(&async_tree.block_async_user_data(idx).unwrap().as_ref().unwrap());
+                                                            if hash != parablock_hash {
+                                                                Some(hash)
+                                                            } else {
+                                                                None
+                                                            }
+                                                        })
+                                                        .or_else(|| {
+                                                            let finalized_parahash = header::hash_from_scale_encoded_header(&finalized_parahead);
+                                                            if finalized_parahash != parablock_hash {
+                                                                Some(finalized_parahash)
+                                                            } else {
+                                                                None
+                                                            }
+                                                        });
+
+                                                    // `parent_hash` is `None` if the parablock is
+                                                    // the same as the finalized parablock.
+                                                    if let Some(parent_hash) = parent_hash {
+                                                        entry.insert(super::BlockNotification {
+                                                            is_new_best: relay_block.is_output_best,
+                                                            scale_encoded_header: parablock.clone(),
+                                                            parent_hash,
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        list.into_iter().map(|(_, v)| v).collect()
+                                    },
                                     new_blocks,
                                 });
                             } else {
