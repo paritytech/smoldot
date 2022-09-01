@@ -662,6 +662,25 @@ where
         }
     }
 
+    /// Close the incoming substreams, automatically denying any new substream request from the
+    /// remote.
+    ///
+    /// Note that this does not prevent incoming-substreams-related events
+    /// (such as [`Event::RequestIn`]) from being generated, as it is possible that the remote has
+    /// already opened a substream but has no sent all the necessary handshake messages yet.
+    ///
+    /// # Panic
+    ///
+    /// Panic if this function has been called before. It is illegal to call
+    /// [`SingleStream::close_incoming_substreams`] more than one on the same connections.
+    ///
+    pub fn deny_new_incoming_substreams(&mut self) {
+        // TODO: arbitrary yamux error code
+        self.inner
+            .yamux
+            .send_goaway(yamux::GoAwayErrorCode::NormalTermination)
+    }
+
     /// Sends a request to the remote.
     ///
     /// Must pass the index of the protocol within [`Config::request_protocols`].
