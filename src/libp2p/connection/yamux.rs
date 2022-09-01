@@ -136,6 +136,9 @@ enum SubstreamState {
         /// True if a message on this substream has already been sent since it has been opened. The
         /// first message on a substream must contain either a SYN or `ACK` flag.
         first_message_queued: bool,
+        /// True if the remote has sent a message on this substream and has thus acknowledged that
+        /// this substream exists.
+        remote_syn_acked: bool,
         /// Amount of data the remote is allowed to transmit to the local node.
         remote_allowed_window: u64,
         /// If non-zero, a window update frame must be sent to the remote to grant this number of
@@ -361,6 +364,7 @@ impl<T> Yamux<T> {
         entry.insert(Substream {
             state: SubstreamState::Healthy {
                 first_message_queued: false,
+                remote_syn_acked: false,
                 remote_allowed_window: DEFAULT_FRAME_SIZE,
                 remote_window_pending_increase: 0,
                 allowed_window: DEFAULT_FRAME_SIZE,
@@ -442,6 +446,13 @@ impl<T> Yamux<T> {
 
     /// Queues a "GoAway" frame, requesting the remote to no longer open any substream.
     ///
+    /// If the state of [`Yamux`] is currently waiting for a confirmation to accept/reject a
+    /// substream, then this function automatically implies calling
+    /// [`Yamux::reject_pending_substream`].
+    ///
+    /// All follow-up requests for new substreams from the remote are automatically rejected.
+    /// [`IncomingDataDetail::IncomingSubstream`] events can no longer happen.
+    ///
     /// # Panic
     ///
     /// Panics if this function has already been called in the past. This can be verified using
@@ -452,6 +463,27 @@ impl<T> Yamux<T> {
         match self.outgoing_goaway {
             OutgoingGoAway::NotRequired => self.outgoing_goaway = OutgoingGoAway::Required(code),
             _ => panic!("send_goaway called multiple times"),
+        }
+
+        // If the remote is currently opening a substream, automatically reject it.
+        match self.incoming {
+            Incoming::PendingIncomingSubstream {
+                substream_id,
+                data_frame_size,
+                fin,
+                ..
+            } => {
+                self.incoming = if data_frame_size == 0 {
+                    Incoming::Header(arrayvec::ArrayVec::new())
+                } else {
+                    Incoming::DataFrame {
+                        substream_id,
+                        remaining_bytes: data_frame_size,
+                        fin,
+                    }
+                };
+            }
+            _ => {}
         }
     }
 
@@ -703,10 +735,64 @@ impl<T> Yamux<T> {
                             self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                             // TODO: error if we have received one in the past before?
                             self.received_goaway = Some(error_code);
+
+                            let mut reset_substreams = Vec::with_capacity(self.substreams.len());
+                            for (substream_id, substream) in self.substreams.iter_mut() {
+                                if !matches!(
+                                    substream.state,
+                                    SubstreamState::Healthy {
+                                        remote_syn_acked: false,
+                                        ..
+                                    }
+                                ) {
+                                    continue;
+                                }
+
+                                reset_substreams.push(SubstreamId(*substream_id));
+
+                                // We might be currently writing a frame of data of the substream
+                                // being reset. If that happens, we need to update some internal
+                                // state regarding this frame of data.
+                                match (
+                                    &mut self.outgoing,
+                                    mem::replace(&mut substream.state, SubstreamState::Reset),
+                                ) {
+                                    (
+                                        Outgoing::Header {
+                                            substream_data_frame:
+                                                Some((data @ OutgoingSubstreamData::Healthy(_), _)),
+                                            ..
+                                        }
+                                        | Outgoing::SubstreamData {
+                                            data: data @ OutgoingSubstreamData::Healthy(_),
+                                            ..
+                                        },
+                                        SubstreamState::Healthy {
+                                            write_buffers,
+                                            first_write_buffer_offset,
+                                            ..
+                                        },
+                                    ) if *data
+                                        == OutgoingSubstreamData::Healthy(SubstreamId(
+                                            *substream_id,
+                                        )) =>
+                                    {
+                                        *data = OutgoingSubstreamData::Obsolete {
+                                            write_buffers,
+                                            first_write_buffer_offset,
+                                        };
+                                    }
+                                    _ => {}
+                                }
+                            }
+
                             return Ok(IncomingDataOutcome {
                                 yamux: self,
                                 bytes_read: total_read,
-                                detail: Some(IncomingDataDetail::GoAway(error_code)),
+                                detail: Some(IncomingDataDetail::GoAway {
+                                    code: error_code,
+                                    reset_substreams,
+                                }),
                             });
                         }
                         header::DecodedYamuxHeader::Data {
@@ -811,6 +897,24 @@ impl<T> Yamux<T> {
                                 None => {}
                             }
 
+                            let is_data =
+                                matches!(decoded_header, header::DecodedYamuxHeader::Data { .. });
+
+                            // If we have queued or sent a GoAway frame, then the substream is
+                            // automatically rejected.
+                            if !matches!(self.outgoing_goaway, OutgoingGoAway::NotRequired) {
+                                self.incoming = if !is_data || length == 0 {
+                                    Incoming::Header(arrayvec::ArrayVec::new())
+                                } else {
+                                    Incoming::DataFrame {
+                                        substream_id: SubstreamId(stream_id),
+                                        remaining_bytes: length,
+                                        fin,
+                                    }
+                                };
+                                continue;
+                            }
+
                             // As documented, when in the `Incoming::PendingIncomingSubstream`
                             // state, the outgoing state must always be `Outgoing::Idle`, in
                             // order to potentially queue the substream rejection message later.
@@ -820,8 +924,6 @@ impl<T> Yamux<T> {
                                 break;
                             }
 
-                            let is_data =
-                                matches!(decoded_header, header::DecodedYamuxHeader::Data { .. });
                             self.incoming = Incoming::PendingIncomingSubstream {
                                 substream_id: SubstreamId(stream_id),
                                 extra_window: if !is_data { length } else { 0 },
@@ -991,6 +1093,7 @@ impl<T> Yamux<T> {
                     Substream {
                         state: SubstreamState::Healthy {
                             first_message_queued: false,
+                            remote_syn_acked: true,
                             remote_allowed_window: DEFAULT_FRAME_SIZE,
                             remote_window_pending_increase: 0,
                             allowed_window: DEFAULT_FRAME_SIZE + u64::from(extra_window),
@@ -1800,7 +1903,11 @@ pub enum IncomingDataDetail {
     /// [`Yamux::reject_pending_substream`] needs to be called in order to accept or reject
     /// this substream. Calling [`Yamux::incoming_data`] before this is done will lead to a
     /// panic.
+    ///
+    /// Note that this can never happen after [`Yamux::send_goaway`] has been called, as all
+    /// substreams are then automatically rejected.
     IncomingSubstream,
+
     /// Received data corresponding to a substream.
     DataFrame {
         /// Offset in the buffer passed to [`Yamux::incoming_data`] where the data frame
@@ -1809,20 +1916,30 @@ pub enum IncomingDataDetail {
         /// Substream the data belongs to. Guaranteed to be valid.
         substream_id: SubstreamId,
     },
+
     /// Remote has closed its writing side of the substream.
     StreamClosed {
         /// Substream that got closed.
         substream_id: SubstreamId,
     },
+
     /// Remote has asked to reset a substream.
     StreamReset {
         /// Substream that has been reset.
         substream_id: SubstreamId,
     },
+
     /// Received a "go away" request. This means that it is now forbidden to open new outbound
     /// substreams. It is still allowed to send and receive data on existing substreams, and the
     /// remote is still allowed to open substreams.
-    GoAway(GoAwayErrorCode),
+    GoAway {
+        /// Error code sent by the remote.
+        code: GoAwayErrorCode,
+        /// List of all outgoing substreams that haven't been ACK'ed by the remote yet. These
+        /// substreams are considered as reset, similar to [`IncomingDataDetail::StreamReset`].
+        reset_substreams: Vec<SubstreamId>,
+    },
+
     /// Received a response to a ping that has been sent out earlier.
     // TODO: associate some data with the ping? in case they're answered in a different order?
     PingResponse,

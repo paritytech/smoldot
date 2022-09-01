@@ -208,6 +208,23 @@ where
         // substreams, and processing incoming data might lead to more data to emit. The easiest
         // way to implement this is a single loop that does everything.
         loop {
+            // If we have both sent and received a GoAway frame, that means that no new substream
+            // can be opened. If in addition to this there is no substream in the connection,
+            // then we can safely close it as a normal termination.
+            // Note that, because we have no guarantee that the remote has received our GoAway
+            // frame yet, it is possible to receive requests for new substreams even after having
+            // sent the GoAway. Because we close the writing side, it is not possible to indicate
+            // to the remote that these new substreams are denied. However, this is not a problem
+            // as the remote interprets our GoAway frame as an automatic refusal of all its pending
+            // substream requests.
+            // TODO: instead of checking things here, maybe add a function in Yamux that guarantees that we won't need to send out any more data?
+            if self.inner.yamux.is_empty()
+                && self.inner.yamux.goaway_queued_or_sent()
+                && self.inner.yamux.received_goaway().is_some()
+            {
+                read_write.close_write();
+            }
+
             // Any meaningful activity within this loop can set this value to `true`. If this
             // value is still `false` at the end of the loop, we return from the function due to
             // having nothing more to do.
@@ -245,16 +262,20 @@ where
             }
 
             // Transfer data from `incoming_data` to the internal buffer in `self.encryption`.
+            // Note that we treat the reading side being closed the same way as no data being
+            // received. The fact that the remote has closed their writing side is no different
+            // than them leaving their writing side open but no longer send any data at all.
+            // The remote is free to close their writing side at any point if it judges that it
+            // will no longer need to send anymore data.
+            // Note, however, that in principle the remote should have sent a GoAway frame prior
+            // to closing their writing side. But this is not something we check or really care
+            // about.
             if let Some(incoming_data) = read_write.incoming_buffer.as_mut() {
                 let num_read = self
                     .encryption
                     .inject_inbound_data(*incoming_data)
                     .map_err(Error::Noise)?;
                 read_write.advance_read(num_read);
-            } else {
-                // TODO: hack-ish
-                read_write.close_write();
-                return Ok((self, None));
             }
 
             // Ask the Yamux state machine to decode the buffer present in `self.encryption`.
@@ -283,6 +304,8 @@ where
                 }
 
                 Some(yamux::IncomingDataDetail::IncomingSubstream) => {
+                    debug_assert!(!self.inner.yamux.goaway_queued_or_sent());
+
                     // Receive a request from the remote for a new incoming substream.
                     // These requests are automatically accepted.
                     // TODO: add a limit to the number of substreams
@@ -335,7 +358,7 @@ where
                     }
                 }
 
-                Some(yamux::IncomingDataDetail::GoAway(_)) => {
+                Some(yamux::IncomingDataDetail::GoAway { .. }) => {
                     // TODO: somehow report the GoAway error code on the external API?
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
