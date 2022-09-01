@@ -204,8 +204,15 @@ where
         }
         read_write.wake_up_after(&self.inner.next_ping);
 
-        // Decoding the incoming data.
+        // Processing incoming data might be blocked on emitting data or on removing dead
+        // substreams, and processing incoming data might lead to more data to emit. The easiest
+        // way to implement this is a single loop that does everything.
         loop {
+            // Any meaningful activity within this loop can set this value to `true`. If this
+            // value is still `false` at the end of the loop, we return from the function due to
+            // having nothing more to do.
+            let mut must_continue_looping = false;
+
             // If `self.inner.current_data_frame` is `Some`, that means that yamux has already
             // processed some of the data in the buffer of decrypted data and has determined that
             // it was data belonging to a certain substream. We now pass over this data again,
@@ -245,6 +252,7 @@ where
                     .map_err(Error::Noise)?;
                 read_write.advance_read(num_read);
             } else {
+                // TODO: hack-ish
                 read_write.close_write();
                 return Ok((self, None));
             }
@@ -258,12 +266,17 @@ where
                 .map_err(Error::Yamux)?;
             self.inner.yamux = yamux_decode.yamux;
 
-            // TODO: it is possible that the yamux reading is blocked on writing
+            // If bytes_read is 0 and detail is None, then Yamux can't do anything more. On the
+            // other hand, if bytes_read is != 0 or detail is Some, then Yamux might have more
+            // things to do, and we must loop again.
+            if !(yamux_decode.bytes_read == 0 && yamux_decode.detail.is_none()) {
+                must_continue_looping = true;
+            }
 
             // Analyze how Yamux has parsed the data.
             // This still contains references to the data in `self.encryption`.
             match yamux_decode.detail {
-                None if yamux_decode.bytes_read == 0 => break,
+                None if yamux_decode.bytes_read == 0 => {}
                 None => {
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
@@ -334,86 +347,92 @@ where
                     unreachable!()
                 }
             };
-        }
 
-        // Substreams that have been closed or reset aren't immediately removed the yamux state
-        // machine. They must be removed manually, which is what is done here.
-        while let Some((dead_substream_id, death_ty, state_machine)) =
-            self.inner.yamux.next_dead_substream()
-        {
-            let state_machine = match state_machine {
-                Some(s) => s,
-                None => continue,
-            };
+            // Substreams that have been closed or reset aren't immediately removed the yamux state
+            // machine. They must be removed manually, which is what is done here.
+            while let Some((dead_substream_id, death_ty, state_machine)) =
+                self.inner.yamux.next_dead_substream()
+            {
+                // Removing a dead substream might lead to Yamux being able to process more
+                // incoming data. As such, we loop again.
+                must_continue_looping = true;
 
-            match death_ty {
-                yamux::DeadSubstreamTy::Reset => {
-                    if let Some(event) = state_machine.reset() {
-                        return Ok((
-                            self,
-                            Some(Self::pass_through_substream_event(dead_substream_id, event)),
-                        ));
+                let state_machine = match state_machine {
+                    Some(s) => s,
+                    None => continue,
+                };
+
+                match death_ty {
+                    yamux::DeadSubstreamTy::Reset => {
+                        if let Some(event) = state_machine.reset() {
+                            return Ok((
+                                self,
+                                Some(Self::pass_through_substream_event(dead_substream_id, event)),
+                            ));
+                        }
                     }
-                }
-                yamux::DeadSubstreamTy::ClosedGracefully => {
-                    let mut substream_read_write = ReadWrite {
-                        now: read_write.now.clone(),
-                        incoming_buffer: None,
-                        outgoing_buffer: None,
-                        read_bytes: 0,
-                        written_bytes: 0,
-                        wake_up_after: None,
-                    };
+                    yamux::DeadSubstreamTy::ClosedGracefully => {
+                        let mut substream_read_write = ReadWrite {
+                            now: read_write.now.clone(),
+                            incoming_buffer: None,
+                            outgoing_buffer: None,
+                            read_bytes: 0,
+                            written_bytes: 0,
+                            wake_up_after: None,
+                        };
 
-                    let (_, _event) = state_machine.read_write(&mut substream_read_write);
+                        let (_, _event) = state_machine.read_write(&mut substream_read_write);
 
-                    if let Some(wake_up_after) = substream_read_write.wake_up_after {
-                        read_write.wake_up_after(&wake_up_after);
+                        if let Some(wake_up_after) = substream_read_write.wake_up_after {
+                            read_write.wake_up_after(&wake_up_after);
+                        }
+
+                        // TODO: finish here
                     }
-
-                    // TODO: finish here
                 }
             }
-        }
 
-        // The yamux state machine contains the data that needs to be written out.
-        // Try to flush it.
-        loop {
+            // The yamux state machine contains the data that needs to be written out.
+            // Try to flush it.
+
             // Calculate number of bytes that we can extract from yamux. This is similar but not
             // exactly the same as the size of the outgoing buffer, as noise adds some headers to
             // the data.
             let unencrypted_bytes_to_extract = self
                 .encryption
                 .encrypt_size_conv(read_write.outgoing_buffer_available());
-            if unencrypted_bytes_to_extract == 0 {
-                break;
+
+            if unencrypted_bytes_to_extract != 0 {
+                // Extract outgoing data that is buffered within yamux.
+                // TODO: don't allocate an intermediary buffer, but instead pass them directly to the encryption
+                let mut buffers = Vec::with_capacity(32);
+                let mut extract_out = self.inner.yamux.extract_out(unencrypted_bytes_to_extract);
+                while let Some(buffer) = extract_out.next() {
+                    buffers.push(buffer.as_ref().to_vec()); // TODO: copy
+                }
+
+                if !buffers.is_empty() {
+                    must_continue_looping = true;
+
+                    // Pass the data to the encryption layer.
+                    let (_read, written) = self.encryption.encrypt(
+                        buffers.into_iter(),
+                        match read_write.outgoing_buffer.as_mut() {
+                            Some((a, b)) => (a, b),
+                            None => (&mut [], &mut []),
+                        },
+                    );
+                    debug_assert!(_read <= unencrypted_bytes_to_extract);
+                    read_write.advance_write(written);
+                }
             }
 
-            // Extract outgoing data that is buffered within yamux.
-            // TODO: don't allocate an intermediary buffer, but instead pass them directly to the encryption
-            let mut buffers = Vec::with_capacity(32);
-            let mut extract_out = self.inner.yamux.extract_out(unencrypted_bytes_to_extract);
-            while let Some(buffer) = extract_out.next() {
-                buffers.push(buffer.as_ref().to_vec()); // TODO: copy
+            // If `must_continue_looping` is still false, then we didn't do anything meaningful
+            // during this iteration. Return due to idleness.
+            if !must_continue_looping {
+                return Ok((self, None));
             }
-
-            if buffers.is_empty() {
-                break;
-            }
-
-            // Pass the data to the encryption layer.
-            let (_read, written) = self.encryption.encrypt(
-                buffers.into_iter(),
-                match read_write.outgoing_buffer.as_mut() {
-                    Some((a, b)) => (a, b),
-                    None => (&mut [], &mut []),
-                },
-            );
-            debug_assert!(_read <= unencrypted_bytes_to_extract);
-            read_write.advance_write(written);
         }
-
-        Ok((self, None))
     }
 
     /// Advances a single substream.
