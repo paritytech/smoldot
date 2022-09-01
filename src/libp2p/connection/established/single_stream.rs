@@ -258,6 +258,10 @@ where
                 if let Some(event) = event {
                     return Ok((self, Some(event)));
                 }
+
+                // Jump back to the beginning of the loop. We don't want to read more data until
+                // this specific substream's data has been processed.
+                continue;
             }
 
             // Transfer data from `incoming_data` to the internal buffer in `self.encryption`.
