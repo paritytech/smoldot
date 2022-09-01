@@ -1593,8 +1593,6 @@ impl<'a, T> SubstreamMut<'a, T> {
             }
             _ => {}
         }
-
-        // TODO: doesn't write the RST flag
     }
 }
 
