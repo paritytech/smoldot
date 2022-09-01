@@ -19,12 +19,13 @@
 
 use super::{Background, Platform};
 
+use alloc::{format, string::ToString as _, sync::Arc, vec::Vec};
+use core::num::NonZeroUsize;
 use smoldot::{
     header,
     json_rpc::{methods, requests_subscriptions},
     network::protocol,
 };
-use std::{num::NonZeroUsize, str, sync::Arc};
 
 impl<TPlat: Platform> Background<TPlat> {
     /// Handles a call to [`methods::MethodCall::chain_getFinalizedHead`].

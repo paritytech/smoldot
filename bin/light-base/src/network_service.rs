@@ -36,25 +36,28 @@
 //! [`NetworkService::new`]. These channels inform the foreground about updates to the network
 //! connectivity.
 
-use crate::{Platform, PlatformConnection, PlatformSubstreamDirection};
+use crate::platform::{Platform, PlatformConnection, PlatformSubstreamDirection};
 
-use core::{cmp, iter, num::NonZeroUsize, task::Poll, time::Duration};
+use alloc::{
+    boxed::Box,
+    string::{String, ToString as _},
+    sync::Arc,
+    vec,
+    vec::Vec,
+};
+use core::{cmp, iter, num::NonZeroUsize, pin::Pin, task::Poll, time::Duration};
 use futures::{
     channel::{mpsc, oneshot},
     lock::Mutex,
     prelude::*,
 };
+use hashbrown::{hash_map, HashMap, HashSet};
 use itertools::Itertools as _;
 use smoldot::{
     header,
     informant::{BytesDisplay, HashDisplay},
     libp2p::{connection, multiaddr::Multiaddr, peer_id::PeerId, peers, read_write::ReadWrite},
     network::{protocol, service},
-};
-use std::{
-    collections::{hash_map, HashMap, HashSet},
-    pin::Pin,
-    sync::Arc,
 };
 
 pub use service::EncodedMerkleProof;

@@ -114,7 +114,7 @@ impl Sub<Instant> for Instant {
 }
 
 lazy_static::lazy_static! {
-    static ref CLIENT: Mutex<Option<init::Client<Vec<future::AbortHandle>, platform::Platform>>> = Mutex::new(None);
+    static ref CLIENT: Mutex<Option<init::Client<platform::Platform, Vec<future::AbortHandle>>>> = Mutex::new(None);
 }
 
 fn init(max_log_level: u32, enable_current_task: u32, cpu_rate_limit: u32) {
@@ -194,7 +194,7 @@ fn add_chain(
         raw_data
             .chunks(4)
             .map(|c| u32::from_le_bytes(<[u8; 4]>::try_from(c).unwrap()))
-            .map(smoldot_light_base::ChainId::from)
+            .map(smoldot_light::ChainId::from)
             .collect()
     };
 
@@ -218,18 +218,17 @@ fn add_chain(
     };
 
     // Insert the chain in the client.
-    let chain_id =
-        client_lock
-            .as_mut()
-            .unwrap()
-            .smoldot
-            .add_chain(smoldot_light_base::AddChainConfig {
-                user_data: abort_handle.into_iter().collect(),
-                specification: str::from_utf8(&chain_spec).unwrap(),
-                database_content: str::from_utf8(&database_content).unwrap(),
-                json_rpc_responses,
-                potential_relay_chains: potential_relay_chains.into_iter(),
-            });
+    let chain_id = client_lock
+        .as_mut()
+        .unwrap()
+        .smoldot
+        .add_chain(smoldot_light::AddChainConfig {
+            user_data: abort_handle.into_iter().collect(),
+            specification: str::from_utf8(&chain_spec).unwrap(),
+            database_content: str::from_utf8(&database_content).unwrap(),
+            json_rpc_responses,
+            potential_relay_chains: potential_relay_chains.into_iter(),
+        });
 
     // Spawn the task if necessary.
     // See explanations above.
@@ -263,7 +262,7 @@ fn remove_chain(chain_id: u32) {
         .as_mut()
         .unwrap()
         .smoldot
-        .remove_chain(smoldot_light_base::ChainId::from(chain_id));
+        .remove_chain(smoldot_light::ChainId::from(chain_id));
 
     // Abort the tasks that retrieve the database content or poll the channel and send out the
     // JSON-RPC responses. This prevents any database callback from being called, and any new
@@ -283,7 +282,7 @@ fn chain_is_ok(chain_id: u32) -> u32 {
         .as_mut()
         .unwrap()
         .smoldot
-        .chain_is_erroneous(smoldot_light_base::ChainId::from(chain_id))
+        .chain_is_erroneous(smoldot_light::ChainId::from(chain_id))
         .is_some()
     {
         0
@@ -298,7 +297,7 @@ fn chain_error_len(chain_id: u32) -> u32 {
         .as_mut()
         .unwrap()
         .smoldot
-        .chain_is_erroneous(smoldot_light_base::ChainId::from(chain_id))
+        .chain_is_erroneous(smoldot_light::ChainId::from(chain_id))
         .map(|msg| msg.as_bytes().len())
         .unwrap_or(0);
     u32::try_from(len).unwrap()
@@ -310,14 +309,14 @@ fn chain_error_ptr(chain_id: u32) -> u32 {
         .as_mut()
         .unwrap()
         .smoldot
-        .chain_is_erroneous(smoldot_light_base::ChainId::from(chain_id))
+        .chain_is_erroneous(smoldot_light::ChainId::from(chain_id))
         .map(|msg| msg.as_bytes().as_ptr() as usize)
         .unwrap_or(0);
     u32::try_from(ptr).unwrap()
 }
 
 fn json_rpc_send(ptr: u32, len: u32, chain_id: u32) {
-    let chain_id = smoldot_light_base::ChainId::from(chain_id);
+    let chain_id = smoldot_light::ChainId::from(chain_id);
 
     let json_rpc_request: Box<[u8]> = {
         let ptr = usize::try_from(ptr).unwrap();
@@ -343,7 +342,7 @@ fn json_rpc_send(ptr: u32, len: u32, chain_id: u32) {
 }
 
 fn database_content(chain_id: u32, max_size: u32) {
-    let client_chain_id = smoldot_light_base::ChainId::from(chain_id);
+    let client_chain_id = smoldot_light::ChainId::from(chain_id);
 
     let mut client_lock = CLIENT.lock().unwrap();
     let init::Client {
@@ -381,7 +380,7 @@ fn database_content(chain_id: u32, max_size: u32) {
         .unwrap();
 }
 
-fn emit_json_rpc_response(rpc: &str, chain_id: smoldot_light_base::ChainId) {
+fn emit_json_rpc_response(rpc: &str, chain_id: smoldot_light::ChainId) {
     unsafe {
         bindings::json_rpc_respond(
             u32::try_from(rpc.as_bytes().as_ptr() as usize).unwrap(),

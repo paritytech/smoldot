@@ -17,7 +17,7 @@
 
 use crate::{bindings, timers::Delay};
 
-use smoldot_light_base::{ConnectError, PlatformSubstreamDirection};
+use smoldot_light::platform::{ConnectError, PlatformSubstreamDirection};
 
 use core::{cmp, mem, slice, str, time::Duration};
 use futures::prelude::*;
@@ -38,7 +38,7 @@ pub static TOTAL_BYTES_SENT: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) struct Platform;
 
-impl smoldot_light_base::Platform for Platform {
+impl smoldot_light::platform::Platform for Platform {
     type Delay = Delay;
     type Instant = crate::Instant;
     type Connection = ConnectionWrapper; // Entry in the ̀`CONNECTIONS` map.
@@ -46,14 +46,17 @@ impl smoldot_light_base::Platform for Platform {
     type ConnectFuture = future::BoxFuture<
         'static,
         Result<
-            smoldot_light_base::PlatformConnection<Self::Stream, Self::Connection>,
+            smoldot_light::platform::PlatformConnection<Self::Stream, Self::Connection>,
             ConnectError,
         >,
     >;
     type StreamDataFuture = future::BoxFuture<'static, ()>;
     type NextSubstreamFuture = future::BoxFuture<
         'static,
-        Option<(Self::Stream, smoldot_light_base::PlatformSubstreamDirection)>,
+        Option<(
+            Self::Stream,
+            smoldot_light::platform::PlatformSubstreamDirection,
+        )>,
     >;
 
     fn now_from_unix_epoch() -> Duration {
@@ -146,7 +149,7 @@ impl smoldot_light_base::Platform for Platform {
                         buffer_first_offset: 0,
                     };
 
-                    Ok(smoldot_light_base::PlatformConnection::SingleStream(
+                    Ok(smoldot_light::platform::PlatformConnection::SingleStream(
                         StreamWrapper((connection_id, 0), read_buffer),
                     ))
                 }
@@ -156,7 +159,7 @@ impl smoldot_light_base::Platform for Platform {
                     ..
                 } => {
                     *connection_handles_alive += 1;
-                    Ok(smoldot_light_base::PlatformConnection::MultiStream(
+                    Ok(smoldot_light::platform::PlatformConnection::MultiStream(
                         ConnectionWrapper(connection_id),
                         peer_id.clone(),
                     ))
@@ -458,10 +461,10 @@ enum ConnectionInner {
     SingleStream,
     MultiStream {
         /// Peer id we're connected to.
-        peer_id: smoldot_light_base::PeerId,
+        peer_id: smoldot_light::PeerId,
         /// List of substreams that the host (i.e. JavaScript side) has reported have been opened,
-        /// but that haven't been reported through [`smoldot_light_base::Platform::next_substream`]
-        /// yet.
+        /// but that haven't been reported through
+        /// [`smoldot_light::platform::Platform::next_substream`] yet.
         opened_substreams_to_pick_up: VecDeque<(u32, PlatformSubstreamDirection)>,
         /// Number of objects (connections and streams) in the [`Platform`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
@@ -529,7 +532,7 @@ pub(crate) fn connection_open_multi_stream(connection_id: u32, peer_id_ptr: u32,
                 peer_id_len,
             ))
         };
-        smoldot_light_base::PeerId::from_bytes(bytes.into()).unwrap()
+        smoldot_light::PeerId::from_bytes(bytes.into()).unwrap()
     };
 
     let mut lock = STATE.try_lock().unwrap();

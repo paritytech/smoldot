@@ -31,13 +31,25 @@ use core::{
 
 use std::io;
 
+/// Configuration for [`websocket_client_handshake`].
+pub struct Config<'a, T> {
+    /// Socket to negotiate WebSocket on top of.
+    pub tcp_socket: T,
+
+    /// Values to pass for the `Host` HTTP header. Example values include `example.com:1234` or
+    /// `127.0.0.1:3337`.
+    pub host: &'a str,
+
+    /// URL to pass to the server during the HTTP handshake. Typically `/`.
+    pub url: &'a str,
+}
+
 /// Negotiates the WebSocket protocol (including the HTTP-like request) on the given socket, and
 /// returns an object that translates reads and writes into WebSocket binary frames.
-pub async fn websocket_client_handshake<T: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
-    tcp_socket: T,
+pub async fn websocket_client_handshake<'a, T: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
+    config: Config<'a, T>,
 ) -> Result<Connection<T>, io::Error> {
-    // TODO: what is the host?
-    let mut client = soketto::handshake::Client::new(tcp_socket, "...", "/");
+    let mut client = soketto::handshake::Client::new(config.tcp_socket, config.host, config.url);
 
     let (sender, receiver) = match client.handshake().await {
         Ok(soketto::handshake::ServerResponse::Accepted { .. }) => client.into_builder().finish(),

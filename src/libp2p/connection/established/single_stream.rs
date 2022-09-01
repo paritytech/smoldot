@@ -243,58 +243,12 @@ where
                         .consume_inbound_data(yamux_decode.bytes_read);
                 }
 
-                Some(yamux::IncomingDataDetail::StreamReset {
-                    substream_id,
-                    user_data: substream_ty,
-                }) => {
+                Some(
+                    yamux::IncomingDataDetail::StreamReset { .. }
+                    | yamux::IncomingDataDetail::StreamClosed { .. },
+                ) => {
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
-                    if let Some(event) = substream_ty.unwrap().reset() {
-                        return Ok((
-                            self,
-                            Some(Self::pass_through_substream_event(substream_id, event)),
-                        ));
-                    }
-                }
-
-                Some(yamux::IncomingDataDetail::StreamClosed {
-                    user_data: state_machine,
-                    ..
-                }) => {
-                    self.encryption
-                        .consume_inbound_data(yamux_decode.bytes_read);
-
-                    let state_machine = match state_machine {
-                        Some(ud) => ud.unwrap(),
-                        None => {
-                            // None here means that only the read side of the substream has been
-                            // closed by the remote. This substream will be processed at the next
-                            // iteration of the loop.
-                            // TODO: actually do this
-                            continue;
-                        }
-                    };
-
-                    // If this is reached, then both sides of the substream have been closed.
-                    // Querying the substream again for events.
-                    // TODO: consider refactoring yamux to keep the substream until removed manually?
-
-                    let mut substream_read_write = ReadWrite {
-                        now: read_write.now.clone(),
-                        incoming_buffer: None,
-                        outgoing_buffer: None,
-                        read_bytes: 0,
-                        written_bytes: 0,
-                        wake_up_after: None,
-                    };
-
-                    let (_, _event) = state_machine.read_write(&mut substream_read_write);
-
-                    if let Some(wake_up_after) = substream_read_write.wake_up_after {
-                        read_write.wake_up_after(&wake_up_after);
-                    }
-
-                    // TODO: finish here
                 }
 
                 Some(yamux::IncomingDataDetail::DataFrame {
@@ -329,7 +283,54 @@ where
                     self.encryption
                         .consume_inbound_data(yamux_decode.bytes_read);
                 }
+
+                Some(yamux::IncomingDataDetail::GoAway(_)) => {
+                    todo!() // TODO: handle properly
+                }
+
+                Some(yamux::IncomingDataDetail::PingResponse) => {
+                    // Can only happen if we send out pings, which we never do.
+                    unreachable!()
+                }
             };
+        }
+
+        while let Some((dead_substream_id, death_ty, state_machine)) =
+            self.inner.yamux.next_dead_substream()
+        {
+            let state_machine = match state_machine {
+                Some(s) => s,
+                None => continue,
+            };
+
+            match death_ty {
+                yamux::DeadSubstreamTy::Reset => {
+                    if let Some(event) = state_machine.reset() {
+                        return Ok((
+                            self,
+                            Some(Self::pass_through_substream_event(dead_substream_id, event)),
+                        ));
+                    }
+                }
+                yamux::DeadSubstreamTy::ClosedGracefully => {
+                    let mut substream_read_write = ReadWrite {
+                        now: read_write.now.clone(),
+                        incoming_buffer: None,
+                        outgoing_buffer: None,
+                        read_bytes: 0,
+                        written_bytes: 0,
+                        wake_up_after: None,
+                    };
+
+                    let (_, _event) = state_machine.read_write(&mut substream_read_write);
+
+                    if let Some(wake_up_after) = substream_read_write.wake_up_after {
+                        read_write.wake_up_after(&wake_up_after);
+                    }
+
+                    // TODO: finish here
+                }
+            }
         }
 
         // The yamux state machine contains the data that needs to be written out.
@@ -342,14 +343,19 @@ where
                 break;
             }
 
-            let mut buffers = self.inner.yamux.extract_out(bytes_out);
-            let mut buffers = buffers.buffers().peekable();
-            if buffers.peek().is_none() {
+            // TODO: don't allocate an intermediary buffer, but instead pass them directly to the encryption
+            let mut buffers = Vec::with_capacity(32);
+            let mut extract_out = self.inner.yamux.extract_out(bytes_out);
+            while let Some(buffer) = extract_out.next() {
+                buffers.push(buffer.as_ref().to_vec()); // TODO: copy
+            }
+
+            if buffers.is_empty() {
                 break;
             }
 
             let (_read, written) = self.encryption.encrypt(
-                buffers,
+                buffers.into_iter(),
                 match read_write.outgoing_buffer.as_mut() {
                     Some((a, b)) => (a, b),
                     None => (&mut [], &mut []),
@@ -411,8 +417,13 @@ where
         loop {
             let mut substream = inner.yamux.substream_by_id_mut(substream_id).unwrap();
 
-            let read_is_closed = substream.is_remote_closed();
-            let write_is_closed = substream.is_closed();
+            let state_machine = match substream.user_data_mut().take() {
+                Some(s) => s,
+                None => break (total_read, None),
+            };
+
+            let read_is_closed = !substream.can_receive();
+            let write_is_closed = !substream.can_send();
 
             let mut substream_read_write = ReadWrite {
                 now: outer_read_write.now.clone(),
@@ -432,11 +443,7 @@ where
                 wake_up_after: None,
             };
 
-            let (substream_update, event) = substream
-                .user_data()
-                .take()
-                .unwrap()
-                .read_write(&mut substream_read_write);
+            let (substream_update, event) = state_machine.read_write(&mut substream_read_write);
 
             total_read += substream_read_write.read_bytes;
             if let Some(wake_up_after) = substream_read_write.wake_up_after {
@@ -455,7 +462,7 @@ where
             }
 
             match substream_update {
-                Some(s) => *substream.user_data() = Some(s),
+                Some(s) => *substream.user_data_mut() = Some(s),
                 None => {
                     // TODO: only reset if not already closed
                     inner

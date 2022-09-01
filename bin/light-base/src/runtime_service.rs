@@ -54,8 +54,23 @@
 //! large, the subscription is force-killed by the [`RuntimeService`].
 //!
 
-use crate::{network_service, sync_service, Platform};
+use crate::{network_service, platform::Platform, sync_service};
 
+use alloc::{
+    boxed::Box,
+    collections::BTreeMap,
+    format,
+    string::{String, ToString as _},
+    sync::{Arc, Weak},
+    vec,
+    vec::Vec,
+};
+use core::{
+    iter, mem,
+    num::{NonZeroU32, NonZeroUsize},
+    pin::Pin,
+    time::Duration,
+};
 use futures::{
     channel::mpsc,
     lock::{Mutex, MutexGuard},
@@ -68,14 +83,6 @@ use smoldot::{
     informant::{BytesDisplay, HashDisplay},
     network::protocol,
     trie::{self, proof_verify},
-};
-use std::{
-    collections::BTreeMap,
-    iter, mem,
-    num::{NonZeroU32, NonZeroUsize},
-    pin::Pin,
-    sync::{Arc, Weak},
-    time::Duration,
 };
 
 /// Configuration for a runtime service.
@@ -1910,11 +1917,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 finalized_block,
                 ..
             } => {
-                // TODO: this if is a small hack because the sync service currently sends multiple identical finalized notifications
-                if finalized_block.hash == hash_to_finalize {
-                    return;
-                }
-
+                debug_assert_ne!(finalized_block.hash, hash_to_finalize);
                 let node_to_finalize = tree
                     .input_iter_unordered()
                     .find(|block| block.user_data.hash == hash_to_finalize)

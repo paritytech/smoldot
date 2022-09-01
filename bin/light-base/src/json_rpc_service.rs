@@ -42,9 +42,26 @@ mod getters;
 mod state_chain;
 mod transactions;
 
-use crate::{network_service, runtime_service, sync_service, transactions_service, Platform};
+use crate::{
+    network_service, platform::Platform, runtime_service, sync_service, transactions_service,
+};
 
+use alloc::{
+    borrow::ToOwned as _,
+    boxed::Box,
+    format,
+    string::{String, ToString as _},
+    sync::Arc,
+    vec::Vec,
+};
+use core::{
+    iter,
+    num::{NonZeroU32, NonZeroUsize},
+    sync::atomic,
+    time::Duration,
+};
 use futures::{channel::mpsc, lock::Mutex, prelude::*};
+use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,
     chain_spec,
@@ -53,14 +70,6 @@ use smoldot::{
     json_rpc::{self, methods, requests_subscriptions},
     libp2p::{multiaddr, PeerId},
     network::protocol,
-};
-use std::{
-    collections::HashMap,
-    iter,
-    num::{NonZeroU32, NonZeroUsize},
-    str,
-    sync::{atomic, Arc},
-    time::Duration,
 };
 
 /// Configuration for [`service`].
