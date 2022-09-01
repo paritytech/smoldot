@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fix parachain initialization unnecessarily waiting for its corresponding relay chain initialization to be finished. ([#2705](https://github.com/paritytech/smoldot/pull/2705))
+- Fix crash when receiving a Yamux GoAway frame. ([#2708](https://github.com/paritytech/smoldot/pull/2708))
 
 ## 0.6.31 - 2022-08-30
 
