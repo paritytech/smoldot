@@ -149,7 +149,6 @@ where
     /// written are both 0, and the returned [`Event`] is `None`.
     ///
     /// If an error is returned, the socket should be entirely shut down.
-    // TODO: in case of error, we're supposed to first send a yamux goaway frame
     // TODO: consider exposing an API more similar to the one of substream::Substream::read_write?
     pub fn read_write(
         mut self,
