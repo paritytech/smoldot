@@ -17,14 +17,13 @@
 
 #![cfg(test)]
 
-use super::{
-    Config, ConfigRequestResponse, ConfigRequestResponseIn, Established, Event, ReadWrite,
-};
+use super::{Config, ConfigRequestResponse, ConfigRequestResponseIn, Event, SingleStream};
+use crate::libp2p::read_write::ReadWrite;
 use std::time::Duration;
 
 struct TwoEstablished {
-    alice: Established<Duration, (), ()>,
-    bob: Established<Duration, (), ()>,
+    alice: SingleStream<Duration, (), ()>,
+    bob: SingleStream<Duration, (), ()>,
     alice_to_bob_buffer: Vec<u8>,
     bob_to_alice_buffer: Vec<u8>,
 
@@ -244,7 +243,7 @@ fn handshake_works() {
             ping_interval: Duration::from_secs(20),
             ping_protocol: "ping".to_owned(),
             ping_timeout: Duration::from_secs(20),
-            randomness_seed: [0; 16],
+            randomness_seed: [0; 32],
         };
 
         perform_handshake(size1, size2, config.clone(), config);
@@ -271,7 +270,7 @@ fn successful_request() {
         ping_interval: Duration::from_secs(20),
         ping_protocol: "ping".to_owned(),
         ping_timeout: Duration::from_secs(20),
-        randomness_seed: [0; 16],
+        randomness_seed: [0; 32],
     };
 
     let mut connections = perform_handshake(256, 256, config.clone(), config);
