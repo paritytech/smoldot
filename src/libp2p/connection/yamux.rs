@@ -272,6 +272,14 @@ impl<T> Yamux<T> {
         }
     }
 
+    /// Returns `true` if there is no substream in the state machine.
+    ///
+    /// > **Note**: After a substream has been closed or reset, it must be removed using
+    /// >           [`Yamux::next_dead_substream`] before this function can return `true`.
+    pub fn is_empty(&self) -> bool {
+        self.substreams.is_empty()
+    }
+
     /// Opens a new substream.
     ///
     /// This method only modifies the state of `self` and reserves an identifier. No message needs
