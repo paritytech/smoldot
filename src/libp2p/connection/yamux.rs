@@ -98,6 +98,9 @@ pub struct Yamux<T> {
     /// What to write to the socket next.
     outgoing: Outgoing,
 
+    /// Whether to send out a "GoAway" frame.
+    outgoing_goaway: OutgoingGoAway,
+
     /// Id of the next outgoing substream to open.
     /// This implementation allocates identifiers linearly. Every time a substream is open, its
     /// value is incremented by two.
@@ -228,6 +231,19 @@ enum Outgoing {
     },
 }
 
+enum OutgoingGoAway {
+    /// No "GoAway" frame has been sent or requested. Normal mode of operations.
+    NotRequired,
+
+    /// API user has asked to send a "GoAway" frame. This frame hasn't been queued into
+    /// [`Yamux::Outgoing`] yet.
+    Required(GoAwayErrorCode),
+
+    /// A "GoAway" frame has been queued into [`Yamux::Outgoing`] in the past. It has been
+    /// possibly sent out, but this isn't tracked by this enum.
+    QueuedOrSent,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OutgoingSubstreamData {
     /// Data is coming from the given substream.
@@ -259,6 +275,7 @@ impl<T> Yamux<T> {
             received_goaway: None,
             incoming: Incoming::Header(arrayvec::ArrayVec::new()),
             outgoing: Outgoing::Idle,
+            outgoing_goaway: OutgoingGoAway::NotRequired,
             next_outbound_substream: if config.is_initiator {
                 NonZeroU32::new(1).unwrap()
             } else {
@@ -413,6 +430,29 @@ impl<T> Yamux<T> {
     /// Queues sending out a ping to the remote.
     pub fn queue_ping(&mut self) {
         self.pings_to_send += 1;
+    }
+
+    /// Returns `true` if [`Yamux::send_goaway`] has been called in the past.
+    ///
+    /// In other words, returns `true` if a "GoAway" frame has been either queued for sending
+    /// (and is available through [`Yamux::extract_out`]) or has already been sent out.
+    pub fn goaway_queued_or_sent(&self) -> bool {
+        !matches!(self.outgoing_goaway, OutgoingGoAway::NotRequired)
+    }
+
+    /// Queues a "GoAway" frame, requesting the remote to no longer open any substream.
+    ///
+    /// # Panic
+    ///
+    /// Panics if this function has already been called in the past. This can be verified using
+    /// [`Yamux::goaway_queued_or_sent`]. It is illegal to call this function more than once on
+    /// the same instance of [`Yamux`].
+    ///
+    pub fn send_goaway(&mut self, code: GoAwayErrorCode) {
+        match self.outgoing_goaway {
+            OutgoingGoAway::NotRequired => self.outgoing_goaway = OutgoingGoAway::Required(code),
+            _ => panic!("send_goaway called multiple times"),
+        }
     }
 
     /// Finds a substream that has been closed or reset, and removes it from this state machine.
@@ -1564,6 +1604,33 @@ impl<'a, T> ExtractOut<'a, T> {
                 }
 
                 Outgoing::Idle => {
+                    // Send a "GoAway" frame if demanded.
+                    if let OutgoingGoAway::Required(code) = self.yamux.outgoing_goaway {
+                        let mut header = arrayvec::ArrayVec::new();
+                        header.push(0);
+                        header.push(3);
+                        header.try_extend_from_slice(&0u16.to_be_bytes()).unwrap();
+                        header.try_extend_from_slice(&0u32.to_be_bytes()).unwrap();
+                        header
+                            .try_extend_from_slice(
+                                &match code {
+                                    GoAwayErrorCode::NormalTermination => 0u32,
+                                    GoAwayErrorCode::ProtocolError => 1u32,
+                                    GoAwayErrorCode::InternalError => 2u32,
+                                }
+                                .to_be_bytes(),
+                            )
+                            .unwrap();
+                        debug_assert_eq!(header.len(), 12);
+
+                        self.yamux.outgoing = Outgoing::Header {
+                            header,
+                            substream_data_frame: None,
+                        };
+                        self.yamux.outgoing_goaway = OutgoingGoAway::QueuedOrSent;
+                        continue;
+                    }
+
                     // Send RST frames.
                     if let Some(substream_id) = self.yamux.rsts_to_send.pop_front() {
                         let mut header = arrayvec::ArrayVec::new();
