@@ -216,9 +216,8 @@ where
             // to the remote that these new substreams are denied. However, this is not a problem
             // as the remote interprets our GoAway frame as an automatic refusal of all its pending
             // substream requests.
-            // TODO: instead of checking things here, maybe add a function in Yamux that guarantees that we won't need to send out any more data?
             if self.inner.yamux.is_empty()
-                && self.inner.yamux.goaway_queued_or_sent()
+                && self.inner.yamux.goaway_sent()
                 && self.inner.yamux.received_goaway().is_some()
             {
                 read_write.close_write();

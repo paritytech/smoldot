@@ -218,6 +218,11 @@ enum Outgoing {
         /// If `Some`, then the header is data frame header and we must then transition the
         /// state to [`Outgoing::SubstreamData`].
         substream_data_frame: Option<(OutgoingSubstreamData, NonZeroUsize)>,
+
+        /// `true` if this header contains a `GoAway` frame. This indicates that
+        /// [`Yamux::outgoing_goaway`] must be transitioned to [`OutgoingGoAway::Sent`] after
+        /// this header has been extracted.
+        is_goaway: bool,
     },
 
     /// Writing out data from a substream.
@@ -242,9 +247,11 @@ enum OutgoingGoAway {
     /// [`Yamux::outgoing`] yet.
     Required(GoAwayErrorCode),
 
-    /// A `GoAway` frame has been queued into [`Yamux::outgoing`] in the past. It has been
-    /// possibly sent out, but this isn't tracked by this enum.
-    QueuedOrSent,
+    /// A `GoAway` frame has been queued into [`Yamux::outgoing`] in the past.
+    Queued,
+
+    /// A `GoAway` frame has been extracted through [`Yamux::extract_out`].
+    Sent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -442,6 +449,12 @@ impl<T> Yamux<T> {
     /// (and is available through [`Yamux::extract_out`]) or has already been sent out.
     pub fn goaway_queued_or_sent(&self) -> bool {
         !matches!(self.outgoing_goaway, OutgoingGoAway::NotRequired)
+    }
+
+    /// Returns `true` if [`Yamux::send_goaway`] has been called in the past and that this
+    /// `GoAway` frame has been extracted through [`Yamux::extract_out`].
+    pub fn goaway_sent(&self) -> bool {
+        matches!(self.outgoing_goaway, OutgoingGoAway::Sent)
     }
 
     /// Queues a `GoAway` frame, requesting the remote to no longer open any substream.
@@ -709,6 +722,7 @@ impl<T> Yamux<T> {
                                     header
                                 },
                                 substream_data_frame: None,
+                                is_goaway: false,
                             };
 
                             self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
@@ -1181,6 +1195,7 @@ impl<T> Yamux<T> {
                 self.outgoing = Outgoing::Header {
                     header,
                     substream_data_frame: None,
+                    is_goaway: false,
                 };
             }
             _ => panic!(),
@@ -1230,6 +1245,7 @@ impl<T> Yamux<T> {
 
         self.outgoing = Outgoing::Header {
             header,
+            is_goaway: false,
             substream_data_frame: if let Some(length) =
                 NonZeroUsize::new(usize::try_from(data_length).unwrap())
             {
@@ -1283,6 +1299,7 @@ impl<T> Yamux<T> {
         self.outgoing = Outgoing::Header {
             header,
             substream_data_frame: None,
+            is_goaway: false,
         };
     }
 
@@ -1308,6 +1325,7 @@ impl<T> Yamux<T> {
         self.outgoing = Outgoing::Header {
             header,
             substream_data_frame: None,
+            is_goaway: false,
         };
     }
 }
@@ -1618,12 +1636,20 @@ impl<'a, T> ExtractOut<'a, T> {
                 Outgoing::Header {
                     ref mut header,
                     ref mut substream_data_frame,
+                    ref is_goaway,
                 } => {
                     // Finish writing the header.
                     debug_assert!(!header.is_empty());
                     if self.size_bytes >= header.len() {
                         self.size_bytes -= header.len();
                         let out = mem::take(header);
+                        if *is_goaway {
+                            debug_assert!(matches!(
+                                self.yamux.outgoing_goaway,
+                                OutgoingGoAway::Queued
+                            ));
+                            self.yamux.outgoing_goaway = OutgoingGoAway::Sent;
+                        }
                         self.yamux.outgoing =
                             if let Some((data, remaining_bytes)) = substream_data_frame.take() {
                                 Outgoing::SubstreamData {
@@ -1727,8 +1753,9 @@ impl<'a, T> ExtractOut<'a, T> {
                         self.yamux.outgoing = Outgoing::Header {
                             header,
                             substream_data_frame: None,
+                            is_goaway: true,
                         };
-                        self.yamux.outgoing_goaway = OutgoingGoAway::QueuedOrSent;
+                        self.yamux.outgoing_goaway = OutgoingGoAway::Queued;
                         continue;
                     }
 
@@ -1747,6 +1774,7 @@ impl<'a, T> ExtractOut<'a, T> {
                         self.yamux.outgoing = Outgoing::Header {
                             header,
                             substream_data_frame: None,
+                            is_goaway: false,
                         };
                         continue;
                     }
