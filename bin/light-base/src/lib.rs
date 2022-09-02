@@ -198,24 +198,21 @@ pub struct Client<TPlat: platform::Platform, TChain = ()> {
     system_version: String,
 }
 
-enum PublicApiChain<TChain> {
-    /// Chain initialization was successful.
-    Ok {
-        /// Opaque user data passed to [`Client::add_chain`].
-        user_data: TChain,
+struct PublicApiChain<TChain> {
+    /// Opaque user data passed to [`Client::add_chain`].
+    user_data: TChain,
 
-        /// Index of the underlying chain found in [`Client::chains_by_key`].
-        key: ChainKey,
+    /// Index of the underlying chain found in [`Client::chains_by_key`].
+    key: ChainKey,
 
-        /// Identifier of the chain found in its chain spec. Equal to the return value of
-        /// [`chain_spec::ChainSpec::id`]. Used in order to match parachains with relay chains.
-        chain_spec_chain_id: String,
+    /// Identifier of the chain found in its chain spec. Equal to the return value of
+    /// [`chain_spec::ChainSpec::id`]. Used in order to match parachains with relay chains.
+    chain_spec_chain_id: String,
 
-        /// Handle that sends requests to the JSON-RPC service that runs in the background.
-        /// Destroying this handle also shuts down the service. `None` iff
-        /// [`AddChainConfig::json_rpc_responses`] was `None` when adding the chain.
-        json_rpc_sender: Option<json_rpc_service::Sender>,
-    },
+    /// Handle that sends requests to the JSON-RPC service that runs in the background.
+    /// Destroying this handle also shuts down the service. `None` iff
+    /// [`AddChainConfig::json_rpc_responses`] was `None` when adding the chain.
+    json_rpc_sender: Option<json_rpc_service::Sender>,
 }
 
 /// Identifies a chain, so that multiple identical chains are de-duplicated.
@@ -423,12 +420,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 .filter(|c| {
                     self.public_api_chains
                         .get(c.0)
-                        .map_or(false, |chain| match chain {
-                            PublicApiChain::Ok {
-                                chain_spec_chain_id,
-                                ..
-                            } => chain_spec_chain_id == relay_chain_id,
-                        })
+                        .map_or(false, |chain| chain.chain_spec_chain_id == relay_chain_id)
                 })
                 .exactly_one();
 
@@ -498,9 +490,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
             genesis_block_hash,
             relay_chain: relay_chain_id.map(|ck| {
                 (
-                    Box::new(match self.public_api_chains.get(ck.0).unwrap() {
-                        PublicApiChain::Ok { key, .. } => key.clone(),
-                    }),
+                    Box::new(self.public_api_chains.get(ck.0).unwrap().key.clone()),
                     chain_spec.relay_chain().unwrap().1,
                 )
             }),
@@ -519,9 +509,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
             relay_chain_id.map(|relay_chain| {
                 let relay_chain = &self
                     .chains_by_key
-                    .get(match self.public_api_chains.get(relay_chain.0).unwrap() {
-                        PublicApiChain::Ok { key, .. } => key,
-                    })
+                    .get(&self.public_api_chains.get(relay_chain.0).unwrap().key)
                     .unwrap();
 
                 let future = match &relay_chain.services {
@@ -802,7 +790,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
         };
 
         // Success!
-        public_api_chains_entry.insert(PublicApiChain::Ok {
+        public_api_chains_entry.insert(PublicApiChain {
             user_data: config.user_data,
             key: new_chain_key,
             chain_spec_chain_id,
@@ -824,24 +812,18 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     pub fn remove_chain(&mut self, id: ChainId) -> TChain {
         let removed_chain = self.public_api_chains.remove(id.0);
 
-        let user_data = match removed_chain {
-            PublicApiChain::Ok { key, user_data, .. } => {
-                let running_chain = self.chains_by_key.get_mut(&key).unwrap();
-                if running_chain.num_references.get() == 1 {
-                    log::info!(target: "smoldot", "Shutting down chain {}", running_chain.log_name);
-                    self.chains_by_key.remove(&key);
-                } else {
-                    running_chain.num_references =
-                        NonZeroU32::new(running_chain.num_references.get() - 1).unwrap();
-                }
-
-                user_data
-            }
-        };
+        let running_chain = self.chains_by_key.get_mut(&removed_chain.key).unwrap();
+        if running_chain.num_references.get() == 1 {
+            log::info!(target: "smoldot", "Shutting down chain {}", running_chain.log_name);
+            self.chains_by_key.remove(&removed_chain.key);
+        } else {
+            running_chain.num_references =
+                NonZeroU32::new(running_chain.num_references.get() - 1).unwrap();
+        }
 
         self.public_api_chains.shrink_to_fit();
 
-        user_data
+        removed_chain.user_data
     }
 
     /// Returns the user data associated to the given chain.
@@ -851,9 +833,11 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     /// Panics if the [`ChainId`] is invalid.
     ///
     pub fn chain_user_data_mut(&mut self, chain_id: ChainId) -> &mut TChain {
-        match self.public_api_chains.get_mut(chain_id.0).unwrap() {
-            PublicApiChain::Ok { user_data, .. } => user_data,
-        }
+        &mut self
+            .public_api_chains
+            .get_mut(chain_id.0)
+            .unwrap()
+            .user_data
     }
 
     /// Enqueues a JSON-RPC request towards the given chain.
@@ -886,11 +870,13 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
         json_rpc_request: String,
         chain_id: ChainId,
     ) -> Result<(), HandleRpcError> {
-        let json_rpc_sender = match self.public_api_chains.get_mut(chain_id.0) {
-            Some(PublicApiChain::Ok {
-                json_rpc_sender: Some(json_rpc_sender),
-                ..
-            }) => json_rpc_sender,
+        let json_rpc_sender = match self
+            .public_api_chains
+            .get_mut(chain_id.0)
+            .unwrap()
+            .json_rpc_sender
+        {
+            Some(ref mut json_rpc_sender) => json_rpc_sender,
             _ => panic!(),
         };
 
@@ -918,16 +904,13 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
         chain_id: ChainId,
         max_size: usize,
     ) -> impl Future<Output = String> {
-        let mut services = match self.public_api_chains.get(chain_id.0) {
-            Some(PublicApiChain::Ok { key, .. }) => {
-                // Clone the services initialization future.
-                match &self.chains_by_key.get(key).unwrap().services {
-                    future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
-                    future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
-                    future::MaybeDone::Gone => unreachable!(),
-                }
-            }
-            _ => panic!(),
+        let key = &self.public_api_chains.get(chain_id.0).unwrap().key;
+
+        // Clone the services initialization future.
+        let mut services = match &self.chains_by_key.get(key).unwrap().services {
+            future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
+            future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
+            future::MaybeDone::Gone => unreachable!(),
         };
 
         async move {
