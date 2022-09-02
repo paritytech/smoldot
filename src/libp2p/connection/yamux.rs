@@ -1044,6 +1044,8 @@ impl<T> Yamux<T> {
                                     });
                                 }
                             }
+
+                            self.incoming = Incoming::Header(arrayvec::ArrayVec::new());
                         }
                     }
                 }
