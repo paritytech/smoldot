@@ -38,6 +38,14 @@ pub(crate) struct Client<TPlat: smoldot_light::platform::Platform, TChain> {
     pub(crate) smoldot: smoldot_light::Client<TPlat, TChain>,
 
     pub(crate) new_tasks_spawner: mpsc::UnboundedSender<(String, future::BoxFuture<'static, ()>)>,
+
+    /// List of all chains that have been added by the user.
+    pub(crate) chains: slab::Slab<Chain>,
+}
+
+pub(crate) enum Chain {
+    Healthy(smoldot_light::ChainId),
+    Erroneous { error: String },
 }
 
 pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
@@ -184,6 +192,7 @@ pub(crate) fn init<TPlat: smoldot_light::platform::Platform, TChain>(
     Client {
         smoldot: client,
         new_tasks_spawner: new_task_tx,
+        chains: slab::Slab::with_capacity(8),
     }
 }
 

@@ -168,20 +168,6 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ChainId(usize);
 
-impl From<u32> for ChainId {
-    fn from(n: u32) -> ChainId {
-        // Assume that we are always on a 32bits or more platform.
-        ChainId(usize::try_from(n).unwrap())
-    }
-}
-
-impl From<ChainId> for u32 {
-    fn from(n: ChainId) -> u32 {
-        // Assume that no `ChainId` above `u32::max_value()` is ever generated.
-        u32::try_from(n.0).unwrap()
-    }
-}
-
 /// Holds a list of chains, connections, and JSON-RPC services.
 pub struct Client<TPlat: platform::Platform, TChain = ()> {
     /// Tasks can be spawned by calling this function. The first parameter is the name of the task
@@ -229,14 +215,6 @@ enum PublicApiChain<TChain> {
         /// Destroying this handle also shuts down the service. `None` iff
         /// [`AddChainConfig::json_rpc_responses`] was `None` when adding the chain.
         json_rpc_sender: Option<json_rpc_service::Sender>,
-    },
-
-    /// Chain initialization has failed.
-    Erroneous {
-        /// Opaque user data passed to [`Client::add_chain`].
-        user_data: TChain,
-        /// Human-readable error message giving the reason for the failure.
-        error: String,
     },
 }
 
@@ -311,26 +289,16 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     }
 
     /// Adds a new chain to the list of chains smoldot tries to synchronize.
-    ///
-    /// This function does not return a `Result`, despite the fact that the chain creation process
-    /// can fail. If the chain creation fails, a chain is added anyway, but it is set to an
-    /// "erroneous" mode.
-    /// Use [`Client::chain_is_erroneous`] to determine whether the chain is in this erroneous
-    /// mode.
-    /// Chain in erroneous mode must be cleaned up using [`Client::remove_chain`].
-    // TODO: this erroneous chain system was added to make it easier to implement the Wasm node; it should eventually be removed
+    // TODO: don't return strings as errors, but something higher level
     pub fn add_chain(
         &mut self,
         config: AddChainConfig<'_, TChain, impl Iterator<Item = ChainId>>,
-    ) -> ChainId {
+    ) -> Result<ChainId, String> {
         // Decode the chain specification.
         let chain_spec = match chain_spec::ChainSpec::from_json_bytes(&config.specification) {
             Ok(cs) => cs,
             Err(err) => {
-                return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
-                    user_data: config.user_data,
-                    error: format!("Failed to decode chain specification: {}", err),
-                }));
+                return Err(format!("Failed to decode chain specification: {}", err));
             }
         };
 
@@ -393,12 +361,8 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
 
                 (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None, _) => {
                     // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
-                    return ChainId(
-                        self.public_api_chains.insert(PublicApiChain::Erroneous {
-                            user_data: config.user_data,
-                            error: "Either a checkpoint or the genesis storage must be provided"
-                                .to_string(),
-                        }),
+                    return Err(
+                        "Either a checkpoint or the genesis storage must be provided".to_string(),
                     );
                 }
 
@@ -419,24 +383,21 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 }
 
                 (Err(err), _, _) => {
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
-                        user_data: config.user_data,
-                        error: format!("Failed to build genesis chain information: {}", err),
-                    }));
+                    return Err(format!(
+                        "Failed to build genesis chain information: {}",
+                        err
+                    ));
                 }
 
                 (Ok(Err(err)), _, _) => {
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
-                        user_data: config.user_data,
-                        error: format!("Invalid genesis chain information: {}", err),
-                    }));
+                    return Err(format!("Invalid genesis chain information: {}", err));
                 }
 
                 (_, Some(Err(err)), _) => {
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
-                        user_data: config.user_data,
-                        error: format!("Invalid checkpoint in chain specification: {}", err),
-                    }));
+                    return Err(format!(
+                        "Invalid checkpoint in chain specification: {}",
+                        err
+                    ));
                 }
 
                 (Ok(Ok(genesis_ci)), Some(Ok(checkpoint)), _) => {
@@ -467,7 +428,6 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                                 chain_spec_chain_id,
                                 ..
                             } => chain_spec_chain_id == relay_chain_id,
-                            _ => false,
                         })
                 })
                 .exactly_one();
@@ -477,17 +437,12 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 Err(mut iter) => {
                     // `iter` here is identical to the iterator above before `exactly_one` is
                     // called. This lets us know what failed.
-                    let error = if iter.next().is_none() {
+                    return Err(if iter.next().is_none() {
                         "Couldn't find any valid relay chain".to_string()
                     } else {
                         debug_assert!(iter.next().is_some());
                         "Multiple valid relay chains found".to_string()
-                    };
-
-                    return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
-                        user_data: config.user_data,
-                        error,
-                    }));
+                    });
                 }
             }
         } else {
@@ -545,7 +500,6 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                 (
                     Box::new(match self.public_api_chains.get(ck.0).unwrap() {
                         PublicApiChain::Ok { key, .. } => key.clone(),
-                        _ => unreachable!(),
                     }),
                     chain_spec.relay_chain().unwrap().1,
                 )
@@ -567,7 +521,6 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
                     .chains_by_key
                     .get(match self.public_api_chains.get(relay_chain.0).unwrap() {
                         PublicApiChain::Ok { key, .. } => key,
-                        _ => unreachable!(),
                     })
                     .unwrap();
 
@@ -855,28 +808,7 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
             chain_spec_chain_id,
             json_rpc_sender,
         });
-        new_chain_id
-    }
-
-    /// Adds a new dummy chain to the list of chains.
-    ///
-    /// The [`Client::chain_is_erroneous`] function for this chain returns `Some` with the given
-    /// error message.
-    pub fn add_erroneous_chain(&mut self, error_message: String, user_data: TChain) -> ChainId {
-        ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
-            user_data,
-            error: error_message,
-        }))
-    }
-
-    /// If [`Client::add_chain`] encountered an error when creating this chain, returns the error
-    /// message corresponding to it.
-    pub fn chain_is_erroneous(&self, id: ChainId) -> Option<&str> {
-        if let Some(PublicApiChain::Erroneous { error, .. }) = self.public_api_chains.get(id.0) {
-            Some(error)
-        } else {
-            None
-        }
+        Ok(new_chain_id)
     }
 
     /// Removes the chain from smoldot. This instantaneously and silently cancels all on-going
@@ -893,7 +825,6 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
         let removed_chain = self.public_api_chains.remove(id.0);
 
         let user_data = match removed_chain {
-            PublicApiChain::Erroneous { user_data, .. } => user_data,
             PublicApiChain::Ok { key, user_data, .. } => {
                 let running_chain = self.chains_by_key.get_mut(&key).unwrap();
                 if running_chain.num_references.get() == 1 {
@@ -922,7 +853,6 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     pub fn chain_user_data_mut(&mut self, chain_id: ChainId) -> &mut TChain {
         match self.public_api_chains.get_mut(chain_id.0).unwrap() {
             PublicApiChain::Ok { user_data, .. } => user_data,
-            PublicApiChain::Erroneous { user_data, .. } => user_data,
         }
     }
 
@@ -940,8 +870,8 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
     ///
     /// # Panic
     ///
-    /// Panics if the [`ChainId`] is invalid, is erroneous, or if
-    /// [`AddChainConfig::json_rpc_responses`] was `None` when adding the chain.
+    /// Panics if the [`ChainId`] is invalid, or if [`AddChainConfig::json_rpc_responses`] was
+    /// `None` when adding the chain.
     ///
     pub fn json_rpc_request(
         &mut self,
