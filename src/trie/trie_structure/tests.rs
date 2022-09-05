@@ -326,6 +326,287 @@ fn insert_branch() {
 }
 
 #[test]
+fn remove_prefix_basic() {
+    let mut trie = TrieStructure::new();
+
+    trie.node([Nibble::try_from(1).unwrap()].iter().cloned())
+        .into_vacant()
+        .unwrap()
+        .insert_storage_value()
+        .insert((), ());
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(4).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(4).unwrap(),
+            Nibble::try_from(5).unwrap(),
+            Nibble::try_from(6).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+
+    trie.remove_prefix(
+        [Nibble::try_from(1).unwrap(), Nibble::try_from(2).unwrap()]
+            .iter()
+            .cloned(),
+    );
+
+    assert_eq!(trie.len(), 1);
+    assert!(trie
+        .node([Nibble::try_from(1).unwrap(),].iter().cloned(),)
+        .into_occupied()
+        .unwrap()
+        .has_storage_value());
+}
+
+#[test]
+fn remove_prefix_clear_all() {
+    let mut trie = TrieStructure::new();
+
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(4).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(4).unwrap(),
+            Nibble::try_from(5).unwrap(),
+            Nibble::try_from(6).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+
+    trie.remove_prefix(
+        [Nibble::try_from(1).unwrap(), Nibble::try_from(2).unwrap()]
+            .iter()
+            .cloned(),
+    );
+
+    assert!(trie.is_empty());
+}
+
+#[test]
+fn remove_prefix_exact() {
+    let mut trie = TrieStructure::new();
+
+    trie.node([Nibble::try_from(1).unwrap()].iter().cloned())
+        .into_vacant()
+        .unwrap()
+        .insert_storage_value()
+        .insert((), ());
+
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+            Nibble::try_from(4).unwrap(),
+            Nibble::try_from(5).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+            Nibble::try_from(4).unwrap(),
+            Nibble::try_from(6).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+
+    trie.remove_prefix(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    );
+
+    assert_eq!(trie.len(), 1);
+    assert!(trie
+        .node([Nibble::try_from(1).unwrap(),].iter().cloned(),)
+        .into_occupied()
+        .unwrap()
+        .has_storage_value());
+}
+
+#[test]
+fn remove_prefix_doesnt_match_anything() {
+    let mut trie = TrieStructure::new();
+
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+
+    trie.remove_prefix(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(5).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    );
+
+    assert_eq!(trie.len(), 1);
+    assert!(trie
+        .node(
+            [
+                Nibble::try_from(1).unwrap(),
+                Nibble::try_from(2).unwrap(),
+                Nibble::try_from(3).unwrap(),
+            ]
+            .iter()
+            .cloned(),
+        )
+        .into_occupied()
+        .unwrap()
+        .has_storage_value());
+}
+
+#[test]
+fn remove_prefix_nothing_to_remove() {
+    let mut trie = TrieStructure::new();
+
+    trie.node(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    )
+    .into_vacant()
+    .unwrap()
+    .insert_storage_value()
+    .insert((), ());
+
+    trie.remove_prefix(
+        [
+            Nibble::try_from(1).unwrap(),
+            Nibble::try_from(2).unwrap(),
+            Nibble::try_from(3).unwrap(),
+            Nibble::try_from(4).unwrap(),
+        ]
+        .iter()
+        .cloned(),
+    );
+
+    assert_eq!(trie.len(), 1);
+    assert!(trie
+        .node(
+            [
+                Nibble::try_from(1).unwrap(),
+                Nibble::try_from(2).unwrap(),
+                Nibble::try_from(3).unwrap(),
+            ]
+            .iter()
+            .cloned(),
+        )
+        .into_occupied()
+        .unwrap()
+        .has_storage_value());
+}
+
+#[test]
 fn fuzzing() {
     fn uniform_sample(min: u8, max: u8) -> u8 {
         Uniform::new_inclusive(min, max).sample(&mut rand::thread_rng())
