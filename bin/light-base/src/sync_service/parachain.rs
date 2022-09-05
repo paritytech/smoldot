@@ -42,16 +42,16 @@ struct ParachainBackgroundTask<TPlat: Platform> {
     /// Events coming from the networking service.
     from_network_service: stream::Fuse<stream::BoxStream<'static, network_service::Event>>,
 
-    // Last-known finalized parachain header. Can be very old and obsolete.
-    // Updated after we successfully fetch the parahead of a relay chain finalized block, and left
-    // untouched if the fetch fails.
-    // Initialized to the parachain genesis block header.
+    /// Last-known finalized parachain header. Can be very old and obsolete.
+    /// Updated after we successfully fetch the parahead of a relay chain finalized block, and left
+    /// untouched if the fetch fails.
+    /// Initialized to the parachain genesis block header.
     obsolete_finalized_parahead: Vec<u8>,
 
-    // State machine that tracks the list of parachain network sources and their known blocks.
+    /// State machine that tracks the list of parachain network sources and their known blocks.
     sync_sources: sources::AllForksSources<(PeerId, protocol::Role)>,
 
-    // Maps `PeerId`s to their indices within `sync_sources`.
+    /// Maps `PeerId`s to their indices within `sync_sources`.
     // TODO: use SipHasher
     sync_sources_map: HashMap<PeerId, sources::SourceId, fnv::FnvBuildHasher>,
 
