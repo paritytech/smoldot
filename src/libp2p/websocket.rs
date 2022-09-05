@@ -215,7 +215,15 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> AsyncWrite for Connecti
                         self.sender = Write::Error(err);
                     }
                 },
-                Write::Closed => return Poll::Ready(Ok(0)), // TODO: is this correct?
+                Write::Closed => {
+                    // It is unclear what to do in the situation where the user tries to write
+                    // to the connection after having closed it. An error seems the most
+                    // appropriate course of action.
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "called poll_write after poll_close has succeeded",
+                    )));
+                }
                 Write::Error(err) => {
                     let out_err = convert_err(&err);
                     self.sender = Write::Error(err);
