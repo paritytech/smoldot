@@ -143,10 +143,11 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         }
     };
 
-    // This function contains two loops within each other. If the relay chain syncing service has
-    // a gap in its blocks, or if the node is overloaded and can't process blocks in time, then
-    // we break out of the inner loop in order to reset everything.
     loop {
+        let runtime_subscription = if let Some(s) = task.runtime_subscription.as_mut() {
+            s
+        } else {
+
         task.runtime_subscription = Some({
             log::debug!(target: &log_target, "Subscriptions <= Reset");
 
@@ -283,10 +284,10 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                 wakeup_deadline: future::Either::Right(future::pending()),
             }
         });
-            
-        let runtime_subscription = task.runtime_subscription.as_mut().unwrap();
 
-        loop {
+        continue;
+    };
+
             // Internal state check.
             debug_assert_eq!(
                 runtime_subscription.reported_best_parahead_hash.is_some(),
@@ -548,7 +549,11 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                 relay_chain_notif = runtime_subscription.relay_chain_subscribe_all.next().fuse() => { // TODO: remove fuse()?
                     let relay_chain_notif = match relay_chain_notif {
                         Some(n) => n,
-                        None => break, // Jumps to the outer loop to recreate the channel.
+                        None => {
+                            // Recreate the channel.
+                            task.runtime_subscription = None;
+                            continue;
+                        },
                     };
 
                     // Update the local tree of blocks to match the update sent by the relay chain
@@ -613,8 +618,9 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         Err(ParaheadError::ObsoleteSubscription) => {
                             // The relay chain runtime service has some kind of gap or issue and
                             // has discarded the runtime.
-                            // Jump to the outer loop to recreate the channel.
-                            break;
+                            // Destroy the subscription to recreate the channel.
+                            task.runtime_subscription = None;
+                            continue;
                         }
                         Err(error) => {
                             // Several chains initially didn't support parachains, and have later
@@ -833,7 +839,6 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     }
                 }
             }
-        }
     }
 }
 
