@@ -739,7 +739,12 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         let mut guarded = self.shared.guarded.lock().await;
 
         // TODO: collecting in a Vec :-/
-        for peer in guarded.network.peers_list().cloned().collect::<Vec<_>>() {
+        for peer in guarded
+            .network
+            .opened_transactions_substream(chain_index)
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             if guarded
                 .network
                 .announce_transaction(&peer, chain_index, transaction)

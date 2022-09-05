@@ -812,6 +812,16 @@ where
         )
     }
 
+    /// Returns the list of peers for which we have a fully established notifications protocol of
+    /// the given protocol.
+    pub fn opened_transactions_substream(
+        &'_ self,
+        chain_index: usize,
+    ) -> impl Iterator<Item = &'_ PeerId> + '_ {
+        self.inner
+            .opened_out_notifications(chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1)
+    }
+
     ///
     ///
     /// Must be passed the SCALE-encoded transaction.
