@@ -37,6 +37,25 @@ use smoldot::{
     sync::{all_forks::sources, para},
 };
 
+/// Task that is running in the background.
+struct ParachainBackgroundTask {
+    /// Events coming from the networking service.
+    from_network_service: stream::Fuse<stream::BoxStream<'static, network_service::Event>>,
+
+    // Last-known finalized parachain header. Can be very old and obsolete.
+    // Updated after we successfully fetch the parahead of a relay chain finalized block, and left
+    // untouched if the fetch fails.
+    // Initialized to the parachain genesis block header.
+    obsolete_finalized_parahead: Vec<u8>,
+
+    // State machine that tracks the list of parachain network sources and their known blocks.
+    sync_sources: sources::AllForksSources<(PeerId, protocol::Role)>,
+
+    // Maps `PeerId`s to their indices within `sync_sources`.
+    // TODO: use SipHasher
+    sync_sources_map: HashMap<PeerId, sources::SourceId, fnv::FnvBuildHasher>,
+}
+
 /// Starts a sync service background task to synchronize a parachain.
 pub(super) async fn start_parachain<TPlat: Platform>(
     log_target: String,
@@ -49,28 +68,24 @@ pub(super) async fn start_parachain<TPlat: Platform>(
     network_chain_index: usize,
     from_network_service: stream::BoxStream<'static, network_service::Event>,
 ) {
-    // Necessary for the `select!` loop below.
-    let mut from_network_service = from_network_service.fuse();
+    let mut task = {
+        let obsolete_finalized_parahead = chain_information
+            .as_ref()
+            .finalized_block_header
+            .scale_encoding_vec(block_number_bytes);
 
-    // Last-known finalized parachain header. Can be very old and obsolete.
-    // Updated after we successfully fetch the parahead of a relay chain finalized block, and left
-    // untouched if the fetch fails.
-    // Initialized to the parachain genesis block header.
-    let mut obsolete_finalized_parahead = chain_information
-        .as_ref()
-        .finalized_block_header
-        .scale_encoding_vec(block_number_bytes);
-
-    // State machine that tracks the list of parachain network sources and their known blocks.
-    let mut sync_sources = sources::AllForksSources::<(PeerId, protocol::Role)>::new(
-        40,
-        header::decode(&obsolete_finalized_parahead, block_number_bytes)
-            .unwrap()
-            .number,
-    );
-    // Maps `PeerId`s to their indices within `sync_sources`.
-    // TODO: use SipHasher
-    let mut sync_sources_map = HashMap::with_capacity_and_hasher(0, fnv::FnvBuildHasher::default());
+        ParachainBackgroundTask {
+            from_network_service: from_network_service.fuse(),
+            sync_sources: sources::AllForksSources::new(
+                40,
+                header::decode(&obsolete_finalized_parahead, block_number_bytes)
+                    .unwrap()
+                    .number,
+            ),
+            obsolete_finalized_parahead,
+            sync_sources_map: HashMap::with_capacity_and_hasher(0, fnv::FnvBuildHasher::default()),
+        }
+    };
 
     // This function contains two loops within each other. If the relay chain syncing service has
     // a gap in its blocks, or if the node is overloaded and can't process blocks in time, then
@@ -139,7 +154,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
                             // No known finalized parahead.
                             let _ = send_back.send(super::SubscribeAll {
-                                finalized_block_scale_encoded_header: obsolete_finalized_parahead.clone(),
+                                finalized_block_scale_encoded_header: task.obsolete_finalized_parahead.clone(),
                                 finalized_block_runtime: None,
                                 non_finalized_blocks_ancestry_order: Vec::new(),
                                 new_blocks,
@@ -152,26 +167,26 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             // knows which block is precisely tracked. Otherwise, it is assumed
                             // that all sources are on the finalized chain and thus that all
                             // sources whose best block is superior to `block_number` have it.
-                            let list = if block_number > sync_sources.finalized_block_height() {
-                                sync_sources.knows_non_finalized_block(block_number, &block_hash)
-                                    .map(|local_id| sync_sources[local_id].0.clone())
+                            let list = if block_number > task.sync_sources.finalized_block_height() {
+                                task.sync_sources.knows_non_finalized_block(block_number, &block_hash)
+                                    .map(|local_id| task.sync_sources[local_id].0.clone())
                                     .collect()
                             } else {
-                                sync_sources
+                                task.sync_sources
                                     .keys()
                                     .filter(|local_id| {
-                                        sync_sources.best_block(*local_id).0 >= block_number
+                                        task.sync_sources.best_block(*local_id).0 >= block_number
                                     })
-                                    .map(|local_id| sync_sources[local_id].0.clone())
+                                    .map(|local_id| task.sync_sources[local_id].0.clone())
                                     .collect()
                             };
 
                             let _ = send_back.send(list);
                         }
                         ToBackground::SyncingPeers { send_back } => {
-                            let _ = send_back.send(sync_sources.keys().map(|local_id| {
-                                let (height, hash) = sync_sources.best_block(local_id);
-                                let (peer_id, role) = sync_sources[local_id].clone();
+                            let _ = send_back.send(task.sync_sources.keys().map(|local_id| {
+                                let (height, hash) = task.sync_sources.best_block(local_id);
+                                let (peer_id, role) = task.sync_sources[local_id].clone();
                                 (peer_id, role, height, *hash)
                             }).collect());
                         }
@@ -315,12 +330,12 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             new_finalized_parahead.as_ref().unwrap(),
                         );
 
-                        obsolete_finalized_parahead = new_finalized_parahead.clone().unwrap();
+                        task.obsolete_finalized_parahead = new_finalized_parahead.clone().unwrap();
 
                         if let Ok(header) =
-                            header::decode(&obsolete_finalized_parahead, block_number_bytes)
+                            header::decode(&task.obsolete_finalized_parahead, block_number_bytes)
                         {
-                            sync_sources.set_finalized_block_height(header.number);
+                            task.sync_sources.set_finalized_block_height(header.number);
                             // TODO: what about an `else`? does sync_sources leak if the block can't be decoded?
                         }
 
@@ -701,7 +716,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             } else {
                                 // No known finalized parahead.
                                 let _ = send_back.send(super::SubscribeAll {
-                                    finalized_block_scale_encoded_header: obsolete_finalized_parahead.clone(),
+                                    finalized_block_scale_encoded_header: task.obsolete_finalized_parahead.clone(),
                                     finalized_block_runtime: None,
                                     non_finalized_blocks_ancestry_order: Vec::new(),
                                     new_blocks,
@@ -715,26 +730,26 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             // knows which block is precisely tracked. Otherwise, it is assumed
                             // that all sources are on the finalized chain and thus that all
                             // sources whose best block is superior to `block_number` have it.
-                            let list = if block_number > sync_sources.finalized_block_height() {
-                                sync_sources.knows_non_finalized_block(block_number, &block_hash)
-                                    .map(|local_id| sync_sources[local_id].0.clone())
+                            let list = if block_number > task.sync_sources.finalized_block_height() {
+                                task.sync_sources.knows_non_finalized_block(block_number, &block_hash)
+                                    .map(|local_id| task.sync_sources[local_id].0.clone())
                                     .collect()
                             } else {
-                                sync_sources
+                                task.sync_sources
                                     .keys()
                                     .filter(|local_id| {
-                                        sync_sources.best_block(*local_id).0 >= block_number
+                                        task.sync_sources.best_block(*local_id).0 >= block_number
                                     })
-                                    .map(|local_id| sync_sources[local_id].0.clone())
+                                    .map(|local_id| task.sync_sources[local_id].0.clone())
                                     .collect()
                             };
 
                             let _ = send_back.send(list);
                         }
                         ToBackground::SyncingPeers { send_back } => {
-                            let _ = send_back.send(sync_sources.keys().map(|local_id| {
-                                let (height, hash) = sync_sources.best_block(local_id);
-                                let (peer_id, role) = sync_sources[local_id].clone();
+                            let _ = send_back.send(task.sync_sources.keys().map(|local_id| {
+                                let (height, hash) = task.sync_sources.best_block(local_id);
+                                let (peer_id, role) = task.sync_sources[local_id].clone();
                                 (peer_id, role, height, *hash)
                             }).collect());
                         }
@@ -744,39 +759,39 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     }
                 },
 
-                network_event = from_network_service.next() => {
+                network_event = task.from_network_service.next() => {
                     // Something happened on the network.
                     // We expect the networking channel to never close, so the event is unwrapped.
                     match network_event.unwrap() {
                         network_service::Event::Connected { peer_id, role, chain_index, best_block_number, best_block_hash }
                             if chain_index == network_chain_index =>
                         {
-                            let local_id = sync_sources.add_source(best_block_number, best_block_hash, (peer_id.clone(), role));
-                            sync_sources_map.insert(peer_id, local_id);
+                            let local_id = task.sync_sources.add_source(best_block_number, best_block_hash, (peer_id.clone(), role));
+                            task.sync_sources_map.insert(peer_id, local_id);
                         },
                         network_service::Event::Disconnected { peer_id, chain_index }
                             if chain_index == network_chain_index =>
                         {
-                            let local_id = sync_sources_map.remove(&peer_id).unwrap();
-                            let (_peer_id, _role) = sync_sources.remove(local_id);
+                            let local_id = task.sync_sources_map.remove(&peer_id).unwrap();
+                            let (_peer_id, _role) = task.sync_sources.remove(local_id);
                             debug_assert_eq!(peer_id, _peer_id);
                         },
                         network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
                             if chain_index == network_chain_index =>
                         {
-                            let local_id = *sync_sources_map.get(&peer_id).unwrap();
+                            let local_id = *task.sync_sources_map.get(&peer_id).unwrap();
                             let decoded = announce.decode();
                             if let Ok(decoded_header) = header::decode(&decoded.scale_encoded_header, block_number_bytes) {
                                 let decoded_header_hash = header::hash_from_scale_encoded_header(
                                     &decoded.scale_encoded_header
                                 );
-                                sync_sources.add_known_block(
+                                task.sync_sources.add_known_block(
                                     local_id,
                                     decoded_header.number,
                                     decoded_header_hash
                                 );
                                 if decoded.is_best {
-                                    sync_sources.add_known_block_and_set_best(
+                                    task.sync_sources.add_known_block_and_set_best(
                                         local_id,
                                         decoded_header.number,
                                         decoded_header_hash
