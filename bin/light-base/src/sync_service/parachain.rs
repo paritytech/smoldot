@@ -178,6 +178,9 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
         // Start fetching paraheads of new blocks whose parahead needs to be fetched.
         self.start_paraheads_fetch();
 
+        // Report to the outside any block in the `async_tree` that is now ready.
+        self.advance_and_report_notifications().await;
+
         let runtime_subscription = match self.subscription_state {
             ParachainBackgroundState::Subscribed(ref mut s) => s,
             ParachainBackgroundState::NotSubscribed { .. } => {
@@ -278,211 +281,6 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 runtime_subscription.reported_best_parahead_hash.is_some(),
                 runtime_subscription.async_tree.finalized_async_user_data().is_some()
             );
-
-            // Report to the outside any block in the `async_tree` that is now ready.
-            while let Some(update) = runtime_subscription.async_tree.try_advance_output() {
-                match update {
-                    async_tree::OutputUpdate::Finalized {
-                        async_op_user_data: new_finalized_parahead,
-                        former_finalized_async_op_user_data: former_finalized_parahead,
-                        pruned_blocks,
-                        ..
-                    } if *new_finalized_parahead != former_finalized_parahead => {
-                        debug_assert!(new_finalized_parahead.is_some());
-
-                        // If this is the first time (in this loop) a finalized parahead is known,
-                        // any `SubscribeAll` message that has been answered beforehand was
-                        // answered in a dummy way with a potentially obsolete finalized header.
-                        // For this reason, we reset all subscriptions to force all subscribers to
-                        // re-subscribe.
-                        if former_finalized_parahead.is_none() {
-                            runtime_subscription.all_subscriptions.clear();
-                        }
-
-                        let hash = header::hash_from_scale_encoded_header(
-                            new_finalized_parahead.as_ref().unwrap(),
-                        );
-
-                        self.obsolete_finalized_parahead = new_finalized_parahead.clone().unwrap();
-
-                        if let Ok(header) =
-                            header::decode(&self.obsolete_finalized_parahead, self.block_number_bytes)
-                        {
-                            self.sync_sources.set_finalized_block_height(header.number);
-                            // TODO: what about an `else`? does sync_sources leak if the block can't be decoded?
-                        }
-
-                        // Must unpin the pruned blocks if they haven't already been unpinned.
-                        for (_, hash, pruned_block_parahead) in pruned_blocks {
-                            if pruned_block_parahead.is_none() {
-                                runtime_subscription.relay_chain_subscribe_all
-                                    .unpin_block(&hash)
-                                    .await;
-                            }
-                        }
-
-                        log::debug!(
-                            target: &self.log_target,
-                            "Subscriptions <= ParablockFinalized(hash={})",
-                            HashDisplay(&hash)
-                        );
-
-                        let best_block_hash = runtime_subscription.async_tree
-                            .best_block_index()
-                            .map(|(_, parahead)| {
-                                header::hash_from_scale_encoded_header(parahead.as_ref().unwrap())
-                            })
-                            .unwrap_or(hash);
-                        runtime_subscription.reported_best_parahead_hash = Some(best_block_hash);
-
-                        // Elements in `all_subscriptions` are removed one by one and
-                        // inserted back if the channel is still open.
-                        for index in (0..runtime_subscription.all_subscriptions.len()).rev() {
-                            let mut sender = runtime_subscription.all_subscriptions.swap_remove(index);
-                            let notif = super::Notification::Finalized {
-                                hash,
-                                best_block_hash,
-                            };
-                            if sender.try_send(notif).is_ok() {
-                                runtime_subscription.all_subscriptions.push(sender);
-                            }
-                        }
-                    }
-                    async_tree::OutputUpdate::Finalized { .. }
-                    | async_tree::OutputUpdate::BestBlockChanged { .. } => {
-                        // Do not report anything to subscriptions if no finalized parahead is
-                        // known yet.
-                        let finalized_parahead = match runtime_subscription.async_tree.finalized_async_user_data() {
-                            Some(p) => p,
-                            None => continue,
-                        };
-
-                        // Calculate hash of the parablock corresponding to the new best relay
-                        // chain block.
-                        let parahash = header::hash_from_scale_encoded_header(
-                            runtime_subscription.async_tree
-                                .best_block_index()
-                                .map(|(_, b)| b.as_ref().unwrap())
-                                .unwrap_or(&finalized_parahead),
-                        );
-
-                        if runtime_subscription.reported_best_parahead_hash.as_ref() != Some(&parahash) {
-                            runtime_subscription.reported_best_parahead_hash = Some(parahash);
-
-                            log::debug!(
-                                target: &self.log_target,
-                                "Subscriptions <= BestBlockChanged(hash={})",
-                                HashDisplay(&parahash)
-                            );
-
-                            // Elements in `all_subscriptions` are removed one by one and
-                            // inserted back if the channel is still open.
-                            for index in (0..runtime_subscription.all_subscriptions.len()).rev() {
-                                let mut sender = runtime_subscription.all_subscriptions.swap_remove(index);
-                                let notif =
-                                    super::Notification::BestBlockChanged { hash: parahash };
-                                if sender.try_send(notif).is_ok() {
-                                    runtime_subscription.all_subscriptions.push(sender);
-                                }
-                            }
-                        }
-                    }
-                    async_tree::OutputUpdate::Block(block) => {
-                        // `block` borrows `async_tree`. We need to mutably access `async_tree`
-                        // below, so deconstruct `block` beforehand.
-                        let is_new_best = block.is_new_best;
-                        let scale_encoded_header: Vec<u8> =
-                            block.async_op_user_data.clone().unwrap();
-                        let parahash =
-                            header::hash_from_scale_encoded_header(&scale_encoded_header);
-                        let block_index = block.index;
-
-                        // Do not report anything to subscriptions if no finalized parahead is
-                        // known yet.
-                        let finalized_parahead = match runtime_subscription.async_tree.finalized_async_user_data() {
-                            Some(p) => p,
-                            None => continue,
-                        };
-
-                        // Do not report the new block if it has already been reported in the
-                        // past. This covers situations where the parahead is identical to the
-                        // relay chain's parent's parahead, but also situations where multiple
-                        // sibling relay chain blocks have the same parahead.
-                        if *finalized_parahead == scale_encoded_header
-                            || runtime_subscription.async_tree
-                                .input_iter_unordered()
-                                .filter(|item| item.id != block_index)
-                                .filter_map(|item| item.async_op_user_data)
-                                .any(|item| item.as_ref() == Some(&scale_encoded_header))
-                        {
-                            // While the parablock has already been reported, it is possible that
-                            // it becomes the new best block while it wasn't before, in which
-                            // case we should send a notification.
-                            if is_new_best
-                                && runtime_subscription.reported_best_parahead_hash.as_ref() != Some(&parahash)
-                            {
-                                runtime_subscription.reported_best_parahead_hash = Some(parahash);
-
-                                log::debug!(
-                                    target: &self.log_target,
-                                    "Subscriptions <= BestBlockChanged(hash={})",
-                                    HashDisplay(&parahash)
-                                );
-
-                                // Elements in `all_subscriptions` are removed one by one and
-                                // inserted back if the channel is still open.
-                                for index in (0..runtime_subscription.all_subscriptions.len()).rev() {
-                                    let mut sender = runtime_subscription.all_subscriptions.swap_remove(index);
-                                    let notif =
-                                        super::Notification::BestBlockChanged { hash: parahash };
-                                    if sender.try_send(notif).is_ok() {
-                                        runtime_subscription.all_subscriptions.push(sender);
-                                    }
-                                }
-                            }
-
-                            continue;
-                        }
-
-                        log::debug!(
-                            target: &self.log_target,
-                            "Subscriptions <= NewParablock(hash={})",
-                            HashDisplay(&parahash)
-                        );
-
-                        if is_new_best {
-                            runtime_subscription.reported_best_parahead_hash = Some(parahash);
-                        }
-
-                        let parent_hash = header::hash_from_scale_encoded_header(
-                            &runtime_subscription.async_tree
-                                .parent(block_index)
-                                .map(|idx| {
-                                    runtime_subscription.async_tree
-                                        .block_async_user_data(idx)
-                                        .unwrap()
-                                        .as_ref()
-                                        .unwrap()
-                                })
-                                .unwrap_or(&finalized_parahead),
-                        );
-
-                        // Elements in `all_subscriptions` are removed one by one and
-                        // inserted back if the channel is still open.
-                        for index in (0..runtime_subscription.all_subscriptions.len()).rev() {
-                            let mut sender = runtime_subscription.all_subscriptions.swap_remove(index);
-                            let notif = super::Notification::Block(super::BlockNotification {
-                                is_new_best,
-                                parent_hash,
-                                scale_encoded_header: scale_encoded_header.clone(),
-                            });
-                            if sender.try_send(notif).is_ok() {
-                                runtime_subscription.all_subscriptions.push(sender);
-                            }
-                        }
-                    }
-                }
-            }
 
             futures::select! {
                 () = &mut runtime_subscription.wakeup_deadline => {
@@ -860,6 +658,217 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 );
 
                 runtime_subscription.async_tree.async_op_failure(async_op_id, &TPlat::now());
+            }
+        }
+    }
+
+    async fn advance_and_report_notifications(&mut self) {
+        let runtime_subscription = match &mut self.subscription_state {
+            ParachainBackgroundState::NotSubscribed { .. } => return,
+            ParachainBackgroundState::Subscribed(s) => s,
+        };
+
+        while let Some(update) = runtime_subscription.async_tree.try_advance_output() {
+            match update {
+                async_tree::OutputUpdate::Finalized {
+                    async_op_user_data: new_finalized_parahead,
+                    former_finalized_async_op_user_data: former_finalized_parahead,
+                    pruned_blocks,
+                    ..
+                } if *new_finalized_parahead != former_finalized_parahead => {
+                    debug_assert!(new_finalized_parahead.is_some());
+
+                    // If this is the first time (in this loop) a finalized parahead is known,
+                    // any `SubscribeAll` message that has been answered beforehand was
+                    // answered in a dummy way with a potentially obsolete finalized header.
+                    // For this reason, we reset all subscriptions to force all subscribers to
+                    // re-subscribe.
+                    if former_finalized_parahead.is_none() {
+                        runtime_subscription.all_subscriptions.clear();
+                    }
+
+                    let hash = header::hash_from_scale_encoded_header(
+                        new_finalized_parahead.as_ref().unwrap(),
+                    );
+
+                    self.obsolete_finalized_parahead = new_finalized_parahead.clone().unwrap();
+
+                    if let Ok(header) =
+                        header::decode(&self.obsolete_finalized_parahead, self.block_number_bytes)
+                    {
+                        self.sync_sources.set_finalized_block_height(header.number);
+                        // TODO: what about an `else`? does sync_sources leak if the block can't be decoded?
+                    }
+
+                    // Must unpin the pruned blocks if they haven't already been unpinned.
+                    for (_, hash, pruned_block_parahead) in pruned_blocks {
+                        if pruned_block_parahead.is_none() {
+                            runtime_subscription.relay_chain_subscribe_all
+                                .unpin_block(&hash)
+                                .await;
+                        }
+                    }
+
+                    log::debug!(
+                        target: &self.log_target,
+                        "Subscriptions <= ParablockFinalized(hash={})",
+                        HashDisplay(&hash)
+                    );
+
+                    let best_block_hash = runtime_subscription.async_tree
+                        .best_block_index()
+                        .map(|(_, parahead)| {
+                            header::hash_from_scale_encoded_header(parahead.as_ref().unwrap())
+                        })
+                        .unwrap_or(hash);
+                    runtime_subscription.reported_best_parahead_hash = Some(best_block_hash);
+
+                    // Elements in `all_subscriptions` are removed one by one and
+                    // inserted back if the channel is still open.
+                    for index in (0..runtime_subscription.all_subscriptions.len()).rev() {
+                        let mut sender = runtime_subscription.all_subscriptions.swap_remove(index);
+                        let notif = super::Notification::Finalized {
+                            hash,
+                            best_block_hash,
+                        };
+                        if sender.try_send(notif).is_ok() {
+                            runtime_subscription.all_subscriptions.push(sender);
+                        }
+                    }
+                }
+                async_tree::OutputUpdate::Finalized { .. }
+                | async_tree::OutputUpdate::BestBlockChanged { .. } => {
+                    // Do not report anything to subscriptions if no finalized parahead is
+                    // known yet.
+                    let finalized_parahead = match runtime_subscription.async_tree.finalized_async_user_data() {
+                        Some(p) => p,
+                        None => continue,
+                    };
+
+                    // Calculate hash of the parablock corresponding to the new best relay
+                    // chain block.
+                    let parahash = header::hash_from_scale_encoded_header(
+                        runtime_subscription.async_tree
+                            .best_block_index()
+                            .map(|(_, b)| b.as_ref().unwrap())
+                            .unwrap_or(&finalized_parahead),
+                    );
+
+                    if runtime_subscription.reported_best_parahead_hash.as_ref() != Some(&parahash) {
+                        runtime_subscription.reported_best_parahead_hash = Some(parahash);
+
+                        log::debug!(
+                            target: &self.log_target,
+                            "Subscriptions <= BestBlockChanged(hash={})",
+                            HashDisplay(&parahash)
+                        );
+
+                        // Elements in `all_subscriptions` are removed one by one and
+                        // inserted back if the channel is still open.
+                        for index in (0..runtime_subscription.all_subscriptions.len()).rev() {
+                            let mut sender = runtime_subscription.all_subscriptions.swap_remove(index);
+                            let notif =
+                                super::Notification::BestBlockChanged { hash: parahash };
+                            if sender.try_send(notif).is_ok() {
+                                runtime_subscription.all_subscriptions.push(sender);
+                            }
+                        }
+                    }
+                }
+                async_tree::OutputUpdate::Block(block) => {
+                    // `block` borrows `async_tree`. We need to mutably access `async_tree`
+                    // below, so deconstruct `block` beforehand.
+                    let is_new_best = block.is_new_best;
+                    let scale_encoded_header: Vec<u8> =
+                        block.async_op_user_data.clone().unwrap();
+                    let parahash =
+                        header::hash_from_scale_encoded_header(&scale_encoded_header);
+                    let block_index = block.index;
+
+                    // Do not report anything to subscriptions if no finalized parahead is
+                    // known yet.
+                    let finalized_parahead = match runtime_subscription.async_tree.finalized_async_user_data() {
+                        Some(p) => p,
+                        None => continue,
+                    };
+
+                    // Do not report the new block if it has already been reported in the
+                    // past. This covers situations where the parahead is identical to the
+                    // relay chain's parent's parahead, but also situations where multiple
+                    // sibling relay chain blocks have the same parahead.
+                    if *finalized_parahead == scale_encoded_header
+                        || runtime_subscription.async_tree
+                            .input_iter_unordered()
+                            .filter(|item| item.id != block_index)
+                            .filter_map(|item| item.async_op_user_data)
+                            .any(|item| item.as_ref() == Some(&scale_encoded_header))
+                    {
+                        // While the parablock has already been reported, it is possible that
+                        // it becomes the new best block while it wasn't before, in which
+                        // case we should send a notification.
+                        if is_new_best
+                            && runtime_subscription.reported_best_parahead_hash.as_ref() != Some(&parahash)
+                        {
+                            runtime_subscription.reported_best_parahead_hash = Some(parahash);
+
+                            log::debug!(
+                                target: &self.log_target,
+                                "Subscriptions <= BestBlockChanged(hash={})",
+                                HashDisplay(&parahash)
+                            );
+
+                            // Elements in `all_subscriptions` are removed one by one and
+                            // inserted back if the channel is still open.
+                            for index in (0..runtime_subscription.all_subscriptions.len()).rev() {
+                                let mut sender = runtime_subscription.all_subscriptions.swap_remove(index);
+                                let notif =
+                                    super::Notification::BestBlockChanged { hash: parahash };
+                                if sender.try_send(notif).is_ok() {
+                                    runtime_subscription.all_subscriptions.push(sender);
+                                }
+                            }
+                        }
+
+                        continue;
+                    }
+
+                    log::debug!(
+                        target: &self.log_target,
+                        "Subscriptions <= NewParablock(hash={})",
+                        HashDisplay(&parahash)
+                    );
+
+                    if is_new_best {
+                        runtime_subscription.reported_best_parahead_hash = Some(parahash);
+                    }
+
+                    let parent_hash = header::hash_from_scale_encoded_header(
+                        &runtime_subscription.async_tree
+                            .parent(block_index)
+                            .map(|idx| {
+                                runtime_subscription.async_tree
+                                    .block_async_user_data(idx)
+                                    .unwrap()
+                                    .as_ref()
+                                    .unwrap()
+                            })
+                            .unwrap_or(&finalized_parahead),
+                    );
+
+                    // Elements in `all_subscriptions` are removed one by one and
+                    // inserted back if the channel is still open.
+                    for index in (0..runtime_subscription.all_subscriptions.len()).rev() {
+                        let mut sender = runtime_subscription.all_subscriptions.swap_remove(index);
+                        let notif = super::Notification::Block(super::BlockNotification {
+                            is_new_best,
+                            parent_hash,
+                            scale_encoded_header: scale_encoded_header.clone(),
+                        });
+                        if sender.try_send(notif).is_ok() {
+                            runtime_subscription.all_subscriptions.push(sender);
+                        }
+                    }
+                }
             }
         }
     }
