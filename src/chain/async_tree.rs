@@ -335,6 +335,17 @@ where
         self.non_finalized_blocks.parent(node)
     }
 
+    /// Returns the ancestors of the given node. The iterator stops when it reaches the finalized
+    /// block. The iterator is empty if the parent of the node is the finalized block.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`NodeIndex`] is invalid.
+    ///
+    pub fn ancestors(&'_ self, node: NodeIndex) -> impl Iterator<Item = NodeIndex> + '_ {
+        self.non_finalized_blocks.ancestors(node)
+    }
+
     /// Returns the list of children that have the given node as parent.
     ///
     /// # Panic

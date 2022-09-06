@@ -74,7 +74,7 @@ ruzstd = { version = "0.3.0" }  # TODO: doesn't support no_std :-/
 schnorrkel = { version = "0.10.2", default-features = false, features = ["preaudit_deprecated", "u64_backend"] }
 serde = { version = "1.0.144", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.85", default-features = false, features = ["alloc", "raw_value"] }
-sha2 = { version = "0.10.2", default-features = false }
+sha2 = { version = "0.10.5", default-features = false }
 siphasher = { version = "0.3.10", default-features = false }
 slab = { version = "0.4.7", default-features = false }
 smallvec = "1.9.0"
@@ -99,7 +99,7 @@ parity-scale-codec = { version = "3.1.5", features = ["derive"], default-feature
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # `std` feature
-wasmtime = { version = "0.40.0", default-features = false, features = ["async", "cranelift"], optional = true }
+wasmtime = { version = "0.40.1", default-features = false, features = ["async", "cranelift"], optional = true }
 
 [dev-dependencies]
 async-std = "1.12.0"
