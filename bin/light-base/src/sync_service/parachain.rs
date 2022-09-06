@@ -40,6 +40,15 @@ use smoldot::{
 
 /// Task that is running in the background.
 struct ParachainBackgroundTask<TPlat: Platform> {
+    log_target: String,
+
+    from_foreground: mpsc::Receiver<ToBackground>,
+
+    block_number_bytes: usize,
+    relay_chain_block_number_bytes: usize,
+    parachain_id: u32,
+    network_chain_index: usize,
+
     /// Events coming from the networking service.
     from_network_service: stream::Fuse<stream::BoxStream<'static, network_service::Event>>,
 
@@ -129,17 +138,23 @@ pub(super) async fn start_parachain<TPlat: Platform>(
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
     relay_chain_block_number_bytes: usize,
     parachain_id: u32,
-    mut from_foreground: mpsc::Receiver<ToBackground>,
+    from_foreground: mpsc::Receiver<ToBackground>,
     network_chain_index: usize,
     from_network_service: stream::BoxStream<'static, network_service::Event>,
 ) {
-    let mut task = {
+    let task = {
         let obsolete_finalized_parahead = chain_information
             .as_ref()
             .finalized_block_header
             .scale_encoding_vec(block_number_bytes);
 
         ParachainBackgroundTask {
+            log_target,
+            from_foreground,
+            block_number_bytes,
+            relay_chain_block_number_bytes,
+            parachain_id,
+            network_chain_index,
             from_network_service: from_network_service.fuse(),
             relay_chain_sync,
             sync_sources: sources::AllForksSources::new(
@@ -154,13 +169,18 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         }
     };
 
+    task.run().await;
+}
+
+impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
+    async fn run(mut self) {
     loop {
-        let runtime_subscription = match task.subscription_state {
+        let runtime_subscription = match self.subscription_state {
             ParachainBackgroundState::Subscribed(ref mut s) => s,
             ParachainBackgroundState::NotSubscribed { .. } => {
                 
-        task.subscription_state = ParachainBackgroundState::Subscribed({
-            log::debug!(target: &log_target, "Subscriptions <= Reset");
+        self.subscription_state = ParachainBackgroundState::Subscribed({
+            log::debug!(target: &self.log_target, "Subscriptions <= Reset");
 
             let relay_chain_subscribe_all = loop {
                 // Subscribing to the runtime service might take a long time, as it waits for the
@@ -168,7 +188,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                 // For this reason, we start the future (without awaiting on it yet), and below
                 // process messages from the foreground at the same time as this subscription is
                 // performed.
-                let relay_chain_sync = task.relay_chain_sync.clone();
+                let relay_chain_sync = self.relay_chain_sync.clone();
                 let subscription = relay_chain_sync
                     .subscribe_all(
                         "parachain-sync",
@@ -184,7 +204,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     subscription = subscription => {
                         // Subscription finished.
                         log::debug!(
-                            target: &log_target,
+                            target: &self.log_target,
                             "RelayChain => NewSubscription(finalized_hash={})",
                             HashDisplay(&header::hash_from_scale_encoded_header(
                                 &subscription.finalized_block_scale_encoded_header
@@ -194,7 +214,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         break subscription
                     },
 
-                    foreground_message = from_foreground.next().fuse() => {
+                    foreground_message = self.from_foreground.next().fuse() => {
                         // Message from the public API of the syncing service.
 
                         // Terminating the parachain sync task if the foreground has closed.
@@ -203,7 +223,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             None => return,
                         };
 
-                        task.process_foreground_message(foreground_message).await;
+                        self.process_foreground_message(foreground_message).await;
                     },
                 }
             };
@@ -232,10 +252,10 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                 async_tree
             };
 
-            log::debug!(target: &log_target, "ParaheadFetchOperations <= Clear");
+            log::debug!(target: &self.log_target, "ParaheadFetchOperations <= Clear");
 
             ParachainBackgroundTaskAfterSubscription {
-                all_subscriptions: match &mut task.subscription_state {
+                all_subscriptions: match &mut self.subscription_state {
                     ParachainBackgroundState::NotSubscribed { all_subscriptions } => { mem::take(all_subscriptions) },
                     _ => unreachable!()
                 },
@@ -269,13 +289,13 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     }
                     async_tree::NextNecessaryAsyncOp::Ready(op) => {
                         log::debug!(
-                            target: &log_target,
+                            target: &self.log_target,
                             "ParaheadFetchOperations <= StartFetch(relay_block_hash={})",
                             HashDisplay(op.block_user_data),
                         );
 
                         runtime_subscription.in_progress_paraheads.push({
-                            let relay_chain_sync = task.relay_chain_sync.clone();
+                            let relay_chain_sync = self.relay_chain_sync.clone();
                             let subscription_id = runtime_subscription.relay_chain_subscribe_all.id();
                             let block_hash = *op.block_user_data;
                             let async_op_id = op.id;
@@ -284,9 +304,9 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                     async_op_id,
                                     parahead(
                                         &relay_chain_sync,
-                                        relay_chain_block_number_bytes,
+                                        self.relay_chain_block_number_bytes,
                                         subscription_id,
-                                        parachain_id,
+                                        self.parachain_id,
                                         &block_hash,
                                     )
                                     .await,
@@ -322,12 +342,12 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             new_finalized_parahead.as_ref().unwrap(),
                         );
 
-                        task.obsolete_finalized_parahead = new_finalized_parahead.clone().unwrap();
+                        self.obsolete_finalized_parahead = new_finalized_parahead.clone().unwrap();
 
                         if let Ok(header) =
-                            header::decode(&task.obsolete_finalized_parahead, block_number_bytes)
+                            header::decode(&self.obsolete_finalized_parahead, self.block_number_bytes)
                         {
-                            task.sync_sources.set_finalized_block_height(header.number);
+                            self.sync_sources.set_finalized_block_height(header.number);
                             // TODO: what about an `else`? does sync_sources leak if the block can't be decoded?
                         }
 
@@ -341,7 +361,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         }
 
                         log::debug!(
-                            target: &log_target,
+                            target: &self.log_target,
                             "Subscriptions <= ParablockFinalized(hash={})",
                             HashDisplay(&hash)
                         );
@@ -389,7 +409,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             runtime_subscription.reported_best_parahead_hash = Some(parahash);
 
                             log::debug!(
-                                target: &log_target,
+                                target: &self.log_target,
                                 "Subscriptions <= BestBlockChanged(hash={})",
                                 HashDisplay(&parahash)
                             );
@@ -443,7 +463,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                                 runtime_subscription.reported_best_parahead_hash = Some(parahash);
 
                                 log::debug!(
-                                    target: &log_target,
+                                    target: &self.log_target,
                                     "Subscriptions <= BestBlockChanged(hash={})",
                                     HashDisplay(&parahash)
                                 );
@@ -464,7 +484,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         }
 
                         log::debug!(
-                            target: &log_target,
+                            target: &self.log_target,
                             "Subscriptions <= NewParablock(hash={})",
                             HashDisplay(&parahash)
                         );
@@ -513,7 +533,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         Some(n) => n,
                         None => {
                             // Recreate the channel.
-                            task.subscription_state = ParachainBackgroundState::NotSubscribed { all_subscriptions: Vec::new() };
+                            self.subscription_state = ParachainBackgroundState::NotSubscribed { all_subscriptions: Vec::new() };
                             continue;
                         },
                     };
@@ -523,7 +543,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     match relay_chain_notif {
                         runtime_service::Notification::Finalized { hash, best_block_hash, .. } => {
                             log::debug!(
-                                target: &log_target,
+                                target: &self.log_target,
                                 "RelayChain => Finalized(hash={})",
                                 HashDisplay(&hash)
                             );
@@ -536,7 +556,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
 
                             log::debug!(
-                                target: &log_target,
+                                target: &self.log_target,
                                 "RelayChain => Block(hash={}, parent_hash={})",
                                 HashDisplay(&hash),
                                 HashDisplay(&block.parent_hash)
@@ -547,7 +567,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         }
                         runtime_service::Notification::BestBlockChanged { hash } => {
                             log::debug!(
-                                target: &log_target,
+                                target: &self.log_target,
                                 "RelayChain => BestBlockChanged(hash={})",
                                 HashDisplay(&hash)
                             );
@@ -565,7 +585,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     match parahead_result {
                         Ok(parahead) => {
                             log::debug!(
-                                target: &log_target,
+                                target: &self.log_target,
                                 "ParaheadFetchOperations => Parahead(hash={}, relay_blocks={})",
                                 HashDisplay(blake2_rfc::blake2b::blake2b(32, b"", &parahead).as_bytes()),
                                 runtime_subscription.async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(",")
@@ -581,7 +601,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             // The relay chain runtime service has some kind of gap or issue and
                             // has discarded the runtime.
                             // Destroy the subscription to recreate the channel.
-                            task.subscription_state = ParachainBackgroundState::NotSubscribed { all_subscriptions: Vec::new() };
+                            self.subscription_state = ParachainBackgroundState::NotSubscribed { all_subscriptions: Vec::new() };
                             continue;
                         }
                         Err(error) => {
@@ -590,11 +610,11 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             // have had a core on the relay chain until recently. For these
                             // reasons, errors when the relay chain is not near head of the chain
                             // are most likely normal and do not warrant logging an error.
-                            if task.relay_chain_sync.is_near_head_of_chain_heuristic().await
+                            if self.relay_chain_sync.is_near_head_of_chain_heuristic().await
                                 && !error.is_network_problem()
                             {
                                 log::error!(
-                                    target: &log_target,
+                                    target: &self.log_target,
                                     "Failed to fetch the parachain head from relay chain blocks {}: {}",
                                     runtime_subscription.async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(", "),
                                     error
@@ -602,7 +622,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             }
 
                             log::debug!(
-                                target: &log_target,
+                                target: &self.log_target,
                                 "ParaheadFetchOperations => Error(relay_blocks={}, error={:?})",
                                 runtime_subscription.async_tree.async_op_blocks(async_op_id).map(|b| HashDisplay(b)).join(","),
                                 error
@@ -613,7 +633,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                     }
                 }
 
-                foreground_message = from_foreground.next().fuse() => {
+                foreground_message = self.from_foreground.next().fuse() => {
                     // Message from the public API of the syncing service.
 
                     // Terminating the parachain sync task if the foreground has closed.
@@ -622,42 +642,42 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         None => return,
                     };
 
-                    task.process_foreground_message(foreground_message).await;
+                    self.process_foreground_message(foreground_message).await;
                 },
 
-                network_event = task.from_network_service.next() => {
+                network_event = self.from_network_service.next() => {
                     // Something happened on the network.
                     // We expect the networking channel to never close, so the event is unwrapped.
                     match network_event.unwrap() {
                         network_service::Event::Connected { peer_id, role, chain_index, best_block_number, best_block_hash }
-                            if chain_index == network_chain_index =>
+                            if chain_index == self.network_chain_index =>
                         {
-                            let local_id = task.sync_sources.add_source(best_block_number, best_block_hash, (peer_id.clone(), role));
-                            task.sync_sources_map.insert(peer_id, local_id);
+                            let local_id = self.sync_sources.add_source(best_block_number, best_block_hash, (peer_id.clone(), role));
+                            self.sync_sources_map.insert(peer_id, local_id);
                         },
                         network_service::Event::Disconnected { peer_id, chain_index }
-                            if chain_index == network_chain_index =>
+                            if chain_index == self.network_chain_index =>
                         {
-                            let local_id = task.sync_sources_map.remove(&peer_id).unwrap();
-                            let (_peer_id, _role) = task.sync_sources.remove(local_id);
+                            let local_id = self.sync_sources_map.remove(&peer_id).unwrap();
+                            let (_peer_id, _role) = self.sync_sources.remove(local_id);
                             debug_assert_eq!(peer_id, _peer_id);
                         },
                         network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
-                            if chain_index == network_chain_index =>
+                            if chain_index == self.network_chain_index =>
                         {
-                            let local_id = *task.sync_sources_map.get(&peer_id).unwrap();
+                            let local_id = *self.sync_sources_map.get(&peer_id).unwrap();
                             let decoded = announce.decode();
-                            if let Ok(decoded_header) = header::decode(&decoded.scale_encoded_header, block_number_bytes) {
+                            if let Ok(decoded_header) = header::decode(&decoded.scale_encoded_header, self.block_number_bytes) {
                                 let decoded_header_hash = header::hash_from_scale_encoded_header(
                                     &decoded.scale_encoded_header
                                 );
-                                task.sync_sources.add_known_block(
+                                self.sync_sources.add_known_block(
                                     local_id,
                                     decoded_header.number,
                                     decoded_header_hash
                                 );
                                 if decoded.is_best {
-                                    task.sync_sources.add_known_block_and_set_best(
+                                    self.sync_sources.add_known_block_and_set_best(
                                         local_id,
                                         decoded_header.number,
                                         decoded_header_hash
@@ -674,7 +694,6 @@ pub(super) async fn start_parachain<TPlat: Platform>(
     }
 }
 
-impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
     async fn process_foreground_message(&mut self, foreground_message: ToBackground) {
         match (foreground_message, &mut self.subscription_state) {
             (ToBackground::IsNearHeadOfChainHeuristic { send_back }, ParachainBackgroundState::Subscribed(sub)) if sub.async_tree.finalized_async_user_data().is_some() => {
