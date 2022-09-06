@@ -168,6 +168,15 @@ where
                 outbound_substreams_reverse,
             } => {
                 let event = match established.pull_event() {
+                    Some(established::Event::NewOutboundSubstreamsForbidden) => {
+                        // TODO: handle properly
+                        self.connection = MultiStreamConnectionTaskInner::ShutdownWaitingAck {
+                            start_shutdown_message_to_send: Some(None),
+                            shutdown_finish_message_sent: false,
+                            initiator: ShutdownInitiator::Coordinator,
+                        };
+                        Some(ConnectionToCoordinatorInner::StartShutdown(None))
+                    }
                     Some(established::Event::InboundError(err)) => {
                         Some(ConnectionToCoordinatorInner::InboundError(err))
                     }

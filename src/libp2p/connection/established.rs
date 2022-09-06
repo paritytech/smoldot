@@ -69,6 +69,11 @@ impl SubstreamId {
 #[must_use]
 #[derive(Debug)]
 pub enum Event<TRqUd, TNotifUd> {
+    /// The connection is now in a mode where opening new substreams (i.e. starting requests
+    /// and opening notifications substreams) is forbidden, but the remote is still able to open
+    /// substreams and messages on existing substreams are still allowed to be sent and received.
+    NewOutboundSubstreamsForbidden,
+
     /// Received an incoming substream, but this substream has produced an error.
     ///
     /// > **Note**: This event exists only for diagnostic purposes. No action is expected in
