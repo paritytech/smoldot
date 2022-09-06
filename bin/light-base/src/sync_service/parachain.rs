@@ -278,12 +278,6 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
 
     ParachainBackgroundState::Subscribed(ref mut runtime_subscription) => {
 
-            // Internal state check.
-            debug_assert_eq!(
-                runtime_subscription.reported_best_parahead_hash.is_some(),
-                runtime_subscription.async_tree.finalized_async_user_data().is_some()
-            );
-
             futures::select! {
                 () = &mut runtime_subscription.wakeup_deadline => {
                     // Do nothing. This is simply to wake up and loop again.
@@ -575,6 +569,12 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
             ParachainBackgroundState::NotSubscribed { .. } => return,
             ParachainBackgroundState::Subscribed(s) => s,
         };
+
+        // Internal state check.
+        debug_assert_eq!(
+            runtime_subscription.reported_best_parahead_hash.is_some(),
+            runtime_subscription.async_tree.finalized_async_user_data().is_some()
+        );
 
         while runtime_subscription.in_progress_paraheads.len() < 4 {
             match runtime_subscription.async_tree.next_necessary_async_op(&TPlat::now()) {
