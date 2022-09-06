@@ -181,10 +181,9 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
         // Report to the outside any block in the `async_tree` that is now ready.
         self.advance_and_report_notifications().await;
 
-        let runtime_subscription = match self.subscription_state {
-            ParachainBackgroundState::Subscribed(ref mut s) => s,
+        match self.subscription_state {
             ParachainBackgroundState::NotSubscribed { .. } => {
-                
+
         self.subscription_state = ParachainBackgroundState::Subscribed({
             log::debug!(target: &self.log_target, "Subscriptions <= Reset");
 
@@ -273,8 +272,9 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
             }
         });
 
-        continue;
-    }};
+    }
+
+    ParachainBackgroundState::Subscribed(ref mut runtime_subscription) => {
 
             // Internal state check.
             debug_assert_eq!(
@@ -360,7 +360,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                     self.process_network_event(network_event.unwrap())
                 }
             }
-    }
+    }}}
 }
 
     async fn process_foreground_message(&mut self, foreground_message: ToBackground) {
