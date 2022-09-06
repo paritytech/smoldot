@@ -175,6 +175,9 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
     async fn run(mut self) {
     loop {
+        // Start fetching paraheads of new blocks whose parahead needs to be fetched.
+        self.start_paraheads_fetch();
+
         let runtime_subscription = match self.subscription_state {
             ParachainBackgroundState::Subscribed(ref mut s) => s,
             ParachainBackgroundState::NotSubscribed { .. } => {
@@ -275,48 +278,6 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 runtime_subscription.reported_best_parahead_hash.is_some(),
                 runtime_subscription.async_tree.finalized_async_user_data().is_some()
             );
-
-            // Start fetching paraheads of new blocks whose parahead needs to be fetched.
-            while runtime_subscription.in_progress_paraheads.len() < 4 {
-                match runtime_subscription.async_tree.next_necessary_async_op(&TPlat::now()) {
-                    async_tree::NextNecessaryAsyncOp::NotReady { when: Some(when) } => {
-                        runtime_subscription.wakeup_deadline = future::Either::Left(TPlat::sleep_until(when).fuse());
-                        break;
-                    }
-                    async_tree::NextNecessaryAsyncOp::NotReady { when: None } => {
-                        runtime_subscription.wakeup_deadline = future::Either::Right(future::pending());
-                        break;
-                    }
-                    async_tree::NextNecessaryAsyncOp::Ready(op) => {
-                        log::debug!(
-                            target: &self.log_target,
-                            "ParaheadFetchOperations <= StartFetch(relay_block_hash={})",
-                            HashDisplay(op.block_user_data),
-                        );
-
-                        runtime_subscription.in_progress_paraheads.push({
-                            let relay_chain_sync = self.relay_chain_sync.clone();
-                            let subscription_id = runtime_subscription.relay_chain_subscribe_all.id();
-                            let block_hash = *op.block_user_data;
-                            let async_op_id = op.id;
-                            async move {
-                                (
-                                    async_op_id,
-                                    parahead(
-                                        &relay_chain_sync,
-                                        self.relay_chain_block_number_bytes,
-                                        subscription_id,
-                                        self.parachain_id,
-                                        &block_hash,
-                                    )
-                                    .await,
-                                )
-                            }
-                            .boxed()
-                        });
-                    }
-                }
-            }
 
             // Report to the outside any block in the `async_tree` that is now ready.
             while let Some(update) = runtime_subscription.async_tree.try_advance_output() {
@@ -842,6 +803,57 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
             },
             _ => {
                 // Uninteresting message or irrelevant chain index.
+            }
+        }
+    }
+
+    /// Start fetching paraheads of new blocks whose parahead needs to be fetched.
+    fn start_paraheads_fetch(&mut self) {
+        let mut runtime_subscription = match &mut self.subscription_state {
+            ParachainBackgroundState::NotSubscribed { .. } => return,
+            ParachainBackgroundState::Subscribed(s) => s,
+        };
+
+        while runtime_subscription.in_progress_paraheads.len() < 4 {
+            match runtime_subscription.async_tree.next_necessary_async_op(&TPlat::now()) {
+                async_tree::NextNecessaryAsyncOp::NotReady { when: Some(when) } => {
+                    runtime_subscription.wakeup_deadline = future::Either::Left(TPlat::sleep_until(when).fuse());
+                    break;
+                }
+                async_tree::NextNecessaryAsyncOp::NotReady { when: None } => {
+                    runtime_subscription.wakeup_deadline = future::Either::Right(future::pending());
+                    break;
+                }
+                async_tree::NextNecessaryAsyncOp::Ready(op) => {
+                    log::debug!(
+                        target: &self.log_target,
+                        "ParaheadFetchOperations <= StartFetch(relay_block_hash={})",
+                        HashDisplay(op.block_user_data),
+                    );
+
+                    runtime_subscription.in_progress_paraheads.push({
+                        let relay_chain_sync = self.relay_chain_sync.clone();
+                        let subscription_id = runtime_subscription.relay_chain_subscribe_all.id();
+                        let block_hash = *op.block_user_data;
+                        let async_op_id = op.id;
+                        let relay_chain_block_number_bytes = self.relay_chain_block_number_bytes;
+                        let parachain_id = self.parachain_id;
+                        async move {
+                            (
+                                async_op_id,
+                                parahead(
+                                    &relay_chain_sync,
+                                    relay_chain_block_number_bytes,
+                                    subscription_id,
+                                    parachain_id,
+                                    &block_hash,
+                                )
+                                .await,
+                            )
+                        }
+                        .boxed()
+                    });
+                }
             }
         }
     }
