@@ -648,47 +648,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 network_event = self.from_network_service.next() => {
                     // Something happened on the network.
                     // We expect the networking channel to never close, so the event is unwrapped.
-                    match network_event.unwrap() {
-                        network_service::Event::Connected { peer_id, role, chain_index, best_block_number, best_block_hash }
-                            if chain_index == self.network_chain_index =>
-                        {
-                            let local_id = self.sync_sources.add_source(best_block_number, best_block_hash, (peer_id.clone(), role));
-                            self.sync_sources_map.insert(peer_id, local_id);
-                        },
-                        network_service::Event::Disconnected { peer_id, chain_index }
-                            if chain_index == self.network_chain_index =>
-                        {
-                            let local_id = self.sync_sources_map.remove(&peer_id).unwrap();
-                            let (_peer_id, _role) = self.sync_sources.remove(local_id);
-                            debug_assert_eq!(peer_id, _peer_id);
-                        },
-                        network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
-                            if chain_index == self.network_chain_index =>
-                        {
-                            let local_id = *self.sync_sources_map.get(&peer_id).unwrap();
-                            let decoded = announce.decode();
-                            if let Ok(decoded_header) = header::decode(&decoded.scale_encoded_header, self.block_number_bytes) {
-                                let decoded_header_hash = header::hash_from_scale_encoded_header(
-                                    &decoded.scale_encoded_header
-                                );
-                                self.sync_sources.add_known_block(
-                                    local_id,
-                                    decoded_header.number,
-                                    decoded_header_hash
-                                );
-                                if decoded.is_best {
-                                    self.sync_sources.add_known_block_and_set_best(
-                                        local_id,
-                                        decoded_header.number,
-                                        decoded_header_hash
-                                    );
-                                }
-                            }
-                        },
-                        _ => {
-                            // Uninteresting message or irrelevant chain index.
-                        }
-                    }
+                    self.process_network_event(network_event.unwrap())
                 }
             }
     }
@@ -838,6 +798,50 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
             }
             (ToBackground::SerializeChainInformation { send_back }, _) => {
                 let _ = send_back.send(None);
+            }
+        }
+    }
+
+    fn process_network_event(&mut self, network_event: network_service::Event) {
+        match network_event {
+            network_service::Event::Connected { peer_id, role, chain_index, best_block_number, best_block_hash }
+                if chain_index == self.network_chain_index =>
+            {
+                let local_id = self.sync_sources.add_source(best_block_number, best_block_hash, (peer_id.clone(), role));
+                self.sync_sources_map.insert(peer_id, local_id);
+            },
+            network_service::Event::Disconnected { peer_id, chain_index }
+                if chain_index == self.network_chain_index =>
+            {
+                let local_id = self.sync_sources_map.remove(&peer_id).unwrap();
+                let (_peer_id, _role) = self.sync_sources.remove(local_id);
+                debug_assert_eq!(peer_id, _peer_id);
+            },
+            network_service::Event::BlockAnnounce { chain_index, peer_id, announce }
+                if chain_index == self.network_chain_index =>
+            {
+                let local_id = *self.sync_sources_map.get(&peer_id).unwrap();
+                let decoded = announce.decode();
+                if let Ok(decoded_header) = header::decode(&decoded.scale_encoded_header, self.block_number_bytes) {
+                    let decoded_header_hash = header::hash_from_scale_encoded_header(
+                        &decoded.scale_encoded_header
+                    );
+                    self.sync_sources.add_known_block(
+                        local_id,
+                        decoded_header.number,
+                        decoded_header_hash
+                    );
+                    if decoded.is_best {
+                        self.sync_sources.add_known_block_and_set_best(
+                            local_id,
+                            decoded_header.number,
+                            decoded_header_hash
+                        );
+                    }
+                }
+            },
+            _ => {
+                // Uninteresting message or irrelevant chain index.
             }
         }
     }
