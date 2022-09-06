@@ -676,11 +676,8 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
 impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
     async fn process_foreground_message(&mut self, foreground_message: ToBackground) {
-        match foreground_message {
-            ToBackground::IsNearHeadOfChainHeuristic { send_back } => {
-                match &mut self.subscription_state {
-                    ParachainBackgroundState::Subscribed(sub) if sub.async_tree.finalized_async_user_data().is_some() => {
-
+        match (foreground_message, &mut self.subscription_state) {
+            (ToBackground::IsNearHeadOfChainHeuristic { send_back }, ParachainBackgroundState::Subscribed(sub)) if sub.async_tree.finalized_async_user_data().is_some() => {
                         // Since there is a mapping between relay chain blocks and
                         // parachain blocks, whether a parachain is at the head of the
                         // chain is the same thing as whether its relay chain is at the
@@ -689,18 +686,14 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                         // block subscriptions notifications.
                         let val = self.relay_chain_sync.is_near_head_of_chain_heuristic().await;
                         let _ = send_back.send(val);
-                    }
-                    _ => {
-                        // If no finalized parahead is known yet, we might be very close
-                        // to the head but also maybe very very far away. We lean on the
-                        // cautious side and always return `false`.
-                        let _ = send_back.send(false);
-                    }
-                }
             },
-            ToBackground::SubscribeAll { send_back, buffer_size, .. } => {
-                match &mut self.subscription_state {
-                    ParachainBackgroundState::NotSubscribed { all_subscriptions } => {
+            (ToBackground::IsNearHeadOfChainHeuristic { send_back }, _) => {
+                // If no finalized parahead is known yet, we might be very close
+                // to the head but also maybe very very far away. We lean on the
+                // cautious side and always return `false`.
+                let _ = send_back.send(false);
+            }
+            (ToBackground::SubscribeAll { send_back, buffer_size, .. }, ParachainBackgroundState::NotSubscribed { all_subscriptions }) => {
                         let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
 
                         // No known finalized parahead.
@@ -713,7 +706,8 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
 
                         all_subscriptions.push(tx);
                     }
-                    ParachainBackgroundState::Subscribed(runtime_subscription) => {
+            (ToBackground::SubscribeAll { send_back, buffer_size, .. }, ParachainBackgroundState::Subscribed(runtime_subscription)) => {
+                    
                         let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
 
                         // There are two possibilities here: either we know of any recent
@@ -794,9 +788,8 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
 
                         runtime_subscription.all_subscriptions.push(tx);
                     }
-                }
-            }
-            ToBackground::PeersAssumedKnowBlock { send_back, block_number, block_hash } => {
+            
+            (ToBackground::PeersAssumedKnowBlock { send_back, block_number, block_hash }, _) => {
                 // If `block_number` is over the finalized block, then which source
                 // knows which block is precisely tracked. Otherwise, it is assumed
                 // that all sources are on the finalized chain and thus that all
@@ -817,14 +810,14 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
 
                 let _ = send_back.send(list);
             }
-            ToBackground::SyncingPeers { send_back } => {
+            (ToBackground::SyncingPeers { send_back }, _) => {
                 let _ = send_back.send(self.sync_sources.keys().map(|local_id| {
                     let (height, hash) = self.sync_sources.best_block(local_id);
                     let (peer_id, role) = self.sync_sources[local_id].clone();
                     (peer_id, role, height, *hash)
                 }).collect());
             }
-            ToBackground::SerializeChainInformation { send_back } => {
+            (ToBackground::SerializeChainInformation { send_back }, _) => {
                 let _ = send_back.send(None);
             }
         }
