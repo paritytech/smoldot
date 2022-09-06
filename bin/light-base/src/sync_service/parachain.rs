@@ -21,6 +21,7 @@ use crate::{network_service, platform::Platform, runtime_service};
 use alloc::{borrow::ToOwned as _, string::String, sync::Arc, vec::Vec};
 use core::{
     iter,
+    mem,
     num::{NonZeroU32, NonZeroUsize},
     time::Duration,
 };
@@ -57,13 +58,19 @@ struct ParachainBackgroundTask<TPlat: Platform> {
 
     /// Extra fields that are set after the subscription to the runtime service events has
     /// succeeded.
-    runtime_subscription: Option<ParachainBackgroundTaskAfterSubscription<TPlat>>,
+    subscription_state: ParachainBackgroundState<TPlat>,
+}
+
+enum ParachainBackgroundState<TPlat: Platform> {
+    NotSubscribed {
+        /// List of senders that get notified when the tree of blocks is modified.
+        all_subscriptions: Vec::<mpsc::Sender<super::Notification>>,    
+    },
+    Subscribed(ParachainBackgroundTaskAfterSubscription<TPlat>)
 }
 
 struct ParachainBackgroundTaskAfterSubscription<TPlat: Platform> {
     /// List of senders that get notified when the tree of blocks is modified.
-    /// Note that this list is created in the inner loop, as to be cleared if the relay chain
-    /// blocks stream has a gap.
     all_subscriptions: Vec::<mpsc::Sender<super::Notification>>,
 
     /// Stream of blocks of the relay chain this parachain is registered on.
@@ -139,19 +146,17 @@ pub(super) async fn start_parachain<TPlat: Platform>(
             ),
             obsolete_finalized_parahead,
             sync_sources_map: HashMap::with_capacity_and_hasher(0, fnv::FnvBuildHasher::default()),
-            runtime_subscription: None,
+            subscription_state: ParachainBackgroundState::NotSubscribed { all_subscriptions: Vec::new() },
         }
     };
 
     loop {
-        let runtime_subscription = if let Some(s) = task.runtime_subscription.as_mut() {
-            s
-        } else {
-
-        task.runtime_subscription = Some({
+        let runtime_subscription = match task.subscription_state {
+            ParachainBackgroundState::Subscribed(ref mut s) => s,
+            ParachainBackgroundState::NotSubscribed { ref mut all_subscriptions } => {
+                
+        task.subscription_state = ParachainBackgroundState::Subscribed({
             log::debug!(target: &log_target, "Subscriptions <= Reset");
-
-            let mut all_subscriptions = Vec::new();
 
             let relay_chain_subscribe_all = loop {
                 // Subscribing to the runtime service might take a long time, as it waits for the
@@ -276,7 +281,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
             log::debug!(target: &log_target, "ParaheadFetchOperations <= Clear");
 
             ParachainBackgroundTaskAfterSubscription {
-                all_subscriptions,
+                all_subscriptions: mem::take(all_subscriptions),
                 relay_chain_subscribe_all: relay_chain_subscribe_all.new_blocks,
                 reported_best_parahead_hash: None,
                 async_tree,
@@ -286,7 +291,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
         });
 
         continue;
-    };
+    }};
 
             // Internal state check.
             debug_assert_eq!(
@@ -551,7 +556,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                         Some(n) => n,
                         None => {
                             // Recreate the channel.
-                            task.runtime_subscription = None;
+                            task.subscription_state = ParachainBackgroundState::NotSubscribed { all_subscriptions: Vec::new() };
                             continue;
                         },
                     };
@@ -619,7 +624,7 @@ pub(super) async fn start_parachain<TPlat: Platform>(
                             // The relay chain runtime service has some kind of gap or issue and
                             // has discarded the runtime.
                             // Destroy the subscription to recreate the channel.
-                            task.runtime_subscription = None;
+                            task.subscription_state = ParachainBackgroundState::NotSubscribed { all_subscriptions: Vec::new() };
                             continue;
                         }
                         Err(error) => {
