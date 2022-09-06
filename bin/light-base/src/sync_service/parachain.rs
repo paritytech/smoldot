@@ -76,7 +76,9 @@ struct ParachainBackgroundTask<TPlat: Platform> {
 enum ParachainBackgroundState<TPlat: Platform> {
     NotSubscribed {
         /// List of senders that get notified when the tree of blocks is modified.
-        all_subscriptions: Vec::<mpsc::Sender<super::Notification>>,    
+        all_subscriptions: Vec::<mpsc::Sender<super::Notification>>,
+
+        subscribe_future: future::Fuse<future::BoxFuture<'static, runtime_service::SubscribeAll<TPlat>>>,
     },
     Subscribed(ParachainBackgroundTaskAfterSubscription<TPlat>)
 }
@@ -156,7 +158,6 @@ pub(super) async fn start_parachain<TPlat: Platform>(
             parachain_id,
             network_chain_index,
             from_network_service: from_network_service.fuse(),
-            relay_chain_sync,
             sync_sources: sources::AllForksSources::new(
                 40,
                 header::decode(&obsolete_finalized_parahead, block_number_bytes)
@@ -165,7 +166,20 @@ pub(super) async fn start_parachain<TPlat: Platform>(
             ),
             obsolete_finalized_parahead,
             sync_sources_map: HashMap::with_capacity_and_hasher(0, fnv::FnvBuildHasher::default()),
-            subscription_state: ParachainBackgroundState::NotSubscribed { all_subscriptions: Vec::new() },
+            subscription_state: ParachainBackgroundState::NotSubscribed {
+                all_subscriptions: Vec::new(),
+                subscribe_future: {
+                    let relay_chain_sync = relay_chain_sync.clone();
+                    async move {
+                        relay_chain_sync.subscribe_all(
+                            "parachain-sync",
+                            32,
+                            NonZeroUsize::new(usize::max_value()).unwrap(),
+                        ).await
+                    }.boxed().fuse()
+                }
+            },
+            relay_chain_sync,
         }
     };
 
@@ -188,25 +202,13 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
             log::debug!(target: &self.log_target, "Subscriptions <= Reset");
 
             let relay_chain_subscribe_all = loop {
-                // Subscribing to the runtime service might take a long time, as it waits for the
-                // runtime of the finalized block to be downloaded.
-                // For this reason, we start the future (without awaiting on it yet), and below
-                // process messages from the foreground at the same time as this subscription is
-                // performed.
-                let relay_chain_sync = self.relay_chain_sync.clone();
-                let subscription = relay_chain_sync
-                    .subscribe_all(
-                        "parachain-sync",
-                        32,
-                        NonZeroUsize::new(usize::max_value()).unwrap(),
-                    )
-                    .fuse();
-                futures::pin_mut!(subscription);
-
-                // While we wait for the `subscription` future to be ready, we still need to process
-                // messages coming from the public API of the syncing service.
+                // While we wait for the `subscribe_future` future to be ready, we still need to
+                // process messages coming from the public API of the syncing service.
                 futures::select! {
-                    subscription = subscription => {
+                    subscription = match self.subscription_state {
+                        ParachainBackgroundState::NotSubscribed { ref mut subscribe_future, .. } => subscribe_future,
+                        _ => unreachable!()
+                     } => {
                         // Subscription finished.
                         log::debug!(
                             target: &self.log_target,
@@ -261,7 +263,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
 
             ParachainBackgroundTaskAfterSubscription {
                 all_subscriptions: match &mut self.subscription_state {
-                    ParachainBackgroundState::NotSubscribed { all_subscriptions } => { mem::take(all_subscriptions) },
+                    ParachainBackgroundState::NotSubscribed { all_subscriptions, .. } => { mem::take(all_subscriptions) },
                     _ => unreachable!()
                 },
                 relay_chain_subscribe_all: relay_chain_subscribe_all.new_blocks,
@@ -292,7 +294,19 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                         Some(n) => n,
                         None => {
                             // Recreate the channel.
-                            self.subscription_state = ParachainBackgroundState::NotSubscribed { all_subscriptions: Vec::new() };
+                            self.subscription_state = ParachainBackgroundState::NotSubscribed {
+                                all_subscriptions: Vec::new(),
+                                subscribe_future: {
+                                    let relay_chain_sync = self.relay_chain_sync.clone();
+                                    async move {
+                                        relay_chain_sync.subscribe_all(
+                                            "parachain-sync",
+                                            32,
+                                            NonZeroUsize::new(usize::max_value()).unwrap(),
+                                        ).await
+                                    }.boxed().fuse()
+                                }
+                            };
                             continue;
                         },
                     };
@@ -381,7 +395,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 // cautious side and always return `false`.
                 let _ = send_back.send(false);
             }
-            (ToBackground::SubscribeAll { send_back, buffer_size, .. }, ParachainBackgroundState::NotSubscribed { all_subscriptions }) => {
+            (ToBackground::SubscribeAll { send_back, buffer_size, .. }, ParachainBackgroundState::NotSubscribed { all_subscriptions, .. }) => {
                         let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
 
                         // No known finalized parahead.
@@ -631,7 +645,19 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 // The relay chain runtime service has some kind of gap or issue and
                 // has discarded the runtime.
                 // Destroy the subscription to recreate the channel.
-                self.subscription_state = ParachainBackgroundState::NotSubscribed { all_subscriptions: Vec::new() };
+                self.subscription_state = ParachainBackgroundState::NotSubscribed {
+                    all_subscriptions: Vec::new(),
+                    subscribe_future: {
+                        let relay_chain_sync = self.relay_chain_sync.clone();
+                        async move {
+                            relay_chain_sync.subscribe_all(
+                                "parachain-sync",
+                                32,
+                                NonZeroUsize::new(usize::max_value()).unwrap(),
+                            ).await
+                        }.boxed().fuse()
+                    }
+                };
             }
             Err(error) => {
                 // Several chains initially didn't support parachains, and have later
