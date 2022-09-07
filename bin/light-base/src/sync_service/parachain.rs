@@ -594,7 +594,8 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                     break;
                 }
                 async_tree::NextNecessaryAsyncOp::NotReady { when: None } => {
-                    runtime_subscription.next_start_parahead_fetch = future::Either::Right(future::pending());
+                    runtime_subscription.next_start_parahead_fetch =
+                        future::Either::Right(future::pending());
                     break;
                 }
                 async_tree::NextNecessaryAsyncOp::Ready(op) => {
