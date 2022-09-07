@@ -146,10 +146,10 @@ struct ParachainBackgroundTaskAfterSubscription<TPlat: Platform> {
     all_subscriptions: Vec<mpsc::Sender<super::Notification>>,
 
     /// Stream of blocks of the relay chain this parachain is registered on.
-    /// The buffer size should be large enough so that, if the CPU is busy, it doesn't
-    /// become full before the execution of the sync service resumes.
-    /// The maximum number of pinned block is ignored, as this maximum is a way to avoid
-    /// malicious behaviors. This code is by definition not considered malicious.
+    /// The buffer size should be large enough so that, if the CPU is busy, it doesn't become full
+    /// before the execution of the sync service resumes.
+    /// The maximum number of pinned block is ignored, as this maximum is a way to avoid malicious
+    /// behaviors. This code is by definition not considered malicious.
     relay_chain_subscribe_all: runtime_service::Subscription<TPlat>,
 
     /// Hash of the best parachain that has been reported to the subscriptions.
@@ -205,8 +205,8 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                     ref mut subscribe_future,
                     ..
                 } => {
-                    // While we wait for the `subscribe_future` future to be ready, we still need to
-                    // process messages coming from the public API of the syncing service.
+                    // While we wait for the `subscribe_future` future to be ready, we still need
+                    // to process messages coming from the public API of the syncing service.
                     futures::select! {
                         relay_chain_subscribe_all = &mut *subscribe_future => {
                             self.set_new_subscription(relay_chain_subscribe_all);
@@ -255,8 +255,8 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                                 },
                             };
 
-                            // Update the local tree of blocks to match the update sent by the relay chain
-                            // syncing service.
+                            // Update the local tree of blocks to match the update sent by the
+                            // relay chain syncing service.
                             self.process_relay_chain_notification(relay_chain_notif);
                         },
 
@@ -279,7 +279,8 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
 
                         network_event = self.from_network_service.next() => {
                             // Something happened on the network.
-                            // We expect the networking channel to never close, so the event is unwrapped.
+                            // We expect the networking channel to never close, so the event is
+                            // unwrapped.
                             self.process_network_event(network_event.unwrap())
                         }
                     }
@@ -294,12 +295,11 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 ToBackground::IsNearHeadOfChainHeuristic { send_back },
                 ParachainBackgroundState::Subscribed(sub),
             ) if sub.async_tree.finalized_async_user_data().is_some() => {
-                // Since there is a mapping between relay chain blocks and
-                // parachain blocks, whether a parachain is at the head of the
-                // chain is the same thing as whether its relay chain is at the
-                // head of the chain.
-                // Note that there is no ordering guarantee of any kind w.r.t.
-                // block subscriptions notifications.
+                // Since there is a mapping between relay chain blocks and parachain blocks,
+                // whether a parachain is at the head of the chain is the same thing as whether
+                // its relay chain is at the head of the chain.
+                // Note that there is no ordering guarantee of any kind w.r.t. block subscriptions
+                // notifications.
                 let val = self
                     .relay_chain_sync
                     .is_near_head_of_chain_heuristic()
@@ -307,9 +307,9 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 let _ = send_back.send(val);
             }
             (ToBackground::IsNearHeadOfChainHeuristic { send_back }, _) => {
-                // If no finalized parahead is known yet, we might be very close
-                // to the head but also maybe very very far away. We lean on the
-                // cautious side and always return `false`.
+                // If no finalized parahead is known yet, we might be very close to the head but
+                // also maybe very very far away. We lean on the cautious side and always return
+                // `false`.
                 let _ = send_back.send(false);
             }
             (
@@ -344,13 +344,12 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
             ) => {
                 let (tx, new_blocks) = mpsc::channel(buffer_size.saturating_sub(1));
 
-                // There are two possibilities here: either we know of any recent
-                // finalized parahead, or we don't. In case where we don't know of
-                // any finalized parahead yet, we report a single obsolete finalized
-                // parahead, which is `obsolete_finalized_parahead`. The rest of this
-                // module makes sure that no other block is reported to subscriptions
-                // as long as this is the case, and that subscriptions are reset once
-                // the first known finalized parahead is known.
+                // There are two possibilities here: either we know of any recent finalized
+                // parahead, or we don't. In case where we don't know of any finalized parahead
+                // yet, we report a single obsolete finalized parahead, which is
+                // `obsolete_finalized_parahead`. The rest of this module makes sure that no
+                // other block is reported to subscriptions as long as this is the case, and that
+                // subscriptions are reset once the first known finalized parahead is known.
                 if let Some(finalized_parahead) =
                     runtime_subscription.async_tree.finalized_async_user_data()
                 {
@@ -455,10 +454,10 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 },
                 _,
             ) => {
-                // If `block_number` is over the finalized block, then which source
-                // knows which block is precisely tracked. Otherwise, it is assumed
-                // that all sources are on the finalized chain and thus that all
-                // sources whose best block is superior to `block_number` have it.
+                // If `block_number` is over the finalized block, then which source knows which
+                // block is precisely tracked. Otherwise, it is assumed that all sources are on
+                // the finalized chain and thus that all sources whose best block is superior to
+                // `block_number` have it.
                 let list = if block_number > self.sync_sources.finalized_block_height() {
                     self.sync_sources
                         .knows_non_finalized_block(block_number, &block_hash)
@@ -646,9 +645,9 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 }
             }
             Err(ParaheadError::ObsoleteSubscription) => {
-                // The relay chain runtime service has some kind of gap or issue and
-                // has discarded the runtime.
-                // Destroy the subscription to recreate the channel.
+                // The relay chain runtime service has some kind of gap or issue and has discarded
+                // the runtime.
+                // Destroy the subscription and recreate the channels.
                 log::debug!(target: &self.log_target, "Subscriptions <= Reset");
                 self.subscription_state = ParachainBackgroundState::NotSubscribed {
                     all_subscriptions: Vec::new(),
@@ -669,11 +668,11 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 };
             }
             Err(error) => {
-                // Several chains initially didn't support parachains, and have later
-                // been upgraded to support them. Similarly, the parachain might not
-                // have had a core on the relay chain until recently. For these
-                // reasons, errors when the relay chain is not near head of the chain
-                // are most likely normal and do not warrant logging an error.
+                // Several chains initially didn't support parachains, and have later been
+                // upgraded to support them. Similarly, the parachain might not have had a core on
+                // the relay chain until recently. For these reasons, errors when the relay chain
+                // is not near head of the chain are most likely normal and do not warrant logging
+                // an error.
                 if self
                     .relay_chain_sync
                     .is_near_head_of_chain_heuristic()
@@ -1143,8 +1142,7 @@ async fn parahead<TPlat: Platform>(
     };
 
     // Try decode the result of the runtime call.
-    // If this fails, it indicates an incompatibility between smoldot and the relay
-    // chain.
+    // If this fails, it indicates an incompatibility between smoldot and the relay chain.
     match para::decode_persisted_validation_data_return_value(
         &output,
         relay_chain_block_number_bytes,
