@@ -124,8 +124,8 @@ struct ParachainBackgroundTask<TPlat: Platform> {
     relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
 
     /// Last-known finalized parachain header. Can be very old and obsolete.
-    /// Updated after we successfully fetch the parahead of a relay chain finalized block, and left
-    /// untouched if the fetch fails.
+    /// Updated after we successfully fetch the parachain head of a relay chain finalized block,
+    /// and left untouched if the fetch fails.
     /// Initialized to the parachain genesis block header.
     obsolete_finalized_parahead: Vec<u8>,
 
@@ -171,31 +171,31 @@ struct ParachainBackgroundTaskAfterSubscription<TPlat: Platform> {
     relay_chain_subscribe_all: runtime_service::Subscription<TPlat>,
 
     /// Hash of the best parachain that has been reported to the subscriptions.
-    /// `None` if and only if no finalized parahead is known yet.
+    /// `None` if and only if no finalized parachain head is known yet.
     reported_best_parahead_hash: Option<[u8; 32]>,
 
     /// Tree of relay chain blocks. Blocks are inserted when received from the relay chain
-    /// sync service. Once inside, their corresponding parahead is fetched. Once the parahead
-    /// is fetched, this parahead is reported to our subscriptions.
+    /// sync service. Once inside, their corresponding parachain head is fetched. Once the
+    /// parachain head is fetched, this parachain head is reported to our subscriptions.
     ///
     /// The root of the tree is a "virtual" block. It can be thought as the parent of the relay
     /// chain finalized block, but is there even if the relay chain finalized block is block 0.
     ///
-    /// All block in the tree has an associated parahead behind an `Option`. This `Option`
+    /// All block in the tree has an associated parachain head behind an `Option`. This `Option`
     /// always contains `Some`, except for the "virtual" root block for which it is `None`.
     ///
-    /// If the output finalized block has a parahead equal to `None`, it therefore means that
-    /// no finalized parahead is known yet.
+    /// If the output finalized block has a parachain head equal to `None`, it therefore means
+    /// that no finalized parachain head is known yet.
     /// Note that, when it is the case, `SubscribeAll` messages from the frontend are still
     /// answered with a single finalized block set to `obsolete_finalized_parahead`. Once a
     /// finalized parahead is known, it is important to reset all subscriptions.
     ///
-    /// The set of blocks in this tree whose parahead hasn't been fetched yet is the same as
-    /// the set of blocks that is maintained pinned on the runtime service. Blocks are unpinned
-    /// when their parahead fetching succeeds or when they are removed from the tree.
+    /// The set of blocks in this tree whose parachain block hasn't been fetched yet is the same
+    /// as the set of blocks that is maintained pinned on the runtime service. Blocks are unpinned
+    /// when their parachain head fetching succeeds or when they are removed from the tree.
     async_tree: async_tree::AsyncTree<TPlat::Instant, [u8; 32], Option<Vec<u8>>>,
 
-    /// List of in-progress parahead fetching operations.
+    /// List of in-progress parachain head fetching operations.
     ///
     /// The operations require some blocks to be pinned within the relay chain runtime service,
     /// which is guaranteed by the fact that `relay_chain_subscribe_all.new_blocks` stays
@@ -205,7 +205,7 @@ struct ParachainBackgroundTaskAfterSubscription<TPlat: Platform> {
         future::BoxFuture<'static, (async_tree::AsyncOpId, Result<Vec<u8>, ParaheadError>)>,
     >,
 
-    /// Future that is ready when we need to start a new parahead fetch operation.
+    /// Future that is ready when we need to start a new parachain head fetch operation.
     next_start_parahead_fetch: future::Either<future::Fuse<TPlat::Delay>, future::Pending<()>>,
 }
 
@@ -567,7 +567,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
         }
     }
 
-    /// Start fetching paraheads of new blocks whose parahead needs to be fetched.
+    /// Start fetching parachain headers of new blocks whose parachain block needs to be fetched.
     fn start_paraheads_fetch(&mut self) {
         let mut runtime_subscription = match &mut self.subscription_state {
             ParachainBackgroundState::NotSubscribed { .. } => return,
