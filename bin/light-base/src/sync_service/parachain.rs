@@ -37,6 +37,64 @@ use smoldot::{
     sync::{all_forks::sources, para},
 };
 
+/// Starts a sync service background task to synchronize a parachain.
+pub(super) async fn start_parachain<TPlat: Platform>(
+    log_target: String,
+    chain_information: chain::chain_information::ValidChainInformation,
+    block_number_bytes: usize,
+    relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
+    relay_chain_block_number_bytes: usize,
+    parachain_id: u32,
+    from_foreground: mpsc::Receiver<ToBackground>,
+    network_chain_index: usize,
+    from_network_service: stream::BoxStream<'static, network_service::Event>,
+) {
+    let task = {
+        let obsolete_finalized_parahead = chain_information
+            .as_ref()
+            .finalized_block_header
+            .scale_encoding_vec(block_number_bytes);
+
+        ParachainBackgroundTask {
+            log_target,
+            from_foreground,
+            block_number_bytes,
+            relay_chain_block_number_bytes,
+            parachain_id,
+            network_chain_index,
+            from_network_service: from_network_service.fuse(),
+            sync_sources: sources::AllForksSources::new(
+                40,
+                header::decode(&obsolete_finalized_parahead, block_number_bytes)
+                    .unwrap()
+                    .number,
+            ),
+            obsolete_finalized_parahead,
+            sync_sources_map: HashMap::with_capacity_and_hasher(0, fnv::FnvBuildHasher::default()),
+            subscription_state: ParachainBackgroundState::NotSubscribed {
+                all_subscriptions: Vec::new(),
+                subscribe_future: {
+                    let relay_chain_sync = relay_chain_sync.clone();
+                    async move {
+                        relay_chain_sync
+                            .subscribe_all(
+                                "parachain-sync",
+                                32,
+                                NonZeroUsize::new(usize::max_value()).unwrap(),
+                            )
+                            .await
+                    }
+                    .boxed()
+                    .fuse()
+                },
+            },
+            relay_chain_sync,
+        }
+    };
+
+    task.run().await;
+}
+
 /// Task that is running in the background.
 struct ParachainBackgroundTask<TPlat: Platform> {
     log_target: String,
@@ -131,64 +189,6 @@ struct ParachainBackgroundTaskAfterSubscription<TPlat: Platform> {
 
     /// Future that is ready when we need to wake up the `select!` below.
     wakeup_deadline: future::Either<future::Fuse<TPlat::Delay>, future::Pending<()>>,
-}
-
-/// Starts a sync service background task to synchronize a parachain.
-pub(super) async fn start_parachain<TPlat: Platform>(
-    log_target: String,
-    chain_information: chain::chain_information::ValidChainInformation,
-    block_number_bytes: usize,
-    relay_chain_sync: Arc<runtime_service::RuntimeService<TPlat>>,
-    relay_chain_block_number_bytes: usize,
-    parachain_id: u32,
-    from_foreground: mpsc::Receiver<ToBackground>,
-    network_chain_index: usize,
-    from_network_service: stream::BoxStream<'static, network_service::Event>,
-) {
-    let task = {
-        let obsolete_finalized_parahead = chain_information
-            .as_ref()
-            .finalized_block_header
-            .scale_encoding_vec(block_number_bytes);
-
-        ParachainBackgroundTask {
-            log_target,
-            from_foreground,
-            block_number_bytes,
-            relay_chain_block_number_bytes,
-            parachain_id,
-            network_chain_index,
-            from_network_service: from_network_service.fuse(),
-            sync_sources: sources::AllForksSources::new(
-                40,
-                header::decode(&obsolete_finalized_parahead, block_number_bytes)
-                    .unwrap()
-                    .number,
-            ),
-            obsolete_finalized_parahead,
-            sync_sources_map: HashMap::with_capacity_and_hasher(0, fnv::FnvBuildHasher::default()),
-            subscription_state: ParachainBackgroundState::NotSubscribed {
-                all_subscriptions: Vec::new(),
-                subscribe_future: {
-                    let relay_chain_sync = relay_chain_sync.clone();
-                    async move {
-                        relay_chain_sync
-                            .subscribe_all(
-                                "parachain-sync",
-                                32,
-                                NonZeroUsize::new(usize::max_value()).unwrap(),
-                            )
-                            .await
-                    }
-                    .boxed()
-                    .fuse()
-                },
-            },
-            relay_chain_sync,
-        }
-    };
-
-    task.run().await;
 }
 
 impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
