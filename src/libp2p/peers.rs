@@ -922,6 +922,20 @@ where
         )
     }
 
+    /// Returns the list of peers for which we have a fully established notifications protocol of
+    /// the given protocol.
+    pub fn opened_out_notifications(
+        &'_ self,
+        notifications_protocol_index: usize,
+    ) -> impl Iterator<Item = &'_ PeerId> + '_ {
+        // TODO: this is O(n)
+        self.peers_notifications_out
+            .iter()
+            .filter(move |((_, idx), _)| *idx == notifications_protocol_index)
+            .filter(|(_, state)| matches!(state.open, NotificationsOutOpenState::Open(_)))
+            .map(|((peer_idx, _), _)| &self.peers[*peer_idx].peer_id)
+    }
+
     /// Returns the state of the given connection.
     ///
     /// # Panic
