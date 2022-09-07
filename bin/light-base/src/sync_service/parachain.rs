@@ -188,7 +188,7 @@ struct ParachainBackgroundTaskAfterSubscription<TPlat: Platform> {
     /// that no finalized parachain head is known yet.
     /// Note that, when it is the case, `SubscribeAll` messages from the frontend are still
     /// answered with a single finalized block set to `obsolete_finalized_parahead`. Once a
-    /// finalized parahead is known, it is important to reset all subscriptions.
+    /// finalized parachain head is known, it is important to reset all subscriptions.
     ///
     /// The set of blocks in this tree whose parachain block hasn't been fetched yet is the same
     /// as the set of blocks that is maintained pinned on the runtime service. Blocks are unpinned
