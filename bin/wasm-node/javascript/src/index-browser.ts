@@ -20,7 +20,14 @@
 import { Client, ClientOptions, start as innerStart } from './client.js'
 import { Connection, ConnectionError, ConnectionConfig } from './instance/instance.js';
 import { inflate } from 'pako';
+
 import { base64url } from "multiformats/bases/base64url";
+import { base58btc } from "multiformats/bases/base58btc";
+import { sha256 } from 'multiformats/hashes/sha2';
+import { Noise } from "@chainsafe/libp2p-noise";
+import { Ed25519PeerIdImpl, peerIdFromString } from '@libp2p/peer-id';
+import { generateKeyPair } from '@libp2p/crypto/keys';
+import type { Duplex } from 'it-stream-types';
 
 export {
   AddChainError,
@@ -92,7 +99,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
   // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
   const wsParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
 
-  const webRTCParsed = config.address.match(/^\/(ip4|ip6)\/(.*?)\/udp\/(.*?)\/webrtc\/certhash\/(.*?)$/);
+  const webRTCParsed = config.address.match(/^\/(ip4|ip6)\/(.*?)\/udp\/(.*?)\/webrtc\/certhash\/(.*?)\/p2p\/(.*?)$/);
 
   if (wsParsed != null) {
       let connection: WebSocket;
@@ -242,9 +249,31 @@ function trustedBase64Decode(base64: string): Uint8Array {
     dataChannel.onopen = () => {
         console.log(`'${dataChannel.label}' opened`);
 
-        // TODO: noise handshake
-        const peerId = "";
-        config.onOpen({ type: 'multi-stream', peerId: trustedBase64Decode(peerId) });
+        const keyPair = generateKeyPair('Ed25519', 1024);
+        const multihash = sha256.digest(keyPair.public);
+        const localPeerId = new Ed25519PeerIdImpl({ multihash: multihash, privateKey: keyPair.private });
+        const remotePeerId = peerIdFromString(webRTCParsed[7] || '');
+
+        console.log(`noise handshake with addr='${config.address}'`);
+        const noise = new Noise(keyPair.private);
+        const conn: Duplex<Uint8Array> = {
+          sink: async data => {
+            dataChannel.send(data);
+          },
+          source: (async function * () {
+            dataChannel.onmessage = (m) => {
+                yield * m.data
+            };
+          }())
+        };
+        const secureConn = noise.secureOutbound(localPeerId, conn, remotePeerId);
+
+        console.log(`verifying peer's identity addr='${config.address}'`);
+        // TODO: assert secureConn.peerId == remotePeerId
+
+        dataChannel.close();
+
+        config.onOpen({ type: 'multi-stream', peerId: remotePeerId });
     };
 
     dataChannel.onerror = (error) => {
@@ -254,10 +283,6 @@ function trustedBase64Decode(base64: string): Uint8Array {
     dataChannel.onclose = () => {
         console.log(`'${dataChannel.label}' closed`);
     };
-
-    dataChannel.onmessage = (m) => {
-        console.log(`new message on '${dataChannel.label}': '${m.data}'`);
-    }
 
     let dataChannels = new Map<number, RTCDataChannel>();
 

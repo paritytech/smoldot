@@ -36,7 +36,11 @@
   "dependencies": {
     "pako": "^2.0.4",
     "ws": "^8.8.1",
-    "multiformats": "^9.8.1"
+    "multiformats": "^9.8.1",
+    "@chainsafe/libp2p-noise": "^8.0.1", // Even though this package works in browser, it will bundle around 600Kb (200Kb gzipped) of code
+    "@libp2p/peer-id": "^1.1.15",
+    "@libp2p/crypto": "^1.0.4",
+    "it-stream-types": "^1.0.4",
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
