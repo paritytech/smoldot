@@ -196,7 +196,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
         self.advance_and_report_notifications().await;
 
         match self.subscription_state {
-            ParachainBackgroundState::NotSubscribed { .. } => {
+            ParachainBackgroundState::NotSubscribed { ref mut subscribe_future, .. } => {
 
         
             log::debug!(target: &self.log_target, "Subscriptions <= Reset");
@@ -204,10 +204,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 // While we wait for the `subscribe_future` future to be ready, we still need to
                 // process messages coming from the public API of the syncing service.
                 futures::select! {
-                    relay_chain_subscribe_all = match self.subscription_state {
-                        ParachainBackgroundState::NotSubscribed { ref mut subscribe_future, .. } => subscribe_future,
-                        _ => unreachable!()
-                     } => {
+                    relay_chain_subscribe_all = &mut *subscribe_future => {
                         // Subscription finished.
                         log::debug!(
                             target: &self.log_target,
