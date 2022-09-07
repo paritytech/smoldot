@@ -201,52 +201,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 // process messages coming from the public API of the syncing service.
                 futures::select! {
                     relay_chain_subscribe_all = &mut *subscribe_future => {
-                        // Subscription finished.
-                        log::debug!(
-                            target: &self.log_target,
-                            "RelayChain => NewSubscription(finalized_hash={})",
-                            HashDisplay(&header::hash_from_scale_encoded_header(
-                                &relay_chain_subscribe_all.finalized_block_scale_encoded_header
-                            ))
-                        );
-
-                        let async_tree = {
-                            let mut async_tree =
-                                async_tree::AsyncTree::<TPlat::Instant, [u8; 32], _>::new(async_tree::Config {
-                                    finalized_async_user_data: None,
-                                    retry_after_failed: Duration::from_secs(5),
-                                    blocks_capacity: 32,
-                                });
-                            let finalized_hash = header::hash_from_scale_encoded_header(
-                                &relay_chain_subscribe_all.finalized_block_scale_encoded_header,
-                            );
-                            let finalized_index = async_tree.input_insert_block(finalized_hash, None, false, true);
-                            async_tree.input_finalize(finalized_index, finalized_index);
-                            for block in relay_chain_subscribe_all.non_finalized_blocks_ancestry_order {
-                                let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
-                                let parent = async_tree
-                                    .input_iter_unordered()
-                                    .find(|b| *b.user_data == block.parent_hash)
-                                    .map(|b| b.id)
-                                    .unwrap_or(finalized_index);
-                                async_tree.input_insert_block(hash, Some(parent), false, block.is_new_best);
-                            }
-                            async_tree
-                        };
-            
-                        log::debug!(target: &self.log_target, "ParaheadFetchOperations <= Clear");
-            
-                        self.subscription_state = ParachainBackgroundState::Subscribed(ParachainBackgroundTaskAfterSubscription {
-                            all_subscriptions: match &mut self.subscription_state {
-                                ParachainBackgroundState::NotSubscribed { all_subscriptions, .. } => { mem::take(all_subscriptions) },
-                                _ => unreachable!()
-                            },
-                            relay_chain_subscribe_all: relay_chain_subscribe_all.new_blocks,
-                            reported_best_parahead_hash: None,
-                            async_tree,
-                            in_progress_paraheads: stream::FuturesUnordered::new(),
-                            wakeup_deadline: future::Either::Right(future::pending()),
-                        });
+                        self.set_new_subscription(relay_chain_subscribe_all);
                     },
 
                     foreground_message = self.from_foreground.next().fuse() => {
@@ -896,6 +851,55 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 runtime_subscription.async_tree.input_set_best_block(node_idx);
             }
         };
+    }
+
+    fn set_new_subscription(&mut self, relay_chain_subscribe_all: runtime_service::SubscribeAll<TPlat>) {
+        // Subscription finished.
+        log::debug!(
+            target: &self.log_target,
+            "RelayChain => NewSubscription(finalized_hash={})",
+            HashDisplay(&header::hash_from_scale_encoded_header(
+                &relay_chain_subscribe_all.finalized_block_scale_encoded_header
+            ))
+        );
+
+        let async_tree = {
+            let mut async_tree =
+                async_tree::AsyncTree::<TPlat::Instant, [u8; 32], _>::new(async_tree::Config {
+                    finalized_async_user_data: None,
+                    retry_after_failed: Duration::from_secs(5),
+                    blocks_capacity: 32,
+                });
+            let finalized_hash = header::hash_from_scale_encoded_header(
+                &relay_chain_subscribe_all.finalized_block_scale_encoded_header,
+            );
+            let finalized_index = async_tree.input_insert_block(finalized_hash, None, false, true);
+            async_tree.input_finalize(finalized_index, finalized_index);
+            for block in relay_chain_subscribe_all.non_finalized_blocks_ancestry_order {
+                let hash = header::hash_from_scale_encoded_header(&block.scale_encoded_header);
+                let parent = async_tree
+                    .input_iter_unordered()
+                    .find(|b| *b.user_data == block.parent_hash)
+                    .map(|b| b.id)
+                    .unwrap_or(finalized_index);
+                async_tree.input_insert_block(hash, Some(parent), false, block.is_new_best);
+            }
+            async_tree
+        };
+
+        log::debug!(target: &self.log_target, "ParaheadFetchOperations <= Clear");
+
+        self.subscription_state = ParachainBackgroundState::Subscribed(ParachainBackgroundTaskAfterSubscription {
+            all_subscriptions: match &mut self.subscription_state {
+                ParachainBackgroundState::NotSubscribed { all_subscriptions, .. } => { mem::take(all_subscriptions) },
+                _ => unreachable!()
+            },
+            relay_chain_subscribe_all: relay_chain_subscribe_all.new_blocks,
+            reported_best_parahead_hash: None,
+            async_tree,
+            in_progress_paraheads: stream::FuturesUnordered::new(),
+            wakeup_deadline: future::Either::Right(future::pending()),
+        });
     }
 }
 
