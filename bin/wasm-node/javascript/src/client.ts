@@ -253,6 +253,12 @@ export interface ClientOptions {
    * connections.
    */
   forbidWss?: boolean;
+
+  /**
+   * If `true`, then the client will never open any WebRTC connection.
+   * Defaults to `false`.
+   */
+  forbidWebRTC?: boolean;
 }
 
 /**

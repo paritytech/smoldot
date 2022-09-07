@@ -20,6 +20,7 @@
 import { Client, ClientOptions, start as innerStart } from './client.js'
 import { Connection, ConnectionError, ConnectionConfig } from './instance/instance.js';
 import { inflate } from 'pako';
+import { base64url } from "multiformats/bases/base64url";
 
 export {
   AddChainError,
@@ -58,7 +59,7 @@ export function start(options?: ClientOptions): Client {
       crypto.getRandomValues(buffer);
     },
     connect: (config) => {
-      return connect(config, options?.forbidWs || false, options?.forbidNonLocalWs || false, options?.forbidWss || false)
+      return connect(config, options?.forbidWs || false, options?.forbidNonLocalWs || false, options?.forbidWss || false, options?.forbidWebRTC || false)
     }
   })
 }
@@ -91,7 +92,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
   // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
   const wsParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
 
-  const webRTCParsed = config.address.match(/^\/(ip4|ip6)\/(.*?)\/udp\/(.*?)\/x-webrtc\/(.*?)\/$/);
+  const webRTCParsed = config.address.match(/^\/(ip4|ip6)\/(.*?)\/udp\/(.*?)\/webrtc\/certhash\/(.*?)$/);
 
   if (wsParsed != null) {
       let connection: WebSocket;
@@ -156,11 +157,10 @@ function trustedBase64Decode(base64: string): Uint8Array {
       }
     };
 
-    // Create a new data channel with id=1. This will trigger a new negotiation (see
-    // `negotiationneeded` handler below).
-    const dataChannel = pc.createDataChannel("data", { id: 1 });
+    // Create an initial data channel with a predefined `id = 1`, which is used
+    // to verify remote peer's identity.
+    const dataChannel = pc.createDataChannel("data", { id: 1, negotiated: true });
 
-    // When a new negotion is triggered, set both local and remote descriptions.
     pc.onnegotiationneeded = async (_event) => {
         // Create a new offer and set it as local description.
         const sdpOffer = (await pc.createOffer()).sdp!;
@@ -170,11 +170,13 @@ function trustedBase64Decode(base64: string): Uint8Array {
 
         const ipVersion = webRTCParsed[1] == 'ip4'? '4' : '6';
         const targetIp = webRTCParsed[2];
-        const ufrag = webRTCParsed[5];
-        let fingerprint = "";
-        for(i=0;i<=ufrag.length;i+=2) {
-          fingerprint += ufrag[i] + ufrag[i+1] + ":";
-        }
+        const ufrag = (webRTCParsed[5] || '');
+
+        // Transform ufrag (multibase-encoded multihash) to fingerprint (upper-hex;
+        // each byte separated by ":").
+        //
+        // To add additional decoders use `or`: `base64url.decoder.or(base32.decoder)`.
+        const fingerprint = new Uint8Array(base64url.decode(ufrag)).join(':').toUpperCase();
 
         // Note that the trailing line feed is important, as otherwise Chrome
         // fails to parse the payload.
