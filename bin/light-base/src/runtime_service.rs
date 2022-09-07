@@ -269,12 +269,12 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
         let _prev_value = pinned_blocks.insert(
             (subscription_id, finalized_block.hash),
-            (
-                tree.finalized_async_user_data().clone(),
-                *decoded_finalized_block.state_root,
-                decoded_finalized_block.number,
-                false,
-            ),
+            PinnedBlock {
+                runtime: tree.finalized_async_user_data().clone(),
+                state_trie_root_hash: *decoded_finalized_block.state_root,
+                block_number: decoded_finalized_block.number,
+                block_ignores_limit: false,
+            },
         );
         debug_assert!(_prev_value.is_none());
 
@@ -314,12 +314,12 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
             let _prev_value = pinned_blocks.insert(
                 (subscription_id, block_hash),
-                (
-                    runtime.clone(),
-                    *decoded_header.state_root,
-                    decoded_header.number,
-                    true,
-                ),
+                PinnedBlock {
+                    runtime: runtime.clone(),
+                    state_trie_root_hash: *decoded_header.state_root,
+                    block_number: decoded_header.number,
+                    block_ignores_limit: true,
+                },
             );
             debug_assert!(_prev_value.is_none());
 
@@ -403,7 +403,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             let block_counts_towards_limit = match pinned_blocks
                 .remove(&(subscription_id.0, *block_hash))
             {
-                Some((_, _, _, to_remove)) => !to_remove,
+                Some(b) => b.block_ignores_limit,
                 None => {
                     // Cold path.
                     if let Some((sub_name, _, _)) = all_blocks_subscriptions.get(&subscription_id.0)
@@ -417,7 +417,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
             guarded_lock.runtimes.retain(|_, rt| rt.strong_count() > 0);
 
-            if block_counts_towards_limit {
+            if !block_counts_towards_limit {
                 let (_name, _, finalized_pinned_remaining) = all_blocks_subscriptions
                     .get_mut(&subscription_id.0)
                     .unwrap();
@@ -451,7 +451,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         let mut guarded = self.guarded.lock().await;
         let guarded = &mut *guarded;
 
-        let (runtime, block_state_root_hash, block_number, _) = {
+        let pinned_block = {
             if let GuardedInner::FinalizedBlockRuntimeKnown {
                 all_blocks_subscriptions,
                 pinned_blocks,
@@ -479,9 +479,9 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         Ok(RuntimeLock {
             service: self,
             hash: block_hash,
-            runtime,
-            block_number,
-            block_state_root_hash,
+            runtime: pinned_block.runtime,
+            block_number: pinned_block.block_number,
+            block_state_root_hash: pinned_block.state_trie_root_hash,
         })
     }
 
@@ -1047,8 +1047,7 @@ enum GuardedInner<TPlat: Platform> {
         /// Keys are `(subscription_id, block_hash)`. Values are indices within
         /// [`Guarded::runtimes`], state trie root hashes, block numbers, and whether the block
         /// is non-finalized and part of the canonical chain.
-        // TODO: use structs instead of tuples
-        pinned_blocks: BTreeMap<(u64, [u8; 32]), (Arc<Runtime>, [u8; 32], u64, bool)>,
+        pinned_blocks: BTreeMap<(u64, [u8; 32]), PinnedBlock>,
     },
     FinalizedBlockRuntimeUnknown {
         /// Tree of blocks. Holds the state of the download of everything. Always `Some` when the
@@ -1067,6 +1066,23 @@ enum GuardedInner<TPlat: Platform> {
         /// [`GuardedInner::FinalizedBlockRuntimeKnown`].
         when_known: event_listener::Event,
     },
+}
+
+#[derive(Clone)]
+struct PinnedBlock {
+    /// Reference-counted runtime of the pinned block.
+    runtime: Arc<Runtime>,
+
+    /// Hash of the trie root of the pinned block.
+    state_trie_root_hash: [u8; 32],
+
+    /// Height of the pinned block.
+    block_number: u64,
+
+    /// `true` if the block is non-finalized and part of the canonical chain.
+    /// If `true`, then the block doesn't count towards the maximum number of pinned blocks of
+    /// the subscription.
+    block_ignores_limit: bool,
 }
 
 #[derive(Clone)]
@@ -1623,11 +1639,11 @@ impl<TPlat: Platform> Background<TPlat> {
                             for block in iter::once(&finalized_block.hash)
                                 .chain(pruned_blocks.iter().map(|(_, b, _)| &b.hash))
                             {
-                                if let Some((_, _, _, non_finalized_canonical)) =
+                                if let Some(pin) =
                                     pinned_blocks.get_mut(&(*subscription_id, *block))
                                 {
-                                    debug_assert!(*non_finalized_canonical);
-                                    *non_finalized_canonical = false;
+                                    debug_assert!(pin.block_ignores_limit);
+                                    pin.block_ignores_limit = false;
                                 }
                             }
                         }
@@ -1649,7 +1665,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         let scale_encoded_header = block.user_data.scale_encoded_header.clone();
                         let is_new_best = block.is_new_best;
 
-                        let (block_number, block_state_root_hash) = {
+                        let (block_number, state_trie_root_hash) = {
                             let decoded = header::decode(
                                 &scale_encoded_header,
                                 self.sync_service.block_number_bytes(),
@@ -1696,12 +1712,12 @@ impl<TPlat: Platform> Background<TPlat> {
                             if sender.try_send(notif.clone()).is_ok() {
                                 let _prev_value = pinned_blocks.insert(
                                     (*subscription_id, block_hash),
-                                    (
-                                        block_runtime.clone(),
-                                        block_state_root_hash,
+                                    PinnedBlock {
+                                        runtime: block_runtime.clone(),
+                                        state_trie_root_hash,
                                         block_number,
-                                        true,
-                                    ),
+                                        block_ignores_limit: true,
+                                    },
                                 );
                                 debug_assert!(_prev_value.is_none());
                             } else {
