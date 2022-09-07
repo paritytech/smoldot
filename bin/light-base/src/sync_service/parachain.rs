@@ -197,10 +197,6 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
 
         match self.subscription_state {
             ParachainBackgroundState::NotSubscribed { ref mut subscribe_future, .. } => {
-
-        
-            log::debug!(target: &self.log_target, "Subscriptions <= Reset");
-
                 // While we wait for the `subscribe_future` future to be ready, we still need to
                 // process messages coming from the public API of the syncing service.
                 futures::select! {
@@ -280,6 +276,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                         Some(n) => n,
                         None => {
                             // Recreate the channel.
+                            log::debug!(target: &self.log_target, "Subscriptions <= Reset");
                             self.subscription_state = ParachainBackgroundState::NotSubscribed {
                                 all_subscriptions: Vec::new(),
                                 subscribe_future: {
@@ -602,6 +599,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 // The relay chain runtime service has some kind of gap or issue and
                 // has discarded the runtime.
                 // Destroy the subscription to recreate the channel.
+                log::debug!(target: &self.log_target, "Subscriptions <= Reset");
                 self.subscription_state = ParachainBackgroundState::NotSubscribed {
                     all_subscriptions: Vec::new(),
                     subscribe_future: {
