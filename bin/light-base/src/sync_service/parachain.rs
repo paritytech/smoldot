@@ -97,13 +97,24 @@ pub(super) async fn start_parachain<TPlat: Platform>(
 
 /// Task that is running in the background.
 struct ParachainBackgroundTask<TPlat: Platform> {
+    /// Target to use for all logs.
     log_target: String,
 
+    /// Channel receiving message from the sync service frontend.
     from_foreground: mpsc::Receiver<ToBackground>,
 
+    /// Number of bytes to use to encode the parachain block numbers in headers.
     block_number_bytes: usize,
+
+    /// Number of bytes to use to encode the relay chain block numbers in headers.
     relay_chain_block_number_bytes: usize,
+
+    /// Id of the parachain registered within the relay chain. Chosen by the user.
     parachain_id: u32,
+
+    /// Index of the chain within the associated network service.
+    ///
+    /// Used to filter events from [`ParachainBackgroundTask::from_network_service`].
     network_chain_index: usize,
 
     /// Events coming from the networking service.
@@ -131,13 +142,17 @@ struct ParachainBackgroundTask<TPlat: Platform> {
 }
 
 enum ParachainBackgroundState<TPlat: Platform> {
+    /// Currently subscribing to the relay chain runtime service.
     NotSubscribed {
         /// List of senders that get notified when the tree of blocks is modified.
         all_subscriptions: Vec<mpsc::Sender<super::Notification>>,
 
+        /// Future when the subscription has finished.
         subscribe_future:
             future::Fuse<future::BoxFuture<'static, runtime_service::SubscribeAll<TPlat>>>,
     },
+
+    /// Subscribed to the relay chain runtime service.
     Subscribed(ParachainBackgroundTaskAfterSubscription<TPlat>),
 }
 
