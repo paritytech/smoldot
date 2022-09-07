@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.32 - 2022-09-07
+
 ### Fixed
 
 - Fix occasional panic when connecting to a parachain with forks and/or missed slots. ([#2703](https://github.com/paritytech/smoldot/pull/2703))
