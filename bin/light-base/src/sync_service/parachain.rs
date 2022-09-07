@@ -205,8 +205,8 @@ struct ParachainBackgroundTaskAfterSubscription<TPlat: Platform> {
         future::BoxFuture<'static, (async_tree::AsyncOpId, Result<Vec<u8>, ParaheadError>)>,
     >,
 
-    /// Future that is ready when we need to wake up the `select!` below.
-    wakeup_deadline: future::Either<future::Fuse<TPlat::Delay>, future::Pending<()>>,
+    /// Future that is ready when we need to start a new parahead fetch operation.
+    next_start_parahead_fetch: future::Either<future::Fuse<TPlat::Delay>, future::Pending<()>>,
 }
 
 impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
@@ -246,7 +246,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
 
                 ParachainBackgroundState::Subscribed(ref mut runtime_subscription) => {
                     futures::select! {
-                        () = &mut runtime_subscription.wakeup_deadline => {
+                        () = &mut runtime_subscription.next_start_parahead_fetch => {
                             // Do nothing. This is simply to wake up and loop again.
                         },
 
@@ -589,12 +589,12 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 .next_necessary_async_op(&TPlat::now())
             {
                 async_tree::NextNecessaryAsyncOp::NotReady { when: Some(when) } => {
-                    runtime_subscription.wakeup_deadline =
+                    runtime_subscription.next_start_parahead_fetch =
                         future::Either::Left(TPlat::sleep_until(when).fuse());
                     break;
                 }
                 async_tree::NextNecessaryAsyncOp::NotReady { when: None } => {
-                    runtime_subscription.wakeup_deadline = future::Either::Right(future::pending());
+                    runtime_subscription.next_start_parahead_fetch = future::Either::Right(future::pending());
                     break;
                 }
                 async_tree::NextNecessaryAsyncOp::Ready(op) => {
@@ -1068,7 +1068,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 reported_best_parahead_hash: None,
                 async_tree,
                 in_progress_paraheads: stream::FuturesUnordered::new(),
-                wakeup_deadline: future::Either::Right(future::pending()),
+                next_start_parahead_fetch: future::Either::Right(future::pending()),
             });
     }
 }
