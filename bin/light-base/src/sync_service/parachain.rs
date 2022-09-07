@@ -144,7 +144,10 @@ struct ParachainBackgroundTask<TPlat: Platform> {
 enum ParachainBackgroundState<TPlat: Platform> {
     /// Currently subscribing to the relay chain runtime service.
     NotSubscribed {
-        /// List of senders that get notified when the tree of blocks is modified.
+        /// List of senders that will get notified when the tree of blocks is modified.
+        ///
+        /// These subscriptions are pending and no notification should be sent to them until the
+        /// subscription to the relay chain runtime service is finished.
         all_subscriptions: Vec<mpsc::Sender<super::Notification>>,
 
         /// Future when the subscription has finished.
@@ -1027,6 +1030,7 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                 &relay_chain_subscribe_all.finalized_block_scale_encoded_header
             ))
         );
+        log::debug!(target: &self.log_target, "ParaheadFetchOperations <= Clear");
 
         let async_tree = {
             let mut async_tree =
@@ -1051,8 +1055,6 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
             }
             async_tree
         };
-
-        log::debug!(target: &self.log_target, "ParaheadFetchOperations <= Clear");
 
         self.subscription_state =
             ParachainBackgroundState::Subscribed(ParachainBackgroundTaskAfterSubscription {
