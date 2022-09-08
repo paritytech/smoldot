@@ -21,11 +21,10 @@ import { Client, ClientOptions, start as innerStart } from './client.js'
 import { Connection, ConnectionError, ConnectionConfig } from './instance/instance.js';
 import { inflate } from 'pako';
 
-import { base64url } from "multiformats/bases/base64url";
-import { base58btc } from "multiformats/bases/base58btc";
+import { base64 } from 'multiformats/bases/base64';
 import { sha256 } from 'multiformats/hashes/sha2';
-import { Noise } from "@chainsafe/libp2p-noise";
-import { Ed25519PeerIdImpl, peerIdFromString } from '@libp2p/peer-id';
+import { Noise } from '@chainsafe/libp2p-noise';
+import { createPeerId, peerIdFromString } from '@libp2p/peer-id';
 import { generateKeyPair } from '@libp2p/crypto/keys';
 import type { Duplex } from 'it-stream-types';
 
@@ -182,8 +181,8 @@ function trustedBase64Decode(base64: string): Uint8Array {
         // Transform ufrag (multibase-encoded multihash) to fingerprint (upper-hex;
         // each byte separated by ":").
         //
-        // To add additional decoders use `or`: `base64url.decoder.or(base32.decoder)`.
-        const fingerprint = new Uint8Array(base64url.decode(ufrag)).join(':').toUpperCase();
+        // To add additional decoders use `or`: `base64.decoder.or(base32.decoder)`.
+        const fingerprint = new Uint8Array(base64.decode(ufrag)).join(':').toUpperCase();
 
         // Note that the trailing line feed is important, as otherwise Chrome
         // fails to parse the payload.
@@ -246,16 +245,16 @@ function trustedBase64Decode(base64: string): Uint8Array {
         console.log("REMOTE ANSWER: " + pc.remoteDescription!.sdp);
     };
 
-    dataChannel.onopen = () => {
+    dataChannel.onopen = async () => {
         console.log(`'${dataChannel.label}' opened`);
 
-        const keyPair = generateKeyPair('Ed25519', 1024);
-        const multihash = sha256.digest(keyPair.public);
-        const localPeerId = new Ed25519PeerIdImpl({ multihash: multihash, privateKey: keyPair.private });
+        const privateKey = await generateKeyPair('Ed25519', 1024);
+        const multihash = await sha256.digest(privateKey.bytes);
+        const localPeerId = createPeerId({ type: 'Ed25519', multihash: multihash, privateKey: privateKey.bytes });
         const remotePeerId = peerIdFromString(webRTCParsed[7] || '');
 
         console.log(`noise handshake with addr=${config.address}`);
-        const noise = new Noise(keyPair.private);
+        const noise = new Noise(privateKey.bytes);
         const conn: Duplex<Uint8Array> = {
           sink: async data => {
             dataChannel.send(data);
@@ -266,7 +265,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
             };
           }())
         };
-        const { secureConn, verifiedRemotePeerId } = noise.secureOutbound(localPeerId, conn, remotePeerId);
+        const { secureConn, verifiedRemotePeerId } = await noise.secureOutbound(localPeerId, conn, remotePeerId);
 
         dataChannel.close();
 
