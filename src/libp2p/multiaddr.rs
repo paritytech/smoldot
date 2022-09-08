@@ -207,9 +207,9 @@ pub enum ProtocolRef<'a> {
     Wss,
     // TODO: unclear what the payload is; see https://github.com/multiformats/multiaddr/issues/127
     Memory(u64),
-    WebRtc,
+    WebRTC,
     /// Contains the multihash of the TLS certificate.
-    CertHash(Cow<'a, [u8]>), // TODO: a bit hacky because there's no "owned" equivalent to MultihashRef
+    Certhash(Cow<'a, [u8]>), // TODO: a bit hacky because there's no "owned" equivalent to MultihashRef
 }
 
 impl<'a> ProtocolRef<'a> {
@@ -277,7 +277,7 @@ impl<'a> ProtocolRef<'a> {
                         .map_err(|_| ParseError::InvalidMemoryPayload)?,
                 ))
             }
-            "webrtc" => Ok(ProtocolRef::WebRtc),
+            "webrtc" => Ok(ProtocolRef::WebRTC),
             "certhash" => {
                 let s = iter.next().ok_or(ParseError::UnexpectedEof)?;
                 let decoded = bs58::decode(s)
@@ -286,7 +286,7 @@ impl<'a> ProtocolRef<'a> {
                 if let Err(err) = multihash::MultihashRef::from_bytes(&decoded) {
                     return Err(ParseError::InvalidMultihash(err));
                 }
-                Ok(ProtocolRef::CertHash(Cow::Owned(decoded)))
+                Ok(ProtocolRef::Certhash(Cow::Owned(decoded)))
             }
             _ => Err(ParseError::UnrecognizedProtocol),
         }
@@ -310,8 +310,8 @@ impl<'a> ProtocolRef<'a> {
             ProtocolRef::Ws => 477,
             ProtocolRef::Wss => 478,
             ProtocolRef::Memory(_) => 777,
-            ProtocolRef::WebRtc => 280,
-            ProtocolRef::CertHash(_) => 466,
+            ProtocolRef::WebRTC => 280,
+            ProtocolRef::Certhash(_) => 466,
         };
 
         // TODO: optimize by not allocating a Vec
@@ -336,7 +336,7 @@ impl<'a> ProtocolRef<'a> {
             }
             ProtocolRef::Tcp(port) | ProtocolRef::Udp(port) => port.to_be_bytes().to_vec(),
             ProtocolRef::Memory(payload) => payload.to_be_bytes().to_vec(),
-            ProtocolRef::CertHash(multihash) => {
+            ProtocolRef::Certhash(multihash) => {
                 // TODO: what if not a valid multihash? the enum variant can be constructed by the user
                 let mut out = Vec::with_capacity(multihash.len() + 4);
                 out.extend(crate::util::leb128::encode_usize(multihash.len()));
@@ -375,8 +375,8 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
             ProtocolRef::Ws => write!(f, "/ws"),
             ProtocolRef::Wss => write!(f, "/wss"),
             ProtocolRef::Memory(payload) => write!(f, "/memory/{}", payload),
-            ProtocolRef::WebRtc => write!(f, "/webrtc"),
-            ProtocolRef::CertHash(multihash) => {
+            ProtocolRef::WebRTC => write!(f, "/webrtc"),
+            ProtocolRef::Certhash(multihash) => {
                 // Base58 encoding doesn't have `/` in its characters set.
                 write!(f, "/certhash/{}", bs58::encode(multihash).into_string())
             }
@@ -515,13 +515,13 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             478 => Ok((bytes, ProtocolRef::Wss)),
             // TODO: unclear what the /memory payload is, see https://github.com/multiformats/multiaddr/issues/127
             777 => nom::combinator::map(nom::number::complete::be_u64, ProtocolRef::Memory)(bytes),
-            280 => Ok((bytes, ProtocolRef::WebRtc)),
+            280 => Ok((bytes, ProtocolRef::WebRTC)),
             466 => nom::combinator::map(
                 nom::combinator::verify(
                     nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
                     |s| multihash::MultihashRef::from_bytes(s).is_ok(),
                 ),
-                |b| ProtocolRef::CertHash(Cow::Borrowed(b)),
+                |b| ProtocolRef::Certhash(Cow::Borrowed(b)),
             )(bytes),
             _ => Err(nom::Err::Error(nom::error::make_error(
                 bytes,
