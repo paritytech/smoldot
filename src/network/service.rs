@@ -379,10 +379,21 @@ where
             })
             .collect::<Vec<_>>();
 
+        // Maximum number that each remote is allowed to open.
+        // Note that this maximum doesn't have to be precise. There only needs to be *a* limit
+        // that is not exaggerately large, and this limit shouldn't be too low as to cause
+        // legitimate substreams to be refused.
+        // According to the protocol, a remote can only open one substream of each protocol at
+        // a time. However, we multiply this value by 2 in order to be generous. We also add 1
+        // to account for the ping protocol.
+        let max_inbound_substreams = chains.len()
+            * (1 + REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN + NOTIFICATIONS_PROTOCOLS_PER_CHAIN) * 2;
+
         ChainNetwork {
             inner: peers::Peers::new(peers::Config {
                 connections_capacity: config.connections_capacity,
                 peers_capacity: config.peers_capacity,
+                max_inbound_substreams,
                 request_response_protocols,
                 noise_key: config.noise_key,
                 randomness_seed: randomness.sample(rand::distributions::Standard),

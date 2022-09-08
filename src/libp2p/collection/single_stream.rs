@@ -64,6 +64,9 @@ enum SingleStreamConnectionTaskInner<TNow> {
         /// See [`super::Config::noise_key`].
         noise_key: Arc<NoiseKey>,
 
+        /// See [`super::Config::max_inbound_substreams`].
+        max_inbound_substreams: usize,
+
         /// See [`OverlayNetwork`].
         notification_protocols: Arc<[OverlayNetwork]>,
 
@@ -130,6 +133,7 @@ where
         is_initiator: bool,
         handshake_timeout: TNow,
         noise_key: Arc<NoiseKey>,
+        max_inbound_substreams: usize,
         notification_protocols: Arc<[OverlayNetwork]>,
         request_response_protocols: Arc<[ConfigRequestResponse]>,
         ping_protocol: Arc<str>,
@@ -140,6 +144,7 @@ where
                 randomness_seed,
                 timeout: handshake_timeout,
                 noise_key,
+                max_inbound_substreams,
                 notification_protocols,
                 request_response_protocols,
                 ping_protocol,
@@ -627,6 +632,7 @@ where
                 randomness_seed,
                 timeout,
                 noise_key,
+                max_inbound_substreams,
                 notification_protocols,
                 request_response_protocols,
                 ping_protocol,
@@ -690,6 +696,7 @@ where
                                 randomness_seed,
                                 timeout,
                                 noise_key,
+                                max_inbound_substreams,
                                 notification_protocols,
                                 request_response_protocols,
                                 ping_protocol,
@@ -718,6 +725,7 @@ where
                                         })
                                         .collect(),
                                     request_protocols: request_response_protocols.to_vec(), // TODO: overhead
+                                    max_inbound_substreams,
                                     randomness_seed,
                                     ping_protocol: ping_protocol.to_string(), // TODO: cloning :-/
                                     ping_interval: Duration::from_secs(20),   // TODO: hardcoded

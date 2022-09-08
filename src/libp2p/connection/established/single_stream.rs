@@ -114,6 +114,8 @@ struct Inner<TNow, TRqUd, TNotifUd> {
     /// unnecessary code being included in the binary and reduces the binary size.
     ping_payload_randomness: rand_chacha::ChaCha20Rng,
 
+    /// See [`Config::max_inbound_substreams`].
+    max_inbound_substreams: usize,
     /// See [`Config::request_protocols`].
     request_protocols: Vec<ConfigRequestResponse>,
     /// See [`Config::notifications_protocols`].
@@ -308,9 +310,20 @@ where
                 Some(yamux::IncomingDataDetail::IncomingSubstream) => {
                     debug_assert!(!self.inner.yamux.goaway_queued_or_sent());
 
+                    self.encryption
+                        .consume_inbound_data(yamux_decode.bytes_read);
+
                     // Receive a request from the remote for a new incoming substream.
-                    // These requests are automatically accepted.
-                    // TODO: add a limit to the number of substreams
+                    // These requests are automatically accepted unless the total limit to the
+                    // number of substreams has been reached.
+                    // Note that `num_inbound()` counts substreams that have been closed but not
+                    // yet removed from the state machine. This can affect the actual limit in a
+                    // subtle way. At the time of writing of this comment the limit should be
+                    // properly enforced, however it is not considered problematic if it weren't.
+                    if self.inner.yamux.num_inbound() >= self.inner.max_inbound_substreams {
+                        self.inner.yamux.reject_pending_substream();
+                        continue;
+                    }
 
                     let supported_protocols = self
                         .inner
@@ -332,8 +345,6 @@ where
                         .accept_pending_substream(Some(substream::Substream::ingoing(
                             supported_protocols,
                         )));
-                    self.encryption
-                        .consume_inbound_data(yamux_decode.bytes_read);
                 }
 
                 Some(
@@ -1059,6 +1070,7 @@ impl ConnectionPrototype {
                 outgoing_pings,
                 next_ping: config.first_out_ping,
                 ping_payload_randomness: randomness,
+                max_inbound_substreams: config.max_inbound_substreams,
                 request_protocols: config.request_protocols,
                 notifications_protocols: config.notifications_protocols,
                 ping_protocol: config.ping_protocol,

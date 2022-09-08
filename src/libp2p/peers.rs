@@ -80,6 +80,16 @@ pub struct Config {
     /// Capacity to initially reserve to the list of peers.
     pub peers_capacity: usize,
 
+    /// Maximum number of substreams that each remote can have simultaneously opened on each
+    /// connection.
+    ///
+    /// If there exists multiple connections with the same remote, the limit is enforced for
+    /// each connection separately.
+    ///
+    /// > **Note**: This limit is necessary in order to avoid DoS attacks where a remote opens too
+    /// >           many substreams.
+    pub max_inbound_substreams: usize,
+
     pub notification_protocols: Vec<NotificationProtocolConfig>,
 
     pub request_response_protocols: Vec<ConfigRequestResponse>,
@@ -206,6 +216,7 @@ where
             inner: collection::Network::new(collection::Config {
                 capacity: config.connections_capacity,
                 noise_key: config.noise_key,
+                max_inbound_substreams: config.max_inbound_substreams,
                 notification_protocols: config.notification_protocols,
                 request_response_protocols: config.request_response_protocols,
                 ping_protocol: config.ping_protocol,
