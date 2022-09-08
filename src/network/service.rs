@@ -387,7 +387,8 @@ where
         // a time. However, we multiply this value by 2 in order to be generous. We also add 1
         // to account for the ping protocol.
         let max_inbound_substreams = chains.len()
-            * (1 + REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN + NOTIFICATIONS_PROTOCOLS_PER_CHAIN) * 2;
+            * (1 + REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN + NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
+            * 2;
 
         ChainNetwork {
             inner: peers::Peers::new(peers::Config {
