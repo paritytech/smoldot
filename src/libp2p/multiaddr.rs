@@ -578,6 +578,8 @@ mod tests {
         check_valid("/dns6//tcp/55");
         check_valid("/dnsaddr/./tcp/55");
         check_valid("/memory/1234567890");
+        check_valid("/webrtc");
+        // TODO: example valid /certhash
 
         check_invalid("/");
         check_invalid("ip4/1.2.3.4");
@@ -587,5 +589,8 @@ mod tests {
         check_invalid("/ws/1.2.3.4");
         check_invalid("/tcp/65536");
         check_invalid("/p2p/blablabla");
+        check_invalid("/webrtc/2");
+        check_invalid("/certhash");
+        check_invalid("/certhash/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN");
     }
 }
