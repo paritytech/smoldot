@@ -254,7 +254,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
         const localPeerId = new Ed25519PeerIdImpl({ multihash: multihash, privateKey: keyPair.private });
         const remotePeerId = peerIdFromString(webRTCParsed[7] || '');
 
-        console.log(`noise handshake with addr='${config.address}'`);
+        console.log(`noise handshake with addr=${config.address}`);
         const noise = new Noise(keyPair.private);
         const conn: Duplex<Uint8Array> = {
           sink: async data => {
@@ -266,12 +266,15 @@ function trustedBase64Decode(base64: string): Uint8Array {
             };
           }())
         };
-        const secureConn = noise.secureOutbound(localPeerId, conn, remotePeerId);
-
-        console.log(`verifying peer's identity addr='${config.address}'`);
-        // TODO: assert secureConn.peerId == remotePeerId
+        const { secureConn, verifiedRemotePeerId } = noise.secureOutbound(localPeerId, conn, remotePeerId);
 
         dataChannel.close();
+
+        console.log(`verifying peer's identity addr=${config.address}`);
+        if (verifiedRemotePeerId != remotePeerId) {
+          console.error(`invalid peer ID (expected ${verifiedRemotePeerId}, got ${remotePeerId})`);
+          return
+        }
 
         config.onOpen({ type: 'multi-stream', peerId: remotePeerId });
     };
