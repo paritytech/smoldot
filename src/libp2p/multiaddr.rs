@@ -187,6 +187,8 @@ pub enum ParseError {
     InvalidDomainName,
     InvalidMultihash(multihash::FromBytesError),
     InvalidMemoryPayload,
+    InvalidMultibase,
+    InvalidBase64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -280,9 +282,16 @@ impl<'a> ProtocolRef<'a> {
             "webrtc" => Ok(ProtocolRef::WebRTC),
             "certhash" => {
                 let s = iter.next().ok_or(ParseError::UnexpectedEof)?;
-                let decoded = bs58::decode(s)
-                    .into_vec()
-                    .map_err(|_| ParseError::NotBase58)?;
+                // See <https://github.com/multiformats/multibase#multibase-table>
+                let base64_flavor = match s.as_bytes().first() {
+                    Some(b'm') => base64::STANDARD_NO_PAD,
+                    Some(b'M') => base64::STANDARD,
+                    Some(b'u') => base64::URL_SAFE_NO_PAD,
+                    Some(b'U') => base64::URL_SAFE,
+                    _ => return Err(ParseError::InvalidMultibase),
+                };
+                let decoded = base64::decode_config(&s[1..], base64_flavor)
+                    .map_err(|_| ParseError::InvalidBase64)?;
                 if let Err(err) = multihash::MultihashRef::from_bytes(&decoded) {
                     return Err(ParseError::InvalidMultihash(err));
                 }
@@ -377,8 +386,11 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
             ProtocolRef::Memory(payload) => write!(f, "/memory/{}", payload),
             ProtocolRef::WebRTC => write!(f, "/webrtc"),
             ProtocolRef::Certhash(multihash) => {
-                // Base58 encoding doesn't have `/` in its characters set.
-                write!(f, "/certhash/{}", bs58::encode(multihash).into_string())
+                write!(
+                    f,
+                    "/certhash/u{}",
+                    base64::encode_config(multihash, base64::URL_SAFE_NO_PAD)
+                )
             }
         }
     }
