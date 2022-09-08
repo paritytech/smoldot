@@ -2262,6 +2262,7 @@ dependencies = [
  "arrayvec 0.7.2",
  "async-std",
  "atomic",
+ "base64",
  "bip39",
  "blake2-rfc",
  "bs58",
