@@ -22,11 +22,11 @@ import { Connection, ConnectionError, ConnectionConfig } from './instance/instan
 import { inflate } from 'pako';
 
 import { base64 } from 'multiformats/bases/base64';
-import { sha256 } from 'multiformats/hashes/sha2';
 import { Noise } from '@chainsafe/libp2p-noise';
-import { createPeerId, peerIdFromString } from '@libp2p/peer-id';
-import { generateKeyPair } from '@libp2p/crypto/keys';
+import { peerIdFromString, peerIdFromKeys } from '@libp2p/peer-id';
+import { generateKeyPair, marshalPrivateKey, marshalPublicKey } from '@libp2p/crypto/keys';
 import type { Duplex } from 'it-stream-types';
+import type { PeerId } from '@libp2p/interface-peer-id';
 
 export {
   AddChainError,
@@ -248,34 +248,40 @@ function trustedBase64Decode(base64: string): Uint8Array {
     dataChannel.onopen = async () => {
         console.log(`'${dataChannel.label}' opened`);
 
-        const privateKey = await generateKeyPair('Ed25519', 1024);
-        const multihash = await sha256.digest(privateKey.bytes);
-        const localPeerId = createPeerId({ type: 'Ed25519', multihash: multihash, privateKey: privateKey.bytes });
+        const privateKey = await generateKeyPair('Ed25519');
+        const localPeerId: PeerId = await peerIdFromKeys(marshalPublicKey(privateKey.public), marshalPrivateKey(privateKey));
         const remotePeerId = peerIdFromString(webRTCParsed[7] || '');
 
         console.log(`noise handshake with addr=${config.address}`);
         const noise = new Noise(privateKey.bytes);
         const conn: Duplex<Uint8Array> = {
-          sink: async data => {
-            dataChannel.send(data);
+          sink: async source => {
+            for await (const v of source) {
+              dataChannel.send(v);
+            }
           },
           source: (async function * () {
             dataChannel.onmessage = (m) => {
-                yield * m.data
+              // TODO: 99% this is incorrect, as I need to yield m.data (`yield
+              // * m.data` doesn't work).
+              //
+              // In Rust/Go, I'd create a channel and use it to pass m.data
+              // from this handler to the outer function.
+              return m.data;
             };
           }())
         };
-        const { secureConn, verifiedRemotePeerId } = await noise.secureOutbound(localPeerId, conn, remotePeerId);
+        const secureConn = await noise.secureOutbound(localPeerId, conn, remotePeerId);
 
         dataChannel.close();
 
         console.log(`verifying peer's identity addr=${config.address}`);
-        if (verifiedRemotePeerId != remotePeerId) {
-          console.error(`invalid peer ID (expected ${verifiedRemotePeerId}, got ${remotePeerId})`);
+        if (!secureConn.remotePeer.equals(remotePeerId)) {
+          console.error(`invalid peer ID (expected ${secureConn.remotePeer}, got ${remotePeerId})`);
           return
         }
 
-        config.onOpen({ type: 'multi-stream', peerId: remotePeerId });
+        config.onOpen({ type: 'multi-stream', peerId: remotePeerId.toBytes() });
     };
 
     dataChannel.onerror = (error) => {
@@ -333,7 +339,9 @@ function trustedBase64Decode(base64: string): Uint8Array {
             console.log(`new message on '${dataChannel.label}': '${m.data}'`);
         }
 
-        dataChannels.set(dataChannel.id, dataChannel);
+        if (dataChannel.id != null) {
+          dataChannels.set(dataChannel.id, dataChannel);
+        }
       }
     };
   } else {
