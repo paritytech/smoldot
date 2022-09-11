@@ -30,7 +30,7 @@ jobs:
       image: rust:1.61
     steps:
     - uses: actions/checkout@v3
-    - uses: Swatinem/rust-cache@v1
+    - uses: Swatinem/rust-cache@6720f05bc48b77f96918929a9019fb2203ff71f8 # v2.0.0
     - run: RUSTFLAGS=-Dwarnings cargo test --locked --workspace --all-features
 
   test-32bits:
@@ -40,7 +40,7 @@ jobs:
     steps:
     - run: apt-get update && apt install -y libc6-dev-i386
     - uses: actions/checkout@v3
-    - uses: Swatinem/rust-cache@v1
+    - uses: Swatinem/rust-cache@6720f05bc48b77f96918929a9019fb2203ff71f8 # v2.0.0
     - run: rustup target add i686-unknown-linux-gnu
     - run: RUSTFLAGS=-Dwarnings cargo test --target i686-unknown-linux-gnu --locked --workspace --all-features
 
@@ -51,11 +51,11 @@ jobs:
     steps:
     - run: apt-get update && apt install -y binaryen # For `wasm-opt`
     - uses: actions/checkout@v3
-    - uses: Swatinem/rust-cache@v1
+    - uses: Swatinem/rust-cache@6720f05bc48b77f96918929a9019fb2203ff71f8 # v2.0.0
     - uses: actions/setup-node@v3.4.1
       with:
         node-version: '12'  # An old version is used to ensure compatibility
-    - uses: denoland/setup-deno@v1
+    - uses: denoland/setup-deno@004814556e37c54a2f6e31384c9e18e983317366 # v1.1.0
       with:
         deno-version: v1.x
     - run: cd bin/wasm-node/javascript && RUSTFLAGS=-Dwarnings npm install-ci-test
@@ -69,11 +69,11 @@ jobs:
     - uses: actions/checkout@v3
       with:
         fetch-depth: 0  # Necessary to fetch pull request base below
-    - uses: Swatinem/rust-cache@v1
+    - uses: Swatinem/rust-cache@6720f05bc48b77f96918929a9019fb2203ff71f8 # v2.0.0
     - uses: actions/setup-node@v3.4.1
       with:
         node-version: '14'  # Because this step doesn't actually check anything, we use a more liberal version
-    - uses: baptiste0928/cargo-install@v1  # This action ensures that the twiggy compilation is cached.
+    - uses: baptiste0928/cargo-install@bf6758885262d0e6f61089a9d8c8790d3ac3368f # v1.3.0  # This action ensures that the twiggy compilation is cached.
       with:
         crate: twiggy
         version: 0.6
@@ -101,7 +101,7 @@ jobs:
       image: rust:1.61
     steps:
     - uses: actions/checkout@v3
-    - uses: Swatinem/rust-cache@v1
+    - uses: Swatinem/rust-cache@6720f05bc48b77f96918929a9019fb2203ff71f8 # v2.0.0
     - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features
     - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features database-sqlite
     - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features std
@@ -120,10 +120,10 @@ jobs:
         # is completely arbitrary.
         toolchain: nightly-2022-06-05
         override: true
-    - uses: baptiste0928/cargo-install@v1  # This action ensures that the compilation is cached.
+    - uses: baptiste0928/cargo-install@bf6758885262d0e6f61089a9d8c8790d3ac3368f # v1.3.0  # This action ensures that the compilation is cached.
       with:
         crate: cargo-fuzz
-    - uses: Swatinem/rust-cache@v1
+    - uses: Swatinem/rust-cache@6720f05bc48b77f96918929a9019fb2203ff71f8 # v2.0.0
       with:
         working-directory: ./bin/fuzz
     - run: cargo fuzz build --fuzz-dir ./bin/fuzz
@@ -134,7 +134,7 @@ jobs:
       image: rust:1.61
     steps:
     - uses: actions/checkout@v3
-    - uses: Swatinem/rust-cache@v1
+    - uses: Swatinem/rust-cache@6720f05bc48b77f96918929a9019fb2203ff71f8 # v2.0.0
     - run: cargo doc --verbose --workspace --all-features --no-deps --document-private-items
 
   fmt:
@@ -167,8 +167,8 @@ jobs:
             toolchain: nightly
             components: clippy
             override: true
-      - uses: Swatinem/rust-cache@v1  # Note that this is done after switching the compiler version to nightly
-      - uses: actions-rs/clippy@master
+      - uses: Swatinem/rust-cache@6720f05bc48b77f96918929a9019fb2203ff71f8 # v2.0.0  # Note that this is done after switching the compiler version to nightly
+      - uses: actions-rs/clippy@9e02862195d5c88dabdda3c1e7fa53a45ed35ec1 # action is in development stage pinned to latest good version
         with:
           args: --all-features --all-targets
 
@@ -182,7 +182,7 @@ jobs:
           - bans licenses sources
     steps:
     - uses: actions/checkout@v3
-    - uses: EmbarkStudios/cargo-deny-action@v1
+    - uses: EmbarkStudios/cargo-deny-action@7257a18a9c2fe3f92b85d41ae473520dff953c97 # v1.3.2
       with:
         command: check --config .github/cargo-deny.toml ${{ matrix.checks }}
         arguments: --workspace --all-features
@@ -191,7 +191,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
-    - uses: baptiste0928/cargo-install@v1  # This action ensures that the compilation is cached.
+    - uses: baptiste0928/cargo-install@bf6758885262d0e6f61089a9d8c8790d3ac3368f # v1.3.0  # This action ensures that the compilation is cached.
       with:
         crate: cargo-spellcheck
         version: 0.11.2
