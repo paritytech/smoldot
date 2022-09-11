@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add support for the `system_nodeRoles` JSON-RPC method. ([#2725](https://github.com/paritytech/smoldot/pull/2725))
+
 ## 0.6.32 - 2022-09-07
 
 ### Fixed
