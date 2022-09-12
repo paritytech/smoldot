@@ -17,7 +17,7 @@
 
 //! All legacy JSON-RPC method handlers that relate to the chain or the storage.
 
-use super::{Background, Platform, RuntimeCallError, SubscriptionTy};
+use super::{Background, Platform, SubscriptionTy};
 
 use crate::runtime_service;
 
@@ -1183,7 +1183,7 @@ impl<TPlat: Platform> Background<TPlat> {
                         .collect(),
                 })
                 .to_json_response(request_id)
-            },
+            }
             Ok(Err(error)) => json_rpc::parse::build_error_response(
                 request_id,
                 json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
