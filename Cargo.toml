@@ -30,7 +30,6 @@ database-sqlite = [
 std = [
     "async-std",
     "futures/thread-pool",
-    "parking_lot",
     "pin-project",
     "schnorrkel/getrandom", # TODO: necessary for signing; clarify in docs and in source code
     "soketto",
