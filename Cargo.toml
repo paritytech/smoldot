@@ -30,7 +30,6 @@ database-sqlite = [
 std = [
     "async-std",
     "futures/thread-pool",
-    "parking_lot",
     "pin-project",
     "schnorrkel/getrandom", # TODO: necessary for signing; clarify in docs and in source code
     "soketto",
@@ -45,6 +44,7 @@ std = [
 # not, or if things are sketchy, please leave a comment next to it.
 arrayvec = { version = "0.7.2", default-features = false }
 atomic = { version = "0.5.1", default-features = false }
+base64 = { version = "0.13.0", default-features = false, features = ["alloc"] }
 bip39 = { version = "1.0.1", default-features = false }
 blake2-rfc = { version = "0.2.18", default-features = false }
 bs58 = { version = "0.4.0", default-features = false, features = ["alloc"] }

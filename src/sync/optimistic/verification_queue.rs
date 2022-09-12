@@ -212,6 +212,14 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
         self.verification_queue[insert_pos].ty =
             VerificationQueueEntryTy::Requested { source, user_data };
 
+        // Check that there's no two "Missing" in a row.
+        debug_assert!(!self
+            .verification_queue
+            .iter()
+            .tuple_windows::<(_, _)>()
+            .any(|(a, b)| matches!(a.ty, VerificationQueueEntryTy::Missing)
+                && matches!(b.ty, VerificationQueueEntryTy::Missing)));
+
         // `verification_queue` must always end with an entry of type `Missing`. Add it, if
         // necessary.
         if insert_pos == self.verification_queue.len() - 1 {
@@ -263,6 +271,18 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
             }
             None => unreachable!(),
         }
+
+        // Check again the internal state of the queue.
+        debug_assert!(!self
+            .verification_queue
+            .iter()
+            .tuple_windows::<(_, _)>()
+            .any(|(a, b)| matches!(a.ty, VerificationQueueEntryTy::Missing)
+                && matches!(b.ty, VerificationQueueEntryTy::Missing)));
+        debug_assert!(matches!(
+            self.verification_queue.back().unwrap().ty,
+            VerificationQueueEntryTy::Missing
+        ));
 
         Ok(())
     }
@@ -383,6 +403,18 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
             }
         };
 
+        // Check the internal state of the queue.
+        debug_assert!(!self
+            .verification_queue
+            .iter()
+            .tuple_windows::<(_, _)>()
+            .any(|(a, b)| matches!(a.ty, VerificationQueueEntryTy::Missing)
+                && matches!(b.ty, VerificationQueueEntryTy::Missing)));
+        debug_assert!(self
+            .verification_queue
+            .back()
+            .map_or(true, |e| matches!(e.ty, VerificationQueueEntryTy::Missing)));
+
         (
             match prev_value {
                 VerificationQueueEntryTy::Requested { user_data, .. } => user_data,
@@ -473,6 +505,20 @@ impl<'a, TRq, TBl> Drop for SourceDrain<'a, TRq, TBl> {
                 self.queue.verification_queue.remove(index);
             }
         }
+
+        // Check the internal state of the queue.
+        debug_assert!(!self
+            .queue
+            .verification_queue
+            .iter()
+            .tuple_windows::<(_, _)>()
+            .any(|(a, b)| matches!(a.ty, VerificationQueueEntryTy::Missing)
+                && matches!(b.ty, VerificationQueueEntryTy::Missing)));
+        debug_assert!(self
+            .queue
+            .verification_queue
+            .back()
+            .map_or(true, |e| matches!(e.ty, VerificationQueueEntryTy::Missing)));
     }
 }
 

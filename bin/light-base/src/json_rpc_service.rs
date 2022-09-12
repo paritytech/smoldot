@@ -918,6 +918,10 @@ impl<TPlat: Platform> Background<TPlat> {
                 self.system_name(request_id, &state_machine_request_id)
                     .await;
             }
+            methods::MethodCall::system_nodeRoles {} => {
+                self.system_node_roles(request_id, &state_machine_request_id)
+                    .await;
+            }
             methods::MethodCall::system_peers {} => {
                 self.system_peers(request_id, &state_machine_request_id)
                     .await;
@@ -1109,7 +1113,6 @@ impl<TPlat: Platform> Background<TPlat> {
             | methods::MethodCall::system_addReservedPeer { .. }
             | methods::MethodCall::system_dryRun { .. }
             | methods::MethodCall::system_networkState { .. }
-            | methods::MethodCall::system_nodeRoles { .. }
             | methods::MethodCall::system_removeReservedPeer { .. }
             | methods::MethodCall::network_unstable_subscribeEvents { .. }
             | methods::MethodCall::network_unstable_unsubscribeEvents { .. }) => {
