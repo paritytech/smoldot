@@ -400,8 +400,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             ..
         } = &mut guarded_lock.tree
         {
-            let block_counts_towards_limit = match pinned_blocks
-                .remove(&(subscription_id.0, *block_hash))
+            let block_ignores_limit = match pinned_blocks.remove(&(subscription_id.0, *block_hash))
             {
                 Some(b) => b.block_ignores_limit,
                 None => {
@@ -417,7 +416,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
 
             guarded_lock.runtimes.retain(|_, rt| rt.strong_count() > 0);
 
-            if !block_counts_towards_limit {
+            if !block_ignores_limit {
                 let (_name, _, finalized_pinned_remaining) = all_blocks_subscriptions
                     .get_mut(&subscription_id.0)
                     .unwrap();
