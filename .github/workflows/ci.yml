@@ -102,12 +102,21 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
-    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features
-    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features database-sqlite
-    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features std
-    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features database-sqlite --features std
-    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot-light --locked --no-default-features
-    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot-light --locked --no-default-features --features std
+    - run: rustup target add i686-unknown-linux-gnu
+    # We test for both x86_64 and i686 because there is some `cfg(target_arch = "x86_64")`
+    # conditional compilation within the source code.
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot-light --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot-light --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot-light --locked --no-default-features --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot-light --locked --no-default-features --features std
 
   fuzzing-binaries-compile:
     runs-on: ubuntu-latest
