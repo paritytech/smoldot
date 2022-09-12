@@ -248,6 +248,11 @@ function trustedBase64Decode(base64: string): Uint8Array {
     dataChannel.onopen = async () => {
         console.log(`'${dataChannel.label}' opened`);
 
+        let messages: Array<Uint8Array> = [];
+        dataChannel.onmessage = (m) => {
+          messages.push(m.data);
+        };
+
         const privateKey = await generateKeyPair('Ed25519');
         const localPeerId: PeerId = await peerIdFromKeys(marshalPublicKey(privateKey.public), marshalPrivateKey(privateKey));
         const remotePeerId = peerIdFromString(webRTCParsed[7] || '');
@@ -261,14 +266,11 @@ function trustedBase64Decode(base64: string): Uint8Array {
             }
           },
           source: (async function * () {
-            dataChannel.onmessage = (m) => {
-              // TODO: 99% this is incorrect, as I need to yield m.data (`yield
-              // * m.data` doesn't work).
-              //
-              // In Rust/Go, I'd create a channel and use it to pass m.data
-              // from this handler to the outer function.
-              return m.data;
-            };
+            let m = messages.shift()
+            while (m != null) {
+              yield m;
+              m = messages.shift();
+            }
           }())
         };
         const secureConn = await noise.secureOutbound(localPeerId, conn, remotePeerId);
