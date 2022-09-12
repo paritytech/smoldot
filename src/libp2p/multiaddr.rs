@@ -187,6 +187,8 @@ pub enum ParseError {
     InvalidDomainName,
     InvalidMultihash(multihash::FromBytesError),
     InvalidMemoryPayload,
+    InvalidMultibase,
+    InvalidBase64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,7 +199,7 @@ pub enum ProtocolRef<'a> {
     DnsAddr(DomainNameRef<'a>),
     Ip4([u8; 4]),
     Ip6([u8; 16]),
-    P2p(Cow<'a, [u8]>), // TODO: a bit hacky
+    P2p(Cow<'a, [u8]>), // TODO: a bit hacky because there's no "owned" equivalent to MultihashRef
     Quic,
     Tcp(u16),
     Tls,
@@ -207,11 +209,9 @@ pub enum ProtocolRef<'a> {
     Wss,
     // TODO: unclear what the payload is; see https://github.com/multiformats/multiaddr/issues/127
     Memory(u64),
-    // TODO: these protocols are inventions for prototyping, see https://github.com/libp2p/specs/pull/412
-    ExperimentalWebRtc,
-    // TODO: these protocols are inventions for prototyping, see https://github.com/libp2p/specs/pull/412
-    /// Contains the SHA-256 hash of the TLS certificate.
-    ExperimentalCertHash([u8; 32]),
+    WebRTC,
+    /// Contains the multihash of the TLS certificate.
+    Certhash(Cow<'a, [u8]>), // TODO: a bit hacky because there's no "owned" equivalent to MultihashRef
 }
 
 impl<'a> ProtocolRef<'a> {
@@ -279,13 +279,23 @@ impl<'a> ProtocolRef<'a> {
                         .map_err(|_| ParseError::InvalidMemoryPayload)?,
                 ))
             }
-            "experimental-webrtc" => Ok(ProtocolRef::ExperimentalWebRtc),
-            "experimental-certhash" => {
-                let string_hash = iter.next().ok_or(ParseError::UnexpectedEof)?;
-                let parsed = hex::decode(string_hash).map_err(|_| ParseError::InvalidDomainName)?; // TODO: wrong error; proper errors should be added to ParseError when it's no longer experimental
-                let correct_len =
-                    <[u8; 32]>::try_from(&parsed[..]).map_err(|_| ParseError::InvalidDomainName)?; // TODO: wrong error
-                Ok(ProtocolRef::ExperimentalCertHash(correct_len))
+            "webrtc" => Ok(ProtocolRef::WebRTC),
+            "certhash" => {
+                let s = iter.next().ok_or(ParseError::UnexpectedEof)?;
+                // See <https://github.com/multiformats/multibase#multibase-table>
+                let base64_flavor = match s.as_bytes().first() {
+                    Some(b'm') => base64::STANDARD_NO_PAD,
+                    Some(b'M') => base64::STANDARD,
+                    Some(b'u') => base64::URL_SAFE_NO_PAD,
+                    Some(b'U') => base64::URL_SAFE,
+                    _ => return Err(ParseError::InvalidMultibase),
+                };
+                let decoded = base64::decode_config(&s[1..], base64_flavor)
+                    .map_err(|_| ParseError::InvalidBase64)?;
+                if let Err(err) = multihash::MultihashRef::from_bytes(&decoded) {
+                    return Err(ParseError::InvalidMultihash(err));
+                }
+                Ok(ProtocolRef::Certhash(Cow::Owned(decoded)))
             }
             _ => Err(ParseError::UnrecognizedProtocol),
         }
@@ -309,8 +319,8 @@ impl<'a> ProtocolRef<'a> {
             ProtocolRef::Ws => 477,
             ProtocolRef::Wss => 478,
             ProtocolRef::Memory(_) => 777,
-            ProtocolRef::ExperimentalWebRtc => 991234, // TODO: these numbers are complete invention
-            ProtocolRef::ExperimentalCertHash(_) => 991235, // TODO: these numbers are complete invention
+            ProtocolRef::WebRTC => 280,
+            ProtocolRef::Certhash(_) => 466,
         };
 
         // TODO: optimize by not allocating a Vec
@@ -335,7 +345,13 @@ impl<'a> ProtocolRef<'a> {
             }
             ProtocolRef::Tcp(port) | ProtocolRef::Udp(port) => port.to_be_bytes().to_vec(),
             ProtocolRef::Memory(payload) => payload.to_be_bytes().to_vec(),
-            ProtocolRef::ExperimentalCertHash(hash) => hash.to_vec(),
+            ProtocolRef::Certhash(multihash) => {
+                // TODO: what if not a valid multihash? the enum variant can be constructed by the user
+                let mut out = Vec::with_capacity(multihash.len() + 4);
+                out.extend(crate::util::leb128::encode_usize(multihash.len()));
+                out.extend_from_slice(multihash);
+                out
+            }
             _ => Vec::new(),
         };
 
@@ -368,9 +384,13 @@ impl<'a> fmt::Display for ProtocolRef<'a> {
             ProtocolRef::Ws => write!(f, "/ws"),
             ProtocolRef::Wss => write!(f, "/wss"),
             ProtocolRef::Memory(payload) => write!(f, "/memory/{}", payload),
-            ProtocolRef::ExperimentalWebRtc => write!(f, "/experimental-webrtc"),
-            ProtocolRef::ExperimentalCertHash(hash) => {
-                write!(f, "/experimental-certhash/{}", hex::encode(hash))
+            ProtocolRef::WebRTC => write!(f, "/webrtc"),
+            ProtocolRef::Certhash(multihash) => {
+                write!(
+                    f,
+                    "/certhash/u{}",
+                    base64::encode_config(multihash, base64::URL_SAFE_NO_PAD)
+                )
             }
         }
     }
@@ -507,12 +527,14 @@ fn protocol<'a, E: nom::error::ParseError<&'a [u8]>>(
             478 => Ok((bytes, ProtocolRef::Wss)),
             // TODO: unclear what the /memory payload is, see https://github.com/multiformats/multiaddr/issues/127
             777 => nom::combinator::map(nom::number::complete::be_u64, ProtocolRef::Memory)(bytes),
-            991234 => Ok((bytes, ProtocolRef::ExperimentalWebRtc)), // TODO: these numbers are complete invention
-            991235 => {
-                nom::combinator::map(nom::bytes::complete::take(32_u32), |hash: &'a [u8]| {
-                    ProtocolRef::ExperimentalCertHash(<[u8; 32]>::try_from(hash).unwrap())
-                })(bytes)
-            } // TODO: these numbers are complete invention
+            280 => Ok((bytes, ProtocolRef::WebRTC)),
+            466 => nom::combinator::map(
+                nom::combinator::verify(
+                    nom::multi::length_data(crate::util::leb128::nom_leb128_usize),
+                    |s| multihash::MultihashRef::from_bytes(s).is_ok(),
+                ),
+                |b| ProtocolRef::Certhash(Cow::Borrowed(b)),
+            )(bytes),
             _ => Err(nom::Err::Error(nom::error::make_error(
                 bytes,
                 nom::error::ErrorKind::Tag,
@@ -556,6 +578,8 @@ mod tests {
         check_valid("/dns6//tcp/55");
         check_valid("/dnsaddr/./tcp/55");
         check_valid("/memory/1234567890");
+        check_valid("/webrtc");
+        // TODO: example valid /certhash
 
         check_invalid("/");
         check_invalid("ip4/1.2.3.4");
@@ -565,5 +589,8 @@ mod tests {
         check_invalid("/ws/1.2.3.4");
         check_invalid("/tcp/65536");
         check_invalid("/p2p/blablabla");
+        check_invalid("/webrtc/2");
+        check_invalid("/certhash");
+        check_invalid("/certhash/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN");
     }
 }

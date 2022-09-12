@@ -81,6 +81,12 @@ pub struct Config {
     /// Number of connections containers should initially allocate for.
     pub capacity: usize,
 
+    /// Maximum number of substreams that each remote can have simultaneously opened.
+    ///
+    /// > **Note**: This limit is necessary in order to avoid DoS attacks where a remote opens too
+    /// >           many substreams.
+    pub max_inbound_substreams: usize,
+
     pub notification_protocols: Vec<NotificationProtocolConfig>,
 
     pub request_response_protocols: Vec<ConfigRequestResponse>,
@@ -217,6 +223,9 @@ pub struct Network<TConn, TNow> {
     /// Generator for randomness seeds given to the established connections.
     randomness_seeds: ChaCha20Rng,
 
+    /// See [`Config::max_inbound_substreams`].
+    max_inbound_substreams: usize,
+
     /// See [`Config::handshake_timeout`].
     handshake_timeout: Duration,
 
@@ -320,6 +329,7 @@ where
             ingoing_notification_substreams_by_connection: BTreeMap::new(),
             randomness_seeds: ChaCha20Rng::from_seed(config.randomness_seed),
             noise_key: Arc::new(config.noise_key),
+            max_inbound_substreams: config.max_inbound_substreams,
             notification_protocols,
             request_response_protocols: config.request_response_protocols.into_iter().collect(), // TODO: stupid overhead
             ping_protocol: config.ping_protocol.into(),
@@ -347,6 +357,7 @@ where
             is_initiator,
             when_connected + self.handshake_timeout,
             self.noise_key.clone(),
+            self.max_inbound_substreams,
             self.notification_protocols.clone(),
             self.request_response_protocols.clone(),
             self.ping_protocol.clone(),
@@ -382,6 +393,7 @@ where
         let connection_task = MultiStreamConnectionTask::new(
             self.randomness_seeds.gen(),
             now,
+            self.max_inbound_substreams,
             self.notification_protocols.clone(),
             self.request_response_protocols.clone(),
             self.ping_protocol.clone(),

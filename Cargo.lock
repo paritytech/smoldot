@@ -2210,9 +2210,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.10.3"
+version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "899bf02746a2c92bf1053d9327dadb252b01af1f81f90cdb902411f518bc7215"
+checksum = "cf9db03534dff993187064c4e0c05a5708d2a9728ace9a8959b77bedf415dac5"
 dependencies = [
  "cfg-if",
  "cpufeatures",
@@ -2257,11 +2257,12 @@ checksum = "2fd0db749597d91ff862fd1d55ea87f7855a744a8425a64695b6fca237d1dad1"
 
 [[package]]
 name = "smoldot"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrayvec 0.7.2",
  "async-std",
  "atomic",
+ "base64",
  "bip39",
  "blake2-rfc",
  "bs58",
@@ -2294,7 +2295,7 @@ dependencies = [
  "schnorrkel",
  "serde",
  "serde_json",
- "sha2 0.10.3",
+ "sha2 0.10.5",
  "siphasher",
  "slab",
  "smallvec",
@@ -2335,7 +2336,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-light"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-std",
  "blake2-rfc",
@@ -2360,7 +2361,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-light-wasm"
-version = "0.6.31"
+version = "0.6.32"
 dependencies = [
  "event-listener",
  "fnv",
@@ -2387,7 +2388,7 @@ dependencies = [
  "curve25519-dalek 4.0.0-pre.1",
  "rand_core 0.6.3",
  "rustc_version",
- "sha2 0.10.3",
+ "sha2 0.10.5",
  "subtle",
 ]
 

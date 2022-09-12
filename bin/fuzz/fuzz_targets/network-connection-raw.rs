@@ -34,6 +34,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         smoldot::libp2p::collection::Network::new(smoldot::libp2p::collection::Config {
             randomness_seed: [0; 32],
             capacity: 0,
+            max_inbound_substreams: 10,
             notification_protocols: Vec::new(),
             request_response_protocols: Vec::new(),
             // This timeout doesn't matter as we pass dummy time values.

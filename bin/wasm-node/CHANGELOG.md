@@ -2,10 +2,22 @@
 
 ## Unreleased
 
+### Added
+
+- Add support for the `system_nodeRoles` JSON-RPC method. ([#2725](https://github.com/paritytech/smoldot/pull/2725))
+
+### Changed
+
+- A limit to the number of substreams a remote can maintain open over a connection is now enforced. ([#2724](https://github.com/paritytech/smoldot/pull/2724))
+
+## 0.6.32 - 2022-09-07
+
 ### Fixed
 
 - Fix occasional panic when connecting to a parachain with forks and/or missed slots. ([#2703](https://github.com/paritytech/smoldot/pull/2703))
 - Fix parachain initialization unnecessarily waiting for its corresponding relay chain initialization to be finished. ([#2705](https://github.com/paritytech/smoldot/pull/2705))
+- Fix panic when broadcasting a transaction to a peer while its connection is shutting down. ([#2717](https://github.com/paritytech/smoldot/pull/2717))
+- Fix crash when receiving a Yamux GoAway frame. ([#2708](https://github.com/paritytech/smoldot/pull/2708))
 
 ## 0.6.31 - 2022-08-30
 
