@@ -6,6 +6,10 @@
 
 - Add support for the `system_nodeRoles` JSON-RPC method. ([#2725](https://github.com/paritytech/smoldot/pull/2725))
 
+### Changed
+
+- A limit to the number of substreams a remote can maintain open over a connection is now enforced. ([#2724](https://github.com/paritytech/smoldot/pull/2724))
+
 ## 0.6.32 - 2022-09-07
 
 ### Fixed
