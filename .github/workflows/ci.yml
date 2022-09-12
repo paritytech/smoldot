@@ -102,6 +102,7 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
+    - run: apt-get update && apt install -y libc6-dev-i386
     - run: rustup target add i686-unknown-linux-gnu
     # We test for both x86_64 and i686 because there is some `cfg(target_arch = "x86_64")`
     # conditional compilation within the source code.
