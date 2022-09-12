@@ -10,6 +10,10 @@
 
 - A limit to the number of substreams a remote can maintain open over a connection is now enforced. ([#2724](https://github.com/paritytech/smoldot/pull/2724))
 
+### Fixed
+
+- No longer panic when calling `state_getRuntimeVersion` is unable to download the runtime code of an old block from the network.
+
 ## 0.6.32 - 2022-09-07
 
 ### Fixed
