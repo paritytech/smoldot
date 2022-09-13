@@ -185,13 +185,15 @@ function trustedBase64Decode(base64: string): Uint8Array {
         const ipVersion = webRTCParsed[1] == 'ip4'? '4' : '6';
         const targetIp = webRTCParsed[2];
 
+        // The payload of `/certhash` is the hash of the self-generated certificate that the
+        // server presents.
         // TODO: this `slice(2)` after decoding the multibase is a hack to remove the multihash prefix, do this better
         const certSha256Hash = new Uint8Array(
           base64.decoder.or(base64pad.decoder).or(base64url.decoder).or(base64urlpad.decoder).decode(webRTCParsed[4]!).slice(2)
         );
 
-        // Transform ufrag (multibase-encoded multihash) to fingerprint (upper-hex;
-        // each byte separated by ":").
+        // Transform certifcate hash into fingerprint (upper-hex; each byte separated by ":")
+        // and into ufrag (lower-hex; no separator).
         const ufrag = Array.from(certSha256Hash).map((n) => ("0" + n.toString(16)).slice(-2).toLowerCase()).join('');
         const fingerprint = Array.from(certSha256Hash).map((n) => ("0" + n.toString(16)).slice(-2).toUpperCase()).join(':');
 
