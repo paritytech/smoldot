@@ -58,7 +58,7 @@ futures = "0.3.24"   # TODO: no-std-ize
 hashbrown = { version = "0.12.3", default-features = false, features = ["serde"] }   # TODO: remove serde feature
 hex = { version = "0.4.3", default-features = false }
 hmac = { version = "0.12.1", default-features = false }
-itertools = { version = "0.10.3", default-features = false }
+itertools = { version = "0.10.4", default-features = false }
 libsecp256k1 = { version = "0.7.1", default-features = false, features = ["static-context", "hmac"] }
 # Reminder: `log` is forbidden
 merlin = { version = "3.0", default-features = false }
@@ -95,7 +95,7 @@ soketto = { version = "0.7.1", optional = true }
 
 # BELOW: DEPENDENCIES TO REMOVE
 # TODO:
-parity-scale-codec = { version = "3.1.5", features = ["derive"], default-features = false } # TODO: a lot of unnecessary overhead in terms of memory allocations
+parity-scale-codec = { version = "3.2.0", features = ["derive"], default-features = false } # TODO: a lot of unnecessary overhead in terms of memory allocations
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 # `std` feature
