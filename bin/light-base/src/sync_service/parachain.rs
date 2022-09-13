@@ -754,6 +754,12 @@ impl<TPlat: Platform> ParachainBackgroundTask<TPlat> {
                     if let Ok(header) =
                         header::decode(&self.obsolete_finalized_parahead, self.block_number_bytes)
                     {
+                        debug_assert!(
+                            former_finalized_parahead.is_none()
+                                || header.number == self.sync_sources.finalized_block_height()
+                                || header.number == self.sync_sources.finalized_block_height() + 1
+                        );
+
                         self.sync_sources.set_finalized_block_height(header.number);
                         // TODO: what about an `else`? does sync_sources leak if the block can't be decoded?
                     }
