@@ -312,9 +312,15 @@ impl ServicePrototype {
             runtime_service: config.runtime_service,
             transactions_service: config.transactions_service,
             cache: Mutex::new(Cache {
-                recent_pinned_blocks: lru::LruCache::with_hasher(32, Default::default()),
+                recent_pinned_blocks: lru::LruCache::with_hasher(
+                    NonZeroUsize::new(32).unwrap(),
+                    Default::default(),
+                ),
                 subscription_id: None,
-                block_state_root_hashes_numbers: lru::LruCache::with_hasher(32, Default::default()),
+                block_state_root_hashes_numbers: lru::LruCache::with_hasher(
+                    NonZeroUsize::new(32).unwrap(),
+                    Default::default(),
+                ),
             }),
             genesis_block: config.genesis_block_hash,
             next_subscription_id: atomic::AtomicU64::new(0),
@@ -620,7 +626,7 @@ impl<TPlat: Platform> Background<TPlat> {
 
                     cache.subscription_id = Some(subscribe_all.new_blocks.id());
                     cache.recent_pinned_blocks.clear();
-                    debug_assert!(cache.recent_pinned_blocks.cap() >= 1);
+                    debug_assert!(cache.recent_pinned_blocks.cap().get() >= 1);
 
                     let finalized_block_hash = header::hash_from_scale_encoded_header(
                         &subscribe_all.finalized_block_scale_encoded_header,
@@ -631,7 +637,9 @@ impl<TPlat: Platform> Background<TPlat> {
                     );
 
                     for block in subscribe_all.non_finalized_blocks_ancestry_order {
-                        if cache.recent_pinned_blocks.len() == cache.recent_pinned_blocks.cap() {
+                        if cache.recent_pinned_blocks.len()
+                            == cache.recent_pinned_blocks.cap().get()
+                        {
                             let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
                             subscribe_all.new_blocks.unpin_block(&hash).await;
                         }
@@ -652,7 +660,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 let mut cache = me.cache.lock().await;
 
                                 if cache.recent_pinned_blocks.len()
-                                    == cache.recent_pinned_blocks.cap()
+                                    == cache.recent_pinned_blocks.cap().get()
                                 {
                                     let (hash, _) = cache.recent_pinned_blocks.pop_lru().unwrap();
                                     subscribe_all.new_blocks.unpin_block(&hash).await;
