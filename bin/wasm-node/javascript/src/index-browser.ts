@@ -169,7 +169,15 @@ function trustedBase64Decode(base64: string): Uint8Array {
 
     pc.onnegotiationneeded = async (_event) => {
         // Create a new offer and set it as local description.
-        const sdpOffer = (await pc.createOffer()).sdp!;
+        let sdpOffer = (await pc.createOffer()).sdp!;
+        // Ensure ufrag and pwd are the same (expected by the server).
+        const pwd = sdpOffer.match(/^a=ice-pwd:(.+)$/m);
+        if (pwd != null) {
+          sdpOffer = sdpOffer.replace(/^a=ice-ufrag.*$/m, 'a=ice-ufrag:' + pwd[1]);
+        } else {
+          console.error("Failed to set ufrag to pwd.");
+          return;
+        }
         await pc.setLocalDescription({ type: 'offer', sdp: sdpOffer });
 
         console.log("LOCAL OFFER: " + pc.localDescription!.sdp);
