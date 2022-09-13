@@ -393,7 +393,7 @@ define_methods! {
     /// Returns, as an opaque string, the name of the client serving these JSON-RPC requests.
     system_name() -> Cow<'a, str>,
     system_networkState() -> (), // TODO:
-    system_nodeRoles() -> (), // TODO:
+    system_nodeRoles() -> Cow<'a, [NodeRole]>,
     system_peers() -> Vec<SystemPeer>,
     system_properties() -> Box<serde_json::value::RawValue>,
     system_removeReservedPeer() -> (), // TODO:
@@ -898,6 +898,17 @@ pub enum MaybeRuntimeSpec<'a> {
     Valid { spec: RuntimeSpec<'a> },
     #[serde(rename = "invalid")]
     Invalid { error: String }, // TODO: String because it's more convenient; improve
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum NodeRole {
+    // Note that "Light" isn't in the Substrate source code and is a custom addition.
+    #[serde(rename = "Light")]
+    Light,
+    #[serde(rename = "Full")]
+    Full,
+    #[serde(rename = "Authority")]
+    Authority,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

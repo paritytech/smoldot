@@ -89,6 +89,9 @@ pub struct Yamux<T> {
     /// A `SipHasher` is used in order to avoid hash collision attacks on substream IDs.
     substreams: hashbrown::HashMap<NonZeroU32, Substream<T>, SipHasherBuild>,
 
+    /// Number of substreams within [`Yamux::substreams`] whose [`Substream::inbound`] is `true`.
+    num_inbound: usize,
+
     /// `Some` if a `GoAway` frame has been received in the past.
     received_goaway: Option<GoAwayErrorCode>,
 
@@ -127,6 +130,8 @@ pub struct Yamux<T> {
 struct Substream<T> {
     /// State of the substream.
     state: SubstreamState,
+    /// `true` if the substream has been opened by the remote.
+    inbound: bool,
     /// Data chosen by the user.
     user_data: T,
 }
@@ -282,6 +287,7 @@ impl<T> Yamux<T> {
                 config.capacity,
                 SipHasherBuild::new(randomness.gen()),
             ),
+            num_inbound: 0,
             received_goaway: None,
             incoming: Incoming::Header(arrayvec::ArrayVec::new()),
             outgoing: Outgoing::Idle,
@@ -305,6 +311,23 @@ impl<T> Yamux<T> {
     /// >           [`Yamux::next_dead_substream`] before this function can return `true`.
     pub fn is_empty(&self) -> bool {
         self.substreams.is_empty()
+    }
+
+    /// Returns the number of substreams in the Yamux state machine. Includes substreams that are
+    /// dead but haven't been removed yet.
+    pub fn len(&self) -> usize {
+        self.substreams.len()
+    }
+
+    /// Returns the number of inbound substreams in the Yamux state machine. Includes substreams
+    /// that are dead but haven't been removed yet.
+    pub fn num_inbound(&self) -> usize {
+        debug_assert_eq!(
+            self.num_inbound,
+            self.substreams.values().filter(|s| s.inbound).count()
+        );
+
+        self.num_inbound
     }
 
     /// Opens a new substream.
@@ -380,6 +403,7 @@ impl<T> Yamux<T> {
                 write_buffers: Vec::with_capacity(16),
                 first_write_buffer_offset: 0,
             },
+            inbound: false,
             user_data,
         });
 
@@ -541,6 +565,10 @@ impl<T> Yamux<T> {
         });
 
         let substream = self.substreams.remove(&id_to_remove).unwrap();
+
+        if substream.inbound {
+            self.num_inbound -= 1;
+        }
 
         Some((
             SubstreamId(id_to_remove),
@@ -1118,10 +1146,13 @@ impl<T> Yamux<T> {
                             write_buffers: Vec::new(),
                             first_write_buffer_offset: 0,
                         },
+                        inbound: true,
                         user_data,
                     },
                 );
                 debug_assert!(_was_before.is_none());
+
+                self.num_inbound += 1;
 
                 self.incoming = if data_frame_size == 0 {
                     Incoming::Header(arrayvec::ArrayVec::new())

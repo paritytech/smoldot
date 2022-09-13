@@ -27,7 +27,8 @@ use core::{
     fmt, mem, slice,
     task::{Context, Poll, Waker},
 };
-use parking_lot::Mutex;
+// TODO: we use std::sync::Mutex rather than parking_lot::Mutex due to issues with Cargo features, see <https://github.com/paritytech/smoldot/issues/2732>
+use std::sync::Mutex;
 
 use futures::{
     future::{self, Future},
@@ -250,7 +251,7 @@ impl JitPrototype {
             .map_err(|err| NewErr::ModuleError(ModuleError(err.to_string())))?;
 
         // Now that we are passed the `start` stage, update the state of execution.
-        *shared.lock() = Shared::Poisoned;
+        *shared.lock().unwrap() = Shared::Poisoned;
 
         let exported_memory = if let Some(mem) = instance.get_export(&mut store, "memory") {
             if let Some(mem) = mem.into_memory() {

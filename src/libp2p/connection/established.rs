@@ -193,6 +193,8 @@ pub enum Event<TRqUd, TNotifUd> {
 // TODO: this struct isn't zero-cost, but making it zero-cost is kind of hard and annoying
 #[derive(Debug, Clone)]
 pub struct Config<TNow> {
+    /// Maximum number of substreams that the remote can have simultaneously opened.
+    pub max_inbound_substreams: usize,
     /// List of request-response protocols supported for incoming substreams.
     pub request_protocols: Vec<ConfigRequestResponse>,
     /// List of notifications protocols supported for incoming substreams.
