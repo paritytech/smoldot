@@ -17,7 +17,7 @@
 
 //! All legacy JSON-RPC method handlers that relate to the chain or the storage.
 
-use super::{Background, Platform, RuntimeCallError, SubscriptionTy};
+use super::{Background, Platform, SubscriptionTy};
 
 use crate::runtime_service;
 
@@ -1162,98 +1162,12 @@ impl<TPlat: Platform> Background<TPlat> {
             ),
         };
 
-        // This function contains two steps: obtaining the runtime of the block in question,
-        // then obtaining the specification. The first step is the longest and most difficult.
-        let specification = {
-            let cache_lock = self.cache.lock().await;
-
-            // Try to find the block in the cache of recent blocks. Most of the time, the call
-            // target should be in there.
-            let spec = if cache_lock.recent_pinned_blocks.contains(&block_hash) {
-                // The runtime service has the block pinned, meaning that we can ask the runtime
-                // service for the specification.
-                self.runtime_service
-                    .pinned_block_runtime_lock(
-                        cache_lock.subscription_id.clone().unwrap(),
-                        &block_hash,
-                    )
-                    .await
-                    .ok()
-                    .map(|rt| rt.specification())
-            } else {
-                None
-            };
-
-            // If the block isn't a recent block or if the subscription is obsolete, fall back
-            // to downloading it.
-            if let Some(spec) = spec {
-                spec
-            } else {
-                // Second situation: the block is not in the cache of recent blocks. This
-                // isn't great.
-                drop::<futures::lock::MutexGuard<_>>(cache_lock);
-
-                // The only solution is to download the runtime of the block in question from the network.
-
-                // TODO: considering caching the runtime code the same way as the state trie root hash
-                // TODO: DRY with runtime_call()
-
-                // In order to grab the runtime code and perform the call network request, we need
-                // to know the state trie root hash and the height of the block.
-                let (state_trie_root_hash, block_number) =
-                    self.state_trie_root_hash(&block_hash).await.unwrap(); // TODO: don't unwrap
-
-                // Download the runtime of this block. This takes a long time as the runtime is rather
-                // big (around 1MiB in general).
-                let (storage_code, storage_heap_pages) = {
-                    let mut code_query_result = self
-                        .sync_service
-                        .clone()
-                        .storage_query(
-                            block_number,
-                            &block_hash,
-                            &state_trie_root_hash,
-                            iter::once(&b":code"[..]).chain(iter::once(&b":heappages"[..])),
-                            3,
-                            Duration::from_secs(24),
-                            NonZeroU32::new(1).unwrap(),
-                        )
-                        .await
-                        .map_err(runtime_service::RuntimeCallError::StorageQuery)
-                        .map_err(RuntimeCallError::Call)
-                        .unwrap(); // TODO: don't unwrap /!\
-                    let heap_pages = code_query_result.pop().unwrap();
-                    let code = code_query_result.pop().unwrap();
-                    (code, heap_pages)
-                };
-
-                // Give the code and heap pages to the runtime service. The runtime service will
-                // try to find any similar runtime it might have, and if not will compile it.
-                let pinned_runtime_id = self
-                    .runtime_service
-                    .compile_and_pin_runtime(storage_code, storage_heap_pages)
-                    .await;
-
-                let runtime = self
-                    .runtime_service
-                    .pinned_runtime_lock(
-                        pinned_runtime_id.clone(),
-                        block_hash,
-                        block_number,
-                        state_trie_root_hash,
-                    )
-                    .await;
-
-                // TODO: consider keeping pinned runtimes in a cache instead
-                self.runtime_service.unpin_runtime(pinned_runtime_id).await;
-
-                runtime.specification()
-            }
-        };
-
-        // Now that we have the runtime specification, turn it into a JSON-RPC response.
-        let response = match specification {
-            Ok(spec) => {
+        let response = match self
+            .runtime_lock(&block_hash)
+            .await
+            .map(|l| l.specification())
+        {
+            Ok(Ok(spec)) => {
                 let runtime_spec = spec.decode();
                 methods::Response::state_getRuntimeVersion(methods::RuntimeVersion {
                     spec_name: runtime_spec.spec_name.into(),
@@ -1270,6 +1184,11 @@ impl<TPlat: Platform> Background<TPlat> {
                 })
                 .to_json_response(request_id)
             }
+            Ok(Err(error)) => json_rpc::parse::build_error_response(
+                request_id,
+                json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
+                None,
+            ),
             Err(error) => json_rpc::parse::build_error_response(
                 request_id,
                 json_rpc::parse::ErrorResponse::ServerError(-32000, &error.to_string()),
