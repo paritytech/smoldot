@@ -21,7 +21,7 @@ import { Client, ClientOptions, start as innerStart } from './client.js'
 import { Connection, ConnectionError, ConnectionConfig } from './instance/instance.js';
 import { inflate } from 'pako';
 
-import { base64 } from 'multiformats/bases/base64';
+import { base64, base64pad, base64url, base64urlpad } from 'multiformats/bases/base64';
 import { Noise } from '@chainsafe/libp2p-noise';
 import { peerIdFromString, peerIdFromKeys } from '@libp2p/peer-id';
 import { generateKeyPair, marshalPrivateKey, marshalPublicKey } from '@libp2p/crypto/keys';
@@ -98,7 +98,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
   // TODO: remove support for `/wss` in a long time (https://github.com/paritytech/smoldot/issues/1940)
   const wsParsed = config.address.match(/^\/(ip4|ip6|dns4|dns6|dns)\/(.*?)\/tcp\/(.*?)\/(ws|wss|tls\/ws)$/);
 
-  const webRTCParsed = config.address.match(/^\/(ip4|ip6)\/(.*?)\/udp\/(.*?)\/webrtc\/certhash\/(.*?)\/p2p\/(.*?)$/);
+  const webRTCParsed = config.address.match(/^\/(ip4|ip6)\/(.*?)\/udp\/(.*?)\/webrtc\/certhash\/(.*?)$/);
 
   if (wsParsed != null) {
       let connection: WebSocket;
@@ -176,17 +176,20 @@ function trustedBase64Decode(base64: string): Uint8Array {
 
         const ipVersion = webRTCParsed[1] == 'ip4'? '4' : '6';
         const targetIp = webRTCParsed[2];
-        const ufrag = (webRTCParsed[5] || '');
+        const ufrag = (webRTCParsed[4] || '');
 
         // Transform ufrag (multibase-encoded multihash) to fingerprint (upper-hex;
         // each byte separated by ":").
-        //
-        // To add additional decoders use `or`: `base64.decoder.or(base32.decoder)`.
-        const fingerprint = new Uint8Array(base64.decode(ufrag)).join(':').toUpperCase();
+        // TODO: this `slice(2)` after decoding the multibase is a hack to remove the multihash prefix, do this better
+        const fingerprint = Array.from(new Uint8Array(
+          base64.decoder.or(base64pad.decoder).or(base64url.decoder).or(base64urlpad.decoder).decode(ufrag).slice(2)
+        )).map((n) => ("0" + n.toString(16)).slice(-2).toUpperCase()).join(':');
 
         // Note that the trailing line feed is important, as otherwise Chrome
         // fails to parse the payload.
         const remoteSdp =
+            // Version of the SDP protocol. Always 0. (RFC8866)
+            "v=0" + "\n" +
             // Identifies the creator of the SDP document. We are allowed to use dummy values
             // (`-` and `0.0.0.0`) to remain anonymous, which we do. Note that "IN" means
             // "Internet". (RFC8866)
