@@ -100,6 +100,10 @@ pub(super) async fn connection_task<TPlat: Platform>(
                     err.map_or(false, |err| err.is_bad_addr),
                 ); // TODO: should pass a proper value for `is_unreachable`, but an error is sometimes returned despite a timeout https://github.com/paritytech/smoldot/issues/1531
 
+                for chain_index in 0..guarded.network.num_chains() {
+                    guarded.unassign_slot_and_ban(chain_index, start_connect.expected_peer_id.clone());
+                }
+
                 // We wake up the background task so that the slot can potentially be
                 // assigned to a different peer.
                 shared.wake_up_main_background_task.notify(1);

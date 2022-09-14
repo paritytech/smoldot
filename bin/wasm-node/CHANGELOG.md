@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- No longer try to connect to a peer for 20 seconds after failing to connect to it.
+
 ## 0.6.33 - 2022-09-13
 
 ### Added
