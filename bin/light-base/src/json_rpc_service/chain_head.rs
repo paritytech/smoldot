@@ -1443,6 +1443,31 @@ impl<TPlat: Platform> Background<TPlat> {
                 .await;
         }
     }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_finalizedDatabase`].
+    pub(super) async fn chain_head_unstable_finalized_database(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        max_size_bytes: Option<u64>,
+    ) {
+        // TODO: move the encode_database function where it makes more sense
+        let response = super::super::encode_database(
+            &self.network_service.0,
+            &self.sync_service,
+            self.sync_service.block_number_bytes(),
+            usize::try_from(max_size_bytes.unwrap_or(u64::max_value())).unwrap_or(usize::max_value()),
+        )
+        .await;
+
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chainHead_unstable_finalizedDatabase(response.into())
+                    .to_json_response(request_id),
+            )
+            .await;
+    }
 }
 
 fn convert_runtime_spec(
