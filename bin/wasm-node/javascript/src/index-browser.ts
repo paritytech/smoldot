@@ -184,17 +184,16 @@ function trustedBase64Decode(base64: string): Uint8Array {
 
         const ipVersion = webRTCParsed[1] == 'ip4'? '4' : '6';
         const targetIp = webRTCParsed[2];
+        const certMultibase = webRTCParsed[4]!;
 
         // The payload of `/certhash` is the hash of the self-generated certificate that the
         // server presents.
         // TODO: this `slice(2)` after decoding the multibase is a hack to remove the multihash prefix, do this better
         const certSha256Hash = new Uint8Array(
-          base64.decoder.or(base64pad.decoder).or(base64url.decoder).or(base64urlpad.decoder).decode(webRTCParsed[4]!).slice(2)
+          base64.decoder.or(base64pad.decoder).or(base64url.decoder).or(base64urlpad.decoder).decode(certMultibase).slice(2)
         );
 
-        // Transform certifcate hash into fingerprint (upper-hex; each byte separated by ":")
-        // and into ufrag (lower-hex; no separator).
-        const ufrag = Array.from(certSha256Hash).map((n) => ("0" + n.toString(16)).slice(-2).toLowerCase()).join('');
+        // Transform certifcate hash into fingerprint (upper-hex; each byte separated by ":").
         const fingerprint = Array.from(certSha256Hash).map((n) => ("0" + n.toString(16)).slice(-2).toUpperCase()).join(':');
 
         // Note that the trailing line feed is important, as otherwise Chrome
@@ -235,8 +234,8 @@ function trustedBase64Decode(base64: string): Uint8Array {
             // ICE username and password, which are used for establishing and
             // maintaining the ICE connection. (RFC8839)
             // MUST match ones used by the answerer (server).
-            "a=ice-ufrag:" + ufrag + "\n" +
-            "a=ice-pwd:" + ufrag + "\n" +
+            "a=ice-ufrag:" + certMultibase + "\n" +
+            "a=ice-pwd:" + certMultibase + "\n" +
             // Fingerprint of the certificate that the server will use during the TLS
             // handshake. (RFC8122)
             // MUST be derived from the certificate used by the answerer (server).
