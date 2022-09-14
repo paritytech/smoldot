@@ -258,11 +258,14 @@ where
 
                 if let Some(event) = event {
                     return Ok((self, Some(event)));
+                } else if num_read == 0 {
+                    // Substream doesn't accept anymore data because it is blocked on writing out.
+                    return Ok((self, None))
+                } else {
+                    // Jump back to the beginning of the loop. We don't want to read more data
+                    // until this specific substream's data has been processed.
+                    continue;
                 }
-
-                // Jump back to the beginning of the loop. We don't want to read more data until
-                // this specific substream's data has been processed.
-                continue;
             }
 
             // Transfer data from `incoming_data` to the internal buffer in `self.encryption`.
