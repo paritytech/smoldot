@@ -551,29 +551,29 @@ where
 
     /// Notifies the state machine that a new substream has been opened.
     ///
-    /// `inbound` indicates whether the substream has been opened by the remote (`true`) or
-    /// locally (`false`).
+    /// `outbound` indicates whether the substream has been opened by the remote (`false`) or
+    /// locally (`true`).
     ///
-    /// If `inbound` is `false`, then the value returned by
+    /// If `outbound` is `true`, then the value returned by
     /// [`MultiStreamConnectionTask::desired_outbound_substreams`] will decrease by one.
     ///
     /// # Panic
     ///
     /// Panics if there already exists a substream with an identical identifier.
     ///
-    pub fn add_substream(&mut self, id: TSubId, inbound: bool) {
+    pub fn add_substream(&mut self, id: TSubId, outbound: bool) {
         match &mut self.connection {
             MultiStreamConnectionTaskInner::Handshake {
                 opened_substream: ref mut opened_substream @ None,
                 ..
-            } if !inbound => {
+            } if outbound => {
                 *opened_substream = Some(id);
             }
             MultiStreamConnectionTaskInner::Handshake { .. } => {
                 // TODO: protocol has been violated, reset the connection?
             }
             MultiStreamConnectionTaskInner::Established { established, .. } => {
-                established.add_substream(id, inbound)
+                established.add_substream(id, outbound)
             }
             MultiStreamConnectionTaskInner::ShutdownAcked { .. }
             | MultiStreamConnectionTaskInner::ShutdownWaitingAck { .. } => {
