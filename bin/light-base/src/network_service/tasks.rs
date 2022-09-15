@@ -18,7 +18,7 @@
 use super::Shared;
 use crate::platform::{Platform, PlatformConnection, PlatformSubstreamDirection};
 
-use alloc::{string::ToString as _, sync::Arc, vec};
+use alloc::{string::ToString as _, sync::Arc, vec, vec::Vec};
 use core::{iter, pin::Pin};
 use futures::{channel::mpsc, prelude::*};
 use smoldot::{libp2p::read_write::ReadWrite, network::service};
