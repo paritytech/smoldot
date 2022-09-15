@@ -499,6 +499,7 @@ pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, l
 /// For the `outbound` parameter, pass `0` if the substream has been opened by the remote, and any
 /// value other than `0` if the substream has been opened in response to a call to
 /// [`connection_stream_open`].
+#[no_mangle]
 pub extern "C" fn connection_stream_opened(connection_id: u32, stream_id: u32, outbound: u32) {
     crate::platform::connection_stream_opened(connection_id, stream_id, outbound)
 }
