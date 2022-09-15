@@ -255,7 +255,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
       const dataChannelId = dataChannel.id!;
 
       dataChannel.onopen = () => {
-          console.log(`'${dataChannel.label}' opened`);
+          console.log(`'${dataChannel.label}' opened, direction is ${direction}`);
           config.onStreamOpened(dataChannelId, direction);
       };
 
