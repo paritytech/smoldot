@@ -465,24 +465,14 @@ pub extern "C" fn connection_open_single_stream(connection_id: u32) {
 ///
 /// See also [`connection_new`].
 ///
-/// The API user is responsible for determining the identity of the remote as part of the opening
-/// process of the connection. This identity must then be provided in the form of the binary
-/// representation of a peer ID, through `peer_id_ptr` and `peer_id_len`.
-/// See <https://github.com/libp2p/specs/blob/master/peer-ids/peer-ids.md#peer-ids> for a
-/// definition of the binary representation of a peer ID.
-/// The buffer **must** have been allocated with [`alloc`]. It is freed when this function is
-/// called.
-///
 /// When in the `Open` state, the connection can receive messages. When a message is received,
 /// [`alloc`] must be called in order to allocate memory for this message, then
 /// [`stream_message`] must be called with the pointer returned by [`alloc`].
 #[no_mangle]
 pub extern "C" fn connection_open_multi_stream(
     connection_id: u32,
-    peer_id_ptr: u32,
-    peer_id_len: u32,
 ) {
-    crate::platform::connection_open_multi_stream(connection_id, peer_id_ptr, peer_id_len)
+    crate::platform::connection_open_multi_stream(connection_id)
 }
 
 /// Notify of a message being received on the stream. The connection associated with that stream

@@ -377,8 +377,9 @@ where
 
     /// Adds a new multi-stream connection to the collection.
     ///
-    /// Note that no [`Event::HandshakeFinished`] event will be generated. The connection is
-    /// immediately considered as fully established.
+    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
+    /// to determine when the handshake timeout expires.
+    // TODO: add an is_initiator parameter? right now we're always implicitly the initiator
     pub fn insert_multi_stream<TSubId>(
         &mut self,
         now: TNow,
@@ -394,6 +395,7 @@ where
             self.randomness_seeds.gen(),
             now,
             self.max_inbound_substreams,
+            self.noise_key.clone(),
             self.notification_protocols.clone(),
             self.request_response_protocols.clone(),
             self.ping_protocol.clone(),
