@@ -154,14 +154,12 @@ impl smoldot_light::platform::Platform for Platform {
                     ))
                 }
                 ConnectionInner::MultiStream {
-                    peer_id,
                     connection_handles_alive,
                     ..
                 } => {
                     *connection_handles_alive += 1;
                     Ok(smoldot_light::platform::PlatformConnection::MultiStream(
                         ConnectionWrapper(connection_id),
-                        peer_id.clone(),
                     ))
                 }
                 ConnectionInner::Closed {
@@ -460,8 +458,6 @@ enum ConnectionInner {
     NotOpen,
     SingleStream,
     MultiStream {
-        /// Peer id we're connected to.
-        peer_id: smoldot_light::PeerId,
         /// List of substreams that the host (i.e. JavaScript side) has reported have been opened,
         /// but that haven't been reported through
         /// [`smoldot_light::platform::Platform::next_substream`] yet.
@@ -522,24 +518,11 @@ pub(crate) fn connection_open_single_stream(connection_id: u32) {
     connection.something_happened.notify(usize::max_value());
 }
 
-pub(crate) fn connection_open_multi_stream(connection_id: u32, peer_id_ptr: u32, peer_id_len: u32) {
-    let peer_id = {
-        let peer_id_ptr = usize::try_from(peer_id_ptr).unwrap();
-        let peer_id_len = usize::try_from(peer_id_len).unwrap();
-        let bytes: Box<[u8]> = unsafe {
-            Box::from_raw(slice::from_raw_parts_mut(
-                peer_id_ptr as *mut u8,
-                peer_id_len,
-            ))
-        };
-        smoldot_light::PeerId::from_bytes(bytes.into()).unwrap()
-    };
-
+pub(crate) fn connection_open_multi_stream(connection_id: u32) {
     let mut lock = STATE.try_lock().unwrap();
     let connection = lock.connections.get_mut(&connection_id).unwrap();
     debug_assert!(matches!(connection.inner, ConnectionInner::NotOpen));
     connection.inner = ConnectionInner::MultiStream {
-        peer_id,
         opened_substreams_to_pick_up: VecDeque::with_capacity(8),
         connection_handles_alive: 0,
     };

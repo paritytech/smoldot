@@ -626,6 +626,12 @@ impl HandshakeInProgress {
         }
     }
 
+    /// Returns `true` if the Noise handshake is waiting to write out data. Returns `false` if
+    /// instead it is blocked on incoming data.
+    pub fn ready_to_write(&self) -> bool {
+        !self.tx_buffer_encrypted.is_empty()
+    }
+
     /// Feeds data coming from a socket and outputs data to write to the socket.
     ///
     /// On success, returns the new state of the negotiation.

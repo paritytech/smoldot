@@ -6,6 +6,10 @@
 
 - No longer try to connect to a peer for 20 seconds after failing to connect to it. This prevents loops where we keep trying to connect to the same address(es) over and over again ([#2747](https://github.com/paritytech/smoldot/pull/2747)).
 
+### Added
+
+- Add support for the `chainHead_unstable_finalizedDatabase` JSON-RPC method. This JSON-RPC method aims to be a replacement for the `databaseContent` method of the `Chain` and is expected to remain a permanently unstable smoldot-specific function. ([#2749](https://github.com/paritytech/smoldot/pull/2749))
+
 ## 0.6.33 - 2022-09-13
 
 ### Added

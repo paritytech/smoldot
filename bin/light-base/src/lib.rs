@@ -256,6 +256,7 @@ struct ChainServices<TPlat: platform::Platform> {
     sync_service: Arc<sync_service::SyncService<TPlat>>,
     runtime_service: Arc<runtime_service::RuntimeService<TPlat>>,
     transactions_service: Arc<transactions_service::TransactionsService<TPlat>>,
+    // TODO: can be grabbed from the sync service instead
     block_number_bytes: usize,
 }
 
@@ -917,7 +918,13 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
             // Wait for the chain to finish initializing before we can obtain the database.
             (&mut services).await;
             let services = Pin::new(&mut services).take_output().unwrap();
-            encode_database(&services, max_size).await
+            encode_database(
+                &services.network_service,
+                &services.sync_service,
+                services.block_number_bytes,
+                max_size,
+            )
+            .await
         }
     }
 }
@@ -1085,14 +1092,16 @@ async fn start_services<TPlat: platform::Platform>(
 }
 
 async fn encode_database<TPlat: platform::Platform>(
-    services: &ChainServices<TPlat>,
+    network_service: &network_service::NetworkService<TPlat>,
+    sync_service: &sync_service::SyncService<TPlat>,
+    block_number_bytes: usize,
     max_size: usize,
 ) -> String {
     // Craft the structure containing all the data that we would like to include.
     let mut database_draft = SerdeDatabase {
-        chain: match services.sync_service.serialize_chain_information().await {
+        chain: match sync_service.serialize_chain_information().await {
             Some(ci) => {
-                let encoded = finalized_serialize::encode_chain(&ci, services.block_number_bytes);
+                let encoded = finalized_serialize::encode_chain(&ci, block_number_bytes);
                 serde_json::from_str(&encoded).unwrap()
             }
             None => {
@@ -1106,9 +1115,8 @@ async fn encode_database<TPlat: platform::Platform>(
                 };
             }
         },
-        nodes: services
-            .network_service
-            .discovered_nodes(0)
+        nodes: network_service
+            .discovered_nodes(0) // TODO: hacky chain_index
             .await
             .map(|(peer_id, addrs)| {
                 (

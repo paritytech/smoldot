@@ -1061,6 +1061,14 @@ impl<TPlat: Platform> Background<TPlat> {
                 )
                 .await;
             }
+            methods::MethodCall::chainHead_unstable_finalizedDatabase { max_size_bytes } => {
+                self.chain_head_unstable_finalized_database(
+                    request_id,
+                    &state_machine_request_id,
+                    max_size_bytes,
+                )
+                .await;
+            }
             methods::MethodCall::chainSpec_unstable_chainName {} => {
                 self.chain_spec_unstable_chain_name(request_id, &state_machine_request_id)
                     .await;
