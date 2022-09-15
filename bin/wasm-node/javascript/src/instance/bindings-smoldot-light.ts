@@ -131,7 +131,7 @@ export interface ConnectionConfig {
      *
      * Must only be called once per connection.
      */
-    onOpen: (info: { type: 'single-stream' } | { type: 'multi-stream', peerId: Uint8Array }) => void;
+    onOpen: (info: { type: 'single-stream' } | { type: 'multi-stream' }) => void;
 
     /**
      * Callback called when the connection transitions to the `Closed` state.
@@ -328,9 +328,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                                     break
                                 }
                                 case 'multi-stream': {
-                                    const ptr = instance.exports.alloc(info.peerId.length) >>> 0;
-                                    new Uint8Array(instance.exports.memory.buffer).set(info.peerId, ptr);
-                                    instance.exports.connection_open_multi_stream(connectionId, ptr, info.peerId.length);
+                                    instance.exports.connection_open_multi_stream(connectionId);
                                     break
                                 }
                             }

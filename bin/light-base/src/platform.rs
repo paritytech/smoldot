@@ -18,7 +18,6 @@
 use alloc::string::String;
 use core::{ops, str, time::Duration};
 use futures::prelude::*;
-use smoldot::libp2p::peer_id::PeerId;
 
 pub mod async_std;
 
@@ -136,7 +135,7 @@ pub enum PlatformConnection<TStream, TConnection> {
     SingleStream(TStream),
     /// The connection is made of multiple substreams. The encryption and multiplexing are handled
     /// externally.
-    MultiStream(TConnection, PeerId),
+    MultiStream(TConnection),
 }
 
 /// Direction in which a substream has been opened. See [`Platform::next_substream`].
