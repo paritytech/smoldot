@@ -22,11 +22,6 @@ import { Connection, ConnectionError, ConnectionConfig } from './instance/instan
 import { inflate } from 'pako';
 
 import { base64, base64pad, base64url, base64urlpad } from 'multiformats/bases/base64';
-import { Noise } from '@chainsafe/libp2p-noise';
-import { peerIdFromString, peerIdFromKeys } from '@libp2p/peer-id';
-import { generateKeyPair, marshalPrivateKey, marshalPublicKey } from '@libp2p/crypto/keys';
-import type { Duplex } from 'it-stream-types';
-import type { PeerId } from '@libp2p/interface-peer-id';
 
 export {
   AddChainError,
@@ -158,14 +153,14 @@ function trustedBase64Decode(base64: string): Uint8Array {
 
     pc.onconnectionstatechange = (_event) => {
       console.log(`conn state: ${pc.connectionState}`);
-      if (pc.connectionState == "closed") {
-          config.onConnectionClose("");
+      if (pc.connectionState == "closed" || pc.connectionState == "disconnected" || pc.connectionState == "failed") {
+          config.onConnectionClose("WebRTC state transitioned to " + pc.connectionState);
       }
     };
 
     // Create an initial data channel with a predefined `id = 1`, which is used
     // to verify remote peer's identity.
-    const dataChannel = pc.createDataChannel("data", { id: 1, negotiated: true });
+    //const dataChannel = pc.createDataChannel("data", { id: 1, negotiated: true });
 
     pc.onnegotiationneeded = async (_event) => {
         // Create a new offer and set it as local description.
@@ -259,56 +254,41 @@ function trustedBase64Decode(base64: string): Uint8Array {
         console.log("REMOTE ANSWER: " + pc.remoteDescription!.sdp);
     };
 
-    dataChannel.onopen = async () => {
-        console.log(`'${dataChannel.label}' opened`);
+    const dataChannels = new Map<number, RTCDataChannel>();
+    const addChannel = (dataChannel: RTCDataChannel, direction: 'inbound' | 'outbound') => {
+      const dataChannelId = dataChannel.id!;
 
-        let messages: Array<Uint8Array> = [];
-        dataChannel.onmessage = (m) => {
-          messages.push(m.data);
-        };
+      dataChannel.onopen = () => {
+          console.log(`'${dataChannel.label}' opened`);
+          config.onStreamOpened(dataChannelId, direction);
+      };
 
-        const privateKey = await generateKeyPair('Ed25519');
-        const localPeerId: PeerId = await peerIdFromKeys(marshalPublicKey(privateKey.public), marshalPrivateKey(privateKey));
-        const remotePeerId = peerIdFromString(webRTCParsed[7] || '');
+      dataChannel.onerror = (error) => {
+          console.log(`'${dataChannel.label}' errored: ${error}`);
+          config.onStreamClose(dataChannelId);
+      };
 
-        console.log(`noise handshake with addr=${config.address}`);
-        const noise = new Noise(privateKey.bytes);
-        const conn: Duplex<Uint8Array> = {
-          sink: async source => {
-            for await (const v of source) {
-              dataChannel.send(v);
-            }
-          },
-          source: (async function * () {
-            let m = messages.shift()
-            while (m != null) {
-              yield m;
-              m = messages.shift();
-            }
-          }())
-        };
-        const secureConn = await noise.secureOutbound(localPeerId, conn, remotePeerId);
+      dataChannel.onclose = () => {
+          console.log(`'${dataChannel.label}' closed`);
+          config.onStreamClose(dataChannelId);
+      };
 
-        dataChannel.close();
+      dataChannel.onmessage = (m) => {
+          console.log(`new message on '${dataChannel.label}': '${m.data}'`);
+          config.onMessage(m.data, dataChannelId);
+      }
 
-        console.log(`verifying peer's identity addr=${config.address}`);
-        if (!secureConn.remotePeer.equals(remotePeerId)) {
-          console.error(`invalid peer ID (expected ${secureConn.remotePeer}, got ${remotePeerId})`);
-          return
-        }
+      dataChannels.set(dataChannelId, dataChannel);
+    }
 
-        config.onOpen({ type: 'multi-stream' });
+    pc.ondatachannel = ({ channel }) => {
+      addChannel(channel, 'inbound')
     };
 
-    dataChannel.onerror = (error) => {
-        console.log(`'${dataChannel.label}' errored: ${error}`);
-    };
-
-    dataChannel.onclose = () => {
-        console.log(`'${dataChannel.label}' closed`);
-    };
-
-    let dataChannels = new Map<number, RTCDataChannel>();
+    // TODO: smoldot panics if we call onOpen before returning
+    setTimeout(() => {
+      config.onOpen({ type: 'multi-stream' });
+    }, 0);
 
     return {
       close: (streamId: number): void => {
@@ -317,47 +297,20 @@ function trustedBase64Decode(base64: string): Uint8Array {
           pc.onnegotiationneeded = null;
           pc.close();
         } else {
-          let dc = dataChannels.get(streamId);
-          if (dc != null) {
-            dc.close();
-          } else {
-            console.log(`Data channel ${streamId} not found`);
-          }
+          const channel = dataChannels.get(streamId)!;
+          channel.close();
+          dataChannels.delete(streamId);
         }
       },
 
-
       send: (data: Uint8Array, streamId: number): void => {
-        let dc = dataChannels.get(streamId);
-        if (dc != null) {
-          dc.send(data);
-        } else {
-          console.log(`Data channel ${streamId} not found`);
-        }
+        const channel = dataChannels.get(streamId)!;
+        console.log("sent", data);
+        channel.send(data);
       },
 
       openOutSubstream: () => {
-        var dataChannel = pc.createDataChannel("data");
-
-        dataChannel.onopen = () => {
-            console.log(`'${dataChannel.label}' opened`);
-        };
-
-        dataChannel.onerror = (error) => {
-            console.log(`'${dataChannel.label}' errored: ${error}`);
-        };
-
-        dataChannel.onclose = () => {
-            console.log(`'${dataChannel.label}' closed`);
-        };
-
-        dataChannel.onmessage = (m) => {
-            console.log(`new message on '${dataChannel.label}': '${m.data}'`);
-        }
-
-        if (dataChannel.id != null) {
-          dataChannels.set(dataChannel.id, dataChannel);
-        }
+        addChannel(pc.createDataChannel("data"), 'outbound')
       }
     };
   } else {

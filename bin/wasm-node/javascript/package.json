@@ -36,12 +36,7 @@
   "dependencies": {
     "pako": "^2.0.4",
     "ws": "^8.8.1",
-    "multiformats": "^9.8.1",
-    "@chainsafe/libp2p-noise": "^8.0.1",
-    "@libp2p/peer-id": "^1.1.15",
-    "@libp2p/crypto": "^1.0.4",
-    "it-stream-types": "^1.0.4",
-    "@libp2p/interface-peer-id": "^1.0.4"
+    "multiformats": "^9.8.1"
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
