@@ -401,6 +401,18 @@ impl<TRq, TBl> VerificationQueue<TRq, TBl> {
 
                 self.verification_queue.remove(index + 1);
             }
+
+            // We must also check whether `index - 1` was not also `Missing`.
+            // This is done after having checking `index + 1`, otherwise the indices would be
+            // wrong.
+            if index != 0
+                && matches!(
+                    self.verification_queue[index - 1].ty,
+                    VerificationQueueEntryTy::Missing
+                )
+            {
+                self.verification_queue.remove(index);
+            }
         };
 
         // Check the internal state of the queue.
