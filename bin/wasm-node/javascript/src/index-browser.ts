@@ -158,10 +158,6 @@ function trustedBase64Decode(base64: string): Uint8Array {
       }
     };
 
-    // Create an initial data channel with a predefined `id = 1`, which is used
-    // to verify remote peer's identity.
-    //const dataChannel = pc.createDataChannel("data", { id: 1, negotiated: true });
-
     pc.onnegotiationneeded = async (_event) => {
         // Create a new offer and set it as local description.
         let sdpOffer = (await pc.createOffer()).sdp!;
@@ -310,7 +306,8 @@ function trustedBase64Decode(base64: string): Uint8Array {
       },
 
       openOutSubstream: () => {
-        addChannel(pc.createDataChannel("data"), 'outbound')
+        // TODO: the `id: 1` is a complete hack
+        addChannel(pc.createDataChannel("data", { id: 1, negotiated: true }), 'outbound')
       }
     };
   } else {
