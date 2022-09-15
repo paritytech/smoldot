@@ -271,7 +271,8 @@ function trustedBase64Decode(base64: string): Uint8Array {
 
       dataChannel.onmessage = (m) => {
           console.log(`new message on '${dataChannel.label}': '${m.data}'`);
-          config.onMessage(m.data, dataChannelId);
+          // The `data` field is an `ArrayBuffer`.
+          config.onMessage(new Uint8Array(m.data), dataChannelId);
       }
 
       dataChannels.set(dataChannelId, dataChannel);
