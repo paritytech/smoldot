@@ -35,7 +35,7 @@ export interface SmoldotWasmExports extends WebAssembly.Exports {
     database_content: (chainId: number, maxSize: number) => void,
     timer_finished: (timerId: number) => void,
     connection_open_single_stream: (connectionId: number) => void,
-    connection_open_multi_stream: (connectionId: number, peerIdPtr: number, peerIdLen: number) => void,
+    connection_open_multi_stream: (connectionId: number) => void,
     stream_message: (connectionId: number, streamId: number, ptr: number, len: number) => void,
     connection_stream_opened: (connectionId: number, streamId: number, outbound: number) => void,
     connection_closed: (connectionId: number, ptr: number, len: number) => void,
