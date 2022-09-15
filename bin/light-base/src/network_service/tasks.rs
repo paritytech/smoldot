@@ -358,6 +358,8 @@ async fn multi_stream_connection_task<TPlat: Platform>(
     let mut pending_opening_out_substreams = 0;
     // Newly-open substream that has just been yielded by the connection.
     let mut newly_open_substream = None;
+    // `true` if the remote has force-closed our connection.
+    let mut has_reset = false;
     // List of all currently open substreams. The index (as a `usize`) corresponds to the id
     // of this substream within the `connection_task` state machine.
     let mut open_substreams = slab::Slab::<TPlat::Stream>::with_capacity(16);
@@ -562,8 +564,15 @@ async fn multi_stream_connection_task<TPlat: Platform>(
         debug_assert!(newly_open_substream.is_none());
         futures::select! {
             _ = message_from_coordinator => {}
-            substream = TPlat::next_substream(&mut connection).fuse() => {
-                newly_open_substream = substream;
+            substream = if has_reset { either::Right(future::pending()) } else { either::Left(TPlat::next_substream(&mut connection)) }.fuse() => {
+                match substream {
+                    Some(s) => newly_open_substream = Some(s),
+                    None => {
+                        // `None` is returned if the remote has force-closed the connection.
+                        connection_task.reset();
+                        has_reset = true;
+                    }
+                }
             }
             _ = poll_after => {}
             _ = data_ready.fuse() => {}
