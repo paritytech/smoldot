@@ -456,10 +456,12 @@ define_methods! {
     transaction_unstable_submitAndWatch(transaction: HexString) -> Cow<'a, str>,
     transaction_unstable_unwatch(subscription: Cow<'a, str>) -> (),
 
-    // This function is a custom addition in smoldot. As of the writing of this comment, there is
-    // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
+    // These functions are a custom addition in smoldot. As of the writing of this comment, there
+    // is no plan to standardize them. See <https://github.com/paritytech/smoldot/issues/2245> and
+    // <https://github.com/paritytech/smoldot/issues/2456>.
     network_unstable_subscribeEvents() -> Cow<'a, str>,
     network_unstable_unsubscribeEvents(subscription: Cow<'a, str>) -> (),
+    chainHead_unstable_finalizedDatabase(max_size_bytes: Option<u64>) -> Cow<'a, str>,
 }
 
 define_methods! {
