@@ -297,7 +297,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
           return
         }
 
-        config.onOpen({ type: 'multi-stream', peerId: remotePeerId.toBytes() });
+        config.onOpen({ type: 'multi-stream' });
     };
 
     dataChannel.onerror = (error) => {
