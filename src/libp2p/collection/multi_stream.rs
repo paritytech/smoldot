@@ -145,14 +145,6 @@ where
                 })),
             },
         }
-
-        /*
-        TODO: old code:
-
-
-
-
-        */
     }
 
     /// Pulls a message to send back to the coordinator.
