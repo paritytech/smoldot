@@ -295,6 +295,10 @@ function trustedBase64Decode(base64: string): Uint8Array {
           pc.close();
         } else {
           const channel = dataChannels.get(streamId)!;
+          channel.onopen = null;
+          channel.onerror = null;
+          channel.onclose = null;
+          channel.onmessage = null;
           channel.close();
           dataChannels.delete(streamId);
         }
