@@ -469,9 +469,7 @@ pub extern "C" fn connection_open_single_stream(connection_id: u32) {
 /// [`alloc`] must be called in order to allocate memory for this message, then
 /// [`stream_message`] must be called with the pointer returned by [`alloc`].
 #[no_mangle]
-pub extern "C" fn connection_open_multi_stream(
-    connection_id: u32,
-) {
+pub extern "C" fn connection_open_multi_stream(connection_id: u32) {
     crate::platform::connection_open_multi_stream(connection_id)
 }
 
