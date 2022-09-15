@@ -282,6 +282,9 @@ function trustedBase64Decode(base64: string): Uint8Array {
       addChannel(channel, 'inbound')
     };
 
+    // TODO: this system is a complete hack
+    let outId = 1;
+
     // TODO: smoldot panics if we call onOpen before returning
     setTimeout(() => {
       config.onOpen({ type: 'multi-stream' });
@@ -311,8 +314,8 @@ function trustedBase64Decode(base64: string): Uint8Array {
       },
 
       openOutSubstream: () => {
-        // TODO: the `id: 1` is a complete hack
-        addChannel(pc.createDataChannel("data", { id: 1, negotiated: true }), 'outbound')
+        addChannel(pc.createDataChannel("data", { id: outId, negotiated: true }), 'outbound')
+        outId += 1;
       }
     };
   } else {
