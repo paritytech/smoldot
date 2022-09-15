@@ -283,7 +283,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
     };
 
     // TODO: this system is a complete hack
-    let outId = 1;
+    let isFirstSubstream = true;
 
     // TODO: smoldot panics if we call onOpen before returning
     setTimeout(() => {
@@ -314,8 +314,12 @@ function trustedBase64Decode(base64: string): Uint8Array {
       },
 
       openOutSubstream: () => {
-        addChannel(pc.createDataChannel("data", { id: outId, negotiated: true }), 'outbound')
-        outId += 1;
+        if (isFirstSubstream) {
+          isFirstSubstream = false;
+          addChannel(pc.createDataChannel("data", { id: 1, negotiated: true }), 'outbound')
+        } else {
+          addChannel(pc.createDataChannel("data"), 'outbound')
+        }
       }
     };
   } else {
