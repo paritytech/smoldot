@@ -153,7 +153,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
 
     pc.onconnectionstatechange = (_event) => {
       console.log(`conn state: ${pc.connectionState}`);
-      if (pc.connectionState == "closed" || pc.connectionState == "disconnected" || pc.connectionState == "failed") {
+      if (pc.connectionState == "closed" || pc.connectionState == "disconnected" || pc.connectionState == "failed") {
           config.onConnectionClose("WebRTC state transitioned to " + pc.connectionState);
       }
     };
