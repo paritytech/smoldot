@@ -129,7 +129,11 @@ where
 
         MultiStreamConnectionTask {
             connection: MultiStreamConnectionTaskInner::Handshake {
-                handshake: Some(noise::HandshakeInProgress::new(&noise_key, true)), // TODO: is_initiator?
+                handshake: Some(noise::HandshakeInProgress::new(noise::Config {
+                    key: &noise_key,
+                    is_initiator: true, // TODO: is_initiator?
+                    prologue: &[], // TODO: this prologue isn't correct, WebRTC requires passing certificate fingerprints
+                })),
                 opened_substream: None,
                 established: Some(established::MultiStream::new(established::Config {
                     notifications_protocols: notification_protocols
