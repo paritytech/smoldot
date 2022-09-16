@@ -205,6 +205,15 @@ pub struct Config<'a> {
     /// `true` if this side of the handshake has initiated the connection or substream onto which
     /// the handshake is performed.
     pub is_initiator: bool,
+
+    /// Prologue data. The prologue data must be identical on both sides of the handshake,
+    /// otherwise it will fail.
+    ///
+    /// See <https://noiseprotocol.org/noise.html#prologue>.
+    ///
+    /// > **Note**: If a certain protocol specification doesn't mention any prologue, it probably
+    /// >           means that this prologue is empty.
+    pub prologue: &'a [u8],
 }
 
 /// State of the noise encryption/decryption cipher.
@@ -525,8 +534,9 @@ impl HandshakeInProgress {
     /// Initializes a new noise handshake state machine.
     pub fn new(config: Config) -> Self {
         let inner = {
-            let builder =
-                snow::Builder::new(noise_params()).local_private_key(&config.key.key.private);
+            let builder = snow::Builder::new(noise_params())
+                .local_private_key(&config.key.key.private)
+                .prologue(&config.prologue);
             if config.is_initiator {
                 builder.build_initiator()
             } else {
@@ -865,10 +875,12 @@ mod tests {
             let mut handshake1 = NoiseHandshake::new(Config {
                 key: &key1,
                 is_initiator: true,
+                prologue: &[],
             });
             let mut handshake2 = NoiseHandshake::new(Config {
                 key: &key2,
                 is_initiator: false,
+                prologue: &[],
             });
 
             let mut buf_1_to_2 = Vec::new();

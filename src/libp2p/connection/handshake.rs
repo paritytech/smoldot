@@ -319,6 +319,7 @@ impl NoiseKeyRequired {
                 handshake: Box::new(noise::HandshakeInProgress::new(noise::Config {
                     key: noise_key,
                     is_initiator: self.is_initiator,
+                    prologue: &[],
                 })),
             },
         }
