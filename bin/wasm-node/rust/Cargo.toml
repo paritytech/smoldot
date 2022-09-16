@@ -18,7 +18,7 @@ futures = "0.3.24"
 hashbrown = { version = "0.12.3", default-features = false }
 lazy_static = "1.4.0"
 log = { version = "0.4.17", features = ["std"] }
-nom = { version = "7.1.1", default-features = false, features = ["alloc"] }
+nom = { version = "7.1.1", default-features = false }
 pin-project = "1.0.12"
 rand = "0.8.5"
 slab = { version = "0.4.7", default-features = false }
