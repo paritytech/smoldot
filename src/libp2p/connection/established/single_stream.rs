@@ -260,7 +260,7 @@ where
                     return Ok((self, Some(event)));
                 } else if num_read == 0 {
                     // Substream doesn't accept anymore data because it is blocked on writing out.
-                    return Ok((self, None))
+                    return Ok((self, None));
                 } else {
                     // Jump back to the beginning of the loop. We don't want to read more data
                     // until this specific substream's data has been processed.
