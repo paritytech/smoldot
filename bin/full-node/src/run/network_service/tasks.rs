@@ -60,6 +60,9 @@ pub(super) async fn opening_connection_task(
             let mut guarded = inner.guarded.lock().await;
             guarded.num_pending_out_attempts -= 1;
             guarded.network.pending_outcome_err(start_connect.id, true);
+            for chain_index in 0..guarded.network.num_chains() {
+                guarded.unassign_slot_and_ban(chain_index, start_connect.expected_peer_id.clone());
+            }
             inner.wake_up_main_background_task.notify(1);
             return;
         }
@@ -83,6 +86,9 @@ pub(super) async fn opening_connection_task(
                 let mut guarded = inner.guarded.lock().await;
                 guarded.num_pending_out_attempts -= 1;
                 guarded.network.pending_outcome_err(start_connect.id, false);
+                for chain_index in 0..guarded.network.num_chains() {
+                    guarded.unassign_slot_and_ban(chain_index, start_connect.expected_peer_id.clone());
+                }
                 inner.wake_up_main_background_task.notify(1);
                 return;
             }
@@ -93,6 +99,9 @@ pub(super) async fn opening_connection_task(
                         let mut guarded = inner.guarded.lock().await;
                         guarded.num_pending_out_attempts -= 1;
                         guarded.network.pending_outcome_err(start_connect.id, true);
+                        for chain_index in 0..guarded.network.num_chains() {
+                            guarded.unassign_slot_and_ban(chain_index, start_connect.expected_peer_id.clone());
+                        }
                         inner.wake_up_main_background_task.notify(1);
                         return;
                     }
@@ -105,9 +114,10 @@ pub(super) async fn opening_connection_task(
     // has succeeded.
     let mut guarded = inner.guarded.lock().await;
     guarded.num_pending_out_attempts -= 1;
-    let (connection_id, connection_task) = guarded
-        .network
-        .pending_outcome_ok_single_stream(start_connect.id);
+    let (connection_id, connection_task) = guarded.network.pending_outcome_ok_single_stream(
+        start_connect.id,
+        service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
+    );
     inner.wake_up_main_background_task.notify(1);
 
     let (tx, rx) = mpsc::channel(16); // TODO: ?!

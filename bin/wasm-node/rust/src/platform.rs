@@ -17,6 +17,7 @@
 
 use crate::{bindings, timers::Delay};
 
+use smoldot::libp2p::multihash;
 use smoldot_light::platform::{ConnectError, PlatformSubstreamDirection};
 
 use core::{cmp, mem, slice, str, time::Duration};
@@ -143,24 +144,27 @@ impl smoldot_light::platform::Platform for Platform {
 
             match &mut connection.inner {
                 ConnectionInner::NotOpen => unreachable!(),
-                ConnectionInner::SingleStream => {
+                ConnectionInner::SingleStreamMsNoiseYamux => {
                     let read_buffer = ReadBuffer {
                         buffer: Vec::new().into(),
                         buffer_first_offset: 0,
                     };
 
-                    Ok(smoldot_light::platform::PlatformConnection::SingleStream(
+                    Ok(smoldot_light::platform::PlatformConnection::SingleStreamMultistreamSelectNoiseYamux(
                         StreamWrapper((connection_id, 0), read_buffer),
                     ))
                 }
-                ConnectionInner::MultiStream {
+                ConnectionInner::MultiStreamWebRtc {
                     connection_handles_alive,
-                    ..
+                    local_tls_certificate_multihash,
+                    remote_tls_certificate_multihash, ..
                 } => {
                     *connection_handles_alive += 1;
-                    Ok(smoldot_light::platform::PlatformConnection::MultiStream(
-                        ConnectionWrapper(connection_id),
-                    ))
+                    Ok(smoldot_light::platform::PlatformConnection::MultiStreamWebRtc {
+                        connection: ConnectionWrapper(connection_id),
+                        local_tls_certificate_multihash: local_tls_certificate_multihash.clone(),
+                        remote_tls_certificate_multihash: remote_tls_certificate_multihash.clone(),
+                    })
                 }
                 ConnectionInner::Closed {
                     message,
@@ -192,7 +196,7 @@ impl smoldot_light::platform::Platform for Platform {
 
                     match &mut connection.inner {
                         ConnectionInner::Closed { .. } => return None,
-                        ConnectionInner::MultiStream {
+                        ConnectionInner::MultiStreamWebRtc {
                             opened_substreams_to_pick_up,
                             connection_handles_alive,
                             ..
@@ -204,7 +208,8 @@ impl smoldot_light::platform::Platform for Platform {
                                 break (substream, direction);
                             }
                         }
-                        ConnectionInner::NotOpen | ConnectionInner::SingleStream { .. } => {
+                        ConnectionInner::NotOpen
+                        | ConnectionInner::SingleStreamMsNoiseYamux { .. } => {
                             unreachable!()
                         }
                     }
@@ -238,7 +243,7 @@ impl smoldot_light::platform::Platform for Platform {
                 .get(connection_id)
                 .unwrap()
                 .inner,
-            ConnectionInner::MultiStream { .. }
+            ConnectionInner::MultiStreamWebRtc { .. }
         ));
 
         unsafe { bindings::connection_stream_open(*connection_id) }
@@ -350,7 +355,7 @@ impl Drop for StreamWrapper {
         let connection = lock.connections.get_mut(&self.0 .0).unwrap();
         let remove_connection = match &mut connection.inner {
             ConnectionInner::NotOpen => unreachable!(),
-            ConnectionInner::SingleStream => {
+            ConnectionInner::SingleStreamMsNoiseYamux => {
                 unsafe {
                     bindings::connection_close(self.0 .0);
                 }
@@ -358,7 +363,7 @@ impl Drop for StreamWrapper {
                 debug_assert_eq!(self.0 .1, 0);
                 true
             }
-            ConnectionInner::MultiStream {
+            ConnectionInner::MultiStreamWebRtc {
                 connection_handles_alive,
                 ..
             } => {
@@ -403,8 +408,8 @@ impl Drop for ConnectionWrapper {
 
         let connection = lock.connections.get_mut(&self.0).unwrap();
         let remove_connection = match &mut connection.inner {
-            ConnectionInner::NotOpen | ConnectionInner::SingleStream => unreachable!(),
-            ConnectionInner::MultiStream {
+            ConnectionInner::NotOpen | ConnectionInner::SingleStreamMsNoiseYamux => unreachable!(),
+            ConnectionInner::MultiStreamWebRtc {
                 connection_handles_alive,
                 ..
             }
@@ -456,8 +461,8 @@ struct Connection {
 
 enum ConnectionInner {
     NotOpen,
-    SingleStream,
-    MultiStream {
+    SingleStreamMsNoiseYamux,
+    MultiStreamWebRtc {
         /// List of substreams that the host (i.e. JavaScript side) has reported have been opened,
         /// but that haven't been reported through
         /// [`smoldot_light::platform::Platform::next_substream`] yet.
@@ -465,6 +470,10 @@ enum ConnectionInner {
         /// Number of objects (connections and streams) in the [`Platform`] API that reference
         /// this connection. If it switches from 1 to 0, the connection must be removed.
         connection_handles_alive: u32,
+        /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
+        local_tls_certificate_multihash: Vec<u8>,
+        /// Multihash encoding of the TLS certificate used by the remote node at the DTLS layer.
+        remote_tls_certificate_multihash: Vec<u8>,
     },
     /// [`bindings::connection_closed`] has been called
     Closed {
@@ -496,14 +505,16 @@ struct ReadBuffer {
     buffer_first_offset: usize,
 }
 
-pub(crate) fn connection_open_single_stream(connection_id: u32) {
+pub(crate) fn connection_open_single_stream(connection_id: u32, handshake_ty: u32) {
+    assert_eq!(handshake_ty, 0);
+
     let mut lock = STATE.try_lock().unwrap();
     let lock = &mut *lock;
 
     let connection = lock.connections.get_mut(&connection_id).unwrap();
 
     debug_assert!(matches!(connection.inner, ConnectionInner::NotOpen));
-    connection.inner = ConnectionInner::SingleStream;
+    connection.inner = ConnectionInner::SingleStreamMsNoiseYamux;
 
     let _prev_value = lock.streams.insert(
         (connection_id, 0),
@@ -518,13 +529,60 @@ pub(crate) fn connection_open_single_stream(connection_id: u32) {
     connection.something_happened.notify(usize::max_value());
 }
 
-pub(crate) fn connection_open_multi_stream(connection_id: u32) {
+pub(crate) fn connection_open_multi_stream(
+    connection_id: u32,
+    handshake_ty_ptr: u32,
+    handshake_ty_len: u32,
+) {
+    let handshake_ty: Box<[u8]> = {
+        let handshake_ty_ptr = usize::try_from(handshake_ty_ptr).unwrap();
+        let handshake_ty_len = usize::try_from(handshake_ty_len).unwrap();
+        unsafe {
+            Box::from_raw(slice::from_raw_parts_mut(
+                handshake_ty_ptr as *mut u8,
+                handshake_ty_len,
+            ))
+        }
+    };
+
+    let (_, (local_tls_certificate_multihash, remote_tls_certificate_multihash)) =
+        nom::sequence::preceded(
+            nom::bytes::complete::tag::<_, _, nom::error::Error<&[u8]>>(&[0]),
+            nom::sequence::tuple((
+                move |b| {
+                    multihash::MultihashRef::from_bytes_partial(b)
+                        .map(|(a, b)| (b, a))
+                        .map_err(|_| {
+                            nom::Err::Failure(nom::error::make_error(
+                                b,
+                                nom::error::ErrorKind::Verify,
+                            ))
+                        })
+                },
+                move |b| {
+                    multihash::MultihashRef::from_bytes_partial(b)
+                        .map(|(a, b)| (b, a))
+                        .map_err(|_| {
+                            nom::Err::Failure(nom::error::make_error(
+                                b,
+                                nom::error::ErrorKind::Verify,
+                            ))
+                        })
+                },
+            )),
+        )(&handshake_ty[..])
+        .unwrap();
+
     let mut lock = STATE.try_lock().unwrap();
     let connection = lock.connections.get_mut(&connection_id).unwrap();
+
     debug_assert!(matches!(connection.inner, ConnectionInner::NotOpen));
-    connection.inner = ConnectionInner::MultiStream {
+
+    connection.inner = ConnectionInner::MultiStreamWebRtc {
         opened_substreams_to_pick_up: VecDeque::with_capacity(8),
         connection_handles_alive: 0,
+        local_tls_certificate_multihash: local_tls_certificate_multihash.to_vec(),
+        remote_tls_certificate_multihash: remote_tls_certificate_multihash.to_vec(),
     };
     connection.something_happened.notify(usize::max_value());
 }
@@ -537,8 +595,8 @@ pub(crate) fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: 
     // For single stream connections, the docs of this function mentions that `stream_id` can be
     // any value. However, internally we always use `0`.
     let actual_stream_id = match connection.inner {
-        ConnectionInner::MultiStream { .. } => stream_id,
-        ConnectionInner::SingleStream => 0,
+        ConnectionInner::MultiStreamWebRtc { .. } => stream_id,
+        ConnectionInner::SingleStreamMsNoiseYamux => 0,
         ConnectionInner::Closed { .. } | ConnectionInner::NotOpen => unreachable!(),
     };
 
@@ -571,7 +629,7 @@ pub(crate) fn connection_stream_opened(connection_id: u32, stream_id: u32, outbo
     let lock = &mut *lock;
 
     let connection = lock.connections.get_mut(&connection_id).unwrap();
-    if let ConnectionInner::MultiStream {
+    if let ConnectionInner::MultiStreamWebRtc {
         opened_substreams_to_pick_up,
         ..
     } = &mut connection.inner
@@ -610,8 +668,8 @@ pub(crate) fn connection_closed(connection_id: u32, ptr: u32, len: u32) {
 
     let connection_handles_alive = match &connection.inner {
         ConnectionInner::NotOpen => 0,
-        ConnectionInner::SingleStream => 1, // TODO: I believe that this is correct but a bit confusing; might be helpful to refactor with an enum or something
-        ConnectionInner::MultiStream {
+        ConnectionInner::SingleStreamMsNoiseYamux => 1, // TODO: I believe that this is correct but a bit confusing; might be helpful to refactor with an enum or something
+        ConnectionInner::MultiStreamWebRtc {
             connection_handles_alive,
             ..
         } => *connection_handles_alive,

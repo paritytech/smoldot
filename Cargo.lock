@@ -2332,6 +2332,7 @@ dependencies = [
  "hashbrown",
  "lazy_static",
  "log",
+ "nom",
  "pin-project",
  "rand",
  "slab",
