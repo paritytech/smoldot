@@ -111,7 +111,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
       connection.binaryType = 'arraybuffer';
 
       connection.onopen = () => {
-          config.onOpen({ type: 'single-stream' });
+          config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux' });
       };
       connection.onclose = (event) => {
           const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");

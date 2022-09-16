@@ -21,8 +21,8 @@ use super::{
         read_write::ReadWrite,
     },
     ConfigRequestResponse, ConnectionToCoordinator, ConnectionToCoordinatorInner,
-    CoordinatorToConnection, CoordinatorToConnectionInner, NotificationsOutErr, OverlayNetwork,
-    PeerId, ShutdownCause, SubstreamId,
+    CoordinatorToConnection, CoordinatorToConnectionInner, MultiStreamHandshakeKind,
+    NotificationsOutErr, OverlayNetwork, PeerId, ShutdownCause, SubstreamId,
 };
 
 use alloc::{string::ToString as _, sync::Arc};
@@ -116,12 +116,17 @@ where
     pub(super) fn new(
         randomness_seed: [u8; 32],
         now: TNow,
+        handshake_kind: MultiStreamHandshakeKind,
         max_inbound_substreams: usize,
         noise_key: Arc<noise::NoiseKey>,
         notification_protocols: Arc<[OverlayNetwork]>,
         request_response_protocols: Arc<[ConfigRequestResponse]>,
         ping_protocol: Arc<str>,
     ) -> Self {
+        // We only support one kind of handshake at the moment. Make sure (at compile time) that
+        // the value provided as parameter is indeed the one expected.
+        let MultiStreamHandshakeKind::WebRtc { .. } = handshake_kind;
+
         MultiStreamConnectionTask {
             connection: MultiStreamConnectionTaskInner::Handshake {
                 handshake: Some(noise::HandshakeInProgress::new(&noise_key, true)), // TODO: is_initiator?

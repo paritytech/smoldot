@@ -64,9 +64,10 @@ use rand::{Rng as _, SeedableRng as _};
 
 pub use collection::{
     ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionToCoordinator,
-    CoordinatorToConnection, InboundError, MultiStreamConnectionTask, NotificationProtocolConfig,
-    NotificationsInClosedErr, NotificationsOutErr, ReadWrite, RequestError, ShutdownCause,
-    SingleStreamConnectionTask, SubstreamId,
+    CoordinatorToConnection, InboundError, MultiStreamConnectionTask, MultiStreamHandshakeKind,
+    NotificationProtocolConfig, NotificationsInClosedErr, NotificationsOutErr, ReadWrite,
+    RequestError, ShutdownCause, SingleStreamConnectionTask, SingleStreamHandshakeKind,
+    SubstreamId,
 };
 
 /// Configuration for a [`Peers`].
@@ -802,10 +803,12 @@ where
     pub fn add_single_stream_incoming_connection(
         &mut self,
         when_connected: TNow,
+        handshake_kind: SingleStreamHandshakeKind,
         user_data: TConn,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         self.inner.insert_single_stream(
             when_connected,
+            handshake_kind,
             false,
             Connection {
                 peer_index: None,
@@ -827,6 +830,7 @@ where
     pub fn add_single_stream_outgoing_connection(
         &mut self,
         when_connected: TNow,
+        handshake_kind: SingleStreamHandshakeKind,
         expected_peer_id: &PeerId,
         user_data: TConn,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
@@ -834,6 +838,7 @@ where
 
         let (connection_id, connection_task) = self.inner.insert_single_stream(
             when_connected,
+            handshake_kind,
             true,
             Connection {
                 peer_index: Some(peer_index),
@@ -860,6 +865,7 @@ where
     pub fn add_multi_stream_outgoing_connection<TSubId>(
         &mut self,
         when_connected: TNow,
+        handshake_kind: MultiStreamHandshakeKind,
         expected_peer_id: &PeerId,
         user_data: TConn,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
@@ -870,6 +876,7 @@ where
 
         let (connection_id, connection_task) = self.inner.insert_multi_stream(
             when_connected,
+            handshake_kind,
             Connection {
                 peer_index: Some(peer_index),
                 user_data,

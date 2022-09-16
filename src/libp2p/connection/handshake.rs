@@ -30,6 +30,7 @@
 //! TCP handshake), depending on the strategy used for the multistream-select protocol.
 
 // TODO: finish commenting on the number of round trips
+// TODO: this module's name ("handshake") is a bit vague considering that there are multiple different handshakes based on the protocol
 
 use super::{
     super::peer_id::PeerId,
