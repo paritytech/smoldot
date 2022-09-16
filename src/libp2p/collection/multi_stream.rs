@@ -25,7 +25,7 @@ use super::{
     NotificationsOutErr, OverlayNetwork, PeerId, ShutdownCause, SubstreamId,
 };
 
-use alloc::{string::ToString as _, sync::Arc};
+use alloc::{string::ToString as _, sync::Arc, vec::Vec};
 use core::{
     hash::Hash,
     iter,
@@ -123,16 +123,42 @@ where
         request_response_protocols: Arc<[ConfigRequestResponse]>,
         ping_protocol: Arc<str>,
     ) -> Self {
-        // We only support one kind of handshake at the moment. Make sure (at compile time) that
-        // the value provided as parameter is indeed the one expected.
-        let MultiStreamHandshakeKind::WebRtc { .. } = handshake_kind;
+        // In the WebRTC handshake, the Noise prologue must be set to `"libp2p-webrtc-noise:"`
+        // followed with the multihash-encoded fingerprints of the local and remote certificates
+        // in ascending order.
+        // See <https://github.com/libp2p/specs/pull/412>.
+        let noise_prologue = {
+            let MultiStreamHandshakeKind::WebRtc {
+                local_tls_certificate_multihash,
+                remote_tls_certificate_multihash,
+            } = handshake_kind;
+            let (first, second) =
+                if local_tls_certificate_multihash < remote_tls_certificate_multihash {
+                    (
+                        local_tls_certificate_multihash,
+                        remote_tls_certificate_multihash,
+                    )
+                } else {
+                    (
+                        remote_tls_certificate_multihash,
+                        local_tls_certificate_multihash,
+                    )
+                };
+
+            const PREFIX: &[u8] = b"libp2p-webrtc-noise:";
+            let mut out = Vec::with_capacity(PREFIX.len() + first.len() + second.len());
+            out.extend_from_slice(PREFIX);
+            out.extend_from_slice(&first);
+            out.extend_from_slice(&second);
+            out
+        };
 
         MultiStreamConnectionTask {
             connection: MultiStreamConnectionTaskInner::Handshake {
                 handshake: Some(noise::HandshakeInProgress::new(noise::Config {
                     key: &noise_key,
                     is_initiator: true, // TODO: is_initiator?
-                    prologue: &[], // TODO: this prologue isn't correct, WebRTC requires passing certificate fingerprints
+                    prologue: &noise_prologue,
                 })),
                 opened_substream: None,
                 established: Some(established::MultiStream::new(established::Config {
