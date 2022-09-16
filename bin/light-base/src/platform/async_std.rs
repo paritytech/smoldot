@@ -252,11 +252,13 @@ impl Platform for AsyncStdTcpWebSocket {
                 Poll::Pending
             }));
 
-            Ok(PlatformConnection::SingleStreamMultistreamSelectNoiseYamux(Stream {
-                shared: shared_clone,
-                read_data_rx: Arc::new(parking_lot::Mutex::new(read_data_rx.peekable())),
-                read_buffer: Some(Vec::with_capacity(4096)),
-            }))
+            Ok(PlatformConnection::SingleStreamMultistreamSelectNoiseYamux(
+                Stream {
+                    shared: shared_clone,
+                    read_data_rx: Arc::new(parking_lot::Mutex::new(read_data_rx.peekable())),
+                    read_buffer: Some(Vec::with_capacity(4096)),
+                },
+            ))
         })
     }
 
