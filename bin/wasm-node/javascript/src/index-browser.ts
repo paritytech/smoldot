@@ -147,8 +147,6 @@ function trustedBase64Decode(base64: string): Uint8Array {
         openOutSubstream: () => { throw new Error('Wrong connection type') }
       };
   } else if (webRTCParsed != null) {
-    let pc: RTCPeerConnection;
-
     const targetPort = webRTCParsed[3];
     if (forbidWebRTC || targetPort == '0') {
         throw new ConnectionError('Connection type not allowed');
@@ -165,7 +163,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
     const certSha256Hash = multibaseMultihashToSha256(certMultibase);
 
     // Create a new peer connection.
-    pc = new RTCPeerConnection();
+    const pc = new RTCPeerConnection();
 
     pc.onconnectionstatechange = (_event) => {
       console.log(`conn state: ${pc.connectionState}`);
