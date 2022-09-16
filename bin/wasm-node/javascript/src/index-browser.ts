@@ -60,7 +60,13 @@ export function start(options?: ClientOptions): Client {
       crypto.getRandomValues(buffer);
     },
     connect: (config) => {
-      return connect(config, options?.forbidWs || false, options?.forbidNonLocalWs || false, options?.forbidWss || false, options?.forbidWebRTC || false)
+      return connect(
+        config,
+        options?.forbidWs || false,
+        options?.forbidNonLocalWs || false,
+        options?.forbidWss || false,
+        !(options?.enableExperimentalWebRTC || false)
+      )
     }
   })
 }
