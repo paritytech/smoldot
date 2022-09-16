@@ -1044,34 +1044,26 @@ where
     ///
     /// See also [`ChainNetwork::pending_outcome_err`].
     ///
-    /// No [`Event::Connected`] will be generated. Calling this function implicitly acts as if
-    /// this event was generated.
-    ///
     /// # Panic
     ///
     /// Panics if the [`PendingId`] is invalid.
     ///
-    // TODO: not generating the Connected event is tricky, as the user needs to do an extra effort to know if there was already a connection to that peer
     pub fn pending_outcome_ok_multi_stream<TSubId>(
         &mut self,
         id: PendingId,
-        now: TNow,
-        peer_id: &PeerId,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
     where
         TSubId: Clone + PartialEq + Eq + Hash,
     {
         // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
         // the user cancels the future returned by `add_outgoing_connection`.
-        let (expected_peer_id, multiaddr, _when_connected) = self.pending_ids.get(id.0).unwrap();
+        let (expected_peer_id, multiaddr, when_connected) = self.pending_ids.get(id.0).unwrap();
 
-        if expected_peer_id != peer_id {
-            todo!() // TODO: return an error or something
-        }
-
-        let (connection_id, connection_task) =
-            self.inner
-                .add_multi_stream_outgoing_connection(now, peer_id, multiaddr.clone());
+        let (connection_id, connection_task) = self.inner.add_multi_stream_outgoing_connection(
+            when_connected.clone(),
+            expected_peer_id,
+            multiaddr.clone(),
+        );
 
         // Update `self.peers`.
         {
