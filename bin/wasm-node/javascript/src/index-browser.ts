@@ -297,11 +297,23 @@ function trustedBase64Decode(base64: string): Uint8Array {
     }, 0);
 
     return {
-      close: (streamId: number): void => {
-        if (streamId == null) {
+      close: (streamId: number | undefined): void => {
+        if (streamId === undefined) {
           pc.onconnectionstatechange = null;
           pc.onnegotiationneeded = null;
+          pc.ondatachannel = null;
+
+          for (const channel of Array.from(dataChannels.values())) {
+            channel.onopen = null;
+            channel.onerror = null;
+            channel.onclose = null;
+            channel.onmessage = null;
+            channel.close();
+          }
+
           pc.close();
+          dataChannels.clear();
+
         } else {
           const channel = dataChannels.get(streamId)!;
           channel.onopen = null;
@@ -314,9 +326,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
       },
 
       send: (data: Uint8Array, streamId: number): void => {
-        const channel = dataChannels.get(streamId)!;
-        console.log("sent", data);
-        channel.send(data);
+        dataChannels.get(streamId)!.send(data);
       },
 
       openOutSubstream: () => {
