@@ -850,26 +850,26 @@ where
 
     /// Inserts a multi-stream outgoing connection in the state machine.
     ///
-    /// The [`PeerId`] of the remote must already be known when this function is called. If it
-    /// was in `unfulfilled_desired_peers`, then after this function returns the provided
-    /// [`PeerId`] will no longer be part of the return value of
+    /// This connection hasn't finished handshaking, and the [`PeerId`] of the remote isn't known
+    /// yet, but it is expected to be in `unfulfilled_desired_peers`. After this function has been
+    /// called, the provided `expected_peer_id` will no longer be part of the return value of
     /// [`Peers::unfulfilled_desired_peers`].
     ///
-    /// No [`Event::HandshakeFinished`] will be generated. Calling this function implicitly acts
-    /// as if this event had been implicitly generated.
+    /// Must be passed the moment (as a `TNow`) when the connection as been established, in order
+    /// to determine when the handshake timeout expires.
     pub fn add_multi_stream_outgoing_connection<TSubId>(
         &mut self,
-        now: TNow,
-        peer_id: &PeerId,
+        when_connected: TNow,
+        expected_peer_id: &PeerId,
         user_data: TConn,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
     where
         TSubId: Clone + PartialEq + Eq + Hash,
     {
-        let peer_index = self.peer_index_or_insert(peer_id);
+        let peer_index = self.peer_index_or_insert(expected_peer_id);
 
         let (connection_id, connection_task) = self.inner.insert_multi_stream(
-            now,
+            when_connected,
             Connection {
                 peer_index: Some(peer_index),
                 user_data,
@@ -879,8 +879,6 @@ where
 
         let _inserted = self.connections_by_peer.insert((peer_index, connection_id));
         debug_assert!(_inserted);
-
-        self.open_desired_notifications_out(peer_index);
 
         (connection_id, connection_task)
     }
