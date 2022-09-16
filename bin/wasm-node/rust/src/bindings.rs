@@ -475,7 +475,7 @@ pub extern "C" fn connection_open_single_stream(connection_id: u32, handshake_ty
 /// A "handshake type" must be provided. To do so, allocate a buffer with [`alloc`] and pass a
 /// pointer to it. This buffer is freed when this function is called.
 /// The buffer must contain a single 0 byte (indicating WebRTC), followed with the multihash
-/// representation of the hash of the local node's TLS certificate, followed with the mulithash
+/// representation of the hash of the local node's TLS certificate, followed with the multihash
 /// representation of the hash of the remote node's TLS certificate.
 #[no_mangle]
 pub extern "C" fn connection_open_multi_stream(
