@@ -197,6 +197,16 @@ impl UnsignedNoiseKey {
     }
 }
 
+/// Configuration for a Noise handshake.
+pub struct Config<'a> {
+    /// Key to use during the handshake.
+    pub key: &'a NoiseKey,
+
+    /// `true` if this side of the handshake has initiated the connection or substream onto which
+    /// the handshake is performed.
+    pub is_initiator: bool,
+}
+
 /// State of the noise encryption/decryption cipher.
 pub struct Noise {
     inner: snow::TransportState,
@@ -506,17 +516,18 @@ enum RxPayload {
 impl NoiseHandshake {
     /// Shortcut function that calls [`HandshakeInProgress::new`] and wraps it into a
     /// [`NoiseHandshake`].
-    pub fn new(key: &NoiseKey, is_initiator: bool) -> Self {
-        NoiseHandshake::InProgress(HandshakeInProgress::new(key, is_initiator))
+    pub fn new(config: Config) -> Self {
+        NoiseHandshake::InProgress(HandshakeInProgress::new(config))
     }
 }
 
 impl HandshakeInProgress {
     /// Initializes a new noise handshake state machine.
-    pub fn new(key: &NoiseKey, is_initiator: bool) -> Self {
+    pub fn new(config: Config) -> Self {
         let inner = {
-            let builder = snow::Builder::new(noise_params()).local_private_key(&key.key.private);
-            if is_initiator {
+            let builder =
+                snow::Builder::new(noise_params()).local_private_key(&config.key.key.private);
+            if config.is_initiator {
                 builder.build_initiator()
             } else {
                 builder.build_responder()
@@ -525,12 +536,12 @@ impl HandshakeInProgress {
         };
 
         // Configure according to the XX handshake.
-        let (tx_payload, rx_payload, rx_messages_remain) = if is_initiator {
-            let tx = Some((1, key.handshake_message.clone().into_boxed_slice()));
+        let (tx_payload, rx_payload, rx_messages_remain) = if config.is_initiator {
+            let tx = Some((1, config.key.handshake_message.clone().into_boxed_slice()));
             let rx = RxPayload::NthMessage(0);
             (tx, rx, 1)
         } else {
-            let tx = Some((0, key.handshake_message.clone().into_boxed_slice()));
+            let tx = Some((0, config.key.handshake_message.clone().into_boxed_slice()));
             let rx = RxPayload::NthMessage(1);
             (tx, rx, 2)
         };
@@ -843,7 +854,7 @@ pub struct PayloadDecodeError;
 
 #[cfg(test)]
 mod tests {
-    use super::{NoiseHandshake, NoiseKey, ReadWrite};
+    use super::{Config, NoiseHandshake, NoiseKey, ReadWrite};
 
     #[test]
     fn handshake_basic_works() {
@@ -851,8 +862,14 @@ mod tests {
             let key1 = NoiseKey::new(&rand::random());
             let key2 = NoiseKey::new(&rand::random());
 
-            let mut handshake1 = NoiseHandshake::new(&key1, true);
-            let mut handshake2 = NoiseHandshake::new(&key2, false);
+            let mut handshake1 = NoiseHandshake::new(Config {
+                key: &key1,
+                is_initiator: true,
+            });
+            let mut handshake2 = NoiseHandshake::new(Config {
+                key: &key2,
+                is_initiator: false,
+            });
 
             let mut buf_1_to_2 = Vec::new();
             let mut buf_2_to_1 = Vec::new();

@@ -316,10 +316,10 @@ impl NoiseKeyRequired {
     pub fn resume(self, noise_key: &NoiseKey) -> HealthyHandshake {
         HealthyHandshake {
             state: NegotiationState::Encryption {
-                handshake: Box::new(noise::HandshakeInProgress::new(
-                    noise_key,
-                    self.is_initiator,
-                )),
+                handshake: Box::new(noise::HandshakeInProgress::new(noise::Config {
+                    key: noise_key,
+                    is_initiator: self.is_initiator,
+                })),
             },
         }
     }
