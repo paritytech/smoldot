@@ -154,6 +154,16 @@ function trustedBase64Decode(base64: string): Uint8Array {
         throw new ConnectionError('Connection type not allowed');
     }
 
+    const ipVersion = webRTCParsed[1] == 'ip4'? '4' : '6';
+    const targetIp = webRTCParsed[2];
+    const certMultibase = webRTCParsed[4]!;
+
+    // The payload of `/certhash` is the hash of the self-generated certificate that the
+    // server presents.
+    // This function throws an exception if the certhash isn't correct. For this reason, this call
+    // is performed as part of the parsing of the multiaddr.
+    const certSha256Hash = multibaseMultihashToSha256(certMultibase);
+
     // Create a new peer connection.
     pc = new RTCPeerConnection();
 
@@ -178,14 +188,6 @@ function trustedBase64Decode(base64: string): Uint8Array {
         await pc.setLocalDescription({ type: 'offer', sdp: sdpOffer });
 
         console.log("LOCAL OFFER: " + pc.localDescription!.sdp);
-
-        const ipVersion = webRTCParsed[1] == 'ip4'? '4' : '6';
-        const targetIp = webRTCParsed[2];
-        const certMultibase = webRTCParsed[4]!;
-
-        // The payload of `/certhash` is the hash of the self-generated certificate that the
-        // server presents.
-        const certSha256Hash = multibaseMultihashToSha256(certMultibase);
 
         // Transform certifcate hash into fingerprint (upper-hex; each byte separated by ":").
         const fingerprint = Array.from(certSha256Hash).map((n) => ("0" + n.toString(16)).slice(-2).toUpperCase()).join(':');
