@@ -426,6 +426,7 @@ impl NetworkService {
                             let (connection_id, connection_task) =
                                 guarded.network.add_single_stream_incoming_connection(
                                     Instant::now(),
+                                    service::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
                                     multiaddr.clone(),
                                 );
 

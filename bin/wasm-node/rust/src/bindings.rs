@@ -453,9 +453,12 @@ pub extern "C" fn timer_finished(timer_id: u32) {
 /// When in the `Open` state, the connection can receive messages. When a message is received,
 /// [`alloc`] must be called in order to allocate memory for this message, then
 /// [`stream_message`] must be called with the pointer returned by [`alloc`].
+///
+/// The `handshake_ty` parameter indicates the type of handshake. It must always be 0 at the
+/// moment, indicating a multistream-select+Noise+Yamux handshake.
 #[no_mangle]
-pub extern "C" fn connection_open_single_stream(connection_id: u32) {
-    crate::platform::connection_open_single_stream(connection_id);
+pub extern "C" fn connection_open_single_stream(connection_id: u32, handshake_ty: u32) {
+    crate::platform::connection_open_single_stream(connection_id, handshake_ty);
 }
 
 /// Called by the JavaScript code if the connection switches to the `Open` state. The connection
@@ -468,9 +471,19 @@ pub extern "C" fn connection_open_single_stream(connection_id: u32) {
 /// When in the `Open` state, the connection can receive messages. When a message is received,
 /// [`alloc`] must be called in order to allocate memory for this message, then
 /// [`stream_message`] must be called with the pointer returned by [`alloc`].
+///
+/// A "handshake type" must be provided. To do so, allocate a buffer with [`alloc`] and pass a
+/// pointer to it. This buffer is freed when this function is called.
+/// The buffer must contain a single 0 byte (indicating WebRTC), followed with the multihash
+/// representation of the hash of the local node's TLS certificate, followed with the multihash
+/// representation of the hash of the remote node's TLS certificate.
 #[no_mangle]
-pub extern "C" fn connection_open_multi_stream(connection_id: u32) {
-    crate::platform::connection_open_multi_stream(connection_id)
+pub extern "C" fn connection_open_multi_stream(
+    connection_id: u32,
+    handshake_ty_ptr: u32,
+    handshake_ty_len: u32,
+) {
+    crate::platform::connection_open_multi_stream(connection_id, handshake_ty_ptr, handshake_ty_len)
 }
 
 /// Notify of a message being received on the stream. The connection associated with that stream

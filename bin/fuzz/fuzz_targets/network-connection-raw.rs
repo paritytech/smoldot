@@ -54,7 +54,12 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         is_initiator
     };
 
-    let (_id, mut task) = collection.insert_single_stream(Duration::new(0, 0), is_initiator, ());
+    let (_id, mut task) = collection.insert_single_stream(
+        Duration::new(0, 0),
+        smoldot::libp2p::collection::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
+        is_initiator,
+        (),
+    );
 
     let mut out_buffer = vec![0; 4096];
 
