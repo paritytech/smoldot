@@ -154,102 +154,20 @@ function trustedBase64Decode(base64: string): Uint8Array {
 
     const ipVersion = webRTCParsed[1] == 'ip4'? '4' : '6';
     const targetIp = webRTCParsed[2];
-    const certMultibase = webRTCParsed[4]!;
+    const remoteCertMultibase = webRTCParsed[4]!;
 
     // The payload of `/certhash` is the hash of the self-generated certificate that the
     // server presents.
     // This function throws an exception if the certhash isn't correct. For this reason, this call
     // is performed as part of the parsing of the multiaddr.
-    const certSha256Hash = multibaseMultihashToSha256(certMultibase);
+    const remoteCertMultihash = multibaseDecode(remoteCertMultibase);
+    const remoteCertSha256Hash = multihashToSha256(remoteCertMultihash);
 
-    // Create a new peer connection.
-    const pc = new RTCPeerConnection();
-
-    pc.onconnectionstatechange = (_event) => {
-      console.log(`conn state: ${pc.connectionState}`);
-      if (pc.connectionState == "closed" || pc.connectionState == "disconnected" || pc.connectionState == "failed") {
-          config.onConnectionClose("WebRTC state transitioned to " + pc.connectionState);
-      }
-    };
-
-    pc.onnegotiationneeded = async (_event) => {
-        // Create a new offer and set it as local description.
-        let sdpOffer = (await pc.createOffer()).sdp!;
-        // Ensure ufrag and pwd are the same (expected by the server).
-        const pwd = sdpOffer.match(/^a=ice-pwd:(.+)$/m);
-        if (pwd != null) {
-          sdpOffer = sdpOffer.replace(/^a=ice-ufrag.*$/m, 'a=ice-ufrag:' + pwd[1]);
-        } else {
-          console.error("Failed to set ufrag to pwd.");
-          return;
-        }
-        await pc.setLocalDescription({ type: 'offer', sdp: sdpOffer });
-
-        // Transform certifcate hash into fingerprint (upper-hex; each byte separated by ":").
-        const fingerprint = Array.from(certSha256Hash).map((n) => ("0" + n.toString(16)).slice(-2).toUpperCase()).join(':');
-
-        // Note that the trailing line feed is important, as otherwise Chrome
-        // fails to parse the payload.
-        const remoteSdp =
-            // Version of the SDP protocol. Always 0. (RFC8866)
-            "v=0" + "\n" +
-            // Identifies the creator of the SDP document. We are allowed to use dummy values
-            // (`-` and `0.0.0.0`) to remain anonymous, which we do. Note that "IN" means
-            // "Internet". (RFC8866)
-            "o=- 0 0 IN IP" + ipVersion  + " " + targetIp + "\n" +
-            // Name for the session. We are allowed to pass a dummy `-`. (RFC8866)
-            "s=-" + "\n" +
-            // Start and end of the validity of the session. `0 0` means that the session never
-            // expires. (RFC8866)
-            "t=0 0" + "\n" +
-            // A lite implementation is only appropriate for devices that will
-            // *always* be connected to the public Internet and have a public
-            // IP address at which it can receive packets from any
-            // correspondent.  ICE will not function when a lite implementation
-            // is placed behind a NAT (RFC8445).
-            "a=ice-lite" + "\n" +
-            // A `m=` line describes a request to establish a certain protocol.
-            // The protocol in this line (i.e. `TCP/DTLS/SCTP` or `UDP/DTLS/SCTP`) must always be
-            // the same as the one in the offer. We know that this is true because we tweak the
-            // offer to match the protocol.
-            // The `<fmt>` component must always be `pc-datachannel` for WebRTC.
-            // The rest of the SDP payload adds attributes to this specific media stream.
-            // RFCs: 8839, 8866, 8841
-            "m=application " + targetPort + " " + "UDP/DTLS/SCTP webrtc-datachannel" + "\n" +
-            // Indicates the IP address of the remote.
-            // Note that "IN" means "Internet".
-            "c=IN IP" + ipVersion + " " + targetIp + "\n" +
-            // Media ID - uniquely identifies this media stream (RFC9143).
-            "a=mid:0" + "\n" +
-            // Indicates that we are complying with RFC8839 (as oppposed to the legacy RFC5245).
-            "a=ice-options:ice2" + "\n" +
-            // ICE username and password, which are used for establishing and
-            // maintaining the ICE connection. (RFC8839)
-            // MUST match ones used by the answerer (server).
-            "a=ice-ufrag:" + certMultibase + "\n" +
-            "a=ice-pwd:" + certMultibase + "\n" +
-            // Fingerprint of the certificate that the server will use during the TLS
-            // handshake. (RFC8122)
-            // MUST be derived from the certificate used by the answerer (server).
-            "a=fingerprint:sha-256 " + fingerprint  + "\n" +
-            // Indicates that the remote DTLS server will only listen for incoming
-            // connections. (RFC5763)
-            // The answerer (server) MUST not be located behind a NAT (RFC6135).
-            "a=setup:passive" + "\n" +
-            // The SCTP port (RFC8841)
-            // Note it's different from the "m=" line port value, which
-            // indicates the port of the underlying transport-layer protocol
-            // (UDP or TCP)
-            "a=sctp-port:5000" + "\n" +
-            // The maximum SCTP user message size (in bytes) (RFC8841)
-            "a=max-message-size:100000" + "\n" +
-            // A transport address for a candidate that can be used for connectivity checks (RFC8839).
-            "a=candidate:1 1 UDP 1 " + targetIp + " " + targetPort + " typ host" + "\n";
-
-        await pc.setRemoteDescription({ type: "answer", sdp: remoteSdp });
-    };
-
+    let pc: RTCPeerConnection | null = null;
     const dataChannels = new Map<number, RTCDataChannel>();
+    // TODO: this system is a complete hack
+    let isFirstSubstream = true;
+
     const addChannel = (dataChannel: RTCDataChannel, direction: 'inbound' | 'outbound') => {
       const dataChannelId = dataChannel.id!;
 
@@ -277,24 +195,129 @@ function trustedBase64Decode(base64: string): Uint8Array {
       dataChannels.set(dataChannelId, dataChannel);
     }
 
-    pc.ondatachannel = ({ channel }) => {
-      addChannel(channel, 'inbound')
-    };
+    // It is possible for the browser to use multiple different certificates.
+    // In order for our local certificate to be deterministic, we need to generate it manually and
+    // set it explicitly as part of the configuration.
+    RTCPeerConnection.generateCertificate({ name: "ECDSA", namedCurve: "P-256" } as EcKeyGenParams).then((localCertificate) => {
+      let localTlsCertificateMultihash: Uint8Array | null = null;
+      for (const { algorithm, value } of localCertificate.getFingerprints()) {
+        if (algorithm === 'sha-256') {
+          localTlsCertificateMultihash = new Uint8Array(34);
+          localTlsCertificateMultihash.set([0x12, 32], 0);
+          localTlsCertificateMultihash.set(value!.split(':').map((s) => parseInt(s, 16)), 2);
+          break;
+        }
+      }
+      if (localTlsCertificateMultihash === null) {
+        config.onConnectionClose('Failed to obtain the browser certificate fingerprint');
+        return;
+      }
 
-    // TODO: this system is a complete hack
-    let isFirstSubstream = true;
+      // Create a new peer connection.
+      pc = new RTCPeerConnection({ certificates: [localCertificate] });
 
-    // TODO: smoldot panics if we call onOpen before returning
-    setTimeout(() => {
-      config.onOpen({ type: 'multi-stream' });
-    }, 0);
+      pc.onconnectionstatechange = (_event) => {
+        console.log(`conn state: ${pc!.connectionState}`);
+        if (pc!.connectionState == "closed" || pc!.connectionState == "disconnected" || pc!.connectionState == "failed") {
+            config.onConnectionClose("WebRTC state transitioned to " + pc!.connectionState);
+        }
+      };
+
+      pc.onnegotiationneeded = async (_event) => {
+          // Create a new offer and set it as local description.
+          let sdpOffer = (await pc!.createOffer()).sdp!;
+          // Ensure ufrag and pwd are the same (expected by the server).
+          const pwd = sdpOffer.match(/^a=ice-pwd:(.+)$/m);
+          if (pwd != null) {
+            sdpOffer = sdpOffer.replace(/^a=ice-ufrag.*$/m, 'a=ice-ufrag:' + pwd[1]);
+          } else {
+            console.error("Failed to set ufrag to pwd.");
+            return;
+          }
+          await pc!.setLocalDescription({ type: 'offer', sdp: sdpOffer });
+
+          // Transform certifcate hash into fingerprint (upper-hex; each byte separated by ":").
+          const fingerprint = Array.from(remoteCertSha256Hash).map((n) => ("0" + n.toString(16)).slice(-2).toUpperCase()).join(':');
+
+          // Note that the trailing line feed is important, as otherwise Chrome
+          // fails to parse the payload.
+          const remoteSdp =
+              // Version of the SDP protocol. Always 0. (RFC8866)
+              "v=0" + "\n" +
+              // Identifies the creator of the SDP document. We are allowed to use dummy values
+              // (`-` and `0.0.0.0`) to remain anonymous, which we do. Note that "IN" means
+              // "Internet". (RFC8866)
+              "o=- 0 0 IN IP" + ipVersion  + " " + targetIp + "\n" +
+              // Name for the session. We are allowed to pass a dummy `-`. (RFC8866)
+              "s=-" + "\n" +
+              // Start and end of the validity of the session. `0 0` means that the session never
+              // expires. (RFC8866)
+              "t=0 0" + "\n" +
+              // A lite implementation is only appropriate for devices that will
+              // *always* be connected to the public Internet and have a public
+              // IP address at which it can receive packets from any
+              // correspondent.  ICE will not function when a lite implementation
+              // is placed behind a NAT (RFC8445).
+              "a=ice-lite" + "\n" +
+              // A `m=` line describes a request to establish a certain protocol.
+              // The protocol in this line (i.e. `TCP/DTLS/SCTP` or `UDP/DTLS/SCTP`) must always be
+              // the same as the one in the offer. We know that this is true because we tweak the
+              // offer to match the protocol.
+              // The `<fmt>` component must always be `pc-datachannel` for WebRTC.
+              // The rest of the SDP payload adds attributes to this specific media stream.
+              // RFCs: 8839, 8866, 8841
+              "m=application " + targetPort + " " + "UDP/DTLS/SCTP webrtc-datachannel" + "\n" +
+              // Indicates the IP address of the remote.
+              // Note that "IN" means "Internet".
+              "c=IN IP" + ipVersion + " " + targetIp + "\n" +
+              // Media ID - uniquely identifies this media stream (RFC9143).
+              "a=mid:0" + "\n" +
+              // Indicates that we are complying with RFC8839 (as oppposed to the legacy RFC5245).
+              "a=ice-options:ice2" + "\n" +
+              // ICE username and password, which are used for establishing and
+              // maintaining the ICE connection. (RFC8839)
+              // MUST match ones used by the answerer (server).
+              "a=ice-ufrag:" + remoteCertMultibase + "\n" +
+              "a=ice-pwd:" + remoteCertMultibase + "\n" +
+              // Fingerprint of the certificate that the server will use during the TLS
+              // handshake. (RFC8122)
+              // MUST be derived from the certificate used by the answerer (server).
+              "a=fingerprint:sha-256 " + fingerprint  + "\n" +
+              // Indicates that the remote DTLS server will only listen for incoming
+              // connections. (RFC5763)
+              // The answerer (server) MUST not be located behind a NAT (RFC6135).
+              "a=setup:passive" + "\n" +
+              // The SCTP port (RFC8841)
+              // Note it's different from the "m=" line port value, which
+              // indicates the port of the underlying transport-layer protocol
+              // (UDP or TCP)
+              "a=sctp-port:5000" + "\n" +
+              // The maximum SCTP user message size (in bytes) (RFC8841)
+              "a=max-message-size:100000" + "\n" +
+              // A transport address for a candidate that can be used for connectivity checks (RFC8839).
+              "a=candidate:1 1 UDP 1 " + targetIp + " " + targetPort + " typ host" + "\n";
+
+          await pc!.setRemoteDescription({ type: "answer", sdp: remoteSdp });
+      };
+
+      pc.ondatachannel = ({ channel }) => {
+        addChannel(channel, 'inbound')
+      };
+
+      config.onOpen({
+        type: 'multi-stream',
+        handshake: 'webrtc',
+        localTlsCertificateMultihash,
+        remoteTlsCertificateMultihash: remoteCertMultihash
+      });
+    });
 
     return {
       close: (streamId: number | undefined): void => {
         if (streamId === undefined) {
-          pc.onconnectionstatechange = null;
-          pc.onnegotiationneeded = null;
-          pc.ondatachannel = null;
+          pc!.onconnectionstatechange = null;
+          pc!.onnegotiationneeded = null;
+          pc!.ondatachannel = null;
 
           for (const channel of Array.from(dataChannels.values())) {
             channel.onopen = null;
@@ -304,7 +327,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
             channel.close();
           }
 
-          pc.close();
+          pc!.close();
           dataChannels.clear();
 
         } else {
@@ -325,9 +348,9 @@ function trustedBase64Decode(base64: string): Uint8Array {
       openOutSubstream: () => {
         if (isFirstSubstream) {
           isFirstSubstream = false;
-          addChannel(pc.createDataChannel("data", { id: 1, negotiated: true }), 'outbound')
+          addChannel(pc!.createDataChannel("data", { id: 1, negotiated: true }), 'outbound')
         } else {
-          addChannel(pc.createDataChannel("data"), 'outbound')
+          addChannel(pc!.createDataChannel("data"), 'outbound')
         }
       }
     };
@@ -336,12 +359,17 @@ function trustedBase64Decode(base64: string): Uint8Array {
   }
 }
 
-/// Parses a multihash-multibase-encoded string into a SHA256.
+/// Parses a multibase-encoded string.
+const multibaseDecode = (certMultibase: string): Uint8Array => {
+  return new Uint8Array(
+    base64.decoder.or(base64pad.decoder).or(base64url.decoder).or(base64urlpad.decoder).decode(certMultibase)
+  );
+}
+
+/// Parses a multihash-multibase-encoded string into a SHA256 hash.
 ///
 /// Throws an exception if the multihash algorithm isn't SHA256.
-const multibaseMultihashToSha256 = (certMultibase: string): Uint8Array => {
+const multihashToSha256 = (certMultihash: Uint8Array): Uint8Array => {
   // TODO: this `slice(2)` after decoding the multibase is a hack to remove the multihash prefix, do this better
-  return new Uint8Array(
-    base64.decoder.or(base64pad.decoder).or(base64url.decoder).or(base64urlpad.decoder).decode(certMultibase).slice(2)
-  );
+  return new Uint8Array(certMultihash.slice(2));
 }
