@@ -185,10 +185,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
 
         // The payload of `/certhash` is the hash of the self-generated certificate that the
         // server presents.
-        // TODO: this `slice(2)` after decoding the multibase is a hack to remove the multihash prefix, do this better
-        const certSha256Hash = new Uint8Array(
-          base64.decoder.or(base64pad.decoder).or(base64url.decoder).or(base64urlpad.decoder).decode(certMultibase).slice(2)
-        );
+        const certSha256Hash = multibaseMultihashToSha256(certMultibase);
 
         // Transform certifcate hash into fingerprint (upper-hex; each byte separated by ":").
         const fingerprint = Array.from(certSha256Hash).map((n) => ("0" + n.toString(16)).slice(-2).toUpperCase()).join(':');
@@ -341,4 +338,14 @@ function trustedBase64Decode(base64: string): Uint8Array {
   } else {
       throw new ConnectionError('Unrecognized multiaddr format');
   }
+}
+
+/// Parses a multihash-multibase-encoded string into a SHA256.
+///
+/// Throws an exception if the multihash algorithm isn't SHA256.
+const multibaseMultihashToSha256 = (certMultibase: string): Uint8Array => {
+  // TODO: this `slice(2)` after decoding the multibase is a hack to remove the multihash prefix, do this better
+  return new Uint8Array(
+    base64.decoder.or(base64pad.decoder).or(base64url.decoder).or(base64urlpad.decoder).decode(certMultibase).slice(2)
+  );
 }
