@@ -185,8 +185,6 @@ function trustedBase64Decode(base64: string): Uint8Array {
         }
         await pc.setLocalDescription({ type: 'offer', sdp: sdpOffer });
 
-        console.log("LOCAL OFFER: " + pc.localDescription!.sdp);
-
         // Transform certifcate hash into fingerprint (upper-hex; each byte separated by ":").
         const fingerprint = Array.from(certSha256Hash).map((n) => ("0" + n.toString(16)).slice(-2).toUpperCase()).join(':');
 
@@ -249,8 +247,6 @@ function trustedBase64Decode(base64: string): Uint8Array {
             "a=candidate:1 1 UDP 1 " + targetIp + " " + targetPort + " typ host" + "\n";
 
         await pc.setRemoteDescription({ type: "answer", sdp: remoteSdp });
-
-        console.log("REMOTE ANSWER: " + pc.remoteDescription!.sdp);
     };
 
     const dataChannels = new Map<number, RTCDataChannel>();
