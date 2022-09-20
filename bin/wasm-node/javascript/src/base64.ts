@@ -42,7 +42,7 @@ export function multibaseBase64Decode(input: string): Uint8Array {
             return classicDecode(input.slice(1))
         case 'u':
         case 'U':
-            return classicDecode(input.slice(1))
+            return urlSafeDecode(input.slice(1))
         default:
             throw new Error('Unknown multibase prefix: ' + input[0]);
     }
