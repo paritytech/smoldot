@@ -159,22 +159,18 @@ export function start(options?: ClientOptions): Client {
       const dataChannelId = dataChannel.id!;
 
       dataChannel.onopen = () => {
-          console.log(`'${dataChannel.label}' opened, direction is ${direction}`);
           config.onStreamOpened(dataChannelId, direction);
       };
 
-      dataChannel.onerror = (error) => {
-          console.log(`'${dataChannel.label}' errored: ${error}`);
+      dataChannel.onerror = (_error) => {
           config.onStreamClose(dataChannelId);
       };
 
       dataChannel.onclose = () => {
-          console.log(`'${dataChannel.label}' closed`);
           config.onStreamClose(dataChannelId);
       };
 
       dataChannel.onmessage = (m) => {
-          console.log(`new message on '${dataChannel.label}': '${m.data}'`);
           // The `data` field is an `ArrayBuffer`.
           config.onMessage(new Uint8Array(m.data), dataChannelId);
       }
@@ -217,7 +213,6 @@ export function start(options?: ClientOptions): Client {
       // Therefore we don't care about events concerning the fact that the connection is now fully
       // open.
       pc.onconnectionstatechange = (_event) => {
-        console.log(`conn state: ${pc!.connectionState}`);
         if (pc!.connectionState == "closed" || pc!.connectionState == "disconnected" || pc!.connectionState == "failed") {
           config.onConnectionClose("WebRTC state transitioned to " + pc!.connectionState);
 
@@ -246,12 +241,12 @@ export function start(options?: ClientOptions): Client {
           let sdpOffer = (await pc!.createOffer()).sdp!;
           // The server excepts the ufrag and pwd to be the same. Modify the local description
           // to ensure that.
+          // TODO: why does the server want that?
           const pwd = sdpOffer.match(/^a=ice-pwd:(.+)$/m);
           if (pwd != null) {
             sdpOffer = sdpOffer.replace(/^a=ice-ufrag.*$/m, 'a=ice-ufrag:' + pwd[1]);
           } else {
-            console.error("Failed to set ufrag to pwd.");
-            return;
+            console.error("Failed to set ufrag to pwd. WebRTC connections will likely fail. Please report this issues.");
           }
           await pc!.setLocalDescription({ type: 'offer', sdp: sdpOffer });
 
