@@ -8,8 +8,7 @@
         "noPropertyAccessFromIndexSignature": true,
         "noUncheckedIndexedAccess": true,
         "noUnusedLocals": true,
-        "noUnusedParameters": true,
-        "moduleResolution": "node"
+        "noUnusedParameters": true
     },
     "include": [
         "src/**/*"
