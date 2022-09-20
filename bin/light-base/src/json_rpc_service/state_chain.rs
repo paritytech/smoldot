@@ -960,7 +960,7 @@ impl<TPlat: Platform> Background<TPlat> {
         // This is necessary to perform network storage queries.
         let (state_root, block_number) = match self.state_trie_root_hash(&hash).await {
             Ok(v) => v,
-            Err(()) => {
+            Err(err) => {
                 self.requests_subscriptions
                     .respond(
                         &state_machine_request_id,
@@ -968,7 +968,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             request_id,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
-                                &"Failed to fetch block information",
+                                &format!("Failed to fetch block information: {}", err),
                             ),
                             None,
                         ),
@@ -1031,7 +1031,7 @@ impl<TPlat: Platform> Background<TPlat> {
         // This is necessary to perform network storage queries.
         let (state_root, block_number) = match self.state_trie_root_hash(&hash).await {
             Ok(v) => v,
-            Err(()) => {
+            Err(err) => {
                 self.requests_subscriptions
                     .respond(
                         &state_machine_request_id,
@@ -1039,7 +1039,7 @@ impl<TPlat: Platform> Background<TPlat> {
                             request_id,
                             json_rpc::parse::ErrorResponse::ServerError(
                                 -32000,
-                                &"Failed to fetch block information",
+                                &format!("Failed to fetch block information: {}", err),
                             ),
                             None,
                         ),
