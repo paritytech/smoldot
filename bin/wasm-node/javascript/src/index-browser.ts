@@ -183,7 +183,7 @@ export function start(options?: ClientOptions): Client {
     // set it explicitly as part of the configuration.
     // According to <https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-generatecertificate>,
     // browsers are guaranteed to support `{ name: "ECDSA", namedCurve: "P-256" }`.
-    RTCPeerConnection.generateCertificate({ name: "ECDSA", namedCurve: "P-256" } as EcKeyGenParams).then((localCertificate) => {
+    RTCPeerConnection.generateCertificate({ name: "ECDSA", namedCurve: "P-256", hash: "SHA-256" } as EcKeyGenParams).then((localCertificate) => {
       if (cancelOpening)
         return;
 
