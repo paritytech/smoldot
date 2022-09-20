@@ -19,9 +19,8 @@
 
 import { Client, ClientOptions, start as innerStart } from './client.js'
 import { Connection, ConnectionError, ConnectionConfig } from './instance/instance.js';
+import { classicDecode, multibaseBase64Decode } from './base64.js'
 import { inflate } from 'pako';
-
-import { base64, base64pad, base64url, base64urlpad } from 'multiformats/bases/base64';
 
 export {
   AddChainError,
@@ -48,7 +47,7 @@ export function start(options?: ClientOptions): Client {
 
   return innerStart(options, {
     trustedBase64DecodeAndZlibInflate: (input) => {
-        return Promise.resolve(inflate(trustedBase64Decode(input)))
+      return Promise.resolve(inflate(classicDecode(input)))
     },
     performanceNow: () => {
       return performance.now()
@@ -69,23 +68,6 @@ export function start(options?: ClientOptions): Client {
       )
     }
   })
-}
-
-/**
- * Decodes a base64 string.
- *
- * The input is assumed to be correct.
- */
-function trustedBase64Decode(base64: string): Uint8Array {
-    // This code is a bit sketchy due to the fact that we decode into a string, but it seems to
-    // work.
-    const binaryString = atob(base64);
-    const size = binaryString.length;
-    const bytes = new Uint8Array(size);
-    for (let i = 0; i < size; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-    }
-    return bytes;
 }
 
 /**
@@ -160,7 +142,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
     // server presents.
     // This function throws an exception if the certhash isn't correct. For this reason, this call
     // is performed as part of the parsing of the multiaddr.
-    const remoteCertMultihash = multibaseDecode(remoteCertMultibase);
+    const remoteCertMultihash = multibaseBase64Decode(remoteCertMultibase);
     const remoteCertSha256Hash = multihashToSha256(remoteCertMultihash);
 
     let pc: RTCPeerConnection | null = null;
@@ -415,13 +397,6 @@ function trustedBase64Decode(base64: string): Uint8Array {
   } else {
       throw new ConnectionError('Unrecognized multiaddr format');
   }
-}
-
-/// Parses a multibase-encoded string.
-const multibaseDecode = (certMultibase: string): Uint8Array => {
-  return new Uint8Array(
-    base64.decoder.or(base64pad.decoder).or(base64url.decoder).or(base64urlpad.decoder).decode(certMultibase)
-  );
 }
 
 /// Parses a multihash-multibase-encoded string into a SHA256 hash.
