@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fix potential infinite loop in networking connection task. ([#2751](https://github.com/paritytech/smoldot/pull/2751))
+- Fix panic when trying to perform a runtime call on an old block while having no networking connection.
 
 ### Changed
 
