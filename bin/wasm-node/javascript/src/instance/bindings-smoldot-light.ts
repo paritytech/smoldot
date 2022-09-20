@@ -334,12 +334,12 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                                     break
                                 }
                                 case 'multi-stream': {
-                                    const bufferLen = 2 + info.localTlsCertificateMultihash.length + info.remoteTlsCertificateMultihash.length;
+                                    const bufferLen = 1 + info.localTlsCertificateMultihash.length + info.remoteTlsCertificateMultihash.length;
                                     const ptr = instance.exports.alloc(bufferLen) >>> 0;
                                     const mem = new Uint8Array(instance.exports.memory.buffer);
                                     buffer.writeUInt8(mem, ptr, 0);
                                     mem.set(info.localTlsCertificateMultihash, ptr + 1)
-                                    mem.set(info.remoteTlsCertificateMultihash, ptr + info.localTlsCertificateMultihash.length)
+                                    mem.set(info.remoteTlsCertificateMultihash, ptr + 1 + info.localTlsCertificateMultihash.length)
                                     instance.exports.connection_open_multi_stream(connectionId, ptr, bufferLen);
                                     break
                                 }

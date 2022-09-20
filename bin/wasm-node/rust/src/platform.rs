@@ -571,7 +571,7 @@ pub(crate) fn connection_open_multi_stream(
                 },
             )),
         )(&handshake_ty[..])
-        .unwrap();
+        .expect("invalid handshake type provided to connection_open_multi_stream");
 
     let mut lock = STATE.try_lock().unwrap();
     let connection = lock.connections.get_mut(&connection_id).unwrap();

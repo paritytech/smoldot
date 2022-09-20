@@ -1084,13 +1084,6 @@ where
             }
         }
 
-        // Because multi-stream connections are considered as having immediately finished their
-        // handshake, we mark the address as connected.
-        if let Some(KBucketsPeer { addresses, .. }) = self.kbuckets_peers.get_mut(expected_peer_id)
-        {
-            addresses.set_connected(multiaddr);
-        }
-
         self.pending_ids.remove(id.0);
 
         (connection_id, connection_task)

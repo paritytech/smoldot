@@ -428,7 +428,7 @@ where
         let _previous_value = self.connections.insert(
             connection_id,
             Connection {
-                state: InnerConnectionState::Established,
+                state: InnerConnectionState::Handshaking,
                 user_data,
             },
         );
