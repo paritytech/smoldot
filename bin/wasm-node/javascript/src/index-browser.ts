@@ -227,11 +227,7 @@ export function start(options?: ClientOptions): Client {
             channel.onmessage = null;
           }
 
-          pc!.close();  // Unclear whether this is necessary, but it doesn't hurt to do so.
-
-          for (const channel of Array.from(dataChannels.values())) {
-            channel.close();  // Unclear whether this is necessary, but it doesn't hurt to do so.
-          }
+          pc!.close();  // Not necessarily necessary, but it doesn't hurt to do so.
           dataChannels.clear();
         }
       };
@@ -239,9 +235,8 @@ export function start(options?: ClientOptions): Client {
       pc.onnegotiationneeded = async (_event) => {
           // Create a new offer and set it as local description.
           let sdpOffer = (await pc!.createOffer()).sdp!;
-          // The server excepts the ufrag and pwd to be the same. Modify the local description
-          // to ensure that.
-          // TODO: why does the server want that?
+          // According to the libp2p WebRTC spec, the ufrag and pwd are the same
+          // randomly-generated string. We modify the local description to ensure that.
           const pwd = sdpOffer.match(/^a=ice-pwd:(.+)$/m);
           if (pwd != null) {
             sdpOffer = sdpOffer.replace(/^a=ice-ufrag.*$/m, 'a=ice-ufrag:' + pwd[1]);
@@ -357,10 +352,6 @@ export function start(options?: ClientOptions): Client {
           }
 
           pc.close();
-
-          for (const channel of Array.from(dataChannels.values())) {
-            channel.close();  // Unclear whether this is necessary, but it doesn't hurt to do so.
-          }
           dataChannels.clear();
 
         } else {
