@@ -370,6 +370,12 @@ const multibaseDecode = (certMultibase: string): Uint8Array => {
 ///
 /// Throws an exception if the multihash algorithm isn't SHA256.
 const multihashToSha256 = (certMultihash: Uint8Array): Uint8Array => {
-  // TODO: this `slice(2)` after decoding the multibase is a hack to remove the multihash prefix, do this better
+  if (certMultihash.length != 34) {
+    throw new Error('Invalid certificate multihash');
+  }
+  if (certMultihash[0] != 0x12 || certMultihash[1] != 32) {
+    throw new Error('Certificate multihash is not SHA-256');
+  }
+
   return new Uint8Array(certMultihash.slice(2));
 }
