@@ -148,7 +148,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
       };
   } else if (webRTCParsed != null) {
     const targetPort = webRTCParsed[3];
-    if (forbidWebRTC || targetPort == '0') {
+    if (forbidWebRTC || targetPort === '0') {
         throw new ConnectionError('Connection type not allowed');
     }
 
@@ -167,7 +167,12 @@ function trustedBase64Decode(base64: string): Uint8Array {
     const dataChannels = new Map<number, RTCDataChannel>();
     // TODO: this system is a complete hack
     let isFirstSubstream = true;
+    // The opening of the connection is asynchronous. If smoldot calls `close` in the meanwhile,
+    // this variable is set to `true`, and we interrupt the opening.
+    let cancelOpening = false;
 
+    // Function that configures a newly-opened channel and adds it to the map. Used for both
+    // inbound and outbound substreams.
     const addChannel = (dataChannel: RTCDataChannel, direction: 'inbound' | 'outbound') => {
       const dataChannelId = dataChannel.id!;
 
@@ -198,7 +203,13 @@ function trustedBase64Decode(base64: string): Uint8Array {
     // It is possible for the browser to use multiple different certificates.
     // In order for our local certificate to be deterministic, we need to generate it manually and
     // set it explicitly as part of the configuration.
+    // According to <https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-generatecertificate>,
+    // browsers are guaranteed to support `{ name: "ECDSA", namedCurve: "P-256" }`.
     RTCPeerConnection.generateCertificate({ name: "ECDSA", namedCurve: "P-256" } as EcKeyGenParams).then((localCertificate) => {
+      if (cancelOpening)
+        return;
+
+      // We need to build the multihash corresponding to the local certificate.
       let localTlsCertificateMultihash: Uint8Array | null = null;
       for (const { algorithm, value } of localCertificate.getFingerprints()) {
         if (algorithm === 'sha-256') {
@@ -209,24 +220,50 @@ function trustedBase64Decode(base64: string): Uint8Array {
         }
       }
       if (localTlsCertificateMultihash === null) {
+        // Because we've already returned from the `connect` function at this point, we pretend
+        // that the connection has failed to open.
         config.onConnectionClose('Failed to obtain the browser certificate fingerprint');
         return;
       }
 
-      // Create a new peer connection.
+      // Create a new WebRTC connection.
       pc = new RTCPeerConnection({ certificates: [localCertificate] });
 
+      // `onconnectionstatechange` is used to detect when the connection has closed or has failed
+      // to open.
+      // Note that smoldot will think that the connection is open even when it is still opening.
+      // Therefore we don't care about events concerning the fact that the connection is now fully
+      // open.
       pc.onconnectionstatechange = (_event) => {
         console.log(`conn state: ${pc!.connectionState}`);
         if (pc!.connectionState == "closed" || pc!.connectionState == "disconnected" || pc!.connectionState == "failed") {
-            config.onConnectionClose("WebRTC state transitioned to " + pc!.connectionState);
+          config.onConnectionClose("WebRTC state transitioned to " + pc!.connectionState);
+
+          pc!.onconnectionstatechange = null;
+          pc!.onnegotiationneeded = null;
+          pc!.ondatachannel = null;
+
+          for (const channel of Array.from(dataChannels.values())) {
+            channel.onopen = null;
+            channel.onerror = null;
+            channel.onclose = null;
+            channel.onmessage = null;
+          }
+
+          pc!.close();  // Unclear whether this is necessary, but it doesn't hurt to do so.
+
+          for (const channel of Array.from(dataChannels.values())) {
+            channel.close();  // Unclear whether this is necessary, but it doesn't hurt to do so.
+          }
+          dataChannels.clear();
         }
       };
 
       pc.onnegotiationneeded = async (_event) => {
           // Create a new offer and set it as local description.
           let sdpOffer = (await pc!.createOffer()).sdp!;
-          // Ensure ufrag and pwd are the same (expected by the server).
+          // The server excepts the ufrag and pwd to be the same. Modify the local description
+          // to ensure that.
           const pwd = sdpOffer.match(/^a=ice-pwd:(.+)$/m);
           if (pwd != null) {
             sdpOffer = sdpOffer.replace(/^a=ice-ufrag.*$/m, 'a=ice-ufrag:' + pwd[1]);
@@ -236,7 +273,7 @@ function trustedBase64Decode(base64: string): Uint8Array {
           }
           await pc!.setLocalDescription({ type: 'offer', sdp: sdpOffer });
 
-          // Transform certifcate hash into fingerprint (upper-hex; each byte separated by ":").
+          // Transform certificate hash into fingerprint (upper-hex; each byte separated by ":").
           const fingerprint = Array.from(remoteCertSha256Hash).map((n) => ("0" + n.toString(16)).slice(-2).toUpperCase()).join(':');
 
           // Note that the trailing line feed is important, as otherwise Chrome
@@ -304,6 +341,13 @@ function trustedBase64Decode(base64: string): Uint8Array {
         addChannel(channel, 'inbound')
       };
 
+      // Creating a `RTCPeerConnection` doesn't actually do anything before a channel is created.
+      // The connection is therefore immediately reported as opened to smoldot so that it starts
+      // opening substreams.
+      // One concern might be that smoldot will think that the remote is reachable at this address
+      // (because we report the connection as being open) even when it might not be the case.
+      // However, WebRTC has a handshake to perform, and smoldot will only consider a connection
+      // as "actually open" once the handshake has finished.
       config.onOpen({
         type: 'multi-stream',
         handshake: 'webrtc',
@@ -314,20 +358,32 @@ function trustedBase64Decode(base64: string): Uint8Array {
 
     return {
       close: (streamId: number | undefined): void => {
+        // If `streamId` is undefined, then the whole connection must be destroyed.
         if (streamId === undefined) {
-          pc!.onconnectionstatechange = null;
-          pc!.onnegotiationneeded = null;
-          pc!.ondatachannel = null;
+          // The `RTCPeerConnection` is created at the same time as we report the connection as
+          // being open. It is however possible for smoldot to cancel the opening, in which case
+          // `pc` will still be undefined.
+          if (!pc) {
+            cancelOpening = true;
+            return;
+          }
+
+          pc.onconnectionstatechange = null;
+          pc.onnegotiationneeded = null;
+          pc.ondatachannel = null;
 
           for (const channel of Array.from(dataChannels.values())) {
             channel.onopen = null;
             channel.onerror = null;
             channel.onclose = null;
             channel.onmessage = null;
-            channel.close();
           }
 
-          pc!.close();
+          pc.close();
+
+          for (const channel of Array.from(dataChannels.values())) {
+            channel.close();  // Unclear whether this is necessary, but it doesn't hurt to do so.
+          }
           dataChannels.clear();
 
         } else {
@@ -346,6 +402,8 @@ function trustedBase64Decode(base64: string): Uint8Array {
       },
 
       openOutSubstream: () => {
+        // `openOutSubstream` can only be called after we have called `config.onOpen`, therefore
+        // `pc` is guaranteed to be non-null.
         if (isFirstSubstream) {
           isFirstSubstream = false;
           addChannel(pc!.createDataChannel("data", { id: 1, negotiated: true }), 'outbound')
