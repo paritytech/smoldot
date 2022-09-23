@@ -532,7 +532,11 @@ struct Cache {
     /// trie root hash multiple, we store these hashes in this LRU cache.
     block_state_root_hashes_numbers: lru::LruCache<
         [u8; 32],
-        future::MaybeDone<future::Shared<future::BoxFuture<'static, Result<([u8; 32], u64), ()>>>>,
+        future::MaybeDone<
+            future::Shared<
+                future::BoxFuture<'static, Result<([u8; 32], u64), StateTrieRootHashError>>,
+            >,
+        >,
         fnv::FnvBuildHasher,
     >,
 }
@@ -1206,8 +1210,10 @@ impl<TPlat: Platform> Background<TPlat> {
 
     /// Obtain the state trie root hash and number of the given block, and make sure to put it
     /// in cache.
-    // TODO: better error return type
-    async fn state_trie_root_hash(&self, hash: &[u8; 32]) -> Result<([u8; 32], u64), ()> {
+    async fn state_trie_root_hash(
+        &self,
+        hash: &[u8; 32],
+    ) -> Result<([u8; 32], u64), StateTrieRootHashError> {
         let fetch = {
             // Try to find an existing entry in cache, and if not create one.
             let mut cache_lock = self.cache.lock().await;
@@ -1219,7 +1225,7 @@ impl<TPlat: Platform> Background<TPlat> {
                 .map(|h| header::decode(h, self.sync_service.block_number_bytes()))
             {
                 Some(Ok(header)) => return Ok((*header.state_root, header.number)),
-                Some(Err(_)) => return Err(()),
+                Some(Err(err)) => return Err(StateTrieRootHashError::HeaderDecodeError(err)), // TODO: can this actually happen? unclear
                 None => {}
             }
 
@@ -1228,8 +1234,14 @@ impl<TPlat: Platform> Background<TPlat> {
                 Some(future::MaybeDone::Done(Ok(val))) => return Ok(*val),
                 Some(future::MaybeDone::Future(f)) => f.clone(),
                 Some(future::MaybeDone::Gone) => unreachable!(), // We never use `Gone`.
-                Some(future::MaybeDone::Done(Err(()))) | None => {
-                    // TODO: filter by error      ^ ; invalid header for example should be returned immediately
+                Some(future::MaybeDone::Done(Err(
+                    err @ StateTrieRootHashError::HeaderDecodeError(_),
+                ))) => {
+                    // In case of a fatal error, return immediately.
+                    return Err(err.clone());
+                }
+                Some(future::MaybeDone::Done(Err(StateTrieRootHashError::NetworkQueryError)))
+                | None => {
                     // No existing cache entry. Create the future that will perform the fetch
                     // but do not actually start doing anything now.
                     let fetch = {
@@ -1266,7 +1278,8 @@ impl<TPlat: Platform> Background<TPlat> {
                                         .unwrap();
                                 Ok((*decoded.state_root, decoded.number))
                             } else {
-                                Err(())
+                                // TODO: better error details?
+                                Err(StateTrieRootHashError::NetworkQueryError)
                             }
                         }
                     };
@@ -1297,7 +1310,7 @@ impl<TPlat: Platform> Background<TPlat> {
         let (state_trie_root_hash, block_number) = self
             .state_trie_root_hash(&hash)
             .await
-            .map_err(|()| StorageQueryError::FindStorageRootHashError)?;
+            .map_err(StorageQueryError::FindStorageRootHashError)?;
 
         let result = self
             .sync_service
@@ -1350,8 +1363,10 @@ impl<TPlat: Platform> Background<TPlat> {
 
             // In order to grab the runtime code and perform the call network request, we need
             // to know the state trie root hash and the height of the block.
-            let (state_trie_root_hash, block_number) =
-                self.state_trie_root_hash(block_hash).await.unwrap(); // TODO: don't unwrap
+            let (state_trie_root_hash, block_number) = self
+                .state_trie_root_hash(block_hash)
+                .await
+                .map_err(RuntimeCallError::FindStorageRootHashError)?;
 
             // Download the runtime of this block. This takes a long time as the runtime is rather
             // big (around 1MiB in general).
@@ -1485,8 +1500,8 @@ impl<TPlat: Platform> Background<TPlat> {
 #[derive(Debug, derive_more::Display)]
 enum StorageQueryError {
     /// Error while finding the storage root hash of the requested block.
-    #[display(fmt = "Unknown block")]
-    FindStorageRootHashError,
+    #[display(fmt = "Failed to obtain block state trie root: {}", _0)]
+    FindStorageRootHashError(StateTrieRootHashError),
     /// Error while retrieving the storage item from other nodes.
     #[display(fmt = "{}", _0)]
     StorageRetrieval(sync_service::StorageQueryError),
@@ -1495,8 +1510,20 @@ enum StorageQueryError {
 // TODO: doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone)]
 enum RuntimeCallError {
+    /// Error while finding the storage root hash of the requested block.
+    #[display(fmt = "Failed to obtain block state trie root: {}", _0)]
+    FindStorageRootHashError(StateTrieRootHashError),
     Call(runtime_service::RuntimeCallError),
     StartError(host::StartErr),
     ReadOnlyRuntime(read_only_runtime_host::ErrorDetail),
     NextKeyForbidden,
+}
+
+/// Error potentially returned by [`Background::state_trie_root_hash`].
+#[derive(Debug, derive_more::Display, Clone)]
+enum StateTrieRootHashError {
+    /// Failed to decode block header.
+    HeaderDecodeError(header::Error),
+    /// Error while fetching block header from network.
+    NetworkQueryError,
 }

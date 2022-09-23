@@ -21,8 +21,8 @@ use super::{
         read_write::ReadWrite,
     },
     ConfigRequestResponse, ConnectionToCoordinator, ConnectionToCoordinatorInner,
-    CoordinatorToConnection, CoordinatorToConnectionInner, NotificationsOutErr, OverlayNetwork,
-    PeerId, ShutdownCause, SubstreamId,
+    CoordinatorToConnection, CoordinatorToConnectionInner, MultiStreamHandshakeKind,
+    NotificationsOutErr, OverlayNetwork, PeerId, ShutdownCause, SubstreamId,
 };
 
 use alloc::{string::ToString as _, sync::Arc};
@@ -116,15 +116,24 @@ where
     pub(super) fn new(
         randomness_seed: [u8; 32],
         now: TNow,
+        handshake_kind: MultiStreamHandshakeKind,
         max_inbound_substreams: usize,
         noise_key: Arc<noise::NoiseKey>,
         notification_protocols: Arc<[OverlayNetwork]>,
         request_response_protocols: Arc<[ConfigRequestResponse]>,
         ping_protocol: Arc<str>,
     ) -> Self {
+        // We only support one kind of handshake at the moment. Make sure (at compile time) that
+        // the value provided as parameter is indeed the one expected.
+        let MultiStreamHandshakeKind::WebRtc { .. } = handshake_kind;
+
         MultiStreamConnectionTask {
             connection: MultiStreamConnectionTaskInner::Handshake {
-                handshake: Some(noise::HandshakeInProgress::new(&noise_key, true)), // TODO: is_initiator?
+                handshake: Some(noise::HandshakeInProgress::new(noise::Config {
+                    key: &noise_key,
+                    is_initiator: true, // TODO: is_initiator?
+                    prologue: &[], // TODO: this prologue isn't correct, WebRTC requires passing certificate fingerprints
+                })),
                 opened_substream: None,
                 established: Some(established::MultiStream::new(established::Config {
                     notifications_protocols: notification_protocols
@@ -551,29 +560,29 @@ where
 
     /// Notifies the state machine that a new substream has been opened.
     ///
-    /// `inbound` indicates whether the substream has been opened by the remote (`true`) or
-    /// locally (`false`).
+    /// `outbound` indicates whether the substream has been opened by the remote (`false`) or
+    /// locally (`true`).
     ///
-    /// If `inbound` is `false`, then the value returned by
+    /// If `outbound` is `true`, then the value returned by
     /// [`MultiStreamConnectionTask::desired_outbound_substreams`] will decrease by one.
     ///
     /// # Panic
     ///
     /// Panics if there already exists a substream with an identical identifier.
     ///
-    pub fn add_substream(&mut self, id: TSubId, inbound: bool) {
+    pub fn add_substream(&mut self, id: TSubId, outbound: bool) {
         match &mut self.connection {
             MultiStreamConnectionTaskInner::Handshake {
                 opened_substream: ref mut opened_substream @ None,
                 ..
-            } if !inbound => {
+            } if outbound => {
                 *opened_substream = Some(id);
             }
             MultiStreamConnectionTaskInner::Handshake { .. } => {
                 // TODO: protocol has been violated, reset the connection?
             }
             MultiStreamConnectionTaskInner::Established { established, .. } => {
-                established.add_substream(id, inbound)
+                established.add_substream(id, outbound)
             }
             MultiStreamConnectionTaskInner::ShutdownAcked { .. }
             | MultiStreamConnectionTaskInner::ShutdownWaitingAck { .. } => {
@@ -595,26 +604,23 @@ where
     /// > **Note**: An example situation is: a notification is queued, which leads to a message
     /// >           being sent to a connection task, which, once injected, leads to a notifications
     /// >           substream being "ready" because it needs to send more data.
+    // TODO: this function really should be more precise as to what a ready substream means
     pub fn ready_substreams(&self) -> impl Iterator<Item = &TSubId> {
         match &self.connection {
             MultiStreamConnectionTaskInner::Handshake {
                 opened_substream: Some(opened_substream),
-                handshake,
                 ..
-            } => {
-                let iter = if handshake.as_ref().unwrap().ready_to_write() {
-                    Some(opened_substream)
-                } else {
-                    None
-                }
-                .into_iter();
-                either::Right(either::Left(iter))
-            }
-            MultiStreamConnectionTaskInner::Established { established, .. } => {
-                // Note that the handshake substream is never ready as it never has anything
-                // to write after the end of the handshake.
-                either::Left(established.ready_substreams())
-            }
+            } => either::Right(either::Left(iter::once(opened_substream))),
+            MultiStreamConnectionTaskInner::Established {
+                established,
+                handshake_substream,
+                ..
+            } => either::Left(
+                handshake_substream
+                    .as_ref()
+                    .into_iter()
+                    .chain(established.ready_substreams()),
+            ),
             MultiStreamConnectionTaskInner::Handshake {
                 opened_substream: None,
                 ..

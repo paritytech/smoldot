@@ -131,7 +131,13 @@ export interface ConnectionConfig {
      *
      * Must only be called once per connection.
      */
-    onOpen: (info: { type: 'single-stream' } | { type: 'multi-stream' }) => void;
+    onOpen: (info:
+        { type: 'single-stream', handshake: 'multistream-select-noise-yamux' } |
+        { type: 'multi-stream', handshake: 'webrtc', 
+            localTlsCertificateMultihash: Uint8Array,
+            remoteTlsCertificateMultihash: Uint8Array,
+        }
+    ) => void;
 
     /**
      * Callback called when the connection transitions to the `Closed` state.
@@ -324,11 +330,17 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
                         try {
                             switch (info.type) {
                                 case 'single-stream': {
-                                    instance.exports.connection_open_single_stream(connectionId);
+                                    instance.exports.connection_open_single_stream(connectionId, 0);
                                     break
                                 }
                                 case 'multi-stream': {
-                                    instance.exports.connection_open_multi_stream(connectionId);
+                                    const bufferLen = 1 + info.localTlsCertificateMultihash.length + info.remoteTlsCertificateMultihash.length;
+                                    const ptr = instance.exports.alloc(bufferLen) >>> 0;
+                                    const mem = new Uint8Array(instance.exports.memory.buffer);
+                                    buffer.writeUInt8(mem, ptr, 0);
+                                    mem.set(info.localTlsCertificateMultihash, ptr + 1)
+                                    mem.set(info.remoteTlsCertificateMultihash, ptr + 1 + info.localTlsCertificateMultihash.length)
+                                    instance.exports.connection_open_multi_stream(connectionId, ptr, bufferLen);
                                     break
                                 }
                             }

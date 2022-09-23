@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 use core::{ops, str, time::Duration};
 use futures::prelude::*;
 
@@ -130,12 +130,19 @@ pub trait Platform: Send + 'static {
 /// Type of opened connection. See [`Platform::connect`].
 #[derive(Debug)]
 pub enum PlatformConnection<TStream, TConnection> {
-    /// The connection is a single stream on top of which encryption and multiplexing should be
-    /// negotiated. The division in multiple substreams is handled internally.
-    SingleStream(TStream),
+    /// The connection is a single stream on top of which Noise encryption and Yamux multiplexing
+    /// should be negotiated. The division in multiple substreams is handled internally.
+    SingleStreamMultistreamSelectNoiseYamux(TStream),
     /// The connection is made of multiple substreams. The encryption and multiplexing are handled
     /// externally.
-    MultiStream(TConnection),
+    MultiStreamWebRtc {
+        /// Object representing the WebRTC connection.
+        connection: TConnection,
+        /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
+        local_tls_certificate_multihash: Vec<u8>,
+        /// Multihash encoding of the TLS certificate used by the remote node at the DTLS layer.
+        remote_tls_certificate_multihash: Vec<u8>,
+    },
 }
 
 /// Direction in which a substream has been opened. See [`Platform::next_substream`].

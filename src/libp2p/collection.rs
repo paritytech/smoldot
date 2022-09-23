@@ -73,6 +73,26 @@ pub use single_stream::SingleStreamConnectionTask;
 mod multi_stream;
 mod single_stream;
 
+/// What kind of handshake to perform on the newly-added connection.
+pub enum SingleStreamHandshakeKind {
+    /// Use the multistream-select protocol to negotiate the Noise encryption, then use the
+    /// multistream-select protocol to negotiate the Yamux multiplexing.
+    MultistreamSelectNoiseYamux,
+}
+
+/// What kind of handshake to perform on the newly-added connection.
+pub enum MultiStreamHandshakeKind {
+    /// The connection is a WebRTC connection.
+    ///
+    /// See <https://github.com/libp2p/specs/pull/412> for details.
+    WebRtc {
+        /// Multihash encoding of the TLS certificate used by the local node at the DTLS layer.
+        local_tls_certificate_multihash: Vec<u8>,
+        /// Multihash encoding of the TLS certificate used by the remote node at the DTLS layer.
+        remote_tls_certificate_multihash: Vec<u8>,
+    },
+}
+
 /// Configuration for a [`Network`].
 pub struct Config {
     /// Seed for the randomness within the networking state machine.
@@ -346,6 +366,7 @@ where
     pub fn insert_single_stream(
         &mut self,
         when_connected: TNow,
+        handshake_kind: SingleStreamHandshakeKind,
         is_initiator: bool,
         user_data: TConn,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
@@ -355,6 +376,7 @@ where
         let connection_task = SingleStreamConnectionTask::new(
             self.randomness_seeds.gen(),
             is_initiator,
+            handshake_kind,
             when_connected + self.handshake_timeout,
             self.noise_key.clone(),
             self.max_inbound_substreams,
@@ -383,6 +405,7 @@ where
     pub fn insert_multi_stream<TSubId>(
         &mut self,
         now: TNow,
+        handshake_kind: MultiStreamHandshakeKind,
         user_data: TConn,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
     where
@@ -394,6 +417,7 @@ where
         let connection_task = MultiStreamConnectionTask::new(
             self.randomness_seeds.gen(),
             now,
+            handshake_kind,
             self.max_inbound_substreams,
             self.noise_key.clone(),
             self.notification_protocols.clone(),
@@ -404,7 +428,7 @@ where
         let _previous_value = self.connections.insert(
             connection_id,
             Connection {
-                state: InnerConnectionState::Established,
+                state: InnerConnectionState::Handshaking,
                 user_data,
             },
         );

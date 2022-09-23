@@ -44,7 +44,8 @@ pub use crate::libp2p::{
     collection::ReadWrite,
     peers::{
         ConnectionId, ConnectionToCoordinator, CoordinatorToConnection, InRequestId, InboundError,
-        MultiStreamConnectionTask, OutRequestId, SingleStreamConnectionTask,
+        MultiStreamConnectionTask, MultiStreamHandshakeKind, OutRequestId,
+        SingleStreamConnectionTask, SingleStreamHandshakeKind,
     },
 };
 
@@ -482,10 +483,14 @@ where
     pub fn add_single_stream_incoming_connection(
         &mut self,
         when_connected: TNow,
+        handshake_kind: SingleStreamHandshakeKind,
         remote_addr: multiaddr::Multiaddr,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
-        self.inner
-            .add_single_stream_incoming_connection(when_connected, remote_addr)
+        self.inner.add_single_stream_incoming_connection(
+            when_connected,
+            handshake_kind,
+            remote_addr,
+        )
     }
 
     pub fn pull_message_to_connection(
@@ -1013,6 +1018,7 @@ where
     pub fn pending_outcome_ok_single_stream(
         &mut self,
         id: PendingId,
+        handshake_kind: SingleStreamHandshakeKind,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
         // the user cancels the future returned by `add_outgoing_connection`.
@@ -1020,6 +1026,7 @@ where
 
         let (connection_id, connection_task) = self.inner.add_single_stream_outgoing_connection(
             when_connected.clone(),
+            handshake_kind,
             expected_peer_id,
             multiaddr.clone(),
         );
@@ -1051,6 +1058,7 @@ where
     pub fn pending_outcome_ok_multi_stream<TSubId>(
         &mut self,
         id: PendingId,
+        handshake_kind: MultiStreamHandshakeKind,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
     where
         TSubId: Clone + PartialEq + Eq + Hash,
@@ -1061,6 +1069,7 @@ where
 
         let (connection_id, connection_task) = self.inner.add_multi_stream_outgoing_connection(
             when_connected.clone(),
+            handshake_kind,
             expected_peer_id,
             multiaddr.clone(),
         );
@@ -1073,13 +1082,6 @@ where
             } else {
                 self.num_pending_per_peer.remove(expected_peer_id).unwrap();
             }
-        }
-
-        // Because multi-stream connections are considered as having immediately finished their
-        // handshake, we mark the address as connected.
-        if let Some(KBucketsPeer { addresses, .. }) = self.kbuckets_peers.get_mut(expected_peer_id)
-        {
-            addresses.set_connected(multiaddr);
         }
 
         self.pending_ids.remove(id.0);

@@ -24,7 +24,8 @@ use super::{
         read_write::ReadWrite,
     },
     ConnectionToCoordinator, ConnectionToCoordinatorInner, CoordinatorToConnection,
-    CoordinatorToConnectionInner, NotificationsOutErr, OverlayNetwork, ShutdownCause, SubstreamId,
+    CoordinatorToConnectionInner, NotificationsOutErr, OverlayNetwork, ShutdownCause,
+    SingleStreamHandshakeKind, SubstreamId,
 };
 
 use alloc::{collections::VecDeque, string::ToString as _, sync::Arc};
@@ -131,6 +132,7 @@ where
     pub(super) fn new(
         randomness_seed: [u8; 32],
         is_initiator: bool,
+        handshake_kind: SingleStreamHandshakeKind,
         handshake_timeout: TNow,
         noise_key: Arc<NoiseKey>,
         max_inbound_substreams: usize,
@@ -138,6 +140,10 @@ where
         request_response_protocols: Arc<[ConfigRequestResponse]>,
         ping_protocol: Arc<str>,
     ) -> Self {
+        // We only support one kind of handshake at the moment. Make sure (at compile time) that
+        // the value provided as parameter is indeed the one expected.
+        let SingleStreamHandshakeKind::MultistreamSelectNoiseYamux = handshake_kind;
+
         SingleStreamConnectionTask {
             connection: SingleStreamConnectionTaskInner::Handshake {
                 handshake: handshake::HealthyHandshake::new(is_initiator),

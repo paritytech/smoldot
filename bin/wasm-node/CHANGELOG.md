@@ -2,14 +2,22 @@
 
 ## Unreleased
 
+## 0.6.34 - 2022-09-20
+
+### Added
+
+- Add experimental support for WebRTC according to the in-progress specification for libp2p-webrtc. For now this feature must explicitly be enabled by passing `enableExperimentalWebRTC: true` as part of the ̀`ClientConfig`. The multiaddress format for WebRTC is `/ip4/.../udp/.../webrtc/certhash/...` (or `/ip6/...`), where the payload behind `/certhash` is a multibase-encoded multihash-encoded SHA256 of the DTLS certificate used by the remote. ([#2579](https://github.com/paritytech/smoldot/pull/2579))
+- Add support for the `chainHead_unstable_finalizedDatabase` JSON-RPC method. This JSON-RPC method aims to be a replacement for the `databaseContent` method of the `Chain` and is expected to remain a permanently unstable smoldot-specific function. ([#2749](https://github.com/paritytech/smoldot/pull/2749))
+
 ### Changed
 
 - No longer try to connect to a peer for 20 seconds after failing to connect to it. This prevents loops where we keep trying to connect to the same address(es) over and over again ([#2747](https://github.com/paritytech/smoldot/pull/2747)).
 - Removed the `version` field of the struct returned by the `rpc_methods` function. This is technically a breaking change, but it has been introduced in a minor version bump because it is very insubstantial. ([#2756](https://github.com/paritytech/smoldot/pull/2756))
 
-### Added
+### Fixed
 
-- Add support for the `chainHead_unstable_finalizedDatabase` JSON-RPC method. This JSON-RPC method aims to be a replacement for the `databaseContent` method of the `Chain` and is expected to remain a permanently unstable smoldot-specific function. ([#2749](https://github.com/paritytech/smoldot/pull/2749))
+- Fix potential infinite loop in networking connection task. ([#2751](https://github.com/paritytech/smoldot/pull/2751))
+- Fix panic when trying to perform a runtime call on an old block while having no networking connection. ([#2764](https://github.com/paritytech/smoldot/pull/2764))
 
 ## 0.6.33 - 2022-09-13
 
