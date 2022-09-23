@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Removed the `version` field of the struct returned by the `rpc_methods` function. This is technically a breaking change, but it has been introduced in a minor version bump because it is very insubstantial. ([#2756](https://github.com/paritytech/smoldot/pull/2756))
+
 ## 0.6.34 - 2022-09-20
 
 ### Added
@@ -11,7 +15,7 @@
 
 ### Changed
 
-- No longer try to connect to a peer for 20 seconds after failing to connect to it. This prevents loops where we keep trying to connect to the same address(es) over and over again ([#2747](https://github.com/paritytech/smoldot/pull/2747)).
+- No longer try to connect to a peer for 20 seconds after failing to connect to it. This prevents loops where we keep trying to connect to the same address(es) over and over again. ([#2747](https://github.com/paritytech/smoldot/pull/2747))
 
 ### Fixed
 

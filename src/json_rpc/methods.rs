@@ -889,7 +889,6 @@ pub struct NetworkConfig {
 
 #[derive(Debug, Clone)]
 pub struct RpcMethods {
-    pub version: u64,
     pub methods: Vec<String>,
 }
 
@@ -1054,12 +1053,10 @@ impl serde::Serialize for RpcMethods {
     {
         #[derive(serde::Serialize)]
         struct SerdeRpcMethods<'a> {
-            version: u64,
             methods: &'a [String],
         }
 
         SerdeRpcMethods {
-            version: self.version,
             methods: &self.methods,
         }
         .serialize(serializer)

@@ -127,7 +127,6 @@ impl<TPlat: Platform> Background<TPlat> {
             .respond(
                 state_machine_request_id,
                 methods::Response::rpc_methods(methods::RpcMethods {
-                    version: 1,
                     methods: methods::MethodCall::method_names()
                         .map(|n| n.into())
                         .collect(),
