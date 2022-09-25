@@ -47,7 +47,7 @@ const client = smoldot.start({
 // We add the chain ahead of time in order to preload it.
 // Once a client connects, the chain is added again, but smoldot is smart enough to not connect
 // a second time.
-client.addChain({ chainSpec });
+client.addChain({ chainSpec, disableJsonRpc: true });
 
 // Now spawn a WebSocket server in order to handle JSON-RPC clients.
 console.log('JSON-RPC server now listening on port 9944');

@@ -116,6 +116,7 @@ wsServer.on('connection', function (connection, request) {
 
             const relay = await client.addChain({
                 chainSpec: chainSpecsById[chainCfg.relayChain].chainSpec,
+                disableJsonRpc: true
             });
 
             const para = await client.addChain({

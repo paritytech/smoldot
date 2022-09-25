@@ -117,11 +117,26 @@ export interface Chain {
    * @param rpc JSON-encoded RPC request.
    *
    * @throws {AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
-   * @throws {JsonRpcDisabledError} If no JSON-RPC callback was passed in the options of the chain.
+   * @throws {JsonRpcDisabledError} If the JSON-RPC system was disabled in the options of the chain.
    * @throws {CrashError} If the background client has crashed.
    */
   sendJsonRpc(rpc: string): void;
 
+  /**
+   * Waits for a JSON-RPC response or notification to be generated.
+   *
+   * If this function is called multiple times "simultaneously" (generating multiple different
+   * `Promise`s), each `Promise` will return a different JSON-RPC response or notification.
+   *
+   * Each chain contains a buffer of the responses waiting to be sent out. Calling this function
+   * pulls one element from the buffer. If this function is called at a slower rate than responses
+   * are generated, then buffer will eventually become full, at which point calling
+   * {Chain.sendJsonRpc} will throw an exception.
+   *
+   * @throws {AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
+   * @throws {JsonRpcDisabledError} If the JSON-RPC system was disabled in the options of the chain.
+   * @throws {CrashError} If the background client has crashed.
+   */
   nextJsonRpcResponse(): Promise<string>;
 
   /**
@@ -323,6 +338,14 @@ export interface AddChainOptions {
    */
   potentialRelayChains?: Chain[];
 
+  /**
+   * Disables the JSON-RPC system of the chain.
+   *
+   * This option can be used in order to save up some resources.
+   *
+   * It will be illegal to call {Chain.sendJsonRpc} and {Chain.nextJsonRpcResponse} on this
+   * chain.
+   */
   disableJsonRpc?: boolean,
 }
 
