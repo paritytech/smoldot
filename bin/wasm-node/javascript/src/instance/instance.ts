@@ -34,6 +34,24 @@ export { PlatformBindings, ConnectionError, ConnectionConfig, Connection } from 
 }
 
 /**
+ * Thrown in case a malformed JSON-RPC request is sent.
+ */
+export class MalformedJsonRpcError extends Error {
+  constructor() {
+    super("JSON-RPC request is malformed");
+  }
+}
+
+/**
+ * Thrown in case the buffer of JSON-RPC requests is full and cannot accept any more request.
+ */
+export class QueueFullError extends Error {
+  constructor() {
+    super("JSON-RPC requests queue is full");
+  }
+}
+
+/**
  * Contains the configuration of the instance.
  */
 export interface Config {
@@ -199,9 +217,9 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 
       switch (retVal) {
         case 0: break;
-        case 1: throw new Error("Couldn't parse JSON-RPC request");  // TODO: document this and use a proper error type
-        case 2: throw new Error("Client currently overloaded");  // TODO: document this and use a proper error type
-        default: throw new Error("Unknown json_rpc_send error code: " + retVal)
+        case 1: throw new MalformedJsonRpcError();
+        case 2: throw new QueueFullError();
+        default: throw new Error("Internal error: unknown json_rpc_send error code: " + retVal)
       }
     },
 

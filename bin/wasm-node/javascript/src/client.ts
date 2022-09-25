@@ -15,9 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { PlatformBindings, start as startInstance } from './instance/instance.js';
+import { MalformedJsonRpcError, PlatformBindings, start as startInstance } from './instance/instance.js';
 
-export { CrashError } from './instance/instance.js';
+export { MalformedJsonRpcError, QueueFullError, CrashError } from './instance/instance.js';
 
 /**
  * Thrown in case of a problem when initializing the chain.
@@ -103,9 +103,8 @@ export interface Chain {
    * Be aware that some requests will cause notifications to be sent back using the same callback
    * as the responses.
    *
-   * No response is generated if the request isn't a valid JSON-RPC request or if the request is
-   * unreasonably large (64 MiB at the time of writing of this comment). The request is then
-   * silently discarded.
+   * A {MalformedJsonRpcError} is thrown if the request isn't a valid JSON-RPC request or if the
+   * request is unreasonably large (64 MiB at the time of writing of this comment).
    * If, however, the request is a valid JSON-RPC request but that concerns an unknown method, a
    * error response is properly generated.
    *
@@ -116,6 +115,8 @@ export interface Chain {
    *
    * @param rpc JSON-encoded RPC request.
    *
+   * @throws {MalformedJsonRpcError} If the payload isn't valid JSON-RPC.
+   * @throws {QueueFullError} If the queue of JSON-RPC requests of the chain is full.
    * @throws {AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
    * @throws {JsonRpcDisabledError} If the JSON-RPC system was disabled in the options of the chain.
    * @throws {CrashError} If the background client has crashed.
@@ -432,8 +433,7 @@ export function start(options: ClientOptions, platformBindings: PlatformBindings
           if (options.disableJsonRpc)
             throw new JsonRpcDisabledError();
           if (request.length >= 64 * 1024 * 1024) {
-            console.error("Client.sendJsonRpc ignored a JSON-RPC request because it was too large (" + request.length + " bytes)");
-            return
+            throw new MalformedJsonRpcError();
           };
           instance.request(request, chainId);
         },

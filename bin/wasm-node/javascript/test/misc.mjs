@@ -17,9 +17,24 @@
 
 import test from 'ava';
 import * as fs from 'node:fs';
-import { start, JsonRpcDisabledError } from "../dist/mjs/index-nodejs.js";
+import { start, JsonRpcDisabledError, MalformedJsonRpcError } from "../dist/mjs/index-nodejs.js";
 
 const westendSpec = fs.readFileSync('./test/westend.json', 'utf8');
+
+test('malformed json-rpc requests rejected', async t => {
+  const client = start({ logCallback: () => { } });
+  await client
+    .addChain({ chainSpec: westendSpec })
+    .then((chain) => {
+      try {
+        chain.sendJsonRpc("this is not a valid JSON-RPC request");
+      } catch(error) {
+        t.assert(error instanceof MalformedJsonRpcError);
+        t.pass();
+      }
+    })
+    .then(() => client.terminate());
+});
 
 test('too large json-rpc requests rejected', async t => {
   // Generate a very long string. We start with a length of 1 and double for every iteration.
@@ -33,17 +48,13 @@ test('too large json-rpc requests rejected', async t => {
   await client
     .addChain({ chainSpec: westendSpec })
     .then((chain) => {
-      // We use `JSON.stringify` in order to be certain that the request is valid JSON.
-      chain.sendJsonRpc(JSON.stringify({ "jsonrpc": "2.0", "id": 1, "method": "foo", "params": [veryLongString] }));
-
-      const after2Seconds = new Promise((resolve) => setTimeout(resolve, 2000));
-      return Promise.any([ chain.nextJsonRpcResponse(), after2Seconds ])
-    })
-    .then((out) => {
-      if (!out)
-        t.pass()
-      else
-        t.fail()
+      try {
+        // We use `JSON.stringify` in order to be certain that the request is valid JSON.
+        chain.sendJsonRpc(JSON.stringify({ "jsonrpc": "2.0", "id": 1, "method": "foo", "params": [veryLongString] }));
+      } catch(error) {
+        t.assert(error instanceof MalformedJsonRpcError);
+        t.pass();
+      }
     })
     .then(() => client.terminate());
 });
