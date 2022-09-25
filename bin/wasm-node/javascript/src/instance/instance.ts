@@ -105,6 +105,16 @@ export function start(configMessage: Config, platformBindings: instance.Platform
         "https://github.com/paritytech/smoldot/issues with the following message:\n" +
         message
       );
+      for (const chain of Array.from(chains.values())) {
+        for (const promise of chain.jsonRpcResponsesPromises) {
+          promise.reject(crashError.error)
+        }
+        chain.jsonRpcResponsesPromises = [];
+        for (const promise of chain.databasePromises) {
+          promise.reject(crashError.error)
+        }
+        chain.databasePromises = [];
+      }
     },
     logCallback: (level, target, message) => {
       configMessage.logCallback(level, target, message)
