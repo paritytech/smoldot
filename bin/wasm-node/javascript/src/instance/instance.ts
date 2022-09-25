@@ -92,27 +92,41 @@ export function start(configMessage: Config, platformBindings: instance.Platform
       configMessage.logCallback(level, target, message)
     },
     jsonRpcResponsesNonEmptyCallback: (chainId) => {
-      if (!state.initialized)
-        throw new Error("Internal error");
+      // We shouldn't call back into the Wasm virtual machine in a callback. For this reason,
+      // we setup a callback to be called immediately after.
+      const update = () => {
+        try {
+          if (!state.initialized)
+            throw new Error("Internal error");
 
-      const promises = chains.get(chainId)!.jsonRpcResponsesPromises;
-      const mem = new Uint8Array(state.instance.exports.memory.buffer);
+          const promises = chains.get(chainId)?.jsonRpcResponsesPromises;
+          if (!promises)
+            return;
+          const mem = new Uint8Array(state.instance.exports.memory.buffer);
 
-      // Immediately read all the elements of the queue and remove them.
-      // `json_rpc_responses_non_empty` is only guaranteed to be called if the queue is
-      // empty.
-      while (promises.length !== 0) {
-          const responseInfo = state.instance.exports.json_rpc_responses_peek(chainId) >>> 0;
-          const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
-          const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
-          // `len === 0` means "queue is empty" according to the API.
-          if (len === 0)
-              break;
+          // Immediately read all the elements of the queue and remove them.
+          // `json_rpc_responses_non_empty` is only guaranteed to be called if the queue is
+          // empty.
+          while (promises.length !== 0) {
+              const responseInfo = state.instance.exports.json_rpc_responses_peek(chainId) >>> 0;
+              const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
+              const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
+              // `len === 0` means "queue is empty" according to the API.
+              if (len === 0)
+                  break;
 
-          const message = buffer.utf8BytesToString(mem, ptr, len);
-          promises.shift()!.resolve(message);
+              const message = buffer.utf8BytesToString(mem, ptr, len);
+              state.instance.exports.json_rpc_responses_pop(chainId);
+              promises.shift()!.resolve(message);
+          }
 
-          state.instance.exports.json_rpc_responses_pop(chainId);
+        } catch(_error) {}
+      };
+
+      if (typeof setImmediate === "function") {
+        setImmediate(update)
+      } else {
+        setTimeout(update, 0)
       }
     },
     databaseContentCallback: (data, chainId) => {
