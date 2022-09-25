@@ -22,101 +22,77 @@ import { start } from "../dist/mjs/index-nodejs.js";
 const westendSpec = fs.readFileSync('./test/westend.json', 'utf8');
 
 test('sudo_unstable_p2pDiscover is available', async t => {
-  let promiseResolve;
-  let promiseReject;
-  const promise = new Promise((resolve, reject) => { promiseResolve = resolve; promiseReject = reject; });
-
   const client = start({ logCallback: () => { } });
   await client
-    .addChain({
-      chainSpec: westendSpec,
-      jsonRpcCallback: (resp) => {
-        const parsed = JSON.parse(resp);
-        if (parsed.id == 1 && parsed.result === null)
-          promiseResolve();
-        else
-          promiseReject(resp);
-      }
-    })
+    .addChain({ chainSpec: westendSpec })
     .then((chain) => {
-      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"sudo_unstable_p2pDiscover","params":["/ip4/1.2.3.4/tcp/30333/p2p/12D3KooWDmQPkBvQGg9wjBdFThtWj3QCDVQyHJ1apfWrHvjwbYS8"]}', 0, 0);
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"sudo_unstable_p2pDiscover","params":["/ip4/1.2.3.4/tcp/30333/p2p/12D3KooWDmQPkBvQGg9wjBdFThtWj3QCDVQyHJ1apfWrHvjwbYS8"]}');
+      return chain;
     })
-    .then(() => promise)
-    .then(() => t.pass())
+    .then(async (chain) => {
+      const response = await chain.nextJsonRpcResponse();
+      const parsed = JSON.parse(response);
+      if (parsed.id == 1 && parsed.result === null)
+        t.pass();
+      else
+        t.fail(response);
+    })
     .then(() => client.terminate());
 });
 
 test('sudo_unstable_p2pDiscover returns error on invalid multiaddr', async t => {
-  let promiseResolve;
-  let promiseReject;
-  const promise = new Promise((resolve, reject) => { promiseResolve = resolve; promiseReject = reject; });
-
   const client = start({ logCallback: () => { } });
   await client
-    .addChain({
-      chainSpec: westendSpec,
-      jsonRpcCallback: (resp) => {
-        const parsed = JSON.parse(resp);
-        if (parsed.id == 1 && !!parsed.error)
-          promiseResolve();
-        else
-          promiseReject(resp);
-      }
-    })
+    .addChain({ chainSpec: westendSpec })
     .then((chain) => {
-      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"sudo_unstable_p2pDiscover","params":["/hello/world"]}', 0, 0);
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"sudo_unstable_p2pDiscover","params":["/hello/world"]}');
+      return chain;
     })
-    .then(() => promise)
-    .then(() => t.pass())
+    .then(async (chain) => {
+      const response = await chain.nextJsonRpcResponse();
+      const parsed = JSON.parse(response);
+      if (parsed.id == 1 && !!parsed.error)
+        t.pass();
+      else
+        t.fail(response);
+    })
     .then(() => client.terminate());
 });
 
 test('sudo_unstable_p2pDiscover returns error if multiaddr doesn\'t end with /p2p', async t => {
-  let promiseResolve;
-  let promiseReject;
-  const promise = new Promise((resolve, reject) => { promiseResolve = resolve; promiseReject = reject; });
-
   const client = start({ logCallback: () => { } });
   await client
-    .addChain({
-      chainSpec: westendSpec,
-      jsonRpcCallback: (resp) => {
-        const parsed = JSON.parse(resp);
-        if (parsed.id == 1 && !!parsed.error)
-          promiseResolve();
-        else
-          promiseReject(resp);
-      }
-    })
+    .addChain({ chainSpec: westendSpec })
     .then((chain) => {
-      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"sudo_unstable_p2pDiscover","params":["/ip4/127.0.0.1/tcp/30333/ws"]}', 0, 0);
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"sudo_unstable_p2pDiscover","params":["/ip4/127.0.0.1/tcp/30333/ws"]}');
+      return chain;
     })
-    .then(() => promise)
-    .then(() => t.pass())
+    .then(async (chain) => {
+      const response = await chain.nextJsonRpcResponse();
+      const parsed = JSON.parse(response);
+      if (parsed.id == 1 && !!parsed.error)
+        t.pass();
+      else
+        t.fail(response);
+    })
     .then(() => client.terminate());
 });
 
 test('sudo_unstable_version works', async t => {
-  let promiseResolve;
-  let promiseReject;
-  const promise = new Promise((resolve, reject) => { promiseResolve = resolve; promiseReject = reject; });
-
   const client = start({ logCallback: () => { } });
   await client
-    .addChain({
-      chainSpec: westendSpec,
-      jsonRpcCallback: (resp) => {
-        const parsed = JSON.parse(resp);
-        if (parsed.result.includes("smoldot"))
-          promiseResolve();
-        else
-          promiseReject(resp);
-      }
-    })
+    .addChain({ chainSpec: westendSpec })
     .then((chain) => {
-      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"sudo_unstable_version","params":[]}', 0, 0);
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"sudo_unstable_version","params":[]}');
+      return chain;
     })
-    .then(() => promise)
-    .then(() => t.pass())
+    .then(async (chain) => {
+      const response = await chain.nextJsonRpcResponse();
+      const parsed = JSON.parse(response);
+      if (parsed.result.includes("smoldot"))
+        t.pass();
+      else
+        t.fail(response);
+    })
     .then(() => client.terminate());
 });

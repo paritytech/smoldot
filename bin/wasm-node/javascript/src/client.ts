@@ -323,7 +323,7 @@ export interface AddChainOptions {
    */
   potentialRelayChains?: Chain[];
 
-  disableJsonRpc: boolean,
+  disableJsonRpc?: boolean,
 }
 
 // This function is similar to the `start` function found in `index.ts`, except with an extra
@@ -390,7 +390,7 @@ export function start(options: ClientOptions, platformBindings: PlatformBindings
         }
       }
 
-      const outcome = await instance.addChain(options.chainSpec, typeof options.databaseContent === 'string' ? options.databaseContent : "", potentialRelayChainsIds, options.disableJsonRpc);
+      const outcome = await instance.addChain(options.chainSpec, typeof options.databaseContent === 'string' ? options.databaseContent : "", potentialRelayChainsIds, !!options.disableJsonRpc);
 
       if (!outcome.success)
         throw new AddChainError(outcome.error);

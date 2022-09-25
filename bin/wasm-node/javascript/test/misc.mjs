@@ -43,7 +43,7 @@ test('too large json-rpc requests rejected', async t => {
       // The test succeeds if a certain time passes without a response.
       setTimeout(() => promiseResolve(), 2000);
       // We use `JSON.stringify` in order to be certain that the request is valid JSON.
-      chain.sendJsonRpc(JSON.stringify({ "jsonrpc": "2.0", "id": 1, "method": "foo", "params": [veryLongString] }), 0, 0);
+      chain.sendJsonRpc(JSON.stringify({ "jsonrpc": "2.0", "id": 1, "method": "foo", "params": [veryLongString] }));
     })
     .then(() => promise)
     .then(() => t.pass())

@@ -65,10 +65,16 @@ while(true) {
 
     const { socket, response } = Deno.upgradeWebSocket(event.request);
 
-    const chain = await client.addChain({
-        chainSpec,
-        jsonRpcCallback: (response) => socket.send(response)
-    });
+    const chain = await client.addChain({ chainSpec });
+
+    (async () => {
+        try {
+            while(true) {
+                const response = await chain.nextJsonRpcResponse();
+                socket.send(response);
+            }
+        } catch(_error) {}
+    })()
 
     socket.onclose = () => {
         console.log("(demo) JSON-RPC client disconnected.");
