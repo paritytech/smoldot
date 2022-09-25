@@ -22,10 +22,6 @@ import { start, JsonRpcDisabledError } from "../dist/mjs/index-nodejs.js";
 const westendSpec = fs.readFileSync('./test/westend.json', 'utf8');
 
 test('too large json-rpc requests rejected', async t => {
-  let promiseResolve;
-  let promiseReject;
-  const promise = new Promise((resolve, reject) => { promiseResolve = resolve; promiseReject = reject; });
-
   // Generate a very long string. We start with a length of 1 and double for every iteration.
   // Thus the final length of the string is `2^i` where `i` is the number of iterations.
   let veryLongString = 'a';
@@ -35,18 +31,20 @@ test('too large json-rpc requests rejected', async t => {
 
   const client = start({ logCallback: () => { } });
   await client
-    .addChain({
-      chainSpec: westendSpec,
-      jsonRpcCallback: (resp) => { promiseReject(resp) }
-    })
+    .addChain({ chainSpec: westendSpec })
     .then((chain) => {
-      // The test succeeds if a certain time passes without a response.
-      setTimeout(() => promiseResolve(), 2000);
       // We use `JSON.stringify` in order to be certain that the request is valid JSON.
       chain.sendJsonRpc(JSON.stringify({ "jsonrpc": "2.0", "id": 1, "method": "foo", "params": [veryLongString] }));
+
+      const after2Seconds = new Promise((resolve) => setTimeout(resolve, 2000));
+      return Promise.any([ chain.nextJsonRpcResponse(), after2Seconds ])
     })
-    .then(() => promise)
-    .then(() => t.pass())
+    .then((out) => {
+      if (!out)
+        t.pass()
+      else
+        t.fail()
+    })
     .then(() => client.terminate());
 });
 
