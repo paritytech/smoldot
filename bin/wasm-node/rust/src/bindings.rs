@@ -407,7 +407,8 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 /// The buffer passed as parameter **must** have been allocated with [`alloc`]. It is freed when
 /// this function is called.
 ///
-/// Responses and notifications are sent back using [`json_rpc_respond`].
+/// Responses and notifications are notified using [`json_rpc_responses_non_empty`], and can
+/// be read with [`json_rpc_responses_peek`].
 ///
 /// It is forbidden to call this function on an erroneous chain or a chain that was created with
 /// `json_rpc_running` equal to 0.
