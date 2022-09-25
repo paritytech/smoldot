@@ -215,18 +215,31 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
             config.onPanic(message);
         },
 
-        // Used by the Rust side to emit a JSON-RPC response or subscription notification.
-        json_rpc_respond: (ptr: number, len: number, chainId: number) => {
+        // Used by the Rust side to notify that a JSON-RPC response or subscription notification
+        // is available in the queue of JSON-RPC responses.
+        json_rpc_responses_non_empty: (chainId: number) => {
             if (killedTracked.killed) return;
 
             const instance = config.instance!;
+            const mem = new Uint8Array(instance.exports.memory.buffer);
 
-            ptr >>>= 0;
-            len >>>= 0;
+            // Immediately read all the elements of the queue and remove them.
+            // `json_rpc_responses_non_empty` is only guaranteed to be called if the queue is
+            // empty.
+            while (true) {
+                const responseInfo = instance.exports.json_rpc_responses_peek(chainId) >>> 0;
+                const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
+                const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
+                // `len === 0` means "queue is empty" according to the API.
+                if (len === 0)
+                    break;
 
-            let message = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), ptr, len);
-            if (config.jsonRpcCallback) {
-                config.jsonRpcCallback(message, chainId);
+                const message = buffer.utf8BytesToString(mem, ptr, len);
+                if (config.jsonRpcCallback) {
+                    config.jsonRpcCallback(message, chainId);
+                }
+
+                instance.exports.json_rpc_responses_pop(chainId);
             }
         },
 

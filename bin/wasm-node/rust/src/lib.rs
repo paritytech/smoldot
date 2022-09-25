@@ -23,11 +23,13 @@
 use core::{
     cmp::Ordering,
     ops::{Add, Sub},
+    pin::Pin,
     slice, str,
+    task::{Context, Poll},
     time::Duration,
 };
 use futures::{channel::mpsc, prelude::*};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub mod bindings;
 
@@ -199,14 +201,16 @@ fn add_chain(
             .chunks(4)
             .map(|c| u32::from_le_bytes(<[u8; 4]>::try_from(c).unwrap()))
             .filter_map(|c| {
-                if let Some(init::Chain::Healthy(id)) = client_lock
+                if let Some(init::Chain::Healthy {
+                    smoldot_chain_id, ..
+                }) = client_lock
                     .as_ref()
                     .unwrap()
                     .chains
                     .get(usize::try_from(c).unwrap())
                 // TODO: don't unwrap here
                 {
-                    Some(*id)
+                    Some(*smoldot_chain_id)
                 } else {
                     None
                 }
@@ -216,21 +220,11 @@ fn add_chain(
 
     // If `json_rpc_running` is non-zero, then we pass a `Sender<String>` to the `add_client`
     // function. The client will push on this channel the JSON-RPC responses and notifications.
-    //
-    // After the client has pushed a response or notification, we must then propagate it to the
-    // FFI layer. This is achieved by spawning a task that continuously polls the `Receiver` (see
-    // below).
-    //
-    // When the chain is later removed, we want the task to immediately stop without sending any
-    // additional response or notification to the FFI. This is achieved by storing an
-    // `AbortHandle` as the "user data" of the chain within the client. When the chain is removed,
-    // the client will yield back this `AbortHandle` and we can use it to abort the task.
-    let (json_rpc_responses, responses_rx_and_reg, abort_handle) = if json_rpc_running != 0 {
+    let (json_rpc_responses_tx, mut json_rpc_responses) = if json_rpc_running != 0 {
         let (tx, rx) = mpsc::channel::<String>(64);
-        let (handle, reg) = future::AbortHandle::new_pair();
-        (Some(tx), Some((rx, reg)), Some(handle))
+        (Some(tx), Some(rx))
     } else {
-        (None, None, None)
+        (None, None)
     };
 
     // Insert the chain in the client.
@@ -240,10 +234,10 @@ fn add_chain(
             .unwrap()
             .smoldot
             .add_chain(smoldot_light::AddChainConfig {
-                user_data: abort_handle.into_iter().collect(),
+                user_data: Vec::new(),
                 specification: str::from_utf8(&chain_spec).unwrap(),
                 database_content: str::from_utf8(&database_content).unwrap(),
-                json_rpc_responses,
+                json_rpc_responses: json_rpc_responses_tx,
                 potential_relay_chains: potential_relay_chains.into_iter(),
             }) {
             Ok(c) => c,
@@ -262,31 +256,40 @@ fn add_chain(
         .as_mut()
         .unwrap()
         .chains
-        .insert(init::Chain::Healthy(smoldot_chain_id));
+        .insert(init::Chain::Healthy {
+            smoldot_chain_id,
+            json_rpc_response: None,
+            json_rpc_response_info: Box::new(bindings::JsonRpcResponseInfo { ptr: 0, len: 0 }),
+            json_rpc_responses_rx: None,
+        });
+    let outer_chain_id_u32 = u32::try_from(outer_chain_id).unwrap();
 
-    // Spawn the task if necessary.
-    // See explanations above.
-    if let Some((mut responses_rx, abort_registration)) = responses_rx_and_reg {
-        let messages_out_task = async move {
-            while let Some(response) = responses_rx.next().await {
-                emit_json_rpc_response(&response, outer_chain_id);
-            }
-        };
-
-        client_lock
-            .as_mut()
-            .unwrap()
-            .new_tasks_spawner
-            .unbounded_send((
-                "json-rpc-messages-out".to_owned(),
-                future::Abortable::new(messages_out_task, abort_registration)
-                    .map(|_| ())
-                    .boxed(),
-            ))
-            .unwrap();
+    // Poll the receiver once in order for `json_rpc_responses_non_empty` to be called the first
+    // time a response is received.
+    if let Some(json_rpc_responses) = json_rpc_responses.as_mut() {
+        let _polled_result = Pin::new(json_rpc_responses).poll_next(&mut Context::from_waker(
+            &Arc::new(JsonRpcResponsesNonEmptyWaker {
+                chain_id: outer_chain_id_u32,
+            })
+            .into(),
+        ));
+        debug_assert!(_polled_result.is_pending());
     }
 
-    u32::try_from(outer_chain_id).unwrap()
+    if let init::Chain::Healthy {
+        json_rpc_responses_rx,
+        ..
+    } = client_lock
+        .as_mut()
+        .unwrap()
+        .chains
+        .get_mut(outer_chain_id)
+        .unwrap()
+    {
+        *json_rpc_responses_rx = json_rpc_responses;
+    }
+
+    outer_chain_id_u32
 }
 
 fn remove_chain(chain_id: u32) {
@@ -298,8 +301,26 @@ fn remove_chain(chain_id: u32) {
         .chains
         .remove(usize::try_from(chain_id).unwrap())
     {
-        init::Chain::Healthy(inner_id) => {
-            client_lock.as_mut().unwrap().smoldot.remove_chain(inner_id)
+        init::Chain::Healthy {
+            smoldot_chain_id,
+            json_rpc_responses_rx,
+            ..
+        } => {
+            // We've polled the JSON-RPC receiver with a waker that calls
+            // `json_rpc_responses_non_empty`. Once the sender is destroyed, this waker will be
+            // called in order to inform of the destruction. We don't want that to happen.
+            // Therefore, we poll the receiver again with a dummy "no-op" waker for the sole
+            // purpose of erasing the previously-registered waker.
+            if let Some(mut json_rpc_responses_rx) = json_rpc_responses_rx {
+                let _ = Pin::new(&mut json_rpc_responses_rx)
+                    .poll_next(&mut Context::from_waker(futures::task::noop_waker_ref()));
+            }
+
+            client_lock
+                .as_mut()
+                .unwrap()
+                .smoldot
+                .remove_chain(smoldot_chain_id)
         }
         init::Chain::Erroneous { .. } => Vec::new(),
     };
@@ -325,7 +346,7 @@ fn chain_is_ok(chain_id: u32) -> u32 {
             .chains
             .get(usize::try_from(chain_id).unwrap())
             .unwrap(),
-        init::Chain::Healthy(_)
+        init::Chain::Healthy { .. }
     ) {
         1
     } else {
@@ -342,7 +363,7 @@ fn chain_error_len(chain_id: u32) -> u32 {
         .get(usize::try_from(chain_id).unwrap())
         .unwrap()
     {
-        init::Chain::Healthy(_) => 0,
+        init::Chain::Healthy { .. } => 0,
         init::Chain::Erroneous { error } => u32::try_from(error.as_bytes().len()).unwrap(),
     }
 }
@@ -356,7 +377,7 @@ fn chain_error_ptr(chain_id: u32) -> u32 {
         .get(usize::try_from(chain_id).unwrap())
         .unwrap()
     {
-        init::Chain::Healthy(_) => 0,
+        init::Chain::Healthy { .. } => 0,
         init::Chain::Erroneous { error } => {
             u32::try_from(error.as_bytes().as_ptr() as usize).unwrap()
         }
@@ -381,19 +402,106 @@ fn json_rpc_send(ptr: u32, len: u32, chain_id: u32) {
         .get(usize::try_from(chain_id).unwrap())
         .unwrap()
     {
-        init::Chain::Healthy(id) => *id,
+        init::Chain::Healthy {
+            smoldot_chain_id, ..
+        } => *smoldot_chain_id,
         init::Chain::Erroneous { .. } => panic!(),
     };
 
-    if let Err(err) = client_lock
+    if let Err(_err) = client_lock
         .as_mut()
         .unwrap()
         .smoldot
         .json_rpc_request(json_rpc_request, client_chain_id)
     {
-        if let Some(response) = err.into_json_rpc_error() {
+        // TODO: return an error from json_rpc_send instead of emitting a response immediately
+        /*if let Some(response) = err.into_json_rpc_error() {
             emit_json_rpc_response(&response, usize::try_from(chain_id).unwrap());
+        }*/
+    }
+}
+
+fn json_rpc_responses_peek(chain_id: u32) -> u32 {
+    let mut client_lock = CLIENT.lock().unwrap();
+    match client_lock
+        .as_mut()
+        .unwrap()
+        .chains
+        .get_mut(usize::try_from(chain_id).unwrap())
+        .unwrap()
+    {
+        init::Chain::Healthy {
+            json_rpc_response,
+            json_rpc_responses_rx,
+            json_rpc_response_info,
+            ..
+        } => {
+            if json_rpc_response.is_none() {
+                if let Some(json_rpc_responses_rx) = json_rpc_responses_rx.as_mut() {
+                    loop {
+                        match Pin::new(&mut *json_rpc_responses_rx).poll_next(
+                            &mut Context::from_waker(
+                                &Arc::new(JsonRpcResponsesNonEmptyWaker { chain_id }).into(),
+                            ),
+                        ) {
+                            Poll::Ready(Some(response)) if response.is_empty() => {
+                                // The API of `json_rpc_responses_peek` says that a length of 0
+                                // indicates that the queue is empty. For this reason, we skip
+                                // this response.
+                                // This is a pretty niche situation, but at least we handle it
+                                // properly.
+                            }
+                            Poll::Ready(Some(response)) => {
+                                debug_assert!(!response.is_empty());
+                                *json_rpc_response = Some(response);
+                                break;
+                            }
+                            Poll::Ready(None) => unreachable!(),
+                            Poll::Pending => break,
+                        }
+                    }
+                }
+            }
+
+            // Note that we might be returning the last item in the queue. In principle, this means
+            // that the next time an entry is added to the queue, `json_rpc_responses_non_empty`
+            // should be called. Due to the way the implementation works, this will not happen
+            // until the user calls `json_rpc_responses_peek`. However, this is not a problem:
+            // it is impossible for the user to observe that the queue is empty, and as such there
+            // is simply not correct implementation of the API that can't work because of this
+            // property.
+
+            match &json_rpc_response {
+                Some(rp) => {
+                    debug_assert!(!rp.is_empty());
+                    json_rpc_response_info.ptr = rp.as_bytes().as_ptr() as u32;
+                    json_rpc_response_info.len = rp.as_bytes().len() as u32;
+                }
+                None => {
+                    json_rpc_response_info.ptr = 0;
+                    json_rpc_response_info.len = 0;
+                }
+            }
+
+            (&**json_rpc_response_info) as *const bindings::JsonRpcResponseInfo as usize as u32
         }
+        _ => panic!(),
+    }
+}
+
+fn json_rpc_responses_pop(chain_id: u32) {
+    let mut client_lock = CLIENT.lock().unwrap();
+    match client_lock
+        .as_mut()
+        .unwrap()
+        .chains
+        .get_mut(usize::try_from(chain_id).unwrap())
+        .unwrap()
+    {
+        init::Chain::Healthy {
+            json_rpc_response, ..
+        } => *json_rpc_response = None,
+        _ => panic!(),
     }
 }
 
@@ -407,7 +515,9 @@ fn database_content(chain_id: u32, max_size: u32) {
     } = client_lock.as_mut().unwrap();
 
     let client_chain_id = match chains.get(usize::try_from(chain_id).unwrap()).unwrap() {
-        init::Chain::Healthy(id) => *id,
+        init::Chain::Healthy {
+            smoldot_chain_id, ..
+        } => *smoldot_chain_id,
         init::Chain::Erroneous { .. } => panic!(),
     };
 
@@ -441,12 +551,12 @@ fn database_content(chain_id: u32, max_size: u32) {
         .unwrap();
 }
 
-fn emit_json_rpc_response(rpc: &str, chain_id: usize) {
-    unsafe {
-        bindings::json_rpc_respond(
-            u32::try_from(rpc.as_bytes().as_ptr() as usize).unwrap(),
-            u32::try_from(rpc.as_bytes().len()).unwrap(),
-            u32::try_from(chain_id).unwrap(),
-        );
+struct JsonRpcResponsesNonEmptyWaker {
+    chain_id: u32,
+}
+
+impl std::task::Wake for JsonRpcResponsesNonEmptyWaker {
+    fn wake(self: Arc<Self>) {
+        unsafe { bindings::json_rpc_responses_non_empty(self.chain_id) }
     }
 }
