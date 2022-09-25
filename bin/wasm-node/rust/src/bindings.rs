@@ -414,7 +414,7 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 /// `json_rpc_running` equal to 0.
 ///
 /// This function returns:
-/// - 0 if everything went ok.
+/// - 0 on success.
 /// - 1 if the request couldn't be parsed as a valid JSON-RPC request.
 /// - 2 if the chain is currently overloaded with JSON-RPC requests and refuses to queue another
 /// one.
