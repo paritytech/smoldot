@@ -17,7 +17,7 @@
 
 import test from 'ava';
 import * as fs from 'node:fs';
-import { start } from "../dist/mjs/index-nodejs.js";
+import { start, JsonRpcDisabledError } from "../dist/mjs/index-nodejs.js";
 
 const westendSpec = fs.readFileSync('./test/westend.json', 'utf8');
 
@@ -47,5 +47,35 @@ test('too large json-rpc requests rejected', async t => {
     })
     .then(() => promise)
     .then(() => t.pass())
+    .then(() => client.terminate());
+});
+
+test('disableJsonRpc option forbids sendJsonRpc', async t => {
+  const client = start({ logCallback: () => { } });
+  await client
+    .addChain({ chainSpec: westendSpec, disableJsonRpc: true })
+    .then((chain) => {
+      try {
+        chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"system_name","params":[]}');
+      } catch(error) {
+        t.assert(error instanceof JsonRpcDisabledError);
+        t.pass();
+      }
+    })
+    .then(() => client.terminate());
+});
+
+test('disableJsonRpc option forbids nextJsonRpcResponse', async t => {
+  const client = start({ logCallback: () => { } });
+  await client
+    .addChain({ chainSpec: westendSpec, disableJsonRpc: true })
+    .then(async (chain) => {
+      try {
+        await chain.nextJsonRpcResponse();
+      } catch(error) {
+        t.assert(error instanceof JsonRpcDisabledError);
+        t.pass();
+      }
+    })
     .then(() => client.terminate());
 });
