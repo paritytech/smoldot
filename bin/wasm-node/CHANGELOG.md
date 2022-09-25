@@ -4,6 +4,8 @@
 
 ### Changed
 
+- `Chain.sendJsonRpc` now throws a `MalformedJsonRpcError` exception if the JSON-RPC request is too large or malformed, or a `QueueFullError` if the queue of JSON-RPC requests of the chain is full.
+- Removed `AddChainOptions.jsonRpcCallback`. Use the new `Chain.nextJsonRpcResponse` asynchronous function to pull JSON-RPC responses instead of registering a callback. A `AddChainOptions.disableJsonRpc` flag is now supported in order to bring the same effects as not passing any `jsonRpcCallback`.
 - Removed the `version` field of the struct returned by the `rpc_methods` function. This is technically a breaking change, but it has been introduced in a minor version bump because it is very insubstantial. ([#2756](https://github.com/paritytech/smoldot/pull/2756))
 
 ## 0.6.34 - 2022-09-20
