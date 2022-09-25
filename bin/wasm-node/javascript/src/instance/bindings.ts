@@ -31,7 +31,7 @@ export interface SmoldotWasmExports extends WebAssembly.Exports {
     chain_is_ok: (chainId: number) => number,
     chain_error_len: (chainId: number) => number,
     chain_error_ptr: (chainId: number) => number,
-    json_rpc_send: (textPtr: number, textLen: number, chainId: number) => void,
+    json_rpc_send: (textPtr: number, textLen: number, chainId: number) => number,
     json_rpc_responses_peek: (chainId: number) => number,
     json_rpc_responses_pop: (chainId: number) => void,
     database_content: (chainId: number, maxSize: number) => void,

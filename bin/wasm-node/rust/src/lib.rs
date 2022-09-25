@@ -29,6 +29,7 @@ use core::{
     time::Duration,
 };
 use futures::{channel::mpsc, prelude::*};
+use smoldot_light::HandleRpcError;
 use std::sync::{Arc, Mutex};
 
 pub mod bindings;
@@ -384,7 +385,7 @@ fn chain_error_ptr(chain_id: u32) -> u32 {
     }
 }
 
-fn json_rpc_send(ptr: u32, len: u32, chain_id: u32) {
+fn json_rpc_send(ptr: u32, len: u32, chain_id: u32) -> u32 {
     let json_rpc_request: Box<[u8]> = {
         let ptr = usize::try_from(ptr).unwrap();
         let len = usize::try_from(len).unwrap();
@@ -408,16 +409,15 @@ fn json_rpc_send(ptr: u32, len: u32, chain_id: u32) {
         init::Chain::Erroneous { .. } => panic!(),
     };
 
-    if let Err(_err) = client_lock
+    match client_lock
         .as_mut()
         .unwrap()
         .smoldot
         .json_rpc_request(json_rpc_request, client_chain_id)
     {
-        // TODO: return an error from json_rpc_send instead of emitting a response immediately
-        /*if let Some(response) = err.into_json_rpc_error() {
-            emit_json_rpc_response(&response, usize::try_from(chain_id).unwrap());
-        }*/
+        Ok(()) => 0,
+        Err(HandleRpcError::MalformedJsonRpc(_)) => 1,
+        Err(HandleRpcError::Overloaded { .. }) => 2,
     }
 }
 

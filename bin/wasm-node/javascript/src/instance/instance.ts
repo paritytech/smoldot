@@ -147,14 +147,22 @@ export function start(configMessage: Config, platformBindings: instance.Platform
       if (crashError.error)
         throw crashError.error;
 
+      let retVal;
       try {
         const encoded = new TextEncoder().encode(request)
         const ptr = state.instance.exports.alloc(encoded.length) >>> 0;
         new Uint8Array(state.instance.exports.memory.buffer).set(encoded, ptr);
-        state.instance.exports.json_rpc_send(ptr, encoded.length, chainId);
+        retVal = state.instance.exports.json_rpc_send(ptr, encoded.length, chainId) >>> 0;
       } catch (_error) {
         console.assert(crashError.error);
         throw crashError.error
+      }
+
+      switch (retVal) {
+        case 0: break;
+        case 1: throw new Error("Couldn't parse JSON-RPC request");  // TODO: document this and use a proper error type
+        case 2: throw new Error("Client currently overloaded");  // TODO: document this and use a proper error type
+        default: throw new Error("Unknown json_rpc_send error code: " + retVal)
       }
     },
 

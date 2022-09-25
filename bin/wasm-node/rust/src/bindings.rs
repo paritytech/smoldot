@@ -403,7 +403,6 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 /// A buffer containing a UTF-8 JSON-RPC request or notification must be passed as parameter. The
 /// format of the JSON-RPC requests and notifications is described in
 /// [the standard JSON-RPC 2.0 specification](https://www.jsonrpc.org/specification).
-/// Requests that are not valid JSON-RPC are silently ignored.
 ///
 /// The buffer passed as parameter **must** have been allocated with [`alloc`]. It is freed when
 /// this function is called.
@@ -412,8 +411,15 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 ///
 /// It is forbidden to call this function on an erroneous chain or a chain that was created with
 /// `json_rpc_running` equal to 0.
+///
+/// This function returns:
+/// - 0 if everything went ok.
+/// - 1 if the request couldn't be parsed as a valid JSON-RPC request.
+/// - 2 if the chain is currently overloaded with JSON-RPC requests and refuses to queue another
+/// one.
+///
 #[no_mangle]
-pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) {
+pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) -> u32 {
     super::json_rpc_send(text_ptr, text_len, chain_id)
 }
 
