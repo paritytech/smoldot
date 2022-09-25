@@ -69,8 +69,8 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 
   // Contains the information of each chain that is currently alive.
   let chains: Map<number, {
-    jsonRpcResponsesPromises: DatabasePromise[], // TODO: rename DatabasePromise?
-    databasePromises: DatabasePromise[],
+    jsonRpcResponsesPromises: PromiseFunctions[], // TODO: rename DatabasePromise?
+    databasePromises: PromiseFunctions[],
   }> = new Map();
 
   // Start initialization of the Wasm VM.
@@ -92,8 +92,8 @@ export function start(configMessage: Config, platformBindings: instance.Platform
       configMessage.logCallback(level, target, message)
     },
     jsonRpcResponsesNonEmptyCallback: (chainId) => {
-      // We shouldn't call back into the Wasm virtual machine in a callback. For this reason,
-      // we setup a callback to be called immediately after.
+      // We shouldn't call back into the Wasm virtual machine from a callback called by the virtual
+      // machine itself. For this reason, we setup a closure to be called immediately after.
       const update = () => {
         try {
           if (!state.initialized)
@@ -123,6 +123,9 @@ export function start(configMessage: Config, platformBindings: instance.Platform
         } catch(_error) {}
       };
 
+      // In browsers, `setTimeout` works as expected when `ms` equals 0. However, NodeJS requires
+      // a minimum of 1 millisecond (if `0` is passed, it is automatically replaced with `1`) and
+      // wants you to use `setImmediate` instead.
       if (typeof setImmediate === "function") {
         setImmediate(update)
       } else {
@@ -131,7 +134,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
     },
     databaseContentCallback: (data, chainId) => {
       const promises = chains.get(chainId)?.databasePromises!;
-      (promises.shift() as DatabasePromise).resolve(data);
+      (promises.shift() as PromiseFunctions).resolve(data);
     },
     currentTaskCallback: (taskName) => {
       currentTask.name = taskName
@@ -378,7 +381,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 
 }
 
-interface DatabasePromise {
+interface PromiseFunctions {
   resolve: (data: string) => void,
   reject: (error: Error) => void,
 }
