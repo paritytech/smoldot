@@ -18,6 +18,7 @@
 import * as buffer from './buffer.js';
 import * as instance from './raw-instance.js';
 import { SmoldotWasmInstance } from './bindings.js';
+import { AlreadyDestroyedError } from '../client.js';
 
 export { PlatformBindings, ConnectionError, ConnectionConfig, Connection } from './raw-instance.js';
 
@@ -44,7 +45,8 @@ export interface Config {
 
 export interface Instance {
   request: (request: string, chainId: number) => void
-  addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], jsonRpcCallback?: (response: string) => void) => Promise<{ success: true, chainId: number } | { success: false, error: string }>
+  nextJsonRpcResponse: (chainId: number, resolve: (response: string) => void, reject: (error: Error) => void) => void
+  addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean) => Promise<{ success: true, chainId: number } | { success: false, error: string }>
   removeChain: (chainId: number) => void
   databaseContent: (chainId: number, maxUtf8BytesSize?: number) => Promise<string>
   startShutdown: () => void
@@ -67,7 +69,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 
   // Contains the information of each chain that is currently alive.
   let chains: Map<number, {
-    jsonRpcCallback?: (response: string) => void,
+    jsonRpcResponsesPromises: DatabasePromise[], // TODO: rename DatabasePromise?
     databasePromises: DatabasePromise[],
   }> = new Map();
 
@@ -89,9 +91,29 @@ export function start(configMessage: Config, platformBindings: instance.Platform
     logCallback: (level, target, message) => {
       configMessage.logCallback(level, target, message)
     },
-    jsonRpcCallback: (data, chainId) => {
-      const cb = chains.get(chainId)?.jsonRpcCallback;
-      if (cb) cb(data);
+    jsonRpcResponsesNonEmptyCallback: (chainId) => {
+      if (!state.initialized)
+        throw new Error("Internal error");
+
+      const promises = chains.get(chainId)!.jsonRpcResponsesPromises;
+      const mem = new Uint8Array(state.instance.exports.memory.buffer);
+
+      // Immediately read all the elements of the queue and remove them.
+      // `json_rpc_responses_non_empty` is only guaranteed to be called if the queue is
+      // empty.
+      while (promises.length !== 0) {
+          const responseInfo = state.instance.exports.json_rpc_responses_peek(chainId) >>> 0;
+          const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
+          const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
+          // `len === 0` means "queue is empty" according to the API.
+          if (len === 0)
+              break;
+
+          const message = buffer.utf8BytesToString(mem, ptr, len);
+          promises.shift()!.resolve(message);
+
+          state.instance.exports.json_rpc_responses_pop(chainId);
+      }
     },
     databaseContentCallback: (data, chainId) => {
       const promises = chains.get(chainId)?.databasePromises!;
@@ -166,7 +188,39 @@ export function start(configMessage: Config, platformBindings: instance.Platform
       }
     },
 
-    addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], jsonRpcCallback?: (response: string) => void): Promise<{ success: true, chainId: number } | { success: false, error: string }> => {
+    nextJsonRpcResponse: (chainId: number, resolve: (response: string) => void, reject: (error: Error) => void) => {
+      // Because `nextJsonRpcResponse` is passed as parameter an identifier returned by `addChain`,
+      // it is always the case that the Wasm instance is already initialized. The only possibility
+      // for it to not be the case is if the user completely invented the `chainId`.
+      if (!state.initialized)
+        throw new Error("Internal error");
+      if (crashError.error)
+        throw crashError.error;
+
+      try {
+        const mem = new Uint8Array(state.instance.exports.memory.buffer);
+        const responseInfo = state.instance.exports.json_rpc_responses_peek(chainId) >>> 0;
+        const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
+        const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
+
+        // `len === 0` means "queue is empty" according to the API.
+        // In that situation, queue the resolve/reject.
+        if (len === 0) {
+          chains.get(chainId)!.jsonRpcResponsesPromises.push({ resolve, reject })
+          return;
+        }
+
+        const message = buffer.utf8BytesToString(mem, ptr, len);
+        resolve(message);
+
+        state.instance.exports.json_rpc_responses_pop(chainId);
+      } catch (_error) {
+        console.assert(crashError.error);
+        throw crashError.error
+      }
+    },
+
+    addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean): Promise<{ success: true, chainId: number } | { success: false, error: string }> => {
       return queueOperation((instance) => {
         if (crashError.error)
           throw crashError.error;
@@ -196,14 +250,14 @@ export function start(configMessage: Config, platformBindings: instance.Platform
           const chainId = instance.exports.add_chain(
             chainSpecPtr, chainSpecEncoded.length,
             databaseContentPtr, databaseContentEncoded.length,
-            !!jsonRpcCallback ? 1 : 0,
+            disableJsonRpc ? 0 : 1,
             potentialRelayChainsPtr, potentialRelayChainsLen
           );
 
           if (instance.exports.chain_is_ok(chainId) != 0) {
             console.assert(!chains.has(chainId));
             chains.set(chainId, {
-              jsonRpcCallback,
+              jsonRpcResponsesPromises: new Array(),
               databasePromises: new Array()
             });
             return { success: true, chainId };
@@ -234,6 +288,9 @@ export function start(configMessage: Config, platformBindings: instance.Platform
       // JSON-RPC response corresponding to a chain that is going to be deleted but hasn't been yet.
       // These kind of race conditions are already delt with within smoldot.
       console.assert(chains.has(chainId));
+      for (const { reject } of chains.get(chainId)!.jsonRpcResponsesPromises) {
+        reject(new AlreadyDestroyedError());
+      }
       chains.delete(chainId);
       try {
         state.instance.exports.remove_chain(chainId);

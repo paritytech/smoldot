@@ -47,7 +47,7 @@ export interface Config {
     onPanic: (message: string) => never,
     
     logCallback: (level: number, target: string, message: string) => void,
-    jsonRpcCallback: (response: string, chainId: number) => void,
+    jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
     databaseContentCallback: (data: string, chainId: number) => void,
     currentTaskCallback?: (taskName: string | null) => void,
 }
@@ -219,28 +219,7 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
         // is available in the queue of JSON-RPC responses.
         json_rpc_responses_non_empty: (chainId: number) => {
             if (killedTracked.killed) return;
-
-            const instance = config.instance!;
-            const mem = new Uint8Array(instance.exports.memory.buffer);
-
-            // Immediately read all the elements of the queue and remove them.
-            // `json_rpc_responses_non_empty` is only guaranteed to be called if the queue is
-            // empty.
-            while (true) {
-                const responseInfo = instance.exports.json_rpc_responses_peek(chainId) >>> 0;
-                const ptr = buffer.readUInt32LE(mem, responseInfo) >>> 0;
-                const len = buffer.readUInt32LE(mem, responseInfo + 4) >>> 0;
-                // `len === 0` means "queue is empty" according to the API.
-                if (len === 0)
-                    break;
-
-                const message = buffer.utf8BytesToString(mem, ptr, len);
-                if (config.jsonRpcCallback) {
-                    config.jsonRpcCallback(message, chainId);
-                }
-
-                instance.exports.json_rpc_responses_pop(chainId);
-            }
+            config.jsonRpcResponsesNonEmptyCallback(chainId);
         },
 
         // Used by the Rust side in response to asking for the database content of a chain.

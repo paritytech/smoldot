@@ -26,7 +26,6 @@ export {
     Client,
     ClientOptions,
     CrashError,
-    JsonRpcCallback,
     JsonRpcDisabledError,
     LogCallback
 } from './client.js';
