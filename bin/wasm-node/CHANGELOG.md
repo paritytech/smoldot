@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fix old runtimes not being cleaned up properly and runtimes being downloaded multiple times after an on-chain runtime upgrade.
+- Fix old runtimes not being cleaned up properly and runtimes being downloaded multiple times after an on-chain runtime upgrade. ([#2781](https://github.com/paritytech/smoldot/pull/2781))
 
 ## 0.6.34 - 2022-09-20
 
