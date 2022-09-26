@@ -36,26 +36,32 @@
 //! [`NetworkService::new`]. These channels inform the foreground about updates to the network
 //! connectivity.
 
-use crate::Platform;
+use crate::platform::Platform;
 
-use core::{cmp, num::NonZeroUsize, task::Poll, time::Duration};
+use alloc::{
+    boxed::Box,
+    string::{String, ToString as _},
+    sync::Arc,
+    vec::Vec,
+};
+use core::{cmp, num::NonZeroUsize, pin::Pin, task::Poll, time::Duration};
 use futures::{
     channel::{mpsc, oneshot},
     lock::Mutex,
     prelude::*,
 };
+use hashbrown::{hash_map, HashMap, HashSet};
 use itertools::Itertools as _;
 use smoldot::{
     header,
     informant::{BytesDisplay, HashDisplay},
-    libp2p::{connection, multiaddr::Multiaddr, peer_id::PeerId, peers, read_write::ReadWrite},
+    libp2p::{connection, multiaddr::Multiaddr, peer_id::PeerId, peers},
     network::{protocol, service},
 };
-use std::{
-    collections::{HashMap, HashSet},
-    pin::Pin,
-    sync::Arc,
-};
+
+pub use service::EncodedMerkleProof;
+
+mod tasks;
 
 /// Configuration for a [`NetworkService`].
 pub struct Config {
@@ -101,6 +107,9 @@ pub struct ConfigChain {
     /// chain, so as to not introduce conflicts in the networking messages.
     pub protocol_id: String,
 
+    /// Number of bytes of the block number in the networking protocol.
+    pub block_number_bytes: usize,
+
     /// If true, the chain uses the GrandPa networking protocol.
     pub has_grandpa_protocol: bool,
 }
@@ -138,6 +147,12 @@ struct SharedGuarded<TPlat: Platform> {
     // TODO: should also detect whenever we fail to open a block announces substream with any of these peers
     important_nodes: HashSet<PeerId, fnv::FnvBuildHasher>,
 
+    /// List of peer and chain index tuples for which no outbound slot should be assigned.
+    ///
+    /// The values are the moment when the ban expires.
+    // TODO: use SipHasher
+    slots_assign_backoff: HashMap<(PeerId, usize), TPlat::Instant, fnv::FnvBuildHasher>,
+
     messages_from_connections_tx:
         mpsc::Sender<(service::ConnectionId, service::ConnectionToCoordinator)>,
 
@@ -169,13 +184,13 @@ struct SharedGuarded<TPlat: Platform> {
 
     storage_proof_requests: HashMap<
         service::OutRequestId,
-        oneshot::Sender<Result<Vec<Vec<u8>>, service::StorageProofRequestError>>,
+        oneshot::Sender<Result<service::EncodedMerkleProof, service::StorageProofRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
     call_proof_requests: HashMap<
         service::OutRequestId,
-        oneshot::Sender<Result<Vec<Vec<u8>>, service::CallProofRequestError>>,
+        oneshot::Sender<Result<service::EncodedMerkleProof, service::CallProofRequestError>>,
         fnv::FnvBuildHasher,
     >,
 
@@ -205,8 +220,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                 grandpa_protocol_config: if chain.has_grandpa_protocol {
                     // TODO: dummy values
                     Some(service::GrandpaState {
-                        commit_finalized_height: u32::try_from(chain.finalized_block_height)
-                            .unwrap(), // TODO: unwrap()?!
+                        commit_finalized_height: chain.finalized_block_height,
                         round_number: 1,
                         set_id: 0,
                     })
@@ -214,6 +228,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     None
                 },
                 protocol_id: chain.protocol_id.clone(),
+                block_number_bytes: chain.block_number_bytes,
                 best_hash: chain.best_block.1,
                 best_number: chain.best_block.0,
                 genesis_hash: chain.genesis_block_hash,
@@ -241,6 +256,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
                     handshake_timeout: Duration::from_secs(8),
                     randomness_seed: rand::random(),
                 }),
+                slots_assign_backoff: HashMap::with_capacity_and_hasher(32, Default::default()),
                 important_nodes: HashSet::with_capacity_and_hasher(16, Default::default()),
                 active_connections: HashMap::with_capacity_and_hasher(32, Default::default()),
                 messages_from_connections_tx,
@@ -442,7 +458,10 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
         if !log::log_enabled!(log::Level::Debug) {
             match &result {
-                Ok(_) | Err(service::BlocksRequestError::Request(_)) => {}
+                Ok(_)
+                | Err(service::BlocksRequestError::EmptyResponse)
+                | Err(service::BlocksRequestError::NotVerifiable) => {}
+                Err(service::BlocksRequestError::Request(err)) if !err.is_protocol_error() => {}
                 Err(err) => {
                     log::warn!(
                         target: "network",
@@ -568,7 +587,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::StorageProofRequestConfig<impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
-    ) -> Result<Vec<Vec<u8>>, StorageProofRequestError> {
+    ) -> Result<service::EncodedMerkleProof, StorageProofRequestError> {
         let rx = {
             let mut guarded = self.shared.guarded.lock().await;
 
@@ -605,13 +624,14 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
         match &result {
             Ok(items) => {
+                let decoded = items.decode();
                 log::debug!(
                     target: "network",
                     "Connection({}) => StorageProofRequest(chain={}, num_elems={}, total_size={})",
                     target,
                     self.shared.log_chain_names[chain_index],
-                    items.len(),
-                    BytesDisplay(items.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
+                    decoded.len(),
+                    BytesDisplay(decoded.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
                 );
             }
             Err(err) => {
@@ -638,7 +658,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         target: PeerId, // TODO: takes by value because of futures longevity issue
         config: protocol::CallProofRequestConfig<'a, impl Iterator<Item = impl AsRef<[u8]>>>,
         timeout: Duration,
-    ) -> Result<Vec<Vec<u8>>, CallProofRequestError> {
+    ) -> Result<EncodedMerkleProof, CallProofRequestError> {
         let rx = {
             let mut guarded = self.shared.guarded.lock().await;
 
@@ -675,13 +695,14 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
         match &result {
             Ok(items) => {
+                let decoded = items.decode();
                 log::debug!(
                     target: "network",
                     "Connection({}) => CallProofRequest({}, num_elems: {}, total_size: {})",
                     target,
                     self.shared.log_chain_names[chain_index],
-                    items.len(),
-                    BytesDisplay(items.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
+                    decoded.len(),
+                    BytesDisplay(decoded.iter().fold(0, |a, b| a + u64::try_from(b.len()).unwrap()))
                 );
             }
             Err(err) => {
@@ -719,10 +740,15 @@ impl<TPlat: Platform> NetworkService<TPlat> {
         let mut guarded = self.shared.guarded.lock().await;
 
         // TODO: collecting in a Vec :-/
-        for peer in guarded.network.peers_list().cloned().collect::<Vec<_>>() {
+        for peer in guarded
+            .network
+            .opened_transactions_substream(chain_index)
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             if guarded
                 .network
-                .announce_transaction(&peer, chain_index, &transaction)
+                .announce_transaction(&peer, chain_index, transaction)
                 .is_ok()
             {
                 sent_peers.push(peer);
@@ -746,7 +772,7 @@ impl<TPlat: Platform> NetworkService<TPlat> {
 
         // The call to `send_block_announce` below panics if we have no active connection.
         // TODO: not the correct check; must make sure that we have a substream open
-        if !guarded.network.has_established_connection(&target) {
+        if !guarded.network.has_established_connection(target) {
             return Err(QueueNotificationError::NoConnection);
         }
 
@@ -773,16 +799,39 @@ impl<TPlat: Platform> NetworkService<TPlat> {
     ) {
         let mut guarded = self.shared.guarded.lock().await;
 
-        if important_nodes {
-            let list = list.into_iter().collect::<Vec<_>>();
-            let to_add_important = list.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>();
-            guarded.network.discover(now, chain_index, list);
-            guarded.important_nodes.extend(to_add_important);
-        } else {
-            guarded.network.discover(now, chain_index, list)
+        for (peer_id, addrs) in list {
+            if important_nodes {
+                guarded.important_nodes.insert(peer_id.clone());
+            }
+
+            guarded.network.discover(now, chain_index, peer_id, addrs);
         }
 
         self.shared.wake_up_main_background_task.notify(1);
+    }
+
+    /// Returns a list of nodes (their [`PeerId`] and multiaddresses) that we know are part of
+    /// the network.
+    ///
+    /// Nodes that are discovered might disappear over time. In other words, there is no guarantee
+    /// that a node that has been added through [`NetworkService::discover`] will later be
+    /// returned by [`NetworkService::discovered_nodes`].
+    pub async fn discovered_nodes(
+        &self,
+        chain_index: usize,
+    ) -> impl Iterator<Item = (PeerId, impl Iterator<Item = Multiaddr>)> {
+        let guarded = self.shared.guarded.lock().await;
+        guarded
+            .network
+            .discovered_nodes(chain_index)
+            .map(|(peer_id, addresses)| {
+                (
+                    peer_id.clone(),
+                    addresses.cloned().collect::<Vec<_>>().into_iter(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
@@ -829,6 +878,7 @@ pub enum Event {
     },
     /// Received a GrandPa commit message from the network.
     GrandpaCommitMessage {
+        peer_id: PeerId,
         chain_index: usize,
         message: service::EncodedGrandpaCommitMessage,
     },
@@ -840,6 +890,7 @@ pub enum BlocksRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
+    #[display(fmt = "{}", _0)]
     Request(service::BlocksRequestError),
 }
 
@@ -849,6 +900,7 @@ pub enum GrandpaWarpSyncRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
+    #[display(fmt = "{}", _0)]
     Request(service::GrandpaWarpSyncRequestError),
 }
 
@@ -858,6 +910,7 @@ pub enum StorageProofRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
+    #[display(fmt = "{}", _0)]
     Request(service::StorageProofRequestError),
 }
 
@@ -867,6 +920,7 @@ pub enum CallProofRequestError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the request.
+    #[display(fmt = "{}", _0)]
     Request(service::CallProofRequestError),
 }
 
@@ -887,6 +941,7 @@ pub enum QueueNotificationError {
     /// No established connection with the target.
     NoConnection,
     /// Error during the queuing.
+    #[display(fmt = "{}", _0)]
     Queue(peers::QueueNotificationError),
 }
 
@@ -1025,6 +1080,8 @@ async fn update_round<TPlat: Platform>(
                         &shared.log_chain_names[chain_index],
                         peer_id
                     );
+                    guarded.unassign_slot_and_ban(chain_index, peer_id);
+                    shared.wake_up_main_background_task.notify(1);
                 }
                 service::Event::ChainDisconnected {
                     peer_id,
@@ -1047,6 +1104,8 @@ async fn update_round<TPlat: Platform>(
                         &shared.log_chain_names[chain_index],
                         peer_id
                     );
+                    guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
+                    shared.wake_up_main_background_task.notify(1);
                     break Event::Disconnected {
                         peer_id,
                         chain_index,
@@ -1113,15 +1172,41 @@ async fn update_round<TPlat: Platform>(
                                 nodes.iter().map(|(p, _)| p.to_string()).join(", ")
                             );
 
-                            guarded.network.discover(&TPlat::now(), chain_index, nodes);
+                            for (peer_id, addrs) in nodes {
+                                guarded.network.discover(
+                                    &TPlat::now(),
+                                    chain_index,
+                                    peer_id,
+                                    addrs,
+                                );
+                            }
                         }
                         Err(error) => {
-                            log::warn!(
+                            log::debug!(
                                 target: "connections",
-                                "Problem during discovery on {}: {}",
-                                &shared.log_chain_names[chain_index],
+                                "Discovery => {:?}",
                                 error
                             );
+
+                            // No error is printed if the error is about the fact that we have
+                            // 0 peers, as this tends to happen quite frequently at initialization
+                            // and there is nothing that can be done against this error anyway.
+                            // No error is printed either if the request fails due to a benign
+                            // networking error such as an unresponsive peer.
+                            match error {
+                                service::DiscoveryError::NoPeer => {}
+                                service::DiscoveryError::FindNode(
+                                    service::KademliaFindNodeError::RequestFailed(err),
+                                ) if !err.is_protocol_error() => {}
+                                _ => {
+                                    log::warn!(
+                                        target: "connections",
+                                        "Problem during discovery on {}: {}",
+                                        &shared.log_chain_names[chain_index],
+                                        error
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -1154,6 +1239,7 @@ async fn update_round<TPlat: Platform>(
                 }
                 service::Event::GrandpaCommitMessage {
                     chain_index,
+                    peer_id,
                     message,
                 } => {
                     log::debug!(
@@ -1164,6 +1250,7 @@ async fn update_round<TPlat: Platform>(
                     );
                     break Event::GrandpaCommitMessage {
                         chain_index,
+                        peer_id,
                         message,
                     };
                 }
@@ -1175,6 +1262,11 @@ async fn update_round<TPlat: Platform>(
                         peer_id,
                         error,
                     );
+
+                    for chain_index in 0..guarded.network.num_chains() {
+                        guarded.unassign_slot_and_ban(chain_index, peer_id.clone());
+                    }
+                    shared.wake_up_main_background_task.notify(1);
                 }
             }
         };
@@ -1204,15 +1296,36 @@ async fn update_round<TPlat: Platform>(
 
     // TODO: doc
     for chain_index in 0..shared.log_chain_names.len() {
+        let now = TPlat::now();
+
+        // Clean up the content of `slots_assign_backoff`.
+        // TODO: the background task should be woken up when the ban expires
+        // TODO: O(n)
+        guarded
+            .slots_assign_backoff
+            .retain(|_, expiration| *expiration > now);
+
         loop {
-            let peer = guarded.network.assign_slots(chain_index);
-            if let Some(peer_id) = peer {
+            let peer_id = guarded
+                .network
+                .slots_to_assign(chain_index)
+                .filter(|peer_id| {
+                    !guarded
+                        .slots_assign_backoff
+                        .contains_key(&((**peer_id).clone(), chain_index)) // TODO: spurious cloning
+                })
+                .next()
+                .cloned();
+
+            if let Some(peer_id) = peer_id {
                 log::debug!(
                     target: "connections",
                     "OutSlots({}) ∋ {}",
                     &shared.log_chain_names[chain_index],
                     peer_id
                 );
+
+                guarded.network.assign_out_slot(chain_index, peer_id);
             } else {
                 break;
             }
@@ -1233,7 +1346,7 @@ async fn update_round<TPlat: Platform>(
             .contains(&start_connect.expected_peer_id);
 
         // Perform the connection process in a separate task.
-        let task = connection_task(
+        let task = tasks::connection_task(
             start_connect,
             shared.clone(),
             guarded.messages_from_connections_tx.clone(),
@@ -1270,285 +1383,19 @@ async fn update_round<TPlat: Platform>(
     }
 }
 
-/// Asynchronous task managing a specific connection, including the connection process and the
-/// processing of the connection after it's been open.
-async fn connection_task<TPlat: Platform>(
-    start_connect: service::StartConnect<TPlat::Instant>,
-    shared: Arc<Shared<TPlat>>,
-    connection_to_coordinator_tx: mpsc::Sender<(
-        service::ConnectionId,
-        service::ConnectionToCoordinator,
-    )>,
-    is_important: bool,
-) {
-    // Convert the `multiaddr` (typically of the form `/ip4/a.b.c.d/tcp/d/ws`)
-    // into a `Future<dyn Output = Result<TcpStream, ...>>`.
-    let socket = {
-        log::debug!(
-            target: "connections",
-            "Pending({:?}, {}) started: {}",
-            start_connect.id, start_connect.expected_peer_id,
-            start_connect.multiaddr
-        );
-        TPlat::connect(&start_connect.multiaddr.to_string())
-    };
+impl<TPlat: Platform> SharedGuarded<TPlat> {
+    fn unassign_slot_and_ban(&mut self, chain_index: usize, peer_id: PeerId) {
+        self.network.unassign_slot(chain_index, &peer_id);
 
-    let socket = {
-        let socket = socket.fuse();
-        futures::pin_mut!(socket);
-        let mut timeout = TPlat::sleep_until(start_connect.timeout).fuse();
-
-        let result = futures::select! {
-            _ = timeout => Err(None),
-            result = socket => result.map_err(Some),
-        };
-
-        match (&result, is_important) {
-            (Ok(_), _) => {}
-            (Err(None), true) => {
-                log::warn!(
-                    target: "connections",
-                    "Timeout when trying to reach bootnode {} through {}",
-                    start_connect.expected_peer_id, start_connect.multiaddr
-                );
+        let new_expiration = TPlat::now() + Duration::from_secs(20); // TODO: arbitrary constant
+        match self.slots_assign_backoff.entry((peer_id, chain_index)) {
+            hash_map::Entry::Occupied(e) if *e.get() < new_expiration => {
+                *e.into_mut() = new_expiration;
             }
-            (Err(None), false) => {
-                log::debug!(
-                    target: "connections",
-                    "Pending({:?}, {}) => Timeout({})",
-                    start_connect.id, start_connect.expected_peer_id,
-                    start_connect.multiaddr
-                );
-            }
-            (Err(Some(err)), true) if !err.is_bad_addr => {
-                log::warn!(
-                    target: "connections",
-                    "Failed to reach bootnode {} through {}: {}",
-                    start_connect.expected_peer_id, start_connect.multiaddr,
-                    err.message
-                );
-            }
-            (Err(Some(err)), _) => {
-                log::debug!(
-                    target: "connections",
-                    "Pending({:?}, {}) => ReachFailed(addr={}, known-unreachable={:?}, error={:?})",
-                    start_connect.id, start_connect.expected_peer_id,
-                    start_connect.multiaddr, err.is_bad_addr, err.message
-                );
+            hash_map::Entry::Occupied(_) => {}
+            hash_map::Entry::Vacant(e) => {
+                e.insert(new_expiration);
             }
         }
-
-        match result {
-            Ok(ws) => ws,
-            Err(err) => {
-                let mut guarded = shared.guarded.lock().await;
-                guarded.network.pending_outcome_err(
-                    start_connect.id,
-                    err.map_or(false, |err| err.is_bad_addr),
-                ); // TODO: should pass a proper value for `is_unreachable`, but an error is sometimes returned despite a timeout https://github.com/paritytech/smoldot/issues/1531
-
-                // We wake up the background task so that the slot can potentially be
-                // assigned to a different peer.
-                shared.wake_up_main_background_task.notify(1);
-
-                // Stop the task.
-                return;
-            }
-        }
-    };
-
-    // Connection process is successful. Notify the network state machine.
-    let mut guarded = shared.guarded.lock().await;
-    let (connection_id, connec_task) = guarded.network.pending_outcome_ok(start_connect.id);
-    log::debug!(
-        target: "connections",
-        "Pending({:?}, {}) => Connection through {}",
-        start_connect.id,
-        start_connect.expected_peer_id,
-        start_connect.multiaddr
-    );
-
-    let (coordinator_to_connection_tx, coordinator_to_connection_rx) = mpsc::channel(8);
-    let _prev_value = guarded
-        .active_connections
-        .insert(connection_id, coordinator_to_connection_tx);
-    debug_assert!(_prev_value.is_none());
-
-    drop(guarded);
-
-    open_connection_task::<TPlat>(
-        socket,
-        shared.clone(),
-        connection_id,
-        connec_task,
-        coordinator_to_connection_rx,
-        connection_to_coordinator_tx,
-    )
-    .await
-}
-
-/// Asynchronous task managing a specific connection after it's been open.
-// TODO: a lot of logging disappeared
-async fn open_connection_task<TPlat: Platform>(
-    mut websocket: TPlat::Connection,
-    shared: Arc<Shared<TPlat>>,
-    connection_id: service::ConnectionId,
-    mut connection_task: service::ConnectionTask<TPlat::Instant>,
-    coordinator_to_connection: mpsc::Receiver<service::CoordinatorToConnection<TPlat::Instant>>,
-    mut connection_to_coordinator: mpsc::Sender<(
-        service::ConnectionId,
-        service::ConnectionToCoordinator,
-    )>,
-) {
-    // We need to use `peek()` on this future later down this function.
-    let mut coordinator_to_connection = coordinator_to_connection.peekable();
-
-    // In order to write data on a connection, we simply pass a slice, and the platform will copy
-    // from this slice the data to send. Consequently, the write buffer is held locally. This is
-    // suboptimal compared to writing to a write buffer provided by the platform, but it is easier
-    // to implement it this way.
-    let mut write_buffer = vec![0; 4096];
-
-    // The main loop is as follows:
-    // - Update the state machine.
-    // - Wait until there's something to do.
-    // - Repeat.
-    loop {
-        // Inject in the connection task the messages coming from the coordinator, if any.
-        loop {
-            let message = match coordinator_to_connection.next().now_or_never() {
-                Some(Some(msg)) => msg,
-                _ => break,
-            };
-            connection_task.inject_coordinator_message(message);
-        }
-
-        // Perform a read-write. This updates the internal state of the connection task.
-        let now = TPlat::now();
-        let mut read_write = ReadWrite {
-            now: now.clone(),
-            incoming_buffer: TPlat::read_buffer(&mut websocket),
-            outgoing_buffer: Some((&mut write_buffer, &mut [])), // TODO: this should be None if a previous read_write() produced None
-            read_bytes: 0,
-            written_bytes: 0,
-            wake_up_after: None,
-        };
-        connection_task.read_write(&mut read_write);
-
-        // Because the `read_write` object borrows the connection, we need to drop it before we
-        // can modify the connection. Before dropping the `read_write`, clone some important
-        // information from it.
-        let read_buffer_has_data = read_write.incoming_buffer.map_or(false, |b| !b.is_empty());
-        let read_buffer_closed = read_write.incoming_buffer.is_none();
-        let read_bytes = read_write.read_bytes;
-        let written_bytes = read_write.written_bytes;
-        let wake_up_after = read_write.wake_up_after.clone();
-        drop(read_write);
-
-        // Now update the connection.
-        if written_bytes != 0 {
-            TPlat::send(&mut websocket, &write_buffer[..written_bytes]);
-        }
-        TPlat::advance_read_cursor(&mut websocket, read_bytes);
-
-        // Try pull message to send to the coordinator.
-
-        // Calling this method takes ownership of the task and returns that task if it has
-        // more work to do. If `None` is returned, then the entire task is gone and the
-        // connection must be abruptly closed, which is what happens when we return from
-        // this function.
-        let (mut task_update, message) = connection_task.pull_message_to_coordinator();
-
-        // If `task_update` is `None`, the connection task is going to die as soon as the
-        // message reaches the coordinator. Before returning, we need to do a bit of clean up
-        // by removing the task from the list of active connections.
-        // This is done before the message is sent to the coordinator, in order to be sure
-        // that the connection id is still attributed to the current task, and not to a new
-        // connection that the coordinator has assigned after receiving the message.
-        if task_update.is_none() {
-            let mut guarded = shared.guarded.lock().await;
-            let _was_in = guarded.active_connections.remove(&connection_id);
-            debug_assert!(_was_in.is_some());
-        }
-
-        let has_message = message.is_some();
-        if let Some(message) = message {
-            // Sending this message might take a long time (in case the coordinator is busy),
-            // but this is intentional and serves as a back-pressure mechanism.
-            // However, it is important to continue processing the messages coming from the
-            // coordinator, otherwise this could result in a deadlock.
-
-            // We do this by waiting for `connection_to_coordinator` to be ready to accept
-            // an element. Due to the way channels work, once a channel is ready it will
-            // always remain ready until we push an element. While waiting, we process
-            // incoming messages.
-            loop {
-                futures::select! {
-                    _ = future::poll_fn(|cx| connection_to_coordinator.poll_ready(cx)).fuse() => break,
-                    message = coordinator_to_connection.next() => {
-                        if let Some(message) = message {
-                            if let Some(task_update) = &mut task_update {
-                                task_update.inject_coordinator_message(message);
-                            }
-                        } else {
-                            return;
-                        }
-                    }
-                }
-            }
-            let result = connection_to_coordinator.try_send((connection_id, message));
-            shared.wake_up_main_background_task.notify(1);
-            if result.is_err() {
-                return;
-            }
-        }
-
-        if let Some(task_update) = task_update {
-            connection_task = task_update;
-        } else {
-            return;
-        }
-
-        // We must call `read_write` and `pull_message_to_coordinator` repeatedly until nothing
-        // happens anymore.
-        if has_message || read_bytes != 0 || written_bytes != 0 {
-            continue;
-        }
-
-        // Starting from here, we block the current task until more processing needs to happen.
-
-        // Future ready when the timeout indicated by the connection state machine is reached.
-        let poll_after = if let Some(wake_up) = wake_up_after {
-            if wake_up > now {
-                let dur = wake_up - now;
-                future::Either::Left(TPlat::sleep(dur))
-            } else {
-                // "Wake up" immediately.
-                continue;
-            }
-        } else {
-            future::Either::Right(future::pending())
-        }
-        .fuse();
-
-        // Future that is woken up when new data is ready on the socket.
-        let read_buffer_ready = if !(read_buffer_has_data && read_bytes == 0) && !read_buffer_closed
-        {
-            future::Either::Left(TPlat::wait_more_data(&mut websocket))
-        } else {
-            future::Either::Right(future::pending())
-        };
-
-        // Future that is woken up when a new message is coming from the coordinator.
-        let message_from_coordinator = Pin::new(&mut coordinator_to_connection).peek();
-
-        // Wait until either some data is ready on the socket, or the connection state machine
-        // has requested to be polled again, or a message is coming from the coordinator.
-        futures::pin_mut!(read_buffer_ready);
-        future::select(
-            future::select(read_buffer_ready, message_from_coordinator),
-            poll_after,
-        )
-        .await;
     }
 }

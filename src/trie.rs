@@ -86,8 +86,7 @@
 
 use crate::util;
 
-use alloc::{collections::BTreeMap, vec::Vec};
-use core::{iter, mem};
+use core::iter;
 
 mod nibble;
 
@@ -105,104 +104,16 @@ pub use nibble::{
 
 /// The format of the nodes of trie has two different versions.
 ///
-/// As a summary of the difference between versions, in V1 the value of the item in the trie is
-/// hashed if it is too large. This isn't the case in V0 where the value of the item is always
+/// As a summary of the difference between versions, in `V1` the value of the item in the trie is
+/// hashed if it is too large. This isn't the case in `V0` where the value of the item is always
 /// unhashed.
 ///
-/// An encoded node value can be decoded unambiguously no matter whether it was encoded using V0
-/// or V1.
+/// An encoded node value can be decoded unambiguously no matter whether it was encoded using `V0`
+/// or `V1`.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum TrieEntryVersion {
     V0,
     V1,
-}
-
-/// Radix-16 Merkle-Patricia trie.
-// TODO: probably useless, remove
-pub struct Trie {
-    /// The entries in the tree.
-    ///
-    /// Since this is a binary tree, the elements are ordered lexicographically.
-    /// Example order: "a", "ab", "ac", "b".
-    ///
-    /// This list only contains the nodes that have an entry in the storage, and not the nodes
-    /// that are branches and don't have a storage entry.
-    ///
-    /// All the keys have an even number of nibbles.
-    entries: BTreeMap<Vec<u8>, Vec<u8>>,
-
-    /// Value passed as initialization.
-    entries_version: TrieEntryVersion,
-}
-
-impl Trie {
-    /// Builds a new empty [`Trie`].
-    pub fn new(entries_version: TrieEntryVersion) -> Trie {
-        Trie {
-            entries: BTreeMap::new(),
-            entries_version,
-        }
-    }
-
-    /// Inserts a new entry in the trie.
-    pub fn insert(&mut self, key: &[u8], value: impl Into<Vec<u8>>) {
-        self.entries.insert(key.into(), value.into());
-    }
-
-    /// Removes an entry from the trie.
-    pub fn remove(&mut self, key: &[u8]) -> Option<Vec<u8>> {
-        self.entries.remove(key)
-    }
-
-    /// Returns true if the `Trie` is empty.
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Removes all the elements from the trie.
-    pub fn clear(&mut self) {
-        self.entries.clear();
-    }
-
-    /// Calculates the Merkle value of the root node.
-    ///
-    /// Passes an optional cache.
-    pub fn root_merkle_value(
-        &self,
-        mut cache: Option<&mut calculate_root::CalculationCache>,
-    ) -> [u8; 32] {
-        let mut calculation = calculate_root::root_merkle_value({
-            if let Some(cache) = &mut cache {
-                Some(mem::replace(
-                    cache,
-                    calculate_root::CalculationCache::empty(),
-                ))
-            } else {
-                None
-            }
-        });
-
-        loop {
-            match calculation {
-                calculate_root::RootMerkleValueCalculation::Finished {
-                    hash,
-                    cache: new_cache,
-                } => {
-                    if let Some(cache) = cache {
-                        *cache = new_cache;
-                    }
-                    return hash;
-                }
-                calculate_root::RootMerkleValueCalculation::AllKeys(keys) => {
-                    calculation = keys.inject(self.entries.keys().map(|k| k.iter().copied()));
-                }
-                calculate_root::RootMerkleValueCalculation::StorageValue(value) => {
-                    let key = value.key().collect::<Vec<u8>>();
-                    calculation = value.inject(self.entries_version, self.entries.get(&key));
-                }
-            }
-        }
-    }
 }
 
 /// Returns the Merkle value of the root of an empty trie.

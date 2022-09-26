@@ -122,7 +122,7 @@ pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
     };
 
     let mut children = [None; 16];
-    for n in 0..16 {
+    for (n, child) in children.iter_mut().enumerate() {
         if children_bitmap & (1 << n) == 0 {
             continue;
         }
@@ -135,7 +135,7 @@ pub fn decode(mut node_value: &[u8]) -> Result<Decoded, Error> {
             return Err(Error::ChildrenTooShort);
         }
 
-        children[n] = Some(&node_value[..len]);
+        *child = Some(&node_value[..len]);
         node_value = &node_value[len..];
     }
 
@@ -192,7 +192,7 @@ impl<'a> Decoded<'a> {
 pub enum StorageValue<'a> {
     /// Storage value of the item is present in the node value.
     Unhashed(&'a [u8]),
-    /// Blake2 hash of the storage value of the item is present in the node value.
+    /// BLAKE2 hash of the storage value of the item is present in the node value.
     Hashed(&'a [u8; 32]),
     /// Item doesn't have any storage value.
     None,

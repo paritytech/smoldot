@@ -139,9 +139,8 @@ impl FromVmPrototypeError {
 }
 
 fn decode_config(scale_encoded: &[u8]) -> Result<GrandpaGenesisConfiguration, ()> {
-    let result: nom::IResult<_, _> = nom::combinator::all_consuming(nom::combinator::flat_map(
-        crate::util::nom_scale_compact_usize,
-        |num_elems| {
+    let result: nom::IResult<_, _> = nom::combinator::all_consuming(nom::combinator::complete(
+        nom::combinator::flat_map(crate::util::nom_scale_compact_usize, |num_elems| {
             nom::multi::fold_many_m_n(
                 num_elems,
                 num_elems,
@@ -160,7 +159,7 @@ fn decode_config(scale_encoded: &[u8]) -> Result<GrandpaGenesisConfiguration, ()
                     acc
                 },
             )
-        },
+        }),
     ))(scale_encoded);
 
     match result {

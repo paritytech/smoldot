@@ -104,6 +104,7 @@ impl<T> ForkTree<T> {
     /// Removes all elements in the tree, leaving it empty.
     pub fn clear(&mut self) {
         self.nodes.clear();
+        self.first_root = None;
     }
 
     /// Shrink the capacity of the tree as much as possible.
@@ -194,6 +195,17 @@ impl<T> ForkTree<T> {
                 .collect(),
             first_root: self.first_root,
         }
+    }
+
+    /// Returns the ancestors of the given node. The iterator is empty if the node doesn't have
+    /// any parent.
+    ///
+    /// # Panic
+    ///
+    /// Panics if the [`NodeIndex`] is invalid.
+    ///
+    pub fn ancestors(&'_ self, node: NodeIndex) -> impl Iterator<Item = NodeIndex> + '_ {
+        iter::successors(Some(node), move |n| self.nodes[n.0].parent.map(NodeIndex)).skip(1)
     }
 
     /// Returns the parent of the given node. Returns `None` if the node doesn't have any parent.

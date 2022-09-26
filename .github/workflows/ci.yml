@@ -27,9 +27,8 @@ jobs:
   test-64bits:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.60
+      image: rust:1.61
     steps:
-    - run: apt-get update && apt install -y cmake # For the `prost-build` library
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
     - run: RUSTFLAGS=-Dwarnings cargo test --locked --workspace --all-features
@@ -37,9 +36,9 @@ jobs:
   test-32bits:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.60
+      image: rust:1.61
     steps:
-    - run: apt-get update && apt install -y libc6-dev-i386 && apt install -y cmake # For the `prost-build` library
+    - run: apt-get update && apt install -y libc6-dev-i386
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
     - run: rustup target add i686-unknown-linux-gnu
@@ -48,29 +47,32 @@ jobs:
   wasm-node-check:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.60
+      image: rust:1.61
     steps:
-    - run: apt-get update && apt install -y binaryen && apt install -y cmake # For `wasm-opt` and the `prost-build` library
+    - run: apt-get update && apt install -y binaryen # For `wasm-opt`
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
-    - uses: actions/setup-node@v3.2.0
+    - uses: actions/setup-node@v3.4.1
       with:
-        node-version: '14'
+        node-version: '12'  # An old version is used to ensure compatibility
+    - uses: denoland/setup-deno@v1
+      with:
+        deno-version: v1.x
     - run: cd bin/wasm-node/javascript && RUSTFLAGS=-Dwarnings npm install-ci-test
 
   wasm-node-size-diff:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.60
+      image: rust:1.61
     steps:
-    - run: apt-get update && apt install -y cmake # For the `prost-build` library
+    - run: apt-get update && apt install -y cmake # TODO: remove; temporarily needed to build the `prost-build` library in the "before" comparison
     - uses: actions/checkout@v3
       with:
         fetch-depth: 0  # Necessary to fetch pull request base below
     - uses: Swatinem/rust-cache@v1
-    - uses: actions/setup-node@v3.2.0
+    - uses: actions/setup-node@v3.4.1
       with:
-        node-version: '14'
+        node-version: '14'  # Because this step doesn't actually check anything, we use a more liberal version
     - uses: baptiste0928/cargo-install@v1  # This action ensures that the twiggy compilation is cached.
       with:
         crate: twiggy
@@ -96,22 +98,51 @@ jobs:
   check-features:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.60
+      image: rust:1.61
     steps:
-    - run: apt-get update && apt install -y cmake # For the `prost-build` library
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
-    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features
-    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features database-sqlite
-    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features std
-    - run: RUSTFLAGS=-Dwarnings cargo check --package smoldot --locked --no-default-features --features database-sqlite --features std
+    - run: apt-get update && apt install -y libc6-dev-i386
+    - run: rustup target add i686-unknown-linux-gnu
+    # We test for both x86_64 and i686 because there is some `cfg(target_arch = "x86_64")`
+    # conditional compilation within the source code.
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot --locked --no-default-features --features database-sqlite --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot-light --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot-light --locked --no-default-features
+    - run: RUSTFLAGS=-Dwarnings cargo check --target x86_64-unknown-linux-gnu --package smoldot-light --locked --no-default-features --features std
+    - run: RUSTFLAGS=-Dwarnings cargo check --target i686-unknown-linux-gnu --package smoldot-light --locked --no-default-features --features std
+
+  fuzzing-binaries-compile:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions-rs/toolchain@v1
+      with:
+        # Since build artifacts are specific to a nightly version, we pin the specific nightly
+        # version to use in order to not invalidate the build cache every day. The exact version
+        # is completely arbitrary.
+        toolchain: nightly-2022-06-05
+        override: true
+    - uses: baptiste0928/cargo-install@v1  # This action ensures that the compilation is cached.
+      with:
+        crate: cargo-fuzz
+    - uses: Swatinem/rust-cache@v1
+      with:
+        working-directory: ./bin/fuzz
+    - run: cargo fuzz build --fuzz-dir ./bin/fuzz
 
   check-rustdoc-links:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.60
+      image: rust:1.61
     steps:
-    - run: apt-get update && apt install -y cmake # For the `prost-build` library
     - uses: actions/checkout@v3
     - uses: Swatinem/rust-cache@v1
     - run: cargo doc --verbose --workspace --all-features --no-deps --document-private-items
@@ -130,6 +161,11 @@ jobs:
         with:
           command: fmt
           args: --all -- --check
+      - uses: actions-rs/cargo@v1
+        # The fuzzing targets are in a different package and thus need to be checked separately.
+        with:
+          command: fmt
+          args: --manifest-path ./bin/fuzz/Cargo.toml --all -- --check
 
   # TODO: as explained in the official repo (https://github.com/actions-rs/clippy), this action uses unstable GH actions features, but has the huge advantage of not requiring `GITHUB_TOKEN` and working on PRs from forked repositories ; should eventually replace `actions-rs/clippy@master` with a specific version
   clippy:
@@ -169,7 +205,7 @@ jobs:
       with:
         crate: cargo-spellcheck
         version: 0.11.2
-    - run: cargo spellcheck check
+    - run: cargo spellcheck -m 99
 
   wasm-node-versions-match:
     runs-on: ubuntu-latest
@@ -192,7 +228,7 @@ jobs:
   all-ci:
     # This dummy job depends on all the mandatory checks. It succeeds if and only if CI is
     # considered successful.
-    needs: [test-64bits, test-32bits, wasm-node-check, wasm-node-size-diff, check-features, check-rustdoc-links, fmt, clippy, cargo-deny, cargo-spellcheck, wasm-node-versions-match]
+    needs: [test-64bits, test-32bits, wasm-node-check, wasm-node-size-diff, check-features, fuzzing-binaries-compile, check-rustdoc-links, fmt, clippy, cargo-deny, cargo-spellcheck, wasm-node-versions-match]
     runs-on: ubuntu-latest
     steps:
      - run: echo Success

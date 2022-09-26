@@ -54,6 +54,19 @@
 //! If the code starts with the magic bytes `[82, 188, 83, 118, 70, 219, 142, 5]`, then it is
 //! assumed that the rest of the data is a zstandard-compressed WebAssembly module.
 //!
+//! ## Runtime version
+//!
+//! Wasm files can contain so-called custom sections. A runtime can contain two custom sections
+//! whose names are `"runtime_version"` and `"runtime_apis"`, in which case they must contain a
+//! so-called runtime version.
+//!
+//! The runtime version contains important field that identifies a runtime.
+//!
+//! If no `"runtime_version"` and `"runtime_apis"` custom sections can be found, the
+//! `Core_version` entry point is used as a fallback in order to obtain the runtime version. This
+//! fallback mechanism is maintained for backwards compatibility purposes, but is considered
+//! deprecated.
+//!
 //! ## Memory allocations
 //!
 //! One of the instructions available in WebAssembly code is
@@ -186,6 +199,9 @@ use core::{fmt, hash::Hasher as _, iter, str};
 use sha2::Digest as _;
 use tiny_keccak::Hasher as _;
 
+pub mod runtime_version;
+
+pub use runtime_version::{CoreVersion, CoreVersionError, CoreVersionRef};
 pub use vm::HeapPages;
 pub use zstd::Error as ModuleFormatError;
 
@@ -224,6 +240,11 @@ pub struct HostVmPrototype {
     /// > **Note**: Cloning this object is cheap.
     module: vm::Module,
 
+    /// Runtime version of this runtime.
+    ///
+    /// Always `Some`, except at initialization.
+    runtime_version: Option<CoreVersion>,
+
     /// Inner virtual machine prototype.
     vm_proto: vm::VirtualMachinePrototype,
 
@@ -255,14 +276,23 @@ impl HostVmPrototype {
         // TODO: configurable maximum allowed size? a uniform value is important for consensus
         let module = zstd::zstd_decode_if_necessary(config.module.as_ref(), 50 * 1024 * 1024)
             .map_err(NewErr::BadFormat)?;
+        let runtime_version = runtime_version::find_embedded_runtime_version(&module)
+            .ok()
+            .flatten(); // TODO: return error instead of using `ok()`? unclear
         let module = vm::Module::new(module, config.exec_hint).map_err(vm::NewErr::ModuleError)?;
-        Self::from_module(module, config.heap_pages, config.allow_unresolved_imports)
+        Self::from_module(
+            module,
+            config.heap_pages,
+            config.allow_unresolved_imports,
+            runtime_version,
+        )
     }
 
     fn from_module(
         module: vm::Module,
         heap_pages: HeapPages,
         allow_unresolved_imports: bool,
+        runtime_version: Option<CoreVersion>,
     ) -> Result<Self, NewErr> {
         // Initialize the virtual machine.
         // Each symbol requested by the Wasm runtime will be put in `registered_functions`. Later,
@@ -313,20 +343,71 @@ impl HostVmPrototype {
             return Err(NewErr::MemoryMaxSizeTooLow);
         }
 
-        Ok(HostVmPrototype {
+        let mut host_vm_prototype = HostVmPrototype {
             module,
+            runtime_version,
             vm_proto,
             heap_base,
             registered_functions,
             heap_pages,
             allow_unresolved_imports,
             memory_total_pages,
-        })
+        };
+
+        // Call `Core_version` if no runtime version is known yet.
+        if host_vm_prototype.runtime_version.is_none() {
+            let mut vm: HostVm = match host_vm_prototype.run_no_param("Core_version") {
+                Ok(vm) => vm.into(),
+                Err((err, _)) => return Err(NewErr::CoreVersion(CoreVersionError::Start(err))),
+            };
+
+            loop {
+                match vm {
+                    HostVm::ReadyToRun(r) => vm = r.run(),
+                    HostVm::Finished(finished) => {
+                        let version =
+                            match CoreVersion::from_slice(finished.value().as_ref().to_vec()) {
+                                Ok(v) => v,
+                                Err(_) => {
+                                    return Err(NewErr::CoreVersion(CoreVersionError::Decode))
+                                }
+                            };
+
+                        host_vm_prototype = finished.into_prototype();
+                        host_vm_prototype.runtime_version = Some(version);
+                        break;
+                    }
+
+                    // Emitted log lines are ignored.
+                    HostVm::GetMaxLogLevel(resume) => {
+                        vm = resume.resume(0); // Off
+                    }
+                    HostVm::LogEmit(log) => vm = log.resume(),
+
+                    HostVm::Error { error, .. } => {
+                        return Err(NewErr::CoreVersion(CoreVersionError::Run(error)))
+                    }
+
+                    // Getting the runtime version is a very core operation, and very few
+                    // external calls are allowed.
+                    _ => return Err(NewErr::CoreVersion(CoreVersionError::ForbiddenHostFunction)),
+                }
+            }
+        }
+
+        // Success!
+        debug_assert!(host_vm_prototype.runtime_version.is_some());
+        Ok(host_vm_prototype)
     }
 
     /// Returns the number of heap pages that were passed to [`HostVmPrototype::new`].
     pub fn heap_pages(&self) -> HeapPages {
         self.heap_pages
+    }
+
+    /// Returns the runtime version found in the module.
+    pub fn runtime_version(&self) -> &CoreVersion {
+        self.runtime_version.as_ref().unwrap()
     }
 
     /// Starts the VM, calling the function passed as parameter.
@@ -393,6 +474,7 @@ impl HostVmPrototype {
             resume_value: None,
             inner: Inner {
                 module: self.module,
+                runtime_version: self.runtime_version,
                 vm,
                 heap_base: self.heap_base,
                 heap_pages: self.heap_pages,
@@ -415,6 +497,7 @@ impl Clone for HostVmPrototype {
             self.module.clone(),
             self.heap_pages,
             self.allow_unresolved_imports,
+            self.runtime_version.clone(),
         )
         .unwrap()
     }
@@ -486,7 +569,6 @@ pub enum HostVm {
         /// Object used to resume execution.
         resume: EndStorageTransaction,
         /// If true, changes must be rolled back.
-        #[must_use]
         rollback: bool,
     },
     /// Need to provide the maximum log level.
@@ -787,12 +869,17 @@ impl ReadyToRun {
             }};
         }
 
-        // TODO: implement properly and use an enum instead;  cc https://github.com/paritytech/smoldot/issues/1967
         macro_rules! expect_state_version {
             ($num:expr) => {{
                 match &params[$num] {
                     vm::WasmValue::I32(0) => trie::TrieEntryVersion::V0,
                     vm::WasmValue::I32(1) => trie::TrieEntryVersion::V1,
+                    vm::WasmValue::I32(_) => {
+                        return HostVm::Error {
+                            error: Error::ParamDecodeError,
+                            prototype: self.inner.into_prototype(),
+                        }
+                    }
                     v => {
                         return HostVm::Error {
                             error: Error::WrongParamTy {
@@ -1056,8 +1143,8 @@ impl ReadyToRun {
                     if let Ok(public_key) = public_key {
                         let signature =
                             ed25519_zebra::Signature::from(expect_pointer_constant_size!(0, 64));
-                        let message = expect_pointer_size!(1).as_ref().to_owned(); // TODO: to_owned() :-/
-                        public_key.verify(&signature, &message).is_ok()
+                        let message = expect_pointer_size!(1);
+                        public_key.verify(&signature, message.as_ref()).is_ok()
                     } else {
                         false
                     }
@@ -1079,11 +1166,15 @@ impl ReadyToRun {
                         schnorrkel::PublicKey::from_bytes(&expect_pointer_constant_size!(2, 32))
                             .unwrap();
 
-                    let message = expect_pointer_size!(1).as_ref().to_owned(); // TODO: to_owned() :-/
                     let signature = expect_pointer_constant_size!(0, 64);
+                    let message = expect_pointer_size!(1);
 
                     signing_public_key
-                        .verify_simple_preaudit_deprecated(b"substrate", &message, &signature)
+                        .verify_simple_preaudit_deprecated(
+                            b"substrate",
+                            message.as_ref(),
+                            &signature,
+                        )
                         .is_ok()
                 };
 
@@ -1330,9 +1421,19 @@ impl ReadyToRun {
                 })
             }
             HostFunction::ext_crypto_finish_batch_verify_version_1 => {
+                // This function is a dummy implementation. After `ext_crypto_start_batch_verify`
+                // has been called, the runtime is supposed to call
+                // `ext_crypto_ed25519_batch_verify`, `ext_crypto_sr25519_batch_verify`, or
+                // `ext_crypto_ecdsa_batch_verify`, then retrieve the result using
+                // `ext_crypto_finish_batch_verify`. However, none of the three
+                // `<algo>_batch_verify` functions is supported by smoldot at the moment.
+                // Thus, if the runtime calls `ext_crypto_finish_batch_verify`, then it
+                // necessarily means that the batch is empty, and thus we always return success.
+                // At the moment, batch signatures verification isn't enabled on any production
+                // chain.
+                // Once support for any of the `<algo>_batch_verify` function is added, this
+                // implementation should of course change.
                 HostVm::ReadyToRun(ReadyToRun {
-                    // TODO: wrong! this is a dummy implementation meaning that all
-                    // signature verifications are always successful
                     resume_value: Some(vm::WasmValue::I32(1)),
                     inner: self.inner,
                 })
@@ -2359,6 +2460,9 @@ struct Inner {
     /// See [`HostVmPrototype::module`].
     module: vm::Module,
 
+    /// See [`HostVmPrototype::runtime_version`].
+    runtime_version: Option<CoreVersion>,
+
     /// Inner lower-level virtual machine.
     vm: vm::VirtualMachine,
 
@@ -2542,6 +2646,7 @@ impl Inner {
     fn into_prototype(self) -> HostVmPrototype {
         HostVmPrototype {
             module: self.module,
+            runtime_version: self.runtime_version,
             vm_proto: self.vm.into_prototype(),
             heap_base: self.heap_base,
             registered_functions: self.registered_functions,
@@ -2556,11 +2661,14 @@ impl Inner {
 #[derive(Debug, derive_more::From, derive_more::Display, Clone)]
 pub enum NewErr {
     /// Error while initializing the virtual machine.
-    #[display(fmt = "Error while initializing the virtual machine: {}", _0)]
+    #[display(fmt = "{}", _0)]
     VirtualMachine(vm::NewErr),
     /// Error in the format of the runtime code.
     #[display(fmt = "{}", _0)]
     BadFormat(ModuleFormatError),
+    /// Error while calling `Core_version` to determine the runtime version.
+    #[display(fmt = "Error while calling Core_version: {}", _0)]
+    CoreVersion(CoreVersionError),
     /// Couldn't find the `__heap_base` symbol in the Wasm code.
     HeapBaseNotFound,
     /// Maximum size of the Wasm memory found in the module is too low to provide the requested
@@ -2572,7 +2680,7 @@ pub enum NewErr {
 #[derive(Debug, Clone, derive_more::From, derive_more::Display)]
 pub enum StartErr {
     /// Error while starting the virtual machine.
-    #[display(fmt = "Error while starting the virtual machine: {}", _0)]
+    #[display(fmt = "{}", _0)]
     VirtualMachine(vm::StartErr),
     /// The size of the input data is too large.
     DataSizeOverflow,
@@ -2632,7 +2740,7 @@ pub enum Error {
     ParamDecodeError,
     /// The type of one of the parameters is wrong.
     #[display(
-        fmt = "Type mismatch in parameter #{}: {}, expected = {:?}, actual = {:?}",
+        fmt = "Type mismatch in parameter of index {}: {}, expected = {:?}, actual = {:?}",
         param_num,
         function,
         expected,
@@ -2651,7 +2759,7 @@ pub enum Error {
     /// One parameter is expected to point to a buffer, but the pointer is out
     /// of range of the memory of the Wasm VM.
     #[display(
-        fmt = "Bad pointer for parameter #{} of {}: 0x{:x}, len = 0x{:x}",
+        fmt = "Bad pointer for parameter of index {} of {}: 0x{:x}, len = 0x{:x}",
         param_num,
         function,
         pointer,
@@ -2673,7 +2781,7 @@ pub enum Error {
     /// One parameter is expected to point to a UTF-8 string, but the buffer
     /// isn't valid UTF-8.
     #[display(
-        fmt = "UTF-8 error for parameter #{} of {}: {}",
+        fmt = "UTF-8 error for parameter of index {} of {}: {}",
         param_num,
         function,
         error
@@ -2721,6 +2829,7 @@ pub enum Error {
     },
     /// The host function isn't implemented.
     // TODO: this variant should eventually disappear as all functions are implemented
+    #[display(fmt = "Host function not implemented: {}", function)]
     HostFunctionNotImplemented {
         /// Name of the function being called.
         function: &'static str,

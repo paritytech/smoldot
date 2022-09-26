@@ -17,26 +17,25 @@
 
 //! All JSON-RPC method handlers that related to the `chainHead` API.
 
-use super::{Background, FollowSubscription, Platform, SubscriptionTy};
+use super::{Background, FollowSubscription, SubscriptionTy};
 
-use crate::{runtime_service, sync_service};
+use crate::{platform::Platform, runtime_service, sync_service};
 
+use alloc::{borrow::ToOwned as _, boxed::Box, format, string::ToString as _, sync::Arc, vec::Vec};
+use core::{
+    cmp, iter,
+    num::{NonZeroU32, NonZeroUsize},
+    sync::atomic,
+    time::Duration,
+};
 use futures::prelude::*;
+use hashbrown::HashMap;
 use smoldot::{
     chain::fork_tree,
     executor::{self, runtime_host},
     header,
     json_rpc::{self, methods, requests_subscriptions},
     network::protocol,
-};
-use std::{
-    cmp,
-    collections::HashMap,
-    iter,
-    num::NonZeroU32,
-    str,
-    sync::{atomic, Arc},
-    time::Duration,
 };
 
 impl<TPlat: Platform> Background<TPlat> {
@@ -100,11 +99,10 @@ impl<TPlat: Platform> Background<TPlat> {
                             return;
                         }
 
-                        Some(
-                            me.runtime_service
-                                .pinned_block_runtime_lock(runtime_service_subscribe_all, &hash.0)
-                                .await,
-                        )
+                        me.runtime_service
+                            .pinned_block_runtime_lock(runtime_service_subscribe_all, &hash.0)
+                            .await
+                            .ok()
                     } else {
                         None
                     }
@@ -379,8 +377,10 @@ impl<TPlat: Platform> Background<TPlat> {
         };
 
         let (mut subscribe_all, runtime_subscribe_all) = if runtime_updates {
-            // TODO: it is possible that the maximum number of pinned blocks is lower than the current number of finalized blocks; the logic of subscribe_all should be slightly changed to avoid this situation
-            let subscribe_all = self.runtime_service.subscribe_all(32, 48).await;
+            let subscribe_all = self
+                .runtime_service
+                .subscribe_all("chainHead_follow", 32, NonZeroUsize::new(32).unwrap())
+                .await;
             let id = subscribe_all.new_blocks.id();
             (either::Left(subscribe_all), Some(id))
         } else {
@@ -668,6 +668,26 @@ impl<TPlat: Platform> Background<TPlat> {
                                 break;
                             }
                         }
+                        either::Left(Some(runtime_service::Notification::BestBlockChanged {
+                            hash,
+                        }))
+                        | either::Right(Some(sync_service::Notification::BestBlockChanged {
+                            hash,
+                        })) => {
+                            let _ = me
+                                .requests_subscriptions
+                                .try_push_notification(
+                                    &state_machine_subscription,
+                                    methods::ServerToClient::chainHead_unstable_followEvent {
+                                        subscription: (&subscription_id).into(),
+                                        result: methods::FollowEvent::BestBlockChanged {
+                                            best_block_hash: methods::HashHexString(hash),
+                                        },
+                                    }
+                                    .to_json_call_object_parameters(None),
+                                )
+                                .await;
+                        }
                         either::Left(Some(runtime_service::Notification::Block(block))) => {
                             let hash =
                                 header::hash_from_scale_encoded_header(&block.scale_encoded_header);
@@ -878,7 +898,9 @@ impl<TPlat: Platform> Background<TPlat> {
             let lock = self.subscriptions.lock().await;
             if let Some(subscription) = lock.chain_head_follow.get(follow_subscription) {
                 if let Some(header) = subscription.pinned_blocks_headers.get(&hash.0) {
-                    if let Ok(decoded) = header::decode(&header) {
+                    if let Ok(decoded) =
+                        header::decode(&header, self.sync_service.block_number_bytes())
+                    {
                         Some((*decoded.state_root, decoded.number))
                     } else {
                         None // TODO: what to return?!
@@ -1059,7 +1081,8 @@ impl<TPlat: Platform> Background<TPlat> {
             let lock = self.subscriptions.lock().await;
             if let Some(subscription) = lock.chain_head_follow.get(follow_subscription) {
                 if let Some(header) = subscription.pinned_blocks_headers.get(&hash.0) {
-                    let decoded = header::decode(&header).unwrap(); // TODO: unwrap?
+                    let decoded =
+                        header::decode(&header, self.sync_service.block_number_bytes()).unwrap(); // TODO: unwrap?
                     Some(decoded.number)
                 } else {
                     self.requests_subscriptions
@@ -1419,6 +1442,32 @@ impl<TPlat: Platform> Background<TPlat> {
                 )
                 .await;
         }
+    }
+
+    /// Handles a call to [`methods::MethodCall::chainHead_unstable_finalizedDatabase`].
+    pub(super) async fn chain_head_unstable_finalized_database(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+        max_size_bytes: Option<u64>,
+    ) {
+        // TODO: move the encode_database function where it makes more sense
+        let response = super::super::encode_database(
+            &self.network_service.0,
+            &self.sync_service,
+            self.sync_service.block_number_bytes(),
+            usize::try_from(max_size_bytes.unwrap_or(u64::max_value()))
+                .unwrap_or(usize::max_value()),
+        )
+        .await;
+
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::chainHead_unstable_finalizedDatabase(response.into())
+                    .to_json_response(request_id),
+            )
+            .await;
     }
 }
 

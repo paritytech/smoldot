@@ -1,6 +1,6 @@
 {
   "name": "@substrate/smoldot-light",
-  "version": "0.6.16",
+  "version": "0.6.34",
   "description": "Light client that connects to Polkadot and Substrate-based blockchains",
   "author": "Parity Technologies <admin@parity.io>",
   "license": "GPL-3.0-or-later WITH Classpath-exception-2.0",
@@ -13,28 +13,34 @@
     "url": "https://github.com/paritytech/smoldot/issues"
   },
   "files": ["dist"],
-  "type": "module",
-  "types": "dist/index.d.ts",
-  "main": "dist/index.js",
-  "scripts": {
-    "prepublishOnly": "node prepare.js --release && rimraf ./dist && tsc",
-    "build": "node prepare.js --release && rimraf ./dist && tsc",
-    "start": "node prepare.js --debug && rimraf ./dist && tsc && node demo/demo.js",
-    "test": "node prepare.js --debug && rimraf ./dist && tsc && ava --timeout=2m --concurrency 2 --no-worker-threads"
+  "main": "dist/cjs/index-browser.js",
+  "types": "dist/mjs/index-browser.d.ts",
+  "module": "dist/mjs/index-browser.js",
+  "exports": {
+    "node": {
+      "import": "./dist/mjs/index-nodejs.js",
+      "require": "./dist/cjs/index-nodejs.js"
+    },
+    "default": {
+      "import": "./dist/mjs/index-browser.js",
+      "require": "./dist/cjs/index-browser.js"
+    }
   },
-  "browser": {
-    "./dist/compat/index.js": "./dist/compat/index-browser-overwrite.js",
-    "./dist/worker/spawn.js": "./dist/worker/spawn-browser-overwrite.js"
+  "scripts": {
+    "buildModules": "tsc -p tsconfig-mjs.json && tsc -p tsconfig-cjs.json && bash fix-package-type.sh",
+    "prepublishOnly": "node prepare.mjs --release && rimraf ./dist && npm run buildModules",
+    "build": "node prepare.mjs --release && rimraf ./dist && npm run buildModules",
+    "start": "node prepare.mjs --debug && rimraf ./dist && npm run buildModules && node demo/demo.mjs",
+    "test": "node prepare.mjs --debug && rimraf ./dist && npm run buildModules && deno run ./dist/mjs/index-deno.js && ava --timeout=2m --concurrency 2 --no-worker-threads"
   },
   "dependencies": {
-    "buffer": "^6.0.1",
     "pako": "^2.0.4",
-    "websocket": "^1.0.32"
+    "ws": "^8.8.1"
   },
   "devDependencies": {
-    "@types/node": "^17.0.8",
+    "@types/node": "^18.0.0",
     "@types/pako": "^2.0.0",
-    "@types/websocket": "^1.0.4",
+    "@types/ws": "^8.5.3",
     "ava": "^4.0.0",
     "dtslint": "^4.0.6",
     "rimraf": "^3.0.2",

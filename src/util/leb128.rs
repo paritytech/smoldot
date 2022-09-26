@@ -71,7 +71,9 @@ pub fn encode(value: impl Into<u64>) -> impl ExactSizeIterator<Item = u8> + Clon
 /// Returns an LEB128-encoded `usize` as a list of bytes.
 ///
 /// See also [`encode`].
-pub fn encode_usize(value: usize) -> impl ExactSizeIterator<Item = u8> {
+pub fn encode_usize(value: usize) -> impl ExactSizeIterator<Item = u8> + Clone {
+    // `encode_usize` can leverage `encode` thanks to the property checked in this debug_assert.
+    debug_assert!(usize::BITS <= u64::BITS);
     encode(u64::try_from(value).unwrap())
 }
 
@@ -82,10 +84,42 @@ pub fn encode_usize(value: usize) -> impl ExactSizeIterator<Item = u8> {
 pub(crate) fn nom_leb128_usize<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], usize, E> {
-    let mut out = 0usize;
+    // `nom_leb128_usize` can leverage `nom_leb128_u64` thanks to the property checked in this
+    // debug_assert.
+    debug_assert!(usize::BITS <= u64::BITS);
+    let (rest, value) = nom_leb128_u64(bytes)?;
+
+    let value = match usize::try_from(value) {
+        Ok(v) => v,
+        Err(_) => {
+            return Err(nom::Err::Error(nom::error::make_error(
+                bytes,
+                nom::error::ErrorKind::LengthValue,
+            )));
+        }
+    };
+
+    Ok((rest, value))
+}
+
+/// Decodes a LEB128-encoded `u64`.
+///
+/// > **Note**: When using this function outside of a `nom` "context", you might have to explicit
+/// >           the type of `E`. Use `nom::error::Error<&[u8]>`.
+pub(crate) fn nom_leb128_u64<'a, E: nom::error::ParseError<&'a [u8]>>(
+    bytes: &'a [u8],
+) -> nom::IResult<&'a [u8], u64, E> {
+    let mut out = 0u64;
 
     for (n, byte) in bytes.iter().enumerate() {
-        match usize::from(*byte & 0b111_1111).checked_mul(1 << (7 * n)) {
+        if (7 * n) >= usize::try_from(u64::BITS).unwrap() {
+            return Err(nom::Err::Error(nom::error::make_error(
+                bytes,
+                nom::error::ErrorKind::LengthValue,
+            )));
+        }
+
+        match u64::from(*byte & 0b111_1111).checked_mul(1 << (7 * n)) {
             Some(o) => out |= o,
             None => {
                 return Err(nom::Err::Error(nom::error::make_error(
@@ -159,6 +193,10 @@ impl FramedInProgress {
             let mut out = 0usize;
 
             for (n, byte) in buffer.iter().enumerate() {
+                if (7 * n) >= usize::try_from(usize::BITS).unwrap() {
+                    return Some(Err(FramedError::LengthPrefixTooLarge));
+                }
+
                 match usize::from(*byte & 0b111_1111).checked_mul(1 << (7 * n)) {
                     Some(o) => out |= o,
                     None => return Some(Err(FramedError::LengthPrefixTooLarge)),
@@ -269,6 +307,14 @@ mod tests {
             let obtained = iter.count();
             assert_eq!(expected, obtained);
         }
+    }
+
+    #[test]
+    fn decode_large_value() {
+        // Carefully crafted LEB128 that overflows the left shift before overflowing the
+        // encoded size.
+        let encoded = (0..256).map(|_| 129).collect::<Vec<_>>();
+        assert!(super::nom_leb128_usize::<nom::error::Error<&[u8]>>(&encoded).is_err());
     }
 
     // TODO: more tests

@@ -114,7 +114,7 @@ impl Sub<Instant> for Instant {
 }
 
 lazy_static::lazy_static! {
-    static ref CLIENT: Mutex<Option<init::Client<Vec<future::AbortHandle>, platform::Platform>>> = Mutex::new(None);
+    static ref CLIENT: Mutex<Option<init::Client<platform::Platform, Vec<future::AbortHandle>>>> = Mutex::new(None);
 }
 
 fn init(max_log_level: u32, enable_current_task: u32, cpu_rate_limit: u32) {
@@ -123,6 +123,11 @@ fn init(max_log_level: u32, enable_current_task: u32, cpu_rate_limit: u32) {
     let mut client_lock = crate::CLIENT.lock().unwrap();
     assert!(client_lock.is_none());
     *client_lock = Some(init_out);
+}
+
+fn start_shutdown() {
+    // TODO: do this in a clean way
+    std::process::exit(0)
 }
 
 fn add_chain(
@@ -141,13 +146,17 @@ fn add_chain(
     // OOM errors. The threshold is completely empirical and should probably be updated
     // regularly to account for changes in the implementation.
     if alloc::total_alloc_bytes() >= usize::max_value() - 400 * 1024 * 1024 {
-        let chain_id = client_lock.as_mut().unwrap().smoldot.add_erroneous_chain(
-            "Wasm node is running low on memory and will prevent any new chain from being added"
-                .into(),
-            Vec::new(),
-        );
+        let chain_id = client_lock
+            .as_mut()
+            .unwrap()
+            .chains
+            .insert(init::Chain::Erroneous {
+            error:
+                "Wasm node is running low on memory and will prevent any new chain from being added"
+                    .into(),
+        });
 
-        return chain_id.into();
+        return u32::try_from(chain_id).unwrap();
     }
 
     // Retrieve the chain spec parameter passed through the FFI layer.
@@ -189,7 +198,19 @@ fn add_chain(
         raw_data
             .chunks(4)
             .map(|c| u32::from_le_bytes(<[u8; 4]>::try_from(c).unwrap()))
-            .map(smoldot_light_base::ChainId::from)
+            .filter_map(|c| {
+                if let Some(init::Chain::Healthy(id)) = client_lock
+                    .as_ref()
+                    .unwrap()
+                    .chains
+                    .get(usize::try_from(c).unwrap())
+                // TODO: don't unwrap here
+                {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
             .collect()
     };
 
@@ -213,25 +234,42 @@ fn add_chain(
     };
 
     // Insert the chain in the client.
-    let chain_id =
-        client_lock
+    let smoldot_chain_id =
+        match client_lock
             .as_mut()
             .unwrap()
             .smoldot
-            .add_chain(smoldot_light_base::AddChainConfig {
+            .add_chain(smoldot_light::AddChainConfig {
                 user_data: abort_handle.into_iter().collect(),
                 specification: str::from_utf8(&chain_spec).unwrap(),
                 database_content: str::from_utf8(&database_content).unwrap(),
                 json_rpc_responses,
                 potential_relay_chains: potential_relay_chains.into_iter(),
-            });
+            }) {
+            Ok(c) => c,
+            Err(error) => {
+                let chain_id = client_lock
+                    .as_mut()
+                    .unwrap()
+                    .chains
+                    .insert(init::Chain::Erroneous { error });
+
+                return u32::try_from(chain_id).unwrap();
+            }
+        };
+
+    let outer_chain_id = client_lock
+        .as_mut()
+        .unwrap()
+        .chains
+        .insert(init::Chain::Healthy(smoldot_chain_id));
 
     // Spawn the task if necessary.
     // See explanations above.
     if let Some((mut responses_rx, abort_registration)) = responses_rx_and_reg {
         let messages_out_task = async move {
             while let Some(response) = responses_rx.next().await {
-                emit_json_rpc_response(&response, chain_id);
+                emit_json_rpc_response(&response, outer_chain_id);
             }
         };
 
@@ -248,17 +286,23 @@ fn add_chain(
             .unwrap();
     }
 
-    chain_id.into()
+    u32::try_from(outer_chain_id).unwrap()
 }
 
 fn remove_chain(chain_id: u32) {
     let mut client_lock = CLIENT.lock().unwrap();
 
-    let abort_handles = client_lock
+    let abort_handles = match client_lock
         .as_mut()
         .unwrap()
-        .smoldot
-        .remove_chain(smoldot_light_base::ChainId::from(chain_id));
+        .chains
+        .remove(usize::try_from(chain_id).unwrap())
+    {
+        init::Chain::Healthy(inner_id) => {
+            client_lock.as_mut().unwrap().smoldot.remove_chain(inner_id)
+        }
+        init::Chain::Erroneous { .. } => Vec::new(),
+    };
 
     // Abort the tasks that retrieve the database content or poll the channel and send out the
     // JSON-RPC responses. This prevents any database callback from being called, and any new
@@ -273,47 +317,53 @@ fn remove_chain(chain_id: u32) {
 }
 
 fn chain_is_ok(chain_id: u32) -> u32 {
-    let mut client_lock = CLIENT.lock().unwrap();
-    if client_lock
-        .as_mut()
-        .unwrap()
-        .smoldot
-        .chain_is_erroneous(smoldot_light_base::ChainId::from(chain_id))
-        .is_some()
-    {
-        0
-    } else {
+    let client_lock = CLIENT.lock().unwrap();
+    if matches!(
+        client_lock
+            .as_ref()
+            .unwrap()
+            .chains
+            .get(usize::try_from(chain_id).unwrap())
+            .unwrap(),
+        init::Chain::Healthy(_)
+    ) {
         1
+    } else {
+        0
     }
 }
 
 fn chain_error_len(chain_id: u32) -> u32 {
-    let mut client_lock = CLIENT.lock().unwrap();
-    let len = client_lock
-        .as_mut()
+    let client_lock = CLIENT.lock().unwrap();
+    match client_lock
+        .as_ref()
         .unwrap()
-        .smoldot
-        .chain_is_erroneous(smoldot_light_base::ChainId::from(chain_id))
-        .map(|msg| msg.as_bytes().len())
-        .unwrap_or(0);
-    u32::try_from(len).unwrap()
+        .chains
+        .get(usize::try_from(chain_id).unwrap())
+        .unwrap()
+    {
+        init::Chain::Healthy(_) => 0,
+        init::Chain::Erroneous { error } => u32::try_from(error.as_bytes().len()).unwrap(),
+    }
 }
 
 fn chain_error_ptr(chain_id: u32) -> u32 {
-    let mut client_lock = CLIENT.lock().unwrap();
-    let ptr = client_lock
-        .as_mut()
+    let client_lock = CLIENT.lock().unwrap();
+    match client_lock
+        .as_ref()
         .unwrap()
-        .smoldot
-        .chain_is_erroneous(smoldot_light_base::ChainId::from(chain_id))
-        .map(|msg| msg.as_bytes().as_ptr() as usize)
-        .unwrap_or(0);
-    u32::try_from(ptr).unwrap()
+        .chains
+        .get(usize::try_from(chain_id).unwrap())
+        .unwrap()
+    {
+        init::Chain::Healthy(_) => 0,
+        init::Chain::Erroneous { error } => {
+            u32::try_from(error.as_bytes().as_ptr() as usize).unwrap()
+        }
+    }
 }
 
 fn json_rpc_send(ptr: u32, len: u32, chain_id: u32) {
-    let chain_id = smoldot_light_base::ChainId::from(chain_id);
-
     let json_rpc_request: Box<[u8]> = {
         let ptr = usize::try_from(ptr).unwrap();
         let len = usize::try_from(len).unwrap();
@@ -324,27 +374,42 @@ fn json_rpc_send(ptr: u32, len: u32, chain_id: u32) {
     let json_rpc_request: String = String::from_utf8(json_rpc_request.into()).unwrap();
 
     let mut client_lock = CLIENT.lock().unwrap();
+    let client_chain_id = match client_lock
+        .as_ref()
+        .unwrap()
+        .chains
+        .get(usize::try_from(chain_id).unwrap())
+        .unwrap()
+    {
+        init::Chain::Healthy(id) => *id,
+        init::Chain::Erroneous { .. } => panic!(),
+    };
 
     if let Err(err) = client_lock
         .as_mut()
         .unwrap()
         .smoldot
-        .json_rpc_request(json_rpc_request, chain_id)
+        .json_rpc_request(json_rpc_request, client_chain_id)
     {
         if let Some(response) = err.into_json_rpc_error() {
-            emit_json_rpc_response(&response, chain_id);
+            emit_json_rpc_response(&response, usize::try_from(chain_id).unwrap());
         }
     }
 }
 
 fn database_content(chain_id: u32, max_size: u32) {
-    let client_chain_id = smoldot_light_base::ChainId::from(chain_id);
-
     let mut client_lock = CLIENT.lock().unwrap();
+
     let init::Client {
         smoldot: client,
         new_tasks_spawner,
+        chains,
     } = client_lock.as_mut().unwrap();
+
+    let client_chain_id = match chains.get(usize::try_from(chain_id).unwrap()).unwrap() {
+        init::Chain::Healthy(id) => *id,
+        init::Chain::Erroneous { .. } => panic!(),
+    };
 
     let task = {
         let max_size = usize::try_from(max_size).unwrap();
@@ -376,12 +441,12 @@ fn database_content(chain_id: u32, max_size: u32) {
         .unwrap();
 }
 
-fn emit_json_rpc_response(rpc: &str, chain_id: smoldot_light_base::ChainId) {
+fn emit_json_rpc_response(rpc: &str, chain_id: usize) {
     unsafe {
         bindings::json_rpc_respond(
             u32::try_from(rpc.as_bytes().as_ptr() as usize).unwrap(),
             u32::try_from(rpc.as_bytes().len()).unwrap(),
-            u32::from(chain_id),
+            u32::try_from(chain_id).unwrap(),
         );
     }
 }

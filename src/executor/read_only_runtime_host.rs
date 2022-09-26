@@ -315,14 +315,7 @@ impl Inner {
                         }
                     };
 
-                    match super::core_version(vm_prototype) {
-                        (Ok(version), _) => {
-                            self.vm = req.resume(Ok(version.as_ref()));
-                        }
-                        (Err(_), _) => {
-                            self.vm = req.resume(Err(()));
-                        }
-                    }
+                    self.vm = req.resume(Ok(vm_prototype.runtime_version().as_ref()));
                 }
 
                 host::HostVm::ExternalStorageRoot(req) => {

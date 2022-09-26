@@ -38,6 +38,11 @@ impl Addresses {
         self.list.len()
     }
 
+    /// Returns the list of addresses stored in this list.
+    pub(super) fn iter(&'_ self) -> impl Iterator<Item = &'_ multiaddr::Multiaddr> + '_ {
+        self.list.iter().map(|(a, _)| a)
+    }
+
     /// Returns the list of addresses stored in this list that are marked as connected.
     pub(super) fn iter_connected(&'_ self) -> impl Iterator<Item = &'_ multiaddr::Multiaddr> + '_ {
         self.list
@@ -85,6 +90,19 @@ impl Addresses {
         if let Some(index) = self.list.iter().position(|(a, _)| a == addr) {
             assert!(!matches!(self.list[index].1, State::Connected));
             self.list[index].1 = State::Connected;
+        }
+    }
+
+    /// If the given address is in the list, sets its state to "pending".
+    ///
+    /// # Panic
+    ///
+    /// Panics if the state of this address was already pending.
+    ///
+    pub(super) fn set_pending(&mut self, addr: &multiaddr::Multiaddr) {
+        if let Some(index) = self.list.iter().position(|(a, _)| a == addr) {
+            assert!(!matches!(self.list[index].1, State::PendingConnect));
+            self.list[index].1 = State::PendingConnect;
         }
     }
 

@@ -30,6 +30,7 @@
 //! TCP handshake), depending on the strategy used for the multistream-select protocol.
 
 // TODO: finish commenting on the number of round trips
+// TODO: this module's name ("handshake") is a bit vague considering that there are multiple different handshakes based on the protocol
 
 use super::{
     super::peer_id::PeerId,
@@ -133,7 +134,7 @@ impl HealthyHandshake {
                     // Delegating read/write to the negotiation.
                     let updated = negotiation
                         .read_write(read_write)
-                        .map_err(HandshakeError::MultistreamSelect)?;
+                        .map_err(HandshakeError::EncryptionMultistreamSelect)?;
 
                     return match updated {
                         multistream_select::Negotiation::InProgress(updated) => {
@@ -209,12 +210,12 @@ impl HealthyHandshake {
                     // through the Noise cipher.
 
                     if read_write.incoming_buffer.is_none() {
-                        return Err(HandshakeError::MultistreamSelect(
+                        return Err(HandshakeError::MultiplexingMultistreamSelect(
                             multistream_select::Error::ReadClosed,
                         ));
                     }
                     if read_write.outgoing_buffer.is_none() {
-                        return Err(HandshakeError::MultistreamSelect(
+                        return Err(HandshakeError::MultiplexingMultistreamSelect(
                             multistream_select::Error::WriteClosed,
                         ));
                     }
@@ -248,7 +249,7 @@ impl HealthyHandshake {
                         };
                         let updated = negotiation
                             .read_write(&mut interm_read_write)
-                            .map_err(HandshakeError::MultistreamSelect)?;
+                            .map_err(HandshakeError::MultiplexingMultistreamSelect)?;
                         (
                             updated,
                             interm_read_write.read_bytes,
@@ -316,10 +317,11 @@ impl NoiseKeyRequired {
     pub fn resume(self, noise_key: &NoiseKey) -> HealthyHandshake {
         HealthyHandshake {
             state: NegotiationState::Encryption {
-                handshake: Box::new(noise::HandshakeInProgress::new(
-                    noise_key,
-                    self.is_initiator,
-                )),
+                handshake: Box::new(noise::HandshakeInProgress::new(noise::Config {
+                    key: noise_key,
+                    is_initiator: self.is_initiator,
+                    prologue: &[],
+                })),
             },
         }
     }
@@ -334,9 +336,14 @@ impl fmt::Debug for NoiseKeyRequired {
 /// Error during a connection handshake. The connection should be shut down.
 #[derive(Debug, derive_more::Display)]
 pub enum HandshakeError {
-    /// Protocol error during a multistream-select negotiation.
-    MultistreamSelect(multistream_select::Error),
+    /// Protocol error during the multistream-select negotiation of the encryption protocol.
+    #[display(fmt = "Encryption protocol selection error: {}", _0)]
+    EncryptionMultistreamSelect(multistream_select::Error),
+    /// Protocol error during the multistream-select negotiation of the multiplexing protocol.
+    #[display(fmt = "Multiplexing protocol selection error: {}", _0)]
+    MultiplexingMultistreamSelect(multistream_select::Error),
     /// Protocol error during the noise handshake.
+    #[display(fmt = "Noise handshake error: {}", _0)]
     NoiseHandshake(noise::HandshakeError),
     /// No encryption protocol in common with the remote.
     ///
@@ -347,5 +354,6 @@ pub enum HandshakeError {
     /// The remote is behaving correctly but isn't compatible with the local node.
     NoMultiplexingProtocol,
     /// Error in the noise cipher. Data has most likely been corrupted.
+    #[display(fmt = "Noise cipher error: {}", _0)]
     Noise(noise::CipherError),
 }

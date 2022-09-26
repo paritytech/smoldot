@@ -41,6 +41,14 @@ pub struct Config<'a, TBody> {
     /// Configuration items related to the consensus engine.
     pub consensus: ConfigConsensus<'a>,
 
+    /// If `false`, digest items with an unknown consensus engine lead to an error.
+    ///
+    /// Passing `true` can lead to blocks being considered as valid when they shouldn't. However,
+    /// even if `true` is passed, a recognized consensus engine must always be present.
+    /// Consequently, both `true` and `false` guarantee that the number of authorable blocks over
+    /// the network is bounded.
+    pub allow_unknown_consensus_engines: bool,
+
     /// Time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time) (i.e.
     /// 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
     pub now_from_unix_epoch: Duration,
@@ -50,6 +58,9 @@ pub struct Config<'a, TBody> {
     /// The `parent_hash` field is the hash of the parent whose storage can be accessed through
     /// the other fields.
     pub block_header: header::HeaderRef<'a>,
+
+    /// Number of bytes used to encode the block number in the header.
+    pub block_number_bytes: usize,
 
     /// Body of the block to verify.
     pub block_body: TBody,
@@ -61,15 +72,6 @@ pub struct Config<'a, TBody> {
 
 /// Extra items of [`Config`] that are dependant on the consensus engine of the chain.
 pub enum ConfigConsensus<'a> {
-    /// Any node on the chain is allowed to produce blocks.
-    ///
-    /// No seal must be present in the header.
-    ///
-    /// > **Note**: Be warned that this variant makes it possible for a huge number of blocks to
-    /// >           be produced. If this variant is used, the user is encouraged to limit, through
-    /// >           other means, the number of blocks being accepted.
-    AllAuthorized,
-
     /// Chain is using the Aura consensus engine.
     Aura {
         /// Aura authorities that must validate the block.
@@ -125,9 +127,6 @@ pub struct Success {
 
 /// Extra items in [`Success`] relevant to the consensus engine.
 pub enum SuccessConsensus {
-    /// [`ConfigConsensus::AllAuthorized`] was passed to [`Config`].
-    AllAuthorized,
-
     /// Chain is using the Aura consensus engine.
     Aura {
         /// True if the list of authorities is modified by this block.
@@ -181,6 +180,12 @@ pub enum Error {
     NonEmptyOutput,
     /// Block header contains items relevant to multiple consensus engines at the same time.
     MultipleConsensusEngines,
+    /// Block header contains an unrecognized consensus engine.
+    #[display(
+        fmt = "Block header contains an unrecognized consensus engine: {:?}",
+        engine
+    )]
+    UnknownConsensusEngine { engine: [u8; 4] },
     /// Failed to verify the authenticity of the block with the AURA algorithm.
     #[display(fmt = "{}", _0)]
     AuraVerification(aura::VerifyError),
@@ -192,6 +197,7 @@ pub enum Error {
     /// Block being verified has erased the `:code` key from the storage.
     CodeKeyErased,
     /// Block has modified the `:heappages` key in a way that fails to parse.
+    #[display(fmt = "Block has modified `:heappages` key in invalid way: {}", _0)]
     HeapPagesParseError(executor::InvalidHeapPagesError),
     /// Block has modified the `:heappages` key without modifying the `:code` key. This isn't
     /// supported by smoldot.
@@ -203,21 +209,28 @@ pub enum Error {
 pub fn verify(
     config: Config<impl ExactSizeIterator<Item = impl AsRef<[u8]> + Clone> + Clone>,
 ) -> Verify {
+    // Fail verification if there is any digest log item with an unrecognized consensus engine.
+    if !config.allow_unknown_consensus_engines {
+        if let Some(engine) = config
+            .block_header
+            .digest
+            .logs()
+            .find_map(|item| match item {
+                header::DigestItemRef::UnknownConsensus { engine, .. }
+                | header::DigestItemRef::UnknownSeal { engine, .. }
+                | header::DigestItemRef::UnknownPreRuntime { engine, .. } => Some(engine),
+                _ => None,
+            })
+        {
+            return Verify::Finished(Err((
+                Error::UnknownConsensusEngine { engine },
+                config.parent_runtime,
+            )));
+        }
+    }
+
     // Start the consensus engine verification process.
     let consensus_success = match &config.consensus {
-        ConfigConsensus::AllAuthorized => {
-            // `has_any_aura()` and `has_any_babe()` also make sure that no seal is present.
-            if config.block_header.digest.has_any_aura()
-                || config.block_header.digest.has_any_babe()
-            {
-                return Verify::Finished(Err((
-                    Error::MultipleConsensusEngines,
-                    config.parent_runtime,
-                )));
-            }
-
-            SuccessConsensus::AllAuthorized
-        }
         ConfigConsensus::Aura {
             current_authorities,
             slot_duration,
@@ -231,6 +244,7 @@ pub fn verify(
 
             let result = aura::verify_header(aura::VerifyConfig {
                 header: config.block_header.clone(),
+                block_number_bytes: config.block_number_bytes,
                 parent_block_header: config.parent_block_header,
                 now_from_unix_epoch: config.now_from_unix_epoch,
                 current_authorities: current_authorities.clone(),
@@ -263,6 +277,7 @@ pub fn verify(
 
             let result = babe::verify_header(babe::VerifyConfig {
                 header: config.block_header.clone(),
+                block_number_bytes: config.block_number_bytes,
                 parent_block_header: config.parent_block_header,
                 parent_block_next_epoch: parent_block_next_epoch.clone(),
                 parent_block_epoch: parent_block_epoch.clone(),
@@ -303,7 +318,7 @@ pub fn verify(
 
         let encoded_body_len = util::encode_scale_compact_usize(config.block_body.len());
         unsealed_header
-            .scale_encoding()
+            .scale_encoding(config.block_number_bytes)
             .map(|b| either::Right(either::Left(b)))
             .chain(iter::once(either::Right(either::Right(encoded_body_len))))
             .chain(config.block_body.map(either::Left))
@@ -702,7 +717,7 @@ fn check_check_inherents_output(output: &[u8]) -> Result<(), Error> {
                     }),
                     crate::util::nom_bytes_decode,
                 )),
-                || Vec::new(),
+                Vec::new,
                 |mut errors, (module, error)| {
                     if module != *b"auraslot" && module != *b"babeslot" {
                         errors.push((module, error.to_vec()));

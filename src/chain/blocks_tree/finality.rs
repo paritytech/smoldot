@@ -37,47 +37,20 @@ impl<T> NonFinalizedTree<T> {
                 // No checkpoint means all blocks allowed.
                 either::Left(iter::empty())
             }
-            Finality::Grandpa {
-                finalized_scheduled_change,
-                ..
-            } => {
-                // Scheduled change that is already finalized.
-                let scheduled = finalized_scheduled_change.as_ref().map(|(n, _)| *n);
-
-                // TODO: this is ~O(n²), but there's no real alternative here
+            Finality::Grandpa { .. } => {
+                // TODO: O(n), could add a cache to make it O(1)
                 let iter = inner
                     .blocks
                     .iter_unordered()
-                    .filter(move |(node_index, block)| {
-                        if scheduled == Some(block.header.number) {
-                            return true;
+                    .filter(move |(_, block)| {
+                        if let BlockFinality::Grandpa {
+                            triggers_change, ..
+                        } = &block.finality
+                        {
+                            *triggers_change
+                        } else {
+                            unreachable!()
                         }
-
-                        for ancestor in inner.blocks.root_to_node_path(*node_index) {
-                            let header = &inner.blocks.get(ancestor).unwrap().header;
-                            for grandpa_digest_item in
-                                header.digest.logs().filter_map(|d| match d {
-                                    header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
-                                    _ => None,
-                                })
-                            {
-                                match grandpa_digest_item {
-                                    header::GrandpaConsensusLogRef::ScheduledChange(change) => {
-                                        let trigger_block_height = header
-                                            .number
-                                            .checked_add(u64::from(change.delay))
-                                            .unwrap();
-
-                                        if trigger_block_height == block.header.number {
-                                            return true;
-                                        }
-                                    }
-                                    _ => {} // TODO: unimplemented
-                                }
-                            }
-                        }
-
-                        false
                     })
                     .map(|(_, block)| (block.header.number, &block.hash));
 
@@ -93,16 +66,21 @@ impl<T> NonFinalizedTree<T> {
     ///
     /// If the verification succeeds, a [`FinalityApply`] object will be returned which can
     /// be used to apply the finalization.
+    ///
+    /// A randomness seed must be provided and will be used during the verification. Note that the
+    /// verification is nonetheless deterministic.
     // TODO: expand the documentation about how blocks with authorities changes have to be finalized before any further block can be finalized
     pub fn verify_justification(
         &mut self,
         consensus_engine_id: [u8; 4],
         scale_encoded_justification: &[u8],
+        randomness_seed: [u8; 32],
     ) -> Result<FinalityApply<T>, JustificationVerifyError> {
-        self.inner
-            .as_mut()
-            .unwrap()
-            .verify_justification(consensus_engine_id, scale_encoded_justification)
+        self.inner.as_mut().unwrap().verify_justification(
+            consensus_engine_id,
+            scale_encoded_justification,
+            randomness_seed,
+        )
     }
 
     /// Verifies the given Grandpa commit message.
@@ -113,14 +91,18 @@ impl<T> NonFinalizedTree<T> {
     ///
     /// If the verification succeeds, a [`FinalityApply`] object will be returned which can
     /// be used to apply the finalization.
+    ///
+    /// A randomness seed must be provided and will be used during the verification. Note that the
+    /// verification is nonetheless deterministic.
     pub fn verify_grandpa_commit_message(
         &mut self,
-        scale_encoded_message: &[u8],
+        scale_encoded_commit: &[u8],
+        randomness_seed: [u8; 32],
     ) -> Result<FinalityApply<T>, CommitVerifyError> {
         self.inner
             .as_mut()
             .unwrap()
-            .verify_grandpa_commit_message(scale_encoded_message)
+            .verify_grandpa_commit_message(scale_encoded_commit, randomness_seed)
     }
 
     /// Sets the latest known finalized block. Trying to verify a block that isn't a descendant of
@@ -206,78 +188,25 @@ impl<T> NonFinalizedTreeInner<T> {
                     }
                 };
 
-                // If any block between the latest finalized one and the target block trigger any GrandPa
-                // authorities change, then we need to finalize that triggering block (or any block
-                // after or including the one that schedules these changes) before finalizing the one
-                // targeted by the justification.
-                // TODO: rethink and reexplain this ^
-
-                // Find out the next block height where an authority change will be triggered.
-                let earliest_trigger = {
-                    // Scheduled change that is already finalized.
-                    let scheduled = finalized_scheduled_change.as_ref().map(|(n, _)| *n);
-
-                    // First change that would be scheduled if we finalize the target block.
-                    let would_happen = {
-                        let mut trigger_height = None;
-                        // TODO: lot of boilerplate code here
-                        for node in self.blocks.root_to_node_path(block_index) {
-                            let header = &self.blocks.get(node).unwrap().header;
-                            for grandpa_digest_item in
-                                header.digest.logs().filter_map(|d| match d {
-                                    header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
-                                    _ => None,
-                                })
-                            {
-                                match grandpa_digest_item {
-                                    header::GrandpaConsensusLogRef::ScheduledChange(change) => {
-                                        let trigger_block_height = header
-                                            .number
-                                            .checked_add(u64::from(change.delay))
-                                            .unwrap();
-                                        match trigger_height {
-                                            Some(_) => panic!("invalid block!"), // TODO: this problem is not checked during block verification
-                                            None => trigger_height = Some(trigger_block_height),
-                                        }
-                                    }
-                                    _ => {} // TODO: unimplemented
-                                }
-                            }
+                // If any block between the latest finalized one and the target block triggers any
+                // GrandPa authorities change, then we need to finalize that triggering block
+                // before finalizing the one targeted by the justification.
+                if let BlockFinality::Grandpa {
+                    ref prev_auth_change_trigger_number,
+                    ..
+                } = self.blocks.get(block_index).unwrap().finality
+                {
+                    if let Some(prev_auth_change_trigger_number) = prev_auth_change_trigger_number {
+                        if *prev_auth_change_trigger_number > self.finalized_block_header.number {
+                            return Err(FinalityVerifyError::TooFarAhead {
+                                justification_block_number: target_number,
+                                justification_block_hash: *target_hash,
+                                block_to_finalize_number: *prev_auth_change_trigger_number,
+                            });
                         }
-                        trigger_height
-                    };
-
-                    match (scheduled, would_happen) {
-                        (Some(a), Some(b)) => Some(cmp::min(a, b)),
-                        (Some(a), None) => Some(a),
-                        (None, Some(b)) => Some(b),
-                        (None, None) => None,
                     }
-                };
-
-                // As explained above, `target_number` must be <= `earliest_trigger`, otherwise the
-                // finalization is unsecure.
-                if let Some(earliest_trigger) = earliest_trigger {
-                    if target_number > earliest_trigger {
-                        let block_to_finalize_hash = self
-                            .blocks
-                            .node_to_root_path(block_index)
-                            .find_map(|b| {
-                                let b = self.blocks.get(b).unwrap();
-                                if b.header.number == earliest_trigger {
-                                    Some(b.hash)
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap();
-                        return Err(FinalityVerifyError::TooFarAhead {
-                            justification_block_number: target_number,
-                            justification_block_hash: *target_hash,
-                            block_to_finalize_number: earliest_trigger,
-                            block_to_finalize_hash,
-                        });
-                    }
+                } else {
+                    unreachable!()
                 }
 
                 // Find which authorities are supposed to finalize the target block.
@@ -305,22 +234,28 @@ impl<T> NonFinalizedTreeInner<T> {
         &mut self,
         consensus_engine_id: [u8; 4],
         scale_encoded_justification: &[u8],
+        randomness_seed: [u8; 32],
     ) -> Result<FinalityApply<T>, JustificationVerifyError> {
         match (&self.finality, &consensus_engine_id) {
             (Finality::Grandpa { .. }, b"FRNK") => {
                 // Turn justification into a strongly-typed struct.
-                let decoded = justification::decode::decode_grandpa(scale_encoded_justification)
-                    .map_err(JustificationVerifyError::InvalidJustification)?;
+                let decoded = justification::decode::decode_grandpa(
+                    scale_encoded_justification,
+                    self.block_number_bytes,
+                )
+                .map_err(JustificationVerifyError::InvalidJustification)?;
 
                 // Delegate the first step to the other function.
                 let (block_index, authorities_set_id, authorities_list) = self
-                    .verify_grandpa_finality(decoded.target_hash, u64::from(decoded.target_number))
+                    .verify_grandpa_finality(decoded.target_hash, decoded.target_number)
                     .map_err(JustificationVerifyError::FinalityVerify)?;
 
                 justification::verify::verify(justification::verify::Config {
                     justification: decoded,
+                    block_number_bytes: self.block_number_bytes,
                     authorities_set_id,
                     authorities_list,
+                    randomness_seed,
                 })
                 .map_err(JustificationVerifyError::VerificationFailed)?;
 
@@ -337,28 +272,34 @@ impl<T> NonFinalizedTreeInner<T> {
     /// See [`NonFinalizedTree::verify_grandpa_commit_message`].
     fn verify_grandpa_commit_message(
         &mut self,
-        scale_encoded_message: &[u8],
+        verify_grandpa_commit_message: &[u8],
+        randomness_seed: [u8; 32],
     ) -> Result<FinalityApply<T>, CommitVerifyError> {
         // The code below would panic if the chain doesn't use Grandpa.
         if !matches!(self.finality, Finality::Grandpa { .. }) {
             return Err(CommitVerifyError::NotGrandpa);
         }
 
-        let decoded_commit = grandpa::commit::decode::decode_grandpa_commit(scale_encoded_message)
-            .map_err(|_| CommitVerifyError::InvalidCommit)?;
+        let decoded_commit = grandpa::commit::decode::decode_grandpa_commit(
+            verify_grandpa_commit_message,
+            self.block_number_bytes,
+        )
+        .map_err(|_| CommitVerifyError::InvalidCommit)?;
 
         // Delegate the first step to the other function.
         let (block_index, expected_authorities_set_id, authorities_list) = self
             .verify_grandpa_finality(
                 decoded_commit.message.target_hash,
-                u64::from(decoded_commit.message.target_number),
+                decoded_commit.message.target_number,
             )
             .map_err(CommitVerifyError::FinalityVerify)?;
 
         let mut verification = grandpa::commit::verify::verify(grandpa::commit::verify::Config {
-            commit: scale_encoded_message,
+            commit: verify_grandpa_commit_message,
+            block_number_bytes: self.block_number_bytes,
             expected_authorities_set_id,
             num_authorities: u32::try_from(authorities_list.clone().count()).unwrap(),
+            randomness_seed,
         });
 
         loop {
@@ -371,7 +312,9 @@ impl<T> NonFinalizedTreeInner<T> {
                     });
                 }
                 grandpa::commit::verify::InProgress::FinishedUnknown => {
-                    return Err(CommitVerifyError::NotEnoughKnownBlocks)
+                    return Err(CommitVerifyError::NotEnoughKnownBlocks {
+                        target_block_number: decoded_commit.message.target_number,
+                    })
                 }
                 grandpa::commit::verify::InProgress::Finished(Err(error)) => {
                     return Err(CommitVerifyError::VerificationFailed(error))
@@ -407,53 +350,41 @@ impl<T> NonFinalizedTreeInner<T> {
         &mut self,
         block_index_to_finalize: fork_tree::NodeIndex,
     ) -> SetFinalizedBlockIter<T> {
-        let new_finalized_block_height = self
-            .blocks
-            .get_mut(block_index_to_finalize)
-            .unwrap()
-            .header
-            .number;
+        let new_finalized_block = self.blocks.get_mut(block_index_to_finalize).unwrap();
 
         // Update `self.finality`.
-        match &mut self.finality {
-            Finality::Outsourced => {}
-            Finality::Grandpa {
-                after_finalized_block_authorities_set_id,
-                finalized_scheduled_change,
-                finalized_triggered_authorities,
-            } => {
-                // Update the scheduled GrandPa change with the latest scheduled-but-non-finalized change
-                // that could be found.
-                *finalized_scheduled_change = None;
-                for node in self.blocks.root_to_node_path(block_index_to_finalize) {
-                    let node = self.blocks.get(node).unwrap();
-                    for grandpa_digest_item in node.header.digest.logs().filter_map(|d| match d {
-                        header::DigestItemRef::GrandpaConsensus(gp) => Some(gp),
-                        _ => None,
-                    }) {
-                        match grandpa_digest_item {
-                            header::GrandpaConsensusLogRef::ScheduledChange(change) => {
-                                let trigger_block_height = node
-                                    .header
-                                    .number
-                                    .checked_add(u64::from(change.delay))
-                                    .unwrap();
-                                if trigger_block_height > new_finalized_block_height {
-                                    *finalized_scheduled_change = Some((
-                                        trigger_block_height,
-                                        change.next_authorities.map(Into::into).collect(),
-                                    ));
-                                } else {
-                                    *finalized_triggered_authorities =
-                                        change.next_authorities.map(Into::into).collect();
-                                    *after_finalized_block_authorities_set_id += 1;
-                                }
-                            }
-                            _ => {} // TODO: unimplemented
-                        }
-                    }
-                }
+        match (&mut self.finality, &new_finalized_block.finality) {
+            (Finality::Outsourced, BlockFinality::Outsourced) => {}
+            (
+                Finality::Grandpa {
+                    after_finalized_block_authorities_set_id,
+                    finalized_scheduled_change,
+                    finalized_triggered_authorities,
+                },
+                BlockFinality::Grandpa {
+                    after_block_authorities_set_id,
+                    triggered_authorities,
+                    scheduled_change,
+                    ..
+                },
+            ) => {
+                // Some sanity checks.
+                debug_assert!(
+                    *after_finalized_block_authorities_set_id <= *after_block_authorities_set_id
+                );
+                debug_assert!(scheduled_change
+                    .as_ref()
+                    .map(|(n, _)| *n > new_finalized_block.header.number)
+                    .unwrap_or(true));
+
+                *after_finalized_block_authorities_set_id = *after_block_authorities_set_id;
+                *finalized_triggered_authorities = triggered_authorities.clone();
+                *finalized_scheduled_change = scheduled_change.clone();
             }
+
+            // Mismatch between chain finality algorithm and block finality algorithm. Should never
+            // happen.
+            _ => unreachable!(),
         }
 
         // If the best block isn't a descendant of the block being finalized, then the best
@@ -551,7 +482,7 @@ impl<T> NonFinalizedTreeInner<T> {
             &mut self.finalized_block_header,
             &mut new_finalized_block.header,
         );
-        self.finalized_block_hash = self.finalized_block_header.hash();
+        self.finalized_block_hash = self.finalized_block_header.hash(self.block_number_bytes);
 
         debug_assert_eq!(self.blocks.len(), self.blocks_by_hash.len());
         SetFinalizedBlockIter {
@@ -613,11 +544,14 @@ pub enum JustificationVerifyError {
     /// >           always returned.
     JustificationEngineMismatch,
     /// Error while decoding the justification.
+    #[display(fmt = "Error while decoding the justification: {}", _0)]
     InvalidJustification(justification::decode::Error),
     /// The justification verification has failed. The justification is invalid and should be
     /// thrown away.
+    #[display(fmt = "{}", _0)]
     VerificationFailed(justification::verify::Error),
     /// Error while verifying the finality in the context of the chain.
+    #[display(fmt = "{}", _0)]
     FinalityVerify(FinalityVerifyError),
 }
 
@@ -629,13 +563,19 @@ pub enum CommitVerifyError {
     /// Error while decoding the commit.
     InvalidCommit,
     /// Error while verifying the finality in the context of the chain.
+    #[display(fmt = "{}", _0)]
     FinalityVerify(FinalityVerifyError),
     /// Not enough blocks are known by the tree to verify this commit.
     ///
     /// This doesn't mean that the commit is bad, but that it can't be verified without adding
     /// more blocks to the tree.
-    NotEnoughKnownBlocks,
+    #[display(fmt = "Not enough blocks are known to verify this commit")]
+    NotEnoughKnownBlocks {
+        /// Block number that the commit targets.
+        target_block_number: u64,
+    },
     /// The commit verification has failed. The commit is invalid and should be thrown away.
+    #[display(fmt = "{}", _0)]
     VerificationFailed(grandpa::commit::verify::Error),
 }
 
@@ -674,8 +614,6 @@ pub enum FinalityVerifyError {
         justification_block_hash: [u8; 32],
         /// Number of the block to finalize first.
         block_to_finalize_number: u64,
-        /// Hash of the block to finalize first.
-        block_to_finalize_hash: [u8; 32],
     },
 }
 

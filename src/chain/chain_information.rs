@@ -136,9 +136,7 @@ impl<'a> From<ChainInformationRef<'a>> for ChainInformation {
         ChainInformation {
             finalized_block_header: info.finalized_block_header.into(),
             consensus: match info.consensus {
-                ChainInformationConsensusRef::AllAuthorized => {
-                    ChainInformationConsensus::AllAuthorized
-                }
+                ChainInformationConsensusRef::Unknown => ChainInformationConsensus::Unknown,
                 ChainInformationConsensusRef::Aura {
                     finalized_authorities_list,
                     slot_duration,
@@ -172,7 +170,7 @@ pub enum ChainInformationConsensus {
     /// > **Note**: Be warned that this variant makes it possible for a huge number of blocks to
     /// >           be produced. If this variant is used, the user is encouraged to limit, through
     /// >           other means, the number of blocks being accepted.
-    AllAuthorized,
+    Unknown,
 
     /// Chain is using the Aura consensus engine.
     Aura {
@@ -417,8 +415,6 @@ impl<'a> ChainInformationRef<'a> {
             }
         }
 
-        // TODO: also check that babe_finalized_block_epoch_information is None if and only if block is in epoch #0
-
         Ok(())
     }
 }
@@ -428,9 +424,7 @@ impl<'a> From<&'a ChainInformation> for ChainInformationRef<'a> {
         ChainInformationRef {
             finalized_block_header: (&info.finalized_block_header).into(),
             consensus: match &info.consensus {
-                ChainInformationConsensus::AllAuthorized => {
-                    ChainInformationConsensusRef::AllAuthorized
-                }
+                ChainInformationConsensus::Unknown => ChainInformationConsensusRef::Unknown,
                 ChainInformationConsensus::Aura {
                     finalized_authorities_list,
                     slot_duration,
@@ -460,8 +454,8 @@ impl<'a> From<&'a ChainInformation> for ChainInformationRef<'a> {
 /// Extra items that depend on the consensus engine.
 #[derive(Debug, Clone)]
 pub enum ChainInformationConsensusRef<'a> {
-    /// See [`ChainInformationConsensus::AllAuthorized`].
-    AllAuthorized,
+    /// See [`ChainInformationConsensus::Unknown`].
+    Unknown,
 
     /// Chain is using the Aura consensus engine.
     Aura {
@@ -589,6 +583,7 @@ pub enum ValidityError {
     /// The finalized block is block number 0, but the GrandPa authorities set id is not 0.
     FinalizedZeroButNonZeroAuthoritiesSetId,
     /// Error in a Babe epoch information.
+    #[display(fmt = "Error in a Babe epoch information: {}", _0)]
     InvalidBabe(BabeValidityError),
 }
 

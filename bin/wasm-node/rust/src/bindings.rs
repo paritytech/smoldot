@@ -189,11 +189,14 @@ extern "C" {
     /// cannot transition back to another state.
     ///
     /// Initially in the `Opening` state, the connection can transition to the `Open` state if the
-    /// remote accepts the connection. When that happens, [`connection_open`] must be called.
+    /// remote accepts the connection. When that happens, [`connection_open_single_stream`] or
+    /// [`connection_open_multi_stream`] must be called.
     ///
-    /// When in the `Open` state, the connection can receive messages. When a message is received,
-    /// [`alloc`] must be called in order to allocate memory for this message, then
-    /// [`connection_message`] must be called with the pointer returned by [`alloc`].
+    /// There exists two kind of connections: single-stream and multi-stream. Single-stream
+    /// connections are assumed to have a single stream open at all time and the encryption and
+    /// multiplexing are handled internally by smoldot. Multi-stream connections open and close
+    /// streams over time using [`connection_stream_opened`] and [`stream_closed`], and the
+    /// encryption and multiplexing are handled by the user of these bindings.
     pub fn connection_new(id: u32, addr_ptr: u32, addr_len: u32, error_ptr_ptr: u32) -> u32;
 
     /// Close a connection previously initialized with [`connection_new`].
@@ -209,12 +212,32 @@ extern "C" {
     /// >           example `WebSocket.close()`.
     pub fn connection_close(id: u32);
 
-    /// Queues data on the given connection. The data is found in the memory of the WebAssembly
+    /// Queues a new outbound substream opening. The [`connection_stream_opened`] function must
+    /// later be called when the substream has been successfully opened.
+    ///
+    /// This function will only be called for multi-stream connections. The connection must
+    /// currently be in the `Open` state. See the documentation of [`connection_new`] for details.
+    pub fn connection_stream_open(connection_id: u32);
+
+    /// Closes an existing substream of a multi-stream connection. The substream must currently
+    /// be in the `Open` state.
+    ///
+    /// This function will only be called for multi-stream connections. The connection must
+    /// currently be in the `Open` state. See the documentation of [`connection_new`] for details.
+    pub fn connection_stream_close(connection_id: u32, stream_id: u32);
+
+    /// Queues data on the given stream. The data is found in the memory of the WebAssembly
     /// virtual machine, at the given pointer. The data must be sent as a binary frame.
     ///
-    /// The connection must currently be in the `Open` state. See the documentation of
+    /// If `connection_id` is a single-stream connection, then the value of `stream_id` should
+    /// be ignored. If `connection_id` is a multi-stream connection, then the value of `stream_id`
+    /// contains the identifier of the stream on which to send the data, as was provided to
+    /// [`connection_stream_opened`].
+    ///
+    /// The connection associated with that stream (and, in the case of a multi-stream connection,
+    /// the stream itself must currently be in the `Open` state. See the documentation of
     /// [`connection_new`] for details.
-    pub fn connection_send(id: u32, ptr: u32, len: u32);
+    pub fn stream_send(connection_id: u32, stream_id: u32, ptr: u32, len: u32);
 
     /// Called when the Wasm execution enters the context of a certain task. This is useful for
     /// debugging purposes.
@@ -255,6 +278,18 @@ extern "C" {
 #[no_mangle]
 pub extern "C" fn init(max_log_level: u32, enable_current_task: u32, cpu_rate_limit: u32) {
     crate::init(max_log_level, enable_current_task, cpu_rate_limit)
+}
+
+/// Instructs the client to start shutting down.
+///
+/// Later, the client will use `exit` to stop.
+///
+/// It is still legal to call all the other functions of these bindings. The client continues to
+/// operate normally until the call to `exit`, which happens at some point in the future.
+// TODO: can this be called multiple times?
+#[no_mangle]
+pub extern "C" fn start_shutdown() {
+    crate::start_shutdown()
 }
 
 /// Allocates a buffer of the given length, with an alignment of 1.
@@ -411,24 +446,75 @@ pub extern "C" fn timer_finished(timer_id: u32) {
 /// Called by the JavaScript code if the connection switches to the `Open` state. The connection
 /// must be in the `Opening` state.
 ///
-/// Must only be called once per connection object.
+/// Must be called at most once per connection object.
 ///
-/// See also [`connection_open`].
+/// See also [`connection_new`].
+///
+/// When in the `Open` state, the connection can receive messages. When a message is received,
+/// [`alloc`] must be called in order to allocate memory for this message, then
+/// [`stream_message`] must be called with the pointer returned by [`alloc`].
+///
+/// The `handshake_ty` parameter indicates the type of handshake. It must always be 0 at the
+/// moment, indicating a multistream-select+Noise+Yamux handshake.
 #[no_mangle]
-pub extern "C" fn connection_open(id: u32) {
-    crate::platform::connection_open(id);
+pub extern "C" fn connection_open_single_stream(connection_id: u32, handshake_ty: u32) {
+    crate::platform::connection_open_single_stream(connection_id, handshake_ty);
 }
 
-/// Notify of a message being received on the connection. The connection must be in the `Open`
-/// state.
+/// Called by the JavaScript code if the connection switches to the `Open` state. The connection
+/// must be in the `Opening` state.
 ///
-/// See also [`connection_open`].
+/// Must be called at most once per connection object.
+///
+/// See also [`connection_new`].
+///
+/// When in the `Open` state, the connection can receive messages. When a message is received,
+/// [`alloc`] must be called in order to allocate memory for this message, then
+/// [`stream_message`] must be called with the pointer returned by [`alloc`].
+///
+/// A "handshake type" must be provided. To do so, allocate a buffer with [`alloc`] and pass a
+/// pointer to it. This buffer is freed when this function is called.
+/// The buffer must contain a single 0 byte (indicating WebRTC), followed with the multihash
+/// representation of the hash of the local node's TLS certificate, followed with the multihash
+/// representation of the hash of the remote node's TLS certificate.
+#[no_mangle]
+pub extern "C" fn connection_open_multi_stream(
+    connection_id: u32,
+    handshake_ty_ptr: u32,
+    handshake_ty_len: u32,
+) {
+    crate::platform::connection_open_multi_stream(connection_id, handshake_ty_ptr, handshake_ty_len)
+}
+
+/// Notify of a message being received on the stream. The connection associated with that stream
+/// (and, in the case of a multi-stream connection, the stream itself) must be in the `Open` state.
+///
+/// If `connection_id` is a single-stream connection, then the value of `stream_id` is ignored.
+/// If `connection_id` is a multi-stream connection, then `stream_id` corresponds to the stream
+/// on which the data was received, as was provided to [`connection_stream_opened`].
+///
+/// See also [`connection_open_single_stream`] and [`connection_open_multi_stream`].
 ///
 /// The buffer **must** have been allocated with [`alloc`]. It is freed when this function is
 /// called.
 #[no_mangle]
-pub extern "C" fn connection_message(id: u32, ptr: u32, len: u32) {
-    crate::platform::connection_message(id, ptr, len)
+pub extern "C" fn stream_message(connection_id: u32, stream_id: u32, ptr: u32, len: u32) {
+    crate::platform::stream_message(connection_id, stream_id, ptr, len)
+}
+
+/// Called by the JavaScript code when the given multi-stream connection has a new substream.
+///
+/// `connection_id` *must* be a multi-stream connection.
+///
+/// The value of `stream_id` is chosen at the discretion of the caller. It is illegal to use the
+/// same `stream_id` as an existing stream on that same connection that is still open.
+///
+/// For the `outbound` parameter, pass `0` if the substream has been opened by the remote, and any
+/// value other than `0` if the substream has been opened in response to a call to
+/// [`connection_stream_open`].
+#[no_mangle]
+pub extern "C" fn connection_stream_opened(connection_id: u32, stream_id: u32, outbound: u32) {
+    crate::platform::connection_stream_opened(connection_id, stream_id, outbound)
 }
 
 /// Can be called at any point by the JavaScript code if the connection switches to the `Closed`
@@ -439,8 +525,23 @@ pub extern "C" fn connection_message(id: u32, ptr: u32, len: u32) {
 /// Must be passed a UTF-8 string indicating the reason for closing. The buffer **must** have
 /// been allocated with [`alloc`]. It is freed when this function is called.
 ///
-/// See also [`connection_open`].
+/// See also [`connection_new`].
 #[no_mangle]
-pub extern "C" fn connection_closed(id: u32, ptr: u32, len: u32) {
-    crate::platform::connection_closed(id, ptr, len)
+pub extern "C" fn connection_closed(connection_id: u32, ptr: u32, len: u32) {
+    crate::platform::connection_closed(connection_id, ptr, len)
+}
+
+/// Can be called at any point by the JavaScript code if the stream switches to the `Closed`
+/// state.
+///
+/// Must only be called once per stream.
+///
+/// The `stream_id` becomes dead and can be re-used for another stream on the same connection.
+///
+/// It is illegal to call this function on a single-stream connections.
+///
+/// See also [`connection_open_multi_stream`].
+#[no_mangle]
+pub extern "C" fn stream_closed(connection_id: u32, stream_id: u32) {
+    crate::platform::stream_closed(connection_id, stream_id)
 }
