@@ -1526,7 +1526,7 @@ enum ConnectionToCoordinatorInner {
     /// might receive this event after having sent a
     /// [`CoordinatorToConnectionInner::AcceptInNotifications`] or
     /// [`CoordinatorToConnectionInner::RejectInNotifications`]. In that situation, the coordinator
-    /// should either reinterpret the message as a "NotificationsInClose" (if it had accepted it)
+    /// should either reinterpret the message as a `NotificationsInClose` (if it had accepted it)
     /// or ignore it (if it had rejected it).
     ///
     /// The connection should be aware that, due to the asynchronous nature of communications, it
@@ -1535,12 +1535,12 @@ enum ConnectionToCoordinatorInner {
     /// situation, the connection should ignore this message.
     ///
     /// Because substream IDs can be reused, this introduces an ambiguity in the following sequence
-    /// of events: send NotificationsInOpen, send NotificationsInOpenCancel, send
-    /// NotificationsInOpen, receive AcceptInNotifications. Does the AcceptInNotifications refer
-    /// to the first NotificationsInOpen or to the second?
+    /// of events: send `NotificationsInOpen`, send `NotificationsInOpenCancel`, send
+    /// `NotificationsInOpen`, receive `AcceptInNotifications`. Does the `AcceptInNotifications`
+    /// refer to the first `NotificationsInOpen` or to the second?
     /// In order to solve this problem, the coordinator must always send back a
     /// [`CoordinatorToConnectionInner::RejectInNotifications`] in order to acknowledge a
-    /// NotificationsInOpenCancel.
+    /// `NotificationsInOpenCancel`.
     NotificationsInOpenCancel {
         id: established::SubstreamId,
     },
