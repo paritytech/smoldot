@@ -25,7 +25,7 @@ use super::{
     NotificationsOutErr, OverlayNetwork, PeerId, ShutdownCause, SubstreamId,
 };
 
-use alloc::{string::ToString as _, sync::Arc};
+use alloc::{collections::VecDeque, string::ToString as _, sync::Arc};
 use core::{
     hash::Hash,
     iter,
@@ -73,6 +73,11 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
         // TODO: could be user datas in established?
         outbound_substreams_reverse:
             hashbrown::HashMap<established::SubstreamId, SubstreamId, fnv::FnvBuildHasher>,
+
+        /// After a [`ConnectionToCoordinatorInner::NotificationsInOpenCancel`] is emitted, an
+        /// entry is added to this list. If the coordinator accepts or refuses a substream in this
+        /// list, the acceptance/refusal is dismissed.
+        notifications_in_open_cancel_acknowledgments: VecDeque<established::SubstreamId>,
     },
 
     /// Connection has finished its shutdown. A [`ConnectionToCoordinatorInner::ShutdownFinished`]
@@ -198,6 +203,7 @@ where
                 outbound_substreams_map,
                 outbound_substreams_reverse,
                 handshake_finished_message_to_send,
+                notifications_in_open_cancel_acknowledgments,
                 ..
             } => {
                 if let Some(remote_peer_id) = handshake_finished_message_to_send.take() {
@@ -249,6 +255,7 @@ where
                         handshake,
                     }),
                     Some(established::Event::NotificationsInOpenCancel { id, .. }) => {
+                        notifications_in_open_cancel_acknowledgments.push_back(id);
                         Some(ConnectionToCoordinatorInner::NotificationsInOpenCancel { id })
                     }
                     Some(established::Event::NotificationIn { id, notification }) => {
@@ -443,17 +450,37 @@ where
                     substream_id,
                     handshake,
                 },
-                MultiStreamConnectionTaskInner::Established { established, .. },
+                MultiStreamConnectionTaskInner::Established {
+                    established,
+                    notifications_in_open_cancel_acknowledgments,
+                    ..
+                },
             ) => {
-                // TODO: must verify that the substream is still valid
-                established.accept_in_notifications_substream(substream_id, handshake, ());
+                if let Some(idx) = notifications_in_open_cancel_acknowledgments
+                    .iter()
+                    .position(|s| *s == substream_id)
+                {
+                    notifications_in_open_cancel_acknowledgments.remove(idx);
+                } else {
+                    established.accept_in_notifications_substream(substream_id, handshake, ());
+                }
             }
             (
                 CoordinatorToConnectionInner::RejectInNotifications { substream_id },
-                MultiStreamConnectionTaskInner::Established { established, .. },
+                MultiStreamConnectionTaskInner::Established {
+                    established,
+                    notifications_in_open_cancel_acknowledgments,
+                    ..
+                },
             ) => {
-                // TODO: must verify that the substream is still valid
-                established.reject_in_notifications_substream(substream_id);
+                if let Some(idx) = notifications_in_open_cancel_acknowledgments
+                    .iter()
+                    .position(|s| *s == substream_id)
+                {
+                    notifications_in_open_cancel_acknowledgments.remove(idx);
+                } else {
+                    established.reject_in_notifications_substream(substream_id);
+                }
             }
             (
                 CoordinatorToConnectionInner::StartShutdown { .. },
@@ -778,6 +805,9 @@ where
                             ),
                             outbound_substreams_reverse:
                                 hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()),
+                            notifications_in_open_cancel_acknowledgments: VecDeque::with_capacity(
+                                4,
+                            ),
                         };
 
                         !handshake_substream_still_open
