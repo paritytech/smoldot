@@ -168,7 +168,8 @@ struct NotificationsOutState {
 }
 
 enum NotificationsOutOpenState {
-    Closed,
+    NotOpen,
+    ClosedByRemote,
     Opening(collection::SubstreamId),
     Open(collection::SubstreamId),
 }
@@ -600,7 +601,7 @@ where
                         notification_out.open = NotificationsOutOpenState::Open(substream_id);
                         // TODO: close if `!desired`
                     } else {
-                        notification_out.open = NotificationsOutOpenState::Closed;
+                        notification_out.open = NotificationsOutOpenState::ClosedByRemote;
                         self.inner_notification_substreams
                             .remove(&substream_id)
                             .unwrap();
@@ -642,7 +643,7 @@ where
                         notification_out.open,
                         NotificationsOutOpenState::Open(_)
                     ));
-                    notification_out.open = NotificationsOutOpenState::Closed;
+                    notification_out.open = NotificationsOutOpenState::ClosedByRemote;
 
                     // Remove entry from map if it has become useless.
                     if !notification_out.desired {
@@ -1100,9 +1101,18 @@ where
 
             let current_state = current_state.or_insert(NotificationsOutState {
                 desired: true,
-                open: NotificationsOutOpenState::Closed,
+                open: NotificationsOutOpenState::NotOpen,
             });
             current_state.desired = true;
+
+            if matches!(new_desired_state, DesiredState::DesiredReset)
+                && matches!(
+                    current_state.open,
+                    NotificationsOutOpenState::ClosedByRemote
+                )
+            {
+                current_state.open = NotificationsOutOpenState::NotOpen;
+            }
 
             // Insert in `unfulfilled_desired_peers` if there is no non-shutting-down established
             // or handshaking connection of that peer.
@@ -1127,11 +1137,11 @@ where
             current_state.desired = false;
 
             match current_state.open {
-                NotificationsOutOpenState::Closed => {}
+                NotificationsOutOpenState::NotOpen | NotificationsOutOpenState::ClosedByRemote => {}
                 NotificationsOutOpenState::Open(substream_id)
                 | NotificationsOutOpenState::Opening(substream_id) => {
                     self.inner.close_out_notifications(substream_id);
-                    current_state.open = NotificationsOutOpenState::Closed;
+                    current_state.open = NotificationsOutOpenState::NotOpen;
                 }
             }
 
@@ -1218,18 +1228,31 @@ where
     /// Returns the list of peer-substream combinations marked as desired where there exists a
     /// non-shutting-down connection to this peer but the desired substream hasn't been opened yet.
     ///
+    /// If `include_already_tried`, this function returns substreams that were attempted before
+    /// and have been refused by the remote.
+    ///
     /// Use [`Peers::open_out_notification`] to actually open a substream.
     pub fn unfulfilled_desired_outbound_substream(
         &'_ self,
+        include_already_tried: bool,
     ) -> impl Iterator<Item = (&'_ PeerId, usize)> + '_ {
         // TODO: this is O(n), maybe add a cache
         self.peers_notifications_out.iter().filter_map(
-            |((peer_index, notifications_protocol_index), state)| {
+            move |((peer_index, notifications_protocol_index), state)| {
                 if !state.desired {
                     return None;
                 }
 
-                if !matches!(state.open, NotificationsOutOpenState::Closed) {
+                if !matches!(
+                    state.open,
+                    NotificationsOutOpenState::NotOpen | NotificationsOutOpenState::ClosedByRemote
+                ) {
+                    return None;
+                }
+
+                if !include_already_tried
+                    && matches!(state.open, NotificationsOutOpenState::ClosedByRemote)
+                {
                     return None;
                 }
 
@@ -1288,7 +1311,7 @@ where
             .entry((peer_index, notifications_protocol_index))
             .or_insert(NotificationsOutState {
                 desired: true,
-                open: NotificationsOutOpenState::Closed,
+                open: NotificationsOutOpenState::NotOpen,
             });
 
         let substream_id = self.inner.open_out_notifications(
@@ -1324,7 +1347,11 @@ where
             .map(|state| &state.open)
         {
             None
-            | Some(NotificationsOutOpenState::Opening(_) | NotificationsOutOpenState::Closed) => {
+            | Some(
+                NotificationsOutOpenState::Opening(_)
+                | NotificationsOutOpenState::NotOpen
+                | NotificationsOutOpenState::ClosedByRemote,
+            ) => {
                 panic!()
             }
             Some(NotificationsOutOpenState::Open(s_id)) => s_id,
@@ -1798,7 +1825,6 @@ pub enum DesiredState {
     Desired,
     /// Substream is now desired. If the peer has refused this substream in the past, try to open
     /// one again.
-    // TODO: now completely identical to Desired
     DesiredReset,
 }
 

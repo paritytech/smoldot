@@ -2059,7 +2059,7 @@ where
         loop {
             // Note: we can't use a `while let` due to borrow checker errors.
             let (peer_id, notifications_protocol_index) =
-                match self.inner.unfulfilled_desired_outbound_substream().next() {
+                match self.inner.unfulfilled_desired_outbound_substream(false).next() {
                     Some((peer_id, idx)) => (peer_id.clone(), idx),
                     None => break,
                 };
