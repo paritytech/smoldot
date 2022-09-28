@@ -87,7 +87,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 
   // Contains the information of each chain that is currently alive.
   let chains: Map<number, {
-    jsonRpcResponsesPromises: PromiseFunctions[], // TODO: rename DatabasePromise?
+    jsonRpcResponsesPromises: PromiseFunctions[],
     databasePromises: PromiseFunctions[],
   }> = new Map();
 
