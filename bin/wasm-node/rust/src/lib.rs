@@ -117,7 +117,7 @@ impl Sub<Instant> for Instant {
 }
 
 lazy_static::lazy_static! {
-    static ref CLIENT: Mutex<Option<init::Client<platform::Platform, Vec<future::AbortHandle>>>> = Mutex::new(None);
+    static ref CLIENT: Mutex<Option<init::Client<platform::Platform, ()>>> = Mutex::new(None);
 }
 
 fn init(max_log_level: u32, enable_current_task: u32, cpu_rate_limit: u32) {
@@ -235,7 +235,7 @@ fn add_chain(
             .unwrap()
             .smoldot
             .add_chain(smoldot_light::AddChainConfig {
-                user_data: Vec::new(),
+                user_data: (),
                 specification: str::from_utf8(&chain_spec).unwrap(),
                 database_content: str::from_utf8(&database_content).unwrap(),
                 json_rpc_responses: json_rpc_responses_tx,
@@ -296,7 +296,7 @@ fn add_chain(
 fn remove_chain(chain_id: u32) {
     let mut client_lock = CLIENT.lock().unwrap();
 
-    let abort_handles = match client_lock
+    match client_lock
         .as_mut()
         .unwrap()
         .chains
@@ -317,24 +317,13 @@ fn remove_chain(chain_id: u32) {
                     .poll_next(&mut Context::from_waker(futures::task::noop_waker_ref()));
             }
 
-            client_lock
+            let () = client_lock
                 .as_mut()
                 .unwrap()
                 .smoldot
-                .remove_chain(smoldot_chain_id)
+                .remove_chain(smoldot_chain_id);
         }
-        init::Chain::Erroneous { .. } => Vec::new(),
-    };
-
-    // Abort the tasks that retrieve the database content or poll the channel and send out the
-    // JSON-RPC responses. This prevents any database callback from being called, and any new
-    // JSON-RPC response concerning this chain from ever being sent back, even if some were still
-    // pending.
-    // Note that this only works because Wasm is single-threaded, otherwise the task being aborted
-    // might be in the process of being polled.
-    // TODO: solve this in case we use Wasm threads in the future
-    for abort_handle in abort_handles {
-        abort_handle.abort();
+        init::Chain::Erroneous { .. } => {},
     }
 }
 
