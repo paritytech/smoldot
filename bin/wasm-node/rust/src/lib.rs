@@ -505,52 +505,6 @@ fn json_rpc_responses_pop(chain_id: u32) {
     }
 }
 
-fn database_content(chain_id: u32, max_size: u32) {
-    let mut client_lock = CLIENT.lock().unwrap();
-
-    let init::Client {
-        smoldot: client,
-        new_tasks_spawner,
-        chains,
-    } = client_lock.as_mut().unwrap();
-
-    let client_chain_id = match chains.get(usize::try_from(chain_id).unwrap()).unwrap() {
-        init::Chain::Healthy {
-            smoldot_chain_id, ..
-        } => *smoldot_chain_id,
-        init::Chain::Erroneous { .. } => panic!(),
-    };
-
-    let task = {
-        let max_size = usize::try_from(max_size).unwrap();
-        let future = client.database_content(client_chain_id, max_size);
-        async move {
-            let content = future.await;
-            unsafe {
-                bindings::database_content_ready(
-                    u32::try_from(content.as_ptr() as usize).unwrap(),
-                    u32::try_from(content.len()).unwrap(),
-                    chain_id,
-                );
-            }
-        }
-    };
-
-    let (abort_handle, abort_registration) = future::AbortHandle::new_pair();
-    client
-        .chain_user_data_mut(client_chain_id)
-        .push(abort_handle);
-
-    new_tasks_spawner
-        .unbounded_send((
-            "database_content-output".to_owned(),
-            future::Abortable::new(task, abort_registration)
-                .map(|_| ())
-                .boxed(),
-        ))
-        .unwrap();
-}
-
 struct JsonRpcResponsesNonEmptyWaker {
     chain_id: u32,
 }
