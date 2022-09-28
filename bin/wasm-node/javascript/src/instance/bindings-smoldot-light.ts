@@ -48,7 +48,6 @@ export interface Config {
     
     logCallback: (level: number, target: string, message: string) => void,
     jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
-    databaseContentCallback: (data: string, chainId: number) => void,
     currentTaskCallback?: (taskName: string | null) => void,
 }
 
@@ -220,21 +219,6 @@ export default function (config: Config): { imports: WebAssembly.ModuleImports, 
         json_rpc_responses_non_empty: (chainId: number) => {
             if (killedTracked.killed) return;
             config.jsonRpcResponsesNonEmptyCallback(chainId);
-        },
-
-        // Used by the Rust side in response to asking for the database content of a chain.
-        database_content_ready: (ptr: number, len: number, chainId: number) => {
-            if (killedTracked.killed) return;
-
-            const instance = config.instance!;
-
-            ptr >>>= 0;
-            len >>>= 0;
-
-            let content = buffer.utf8BytesToString(new Uint8Array(instance.exports.memory.buffer), ptr, len);
-            if (config.databaseContentCallback) {
-                config.databaseContentCallback(content, chainId);
-            }
         },
 
         // Used by the Rust side to emit a log entry.

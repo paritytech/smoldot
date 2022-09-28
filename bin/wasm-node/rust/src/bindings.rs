@@ -96,16 +96,6 @@ extern "C" {
     /// [`json_rpc_responses_pop`] in order to have the guarantee that this function gets called.
     pub fn json_rpc_responses_non_empty(chain_id: u32);
 
-    /// This function is called by the client is response to calling [`database_content`].
-    ///
-    /// The database content is a UTF-8 string found in the memory of the WebAssembly virtual
-    /// machine at offset `ptr` and with length `len`.
-    ///
-    /// `chain_id` is the chain that the request was made to. It is guaranteed to always be valid.
-    /// This function is not called if the chain is removed with [`remove_chain`] while the fetch
-    /// is in progress.
-    pub fn database_content_ready(ptr: u32, len: u32, chain_id: u32);
-
     /// Client is emitting a log entry.
     ///
     /// Each log entry is made of a log level (`1 = Error, 2 = Warn, 3 = Info, 4 = Debug,
@@ -319,7 +309,7 @@ pub extern "C" fn alloc(len: u32) -> u32 {
 /// the pointers and lengths (in bytes) as parameter to this function.
 ///
 /// > **Note**: The database content is an opaque string that can be obtained by calling
-/// >           [`database_content`].
+/// >           the `chainHead_unstable_finalizedDatabase` JSON-RPC function.
 ///
 /// Similarly, use [`alloc`] to allocate a buffer containing a list of 32-bits-little-endian chain
 /// ids. Pass the pointer and number of chain ids (*not* length in bytes of the buffer) to this
@@ -463,28 +453,6 @@ pub struct JsonRpcResponseInfo {
 #[no_mangle]
 pub extern "C" fn json_rpc_responses_pop(chain_id: u32) {
     super::json_rpc_responses_pop(chain_id)
-}
-
-/// Starts generating the content of the database of the chain.
-///
-/// This function doesn't immediately return the content, but later calls
-/// [`database_content_ready`] with the content of the database.
-///
-/// Calling this function multiple times will lead to multiple calls to [`database_content_ready`],
-/// with potentially different values.
-///
-/// The `max_size` parameter contains the maximum length, in bytes, of the value that will be
-/// provided back. Please be aware that passing a `u32` across the FFI boundary can be tricky.
-/// From the Wasm perspective, the parameter of this function is actually a `i32` that is then
-/// reinterpreted as a `u32`.
-///
-/// [`database_content_ready`] will not be called if you remove the chain with [`remove_chain`]
-/// while the operation is in progress.
-///
-/// It is forbidden to call this function on an erroneous chain.
-#[no_mangle]
-pub extern "C" fn database_content(chain_id: u32, max_size: u32) {
-    super::database_content(chain_id, max_size)
 }
 
 /// Must be called in response to [`start_timer`] after the given duration has passed.

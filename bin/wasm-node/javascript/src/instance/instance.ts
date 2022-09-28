@@ -66,7 +66,6 @@ export interface Instance {
   nextJsonRpcResponse: (chainId: number, resolve: (response: string) => void, reject: (error: Error) => void) => void
   addChain: (chainSpec: string, databaseContent: string, potentialRelayChains: number[], disableJsonRpc: boolean) => Promise<{ success: true, chainId: number } | { success: false, error: string }>
   removeChain: (chainId: number) => void
-  databaseContent: (chainId: number, maxUtf8BytesSize?: number) => Promise<string>
   startShutdown: () => void
 }
 
@@ -87,8 +86,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 
   // Contains the information of each chain that is currently alive.
   let chains: Map<number, {
-    jsonRpcResponsesPromises: PromiseFunctions[],
-    databasePromises: PromiseFunctions[],
+    jsonRpcResponsesPromises: JsonRpcResponsesPromise[],
   }> = new Map();
 
   // Start initialization of the Wasm VM.
@@ -110,10 +108,6 @@ export function start(configMessage: Config, platformBindings: instance.Platform
           promise.reject(crashError.error)
         }
         chain.jsonRpcResponsesPromises = [];
-        for (const promise of chain.databasePromises) {
-          promise.reject(crashError.error)
-        }
-        chain.databasePromises = [];
       }
     },
     logCallback: (level, target, message) => {
@@ -159,10 +153,6 @@ export function start(configMessage: Config, platformBindings: instance.Platform
       } else {
         setTimeout(update, 0)
       }
-    },
-    databaseContentCallback: (data, chainId) => {
-      const promises = chains.get(chainId)?.databasePromises!;
-      (promises.shift() as PromiseFunctions).resolve(data);
     },
     currentTaskCallback: (taskName) => {
       currentTask.name = taskName
@@ -302,8 +292,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
           if (instance.exports.chain_is_ok(chainId) != 0) {
             console.assert(!chains.has(chainId));
             chains.set(chainId, {
-              jsonRpcResponsesPromises: new Array(),
-              databasePromises: new Array()
+              jsonRpcResponsesPromises: new Array()
             });
             return { success: true, chainId };
           } else {
@@ -345,48 +334,6 @@ export function start(configMessage: Config, platformBindings: instance.Platform
       }
     },
 
-    databaseContent: (chainId: number, maxUtf8BytesSize?: number): Promise<string> => {
-      // Because `databaseContent` is passed as parameter an identifier returned by `addChain`, it
-      // is always the case that the Wasm instance is already initialized. The only possibility for
-      // it to not be the case is if the user completely invented the `chainId`.
-      if (!state.initialized)
-        throw new Error("Internal error");
-
-      if (crashError.error)
-        throw crashError.error;
-
-      console.assert(chains.has(chainId));
-      const databaseContentPromises = chains.get(chainId)?.databasePromises!;
-      const promise: Promise<string> = new Promise((resolve, reject) => {
-        databaseContentPromises.push({ resolve, reject });
-      });
-
-      // Cap `maxUtf8BytesSize` and set a default value.
-      const twoPower32 = (1 << 30) * 4;  // `1 << 31` and `1 << 32` in JavaScript don't give the value that you expect.
-      const maxSize = maxUtf8BytesSize || (twoPower32 - 1);
-      const cappedMaxSize = (maxSize >= twoPower32) ? (twoPower32 - 1) : maxSize;
-
-      // The value of `maxUtf8BytesSize` is guaranteed to always fit in 32 bits, in
-      // other words, that `maxUtf8BytesSize < (1 << 32)`.
-      // We need to perform a conversion in such a way that the the bits of the output of
-      // `ToInt32(converted)`, when interpreted as u32, is equal to `maxUtf8BytesSize`.
-      // See ToInt32 here: https://tc39.es/ecma262/#sec-toint32
-      // Note that the code below has been tested against example values. Please be very careful
-      // if you decide to touch it. Ideally it would be unit-tested, but since it concerns the FFI
-      // layer between JS and Rust, writing unit tests would be extremely complicated.
-      const twoPower31 = (1 << 30) * 2;  // `1 << 31` in JavaScript doesn't give the value that you expect.
-      const converted = (cappedMaxSize >= twoPower31) ?
-        (cappedMaxSize - twoPower32) : cappedMaxSize;
-
-      try {
-        state.instance.exports.database_content(chainId, converted);
-        return promise;
-      } catch (_error) {
-        console.assert(crashError.error);
-        throw crashError.error
-      }
-    },
-
     startShutdown: () => {
       return queueOperation((instance) => {
         // `startShutdown` is a bit special in its handling of crashes.
@@ -409,7 +356,7 @@ export function start(configMessage: Config, platformBindings: instance.Platform
 
 }
 
-interface PromiseFunctions {
+interface JsonRpcResponsesPromise {
   resolve: (data: string) => void,
   reject: (error: Error) => void,
 }
