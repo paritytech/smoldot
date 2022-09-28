@@ -155,6 +155,7 @@ pub struct Peers<TConn, TNow> {
     /// Each [`DesiredInNotificationId`] points to this slab. Contains the connection and
     /// substream id to accept or refuse. Items are always initially set to `Some`, but they can
     /// be set to `None` if the remote cancels its request.
+    // TODO: we should just pass through the events from the collection/established
     desired_in_notifications: slab::Slab<Option<(collection::SubstreamId, usize, usize)>>,
 }
 
