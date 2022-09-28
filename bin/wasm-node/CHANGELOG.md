@@ -6,6 +6,10 @@
 
 - Removed the `version` field of the struct returned by the `rpc_methods` function. This is technically a breaking change, but it has been introduced in a minor version bump because it is very insubstantial. ([#2756](https://github.com/paritytech/smoldot/pull/2756))
 
+### Fixed
+
+- Fix old runtimes not being cleaned up properly and runtimes being downloaded multiple times after an on-chain runtime upgrade. ([#2781](https://github.com/paritytech/smoldot/pull/2781))
+
 ## 0.6.34 - 2022-09-20
 
 ### Added

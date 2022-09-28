@@ -897,9 +897,15 @@ impl<T> Yamux<T> {
                                     }
                                     _ => {}
                                 }
-                            }
 
-                            // TODO: should return an event
+                                return Ok(IncomingDataOutcome {
+                                    yamux: self,
+                                    bytes_read: total_read,
+                                    detail: Some(IncomingDataDetail::StreamReset {
+                                        substream_id: SubstreamId(stream_id),
+                                    }),
+                                });
+                            }
                         }
 
                         // Remote has sent a SYN flag. A new substream is to be opened.
