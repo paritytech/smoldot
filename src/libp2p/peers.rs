@@ -121,6 +121,11 @@ pub struct Peers<TConn, TNow> {
     /// it's not necessary.
     peer_indices: hashbrown::HashMap<PeerId, usize, SipHasherBuild>,
 
+    /// List of all peers (as indices within [`Peers::peers`]) that are desired or have a substream
+    /// marked as desired but for which no non-shutting-down established or handshaking connection
+    /// exists.
+    unfulfilled_desired_peers: hashbrown::HashSet<usize, fnv::FnvBuildHasher>,
+
     /// List of all established connections, as a tuple of `(peer_index, connection_id)`.
     /// `peer_index` is the index in [`Peers::peers`]. Includes all connections even if they are
     /// still handshaking or shutting down.
@@ -230,6 +235,10 @@ where
                 SipHasherBuild::new(randomness.sample(rand::distributions::Standard)),
             ),
             peers: slab::Slab::with_capacity(config.peers_capacity),
+            unfulfilled_desired_peers: hashbrown::HashSet::with_capacity_and_hasher(
+                config.peers_capacity,
+                Default::default(),
+            ),
             inner_notification_substreams: hashbrown::HashMap::with_capacity_and_hasher(
                 0,
                 Default::default(),
@@ -314,29 +323,61 @@ where
                     let actual_peer_index = self.peer_index_or_insert(&peer_id);
                     let peer_id = self.peers[actual_peer_index].peer_id.clone();
 
-                    let expected_peer_id =
-                        if let Some(expected_peer_index) = self.inner[connection_id].peer_index {
-                            if expected_peer_index != actual_peer_index {
-                                let _was_in = self
-                                    .connections_by_peer
-                                    .remove(&(expected_peer_index, connection_id));
-                                debug_assert!(_was_in);
-                                let _inserted = self
-                                    .connections_by_peer
-                                    .insert((actual_peer_index, connection_id));
-                                debug_assert!(_inserted);
-                                self.inner[connection_id].peer_index = Some(actual_peer_index);
-                            }
+                    let expected_peer_id = if let Some(expected_peer_index) =
+                        self.inner[connection_id].peer_index
+                    {
+                        debug_assert!(!self
+                            .unfulfilled_desired_peers
+                            .contains(&expected_peer_index));
 
-                            Some(self.peers[actual_peer_index].peer_id.clone())
-                        } else {
+                        if expected_peer_index != actual_peer_index {
+                            let _was_in = self
+                                .connections_by_peer
+                                .remove(&(expected_peer_index, connection_id));
+                            debug_assert!(_was_in);
                             let _inserted = self
                                 .connections_by_peer
                                 .insert((actual_peer_index, connection_id));
                             debug_assert!(_inserted);
                             self.inner[connection_id].peer_index = Some(actual_peer_index);
-                            None
-                        };
+
+                            self.unfulfilled_desired_peers.remove(&actual_peer_index);
+
+                            // We might have to insert the expected peer back in
+                            // `unfulfilled_desired_peers` if it is desired.
+                            if (self.peers[expected_peer_index].desired
+                                || self
+                                    .peers_notifications_out
+                                    .range(
+                                        (expected_peer_index, usize::min_value())
+                                            ..=(expected_peer_index, usize::max_value()),
+                                    )
+                                    .any(|(_, state)| state.desired))
+                                && !self
+                                    .connections_by_peer
+                                    .range(
+                                        (expected_peer_index, ConnectionId::min_value())
+                                            ..=(expected_peer_index, ConnectionId::max_value()),
+                                    )
+                                    .map(|(_, connection_id)| *connection_id)
+                                    .any(|connection_id| {
+                                        !self.inner.connection_state(connection_id).shutting_down
+                                    })
+                            {
+                                self.unfulfilled_desired_peers.insert(expected_peer_index);
+                            }
+                        }
+
+                        Some(self.peers[actual_peer_index].peer_id.clone())
+                    } else {
+                        let _inserted = self
+                            .connections_by_peer
+                            .insert((actual_peer_index, connection_id));
+                        debug_assert!(_inserted);
+                        self.inner[connection_id].peer_index = Some(actual_peer_index);
+                        self.unfulfilled_desired_peers.remove(&actual_peer_index);
+                        None
+                    };
 
                     let num_healthy_peer_connections = {
                         let num = self
@@ -382,6 +423,30 @@ where
 
                     let peer = if let Some(peer_index) = self.inner[id].peer_index {
                         let peer_id = self.peers[peer_index].peer_id.clone();
+
+                        // We might have to insert the peer back in `unfulfilled_desired_peers` if
+                        // it is desired.
+                        if (self.peers[peer_index].desired
+                            || self
+                                .peers_notifications_out
+                                .range(
+                                    (peer_index, usize::min_value())
+                                        ..=(peer_index, usize::max_value()),
+                                )
+                                .any(|(_, state)| state.desired))
+                            && !self
+                                .connections_by_peer
+                                .range(
+                                    (peer_index, ConnectionId::min_value())
+                                        ..=(peer_index, ConnectionId::max_value()),
+                                )
+                                .map(|(_, connection_id)| *connection_id)
+                                .any(|connection_id| {
+                                    !self.inner.connection_state(connection_id).shutting_down
+                                })
+                        {
+                            self.unfulfilled_desired_peers.insert(peer_index);
+                        }
 
                         if connection_state.established {
                             let num_healthy_peer_connections = {
@@ -834,6 +899,8 @@ where
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         let peer_index = self.peer_index_or_insert(expected_peer_id);
 
+        self.unfulfilled_desired_peers.remove(&peer_index);
+
         let (connection_id, connection_task) = self.inner.insert_single_stream(
             when_connected,
             handshake_kind,
@@ -871,6 +938,8 @@ where
         TSubId: Clone + PartialEq + Eq + Hash,
     {
         let peer_index = self.peer_index_or_insert(expected_peer_id);
+
+        self.unfulfilled_desired_peers.remove(&peer_index);
 
         let (connection_id, connection_task) = self.inner.insert_multi_stream(
             when_connected,
@@ -971,43 +1040,10 @@ where
     /// associated connection. An associated connection is either a fully established connection
     /// with that peer, or an outgoing connection that is still handshaking but expects to reach
     /// that peer.
-    pub fn unfulfilled_desired_peers(&self) -> impl Iterator<Item = &PeerId> {
-        // TODO: complexity of this method is too damn high
-
-        let mut desired = self
-            .peers
+    pub fn unfulfilled_desired_peers(&'_ self) -> impl Iterator<Item = &'_ PeerId> + '_ {
+        self.unfulfilled_desired_peers
             .iter()
-            .filter(|(_, p)| p.desired)
-            .map(|(peer_index, _)| peer_index)
-            .collect::<BTreeSet<_>>();
-
-        for ((peer_index, _), state) in &self.peers_notifications_out {
-            if state.desired {
-                desired.insert(*peer_index);
-            }
-        }
-
-        let mut out = Vec::with_capacity(desired.len());
-        for peer_index in desired {
-            if self
-                .connections_by_peer
-                .range(
-                    (peer_index, ConnectionId::min_value())
-                        ..=(peer_index, ConnectionId::max_value()),
-                )
-                .filter(|(_, connection_id)| {
-                    !self.inner.connection_state(*connection_id).shutting_down
-                })
-                .count()
-                != 0
-            {
-                continue;
-            }
-
-            out.push(&self.peers[peer_index].peer_id);
-        }
-
-        out.into_iter()
+            .map(move |idx| &self.peers[*idx].peer_id)
     }
 
     /// Sets the "desired" flag of the given [`PeerId`].
@@ -1017,7 +1053,33 @@ where
     pub fn set_peer_desired(&mut self, peer_id: &PeerId, desired: bool) {
         let peer_index = self.peer_index_or_insert(peer_id);
         self.peers[peer_index].desired = desired;
-        if !desired {
+
+        if desired {
+            // Insert in `unfulfilled_desired_peers` if there is no non-shutting-down established
+            // or handshaking connection of that peer.
+            if !self
+                .connections_by_peer
+                .range(
+                    (peer_index, ConnectionId::min_value())
+                        ..=(peer_index, ConnectionId::max_value()),
+                )
+                .map(|(_, connection_id)| *connection_id)
+                .any(|connection_id| !self.inner.connection_state(connection_id).shutting_down)
+            {
+                self.unfulfilled_desired_peers.insert(peer_index);
+            }
+        } else {
+            // Remove from `unfulfilled_desired_peers` if there no desired notifications
+            // substream.
+            // Note that the peer is not necessarily expected to be in `unfulfilled_desired_peers`.
+            if !self
+                .peers_notifications_out
+                .range((peer_index, usize::min_value())..=(peer_index, usize::max_value()))
+                .any(|(_, state)| state.desired)
+            {
+                self.unfulfilled_desired_peers.remove(&peer_index);
+            }
+
             self.try_clean_up_peer(peer_index);
         }
     }
@@ -1060,6 +1122,20 @@ where
                 open: NotificationsOutOpenState::Closed,
             });
             current_state.desired = true;
+
+            // Insert in `unfulfilled_desired_peers` if there is no non-shutting-down established
+            // or handshaking connection of that peer.
+            if !self
+                .connections_by_peer
+                .range(
+                    (peer_index, ConnectionId::min_value())
+                        ..=(peer_index, ConnectionId::max_value()),
+                )
+                .map(|(_, connection_id)| *connection_id)
+                .any(|connection_id| !self.inner.connection_state(connection_id).shutting_down)
+            {
+                self.unfulfilled_desired_peers.insert(peer_index);
+            }
 
             // If substream is closed, try to open it.
             if matches!(current_state.open, NotificationsOutOpenState::Closed) {
@@ -1104,6 +1180,18 @@ where
                     self.inner.close_out_notifications(substream_id);
                     current_state.open = NotificationsOutOpenState::Closed;
                 }
+            }
+
+            // Remove from `unfulfilled_desired_peers` if the peer is not desired and there is no
+            // desired notifications substream.
+            // Note that the peer is not necessarily expected to be in `unfulfilled_desired_peers`.
+            if !self.peers[peer_index].desired
+                && !self
+                    .peers_notifications_out
+                    .range((peer_index, usize::min_value())..=(peer_index, usize::max_value()))
+                    .any(|(_, state)| state.desired)
+            {
+                self.unfulfilled_desired_peers.remove(&peer_index);
             }
 
             self.try_clean_up_peer(peer_index);
