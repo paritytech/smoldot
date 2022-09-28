@@ -4,7 +4,7 @@
 
 ### Removed
 
-- Removed `Chain.databaseContent` function. Use the `chainHead_unstable_finalizedDatabase` JSON-RPC function to obtain the database content instead.
+- Removed `Chain.databaseContent` function. Use the `chainHead_unstable_finalizedDatabase` JSON-RPC function to obtain the database content instead. ([#2791](https://github.com/paritytech/smoldot/pull/2791))
 
 ### Changed
 
