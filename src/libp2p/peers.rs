@@ -514,11 +514,13 @@ where
                         Connection {
                             peer_index: None,
                             user_data,
+                            outbound,
                             ..
                         },
                     ..
                 } => {
                     // Connection was incoming but its handshake wasn't finished yet.
+                    debug_assert!(!outbound);
                     return Some(Event::Shutdown {
                         connection_id,
                         peer: ShutdownPeer::IngoingHandshake,
