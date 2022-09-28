@@ -1063,9 +1063,7 @@ where
 
             // If substream is closed, try to open it.
             if matches!(current_state.open, NotificationsOutOpenState::Closed) {
-                if let ConnectionIdForPeer::Connected(connection_id) =
-                    self.connection_id_for_peer(peer_id)
-                {
+                if let Some(connection_id) = self.connection_id_for_peer(peer_id) {
                     let id =
                         DesiredOutNotificationId(self.desired_out_notifications.insert(Some((
                             peer_index,
@@ -1386,9 +1384,8 @@ where
         timeout: TNow,
     ) -> OutRequestId {
         let target_connection_id = match self.connection_id_for_peer(target) {
-            ConnectionIdForPeer::Connected(id) => id,
-            ConnectionIdForPeer::NotConnected
-            | ConnectionIdForPeer::ConnectedButShuttingDown(_) => panic!(), // As documented.
+            Some(id) => id,
+            None => panic!(), // As documented.
         };
 
         OutRequestId(self.inner.start_request(
@@ -1445,18 +1442,12 @@ where
 
     /// Picks the connection to use to send requests or notifications to the given peer.
     ///
-    /// This function tries to find a connection that is established and not shutting down. If it
-    /// can't find any, it instead tries to find a connection that is established but shutting
-    /// down. While it is technically not possible to send requests or notifications to connections
-    /// that are shutting down, the API user is still allowed to do so, and thus shouldn't lead to
-    /// a panic or error.
-    fn connection_id_for_peer(&self, target: &PeerId) -> ConnectionIdForPeer {
+    /// This function tries to find a connection that is established and not shutting down.
+    fn connection_id_for_peer(&self, target: &PeerId) -> Option<ConnectionId> {
         let peer_index = match self.peer_indices.get(target) {
             Some(i) => *i,
-            None => return ConnectionIdForPeer::NotConnected,
+            None => return None,
         };
-
-        let mut found_shutting_down = None;
 
         for (_, connection_id) in self.connections_by_peer.range(
             (peer_index, collection::ConnectionId::min_value())
@@ -1467,18 +1458,14 @@ where
                 continue;
             }
 
-            if !state.shutting_down {
-                return ConnectionIdForPeer::Connected(*connection_id);
-            } else {
-                found_shutting_down = Some(*connection_id);
+            if state.shutting_down {
+                continue;
             }
+
+            return Some(*connection_id);
         }
 
-        if let Some(found_shutting_down) = found_shutting_down {
-            ConnectionIdForPeer::ConnectedButShuttingDown(found_shutting_down)
-        } else {
-            ConnectionIdForPeer::NotConnected
-        }
+        None
     }
 
     fn peer_index_or_insert(&mut self, peer_id: &PeerId) -> usize {
@@ -1592,13 +1579,6 @@ impl<TConn, TNow> ops::IndexMut<ConnectionId> for Peers<TConn, TNow> {
     fn index_mut(&mut self, id: ConnectionId) -> &mut TConn {
         &mut self.inner[id].user_data
     }
-}
-
-enum ConnectionIdForPeer {
-    Connected(ConnectionId),
-    // TODO: is the distinction with NotConnected still useful?
-    ConnectedButShuttingDown(ConnectionId),
-    NotConnected,
 }
 
 /// See [`Peers::connection_state`].
