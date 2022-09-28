@@ -229,10 +229,9 @@ pub fn build_block_response(response: Vec<BlockData>) -> impl Iterator<Item = im
                     );
                     j.extend_from_slice(justification);
                 }
-                j
+                Some(j)
             } else {
-                // TODO: no; should simply not send the field
-                Vec::new()
+                None
             };
 
             protobuf::bytes_tag_encode(1, block.hash)
@@ -252,7 +251,12 @@ pub fn build_block_response(response: Vec<BlockData>) -> impl Iterator<Item = im
                         .flat_map(|b| b.into_iter())
                         .flat_map(|tx| protobuf::bytes_tag_encode(3, tx))
                         .map(either::Left)
-                        .chain(protobuf::bytes_tag_encode(8, justifications).map(either::Right))
+                        .chain(
+                            justifications
+                                .into_iter()
+                                .flat_map(|j| protobuf::bytes_tag_encode(8, j))
+                                .map(either::Right),
+                        )
                         .map(either::Right),
                 )
         })
