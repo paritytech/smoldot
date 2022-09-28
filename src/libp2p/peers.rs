@@ -774,6 +774,30 @@ where
                     let peer = if let Some(peer_index) = self.inner[id].peer_index {
                         let peer_id = self.peers[peer_index].peer_id.clone();
 
+                        // We might have to insert the peer back in `unfulfilled_desired_peers` if
+                        // it is desired.
+                        if (self.peers[peer_index].desired
+                            || self
+                                .peers_notifications_out
+                                .range(
+                                    (peer_index, usize::min_value())
+                                        ..=(peer_index, usize::max_value()),
+                                )
+                                .any(|(_, state)| state.desired))
+                            && !self
+                                .connections_by_peer
+                                .range(
+                                    (peer_index, ConnectionId::min_value())
+                                        ..=(peer_index, ConnectionId::max_value()),
+                                )
+                                .map(|(_, connection_id)| *connection_id)
+                                .any(|connection_id| {
+                                    !self.inner.connection_state(connection_id).shutting_down
+                                })
+                        {
+                            self.unfulfilled_desired_peers.insert(peer_index);
+                        }
+
                         if connection_state.established {
                             let num_healthy_peer_connections = {
                                 let num = self
