@@ -493,6 +493,7 @@ where
                     self.try_clean_up_peer(expected_peer_index);
 
                     return Some(Event::Shutdown {
+                        connection_id,
                         peer: if was_established {
                             ShutdownPeer::Established {
                                 num_healthy_peer_connections,
@@ -508,6 +509,7 @@ where
                 }
 
                 collection::Event::Shutdown {
+                    id: connection_id,
                     user_data:
                         Connection {
                             peer_index: None,
@@ -518,6 +520,7 @@ where
                 } => {
                     // Connection was incoming but its handshake wasn't finished yet.
                     return Some(Event::Shutdown {
+                        connection_id,
                         peer: ShutdownPeer::IngoingHandshake,
                         user_data,
                     });
@@ -1655,11 +1658,11 @@ pub enum Event<TConn> {
 
     /// A connection has stopped.
     Shutdown {
+        /// Identifier of the connection that has started shutting down.
+        connection_id: ConnectionId,
         /// State of the connection and identity of the remote.
         peer: ShutdownPeer,
-
         /// User data that was associated to this connection.
-        // TODO: ?!
         user_data: TConn,
     },
 
