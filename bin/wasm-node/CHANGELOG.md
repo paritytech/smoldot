@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Fix several panics related to cancelling the opening of incoming substreams. ([#2785](https://github.com/paritytech/smoldot/pull/2785))
 - Fix old runtimes not being cleaned up properly and runtimes being downloaded multiple times after an on-chain runtime upgrade. ([#2781](https://github.com/paritytech/smoldot/pull/2781))
 
 ## 0.6.34 - 2022-09-20
