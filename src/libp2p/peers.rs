@@ -1285,21 +1285,22 @@ where
         )
     }
 
-    /// Open a new outgoing substream to the given peer. A non-shutting-down connection must exist
-    /// with the current peer.
+    /// Open a new outgoing substream to the given peer. The peer-protocol combination must have
+    /// been marked as desired, and a non-shutting-down connection must exist with the current
+    /// peer.
     ///
     /// Must be passed the current moment in time in order to determine when the operation of
     /// opening the substream times out.
     ///
     /// Use [`Peers::unfulfilled_desired_outbound_substream`] in order to determine which
-    /// substreams should be opened. Note, however, that the parameters do not need to match an
-    /// item returned by [`Peers::unfulfilled_desired_outbound_substream`].
+    /// substreams should be opened.
     ///
     /// This function might generate a message destined to a connection. Use
     /// [`Peers::pull_message_to_connection`] to process these messages after it has returned.
     ///
     /// # Panic
     ///
+    /// Panics if this combination of peer-protocol isn't desired.
     /// Panics if there is no established non-shutting-down connection with the given peer.
     /// Panics if there is already an outgoing substream with this peer-protocol combination.
     ///
@@ -1321,6 +1322,7 @@ where
                 open: NotificationsOutOpenState::NotOpen,
             });
 
+        assert!(notif_state.desired);
         assert!(matches!(
             notif_state.open,
             NotificationsOutOpenState::NotOpen | NotificationsOutOpenState::ClosedByRemote
