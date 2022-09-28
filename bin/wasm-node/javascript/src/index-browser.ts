@@ -375,7 +375,7 @@ export function start(options?: ClientOptions): Client {
         // `pc` is guaranteed to be non-null.
         if (isFirstSubstream) {
           isFirstSubstream = false;
-          addChannel(pc!.createDataChannel("data", { id: 1, negotiated: true }), 'outbound')
+          addChannel(pc!.createDataChannel("data", { id: 0, negotiated: true }), 'outbound')
         } else {
           addChannel(pc!.createDataChannel("data"), 'outbound')
         }
