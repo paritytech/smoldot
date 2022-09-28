@@ -1678,7 +1678,7 @@ pub enum Event<TConn> {
 
     /// Outcome of a request started using [`Peers::start_request`].
     ///
-    /// *All* requests always lead to an outcome, even if the connection has been closed while the
+    /// All requests always lead to an outcome, even if the connection has been closed while the
     /// request was in progress.
     Response {
         /// Identifier for this request. Was returned by [`Peers::start_request`].
