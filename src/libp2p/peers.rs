@@ -37,8 +37,6 @@
 //! accepting or refusing the request. The requests can automatically become obsolete if the
 //! remote decides to withdraw their request or the connection closes. A request becoming obsolete
 //! does *not* invalidate its [`DesiredInNotificationId`].
-//! - A list of requests for outbound substreams emitted by the local node, identified by a
-//! [`DesiredOutNotificationId`]. Must be responded using [`Peers::open_out_notification`].
 //! - A list of requests that have been received, identified by a [`InRequestId`]. The API user
 //! must answer by calling [`Peers::respond_in_request`]. Requests can automatically become
 //! obsolete if the remote decides to withdraw their request or the connection closes. A request
@@ -49,7 +47,7 @@ use crate::libp2p::{self, collection, PeerId};
 use crate::util::SipHasherBuild;
 
 use alloc::{
-    collections::{btree_map, BTreeMap, BTreeSet, VecDeque},
+    collections::{btree_map, BTreeMap, BTreeSet},
     string::String,
     vec::Vec,
 };
@@ -158,17 +156,6 @@ pub struct Peers<TConn, TNow> {
     /// substream id to accept or refuse. Items are always initially set to `Some`, but they can
     /// be set to `None` if the remote cancels its request.
     desired_in_notifications: slab::Slab<Option<(collection::SubstreamId, usize, usize)>>,
-
-    /// Each [`DesiredOutNotificationId`] points to this slab.
-    // TODO: doc
-    desired_out_notifications: slab::Slab<Option<(usize, collection::ConnectionId, usize)>>,
-
-    /// When a [`DesiredOutNotificationId`] is allocated, the parameters of the desired out
-    /// notification are added to this FIFO queue.
-    /// This list is later processed in the [`Peers::next_unfulfilled_desired_outbound_substream`]
-    /// function.
-    // TODO: explain why it can't grow unbounded
-    pending_desired_out_notifs: VecDeque<(DesiredOutNotificationId, usize, usize)>,
 }
 
 /// See [`Peers::peers_notifications_out`].
@@ -182,7 +169,6 @@ struct NotificationsOutState {
 
 enum NotificationsOutOpenState {
     Closed,
-    ApiHandshakeWait(DesiredOutNotificationId),
     Opening(collection::SubstreamId),
     Open(collection::SubstreamId),
 }
@@ -245,9 +231,7 @@ where
             ), // TODO: capacity?
             peers_notifications_out: BTreeMap::new(),
             peers_notifications_in: BTreeSet::new(),
-            pending_desired_out_notifs: VecDeque::new(), // TODO: capacity?
             desired_in_notifications: slab::Slab::new(), // TODO: capacity?
-            desired_out_notifications: slab::Slab::new(), // TODO: capacity?
         }
     }
 
@@ -394,12 +378,6 @@ where
                         NonZeroU32::new(u32::try_from(num).unwrap()).unwrap()
                     };
 
-                    // If there isn't any other connection with this peer yet, check the desired
-                    // substreams and open them.
-                    if num_healthy_peer_connections.get() == 1 {
-                        self.open_desired_notifications_out(actual_peer_index);
-                    }
-
                     return Some(Event::HandshakeFinished {
                         connection_id,
                         num_healthy_peer_connections,
@@ -409,15 +387,6 @@ where
                 }
 
                 collection::Event::StartShutdown { id, reason } => {
-                    // TODO: this is O(n)
-                    for (_, item) in &mut self.desired_out_notifications {
-                        if let Some((_, connection_id, _)) = item.as_ref() {
-                            if *connection_id == id {
-                                *item = None;
-                            }
-                        }
-                    }
-
                     let connection_state = self.inner.connection_state(id);
                     debug_assert!(connection_state.shutting_down);
 
@@ -798,17 +767,6 @@ where
                     // A failed ping leads to a disconnect.
                     self.inner.start_shutdown(id);
 
-                    // We need to perform the same clean up as if the remote started the
-                    // shutdown.
-                    // TODO: this is O(n)
-                    for (_, item) in &mut self.desired_out_notifications {
-                        if let Some((_, connection_id, _)) = item.as_ref() {
-                            if *connection_id == id {
-                                *item = None;
-                            }
-                        }
-                    }
-
                     // TODO: DRY with StartShutdown event
                     let connection_state = self.inner.connection_state(id);
                     debug_assert!(connection_state.shutting_down);
@@ -1136,30 +1094,6 @@ where
             {
                 self.unfulfilled_desired_peers.insert(peer_index);
             }
-
-            // If substream is closed, try to open it.
-            if matches!(current_state.open, NotificationsOutOpenState::Closed) {
-                if let Some(connection_id) = self.connection_id_for_peer(peer_id) {
-                    let id =
-                        DesiredOutNotificationId(self.desired_out_notifications.insert(Some((
-                            peer_index,
-                            connection_id,
-                            notification_protocol,
-                        ))));
-
-                    // TODO: should use `current_state` instead, but this causes difficulties calling `connection_id_for_peer`
-                    self.peers_notifications_out
-                        .get_mut(&(peer_index, notification_protocol))
-                        .unwrap()
-                        .open = NotificationsOutOpenState::ApiHandshakeWait(id);
-
-                    self.pending_desired_out_notifs.push_back((
-                        id,
-                        peer_index,
-                        notification_protocol,
-                    ));
-                }
-            }
         } else {
             // Do nothing if not desired.
             let current_state = match current_state {
@@ -1170,10 +1104,6 @@ where
             current_state.desired = false;
 
             match current_state.open {
-                NotificationsOutOpenState::ApiHandshakeWait(id) => {
-                    debug_assert!(self.desired_out_notifications[id.0].is_some());
-                    self.desired_out_notifications[id.0] = None;
-                }
                 NotificationsOutOpenState::Closed => {}
                 NotificationsOutOpenState::Open(substream_id)
                 | NotificationsOutOpenState::Opening(substream_id) => {
@@ -1284,67 +1214,80 @@ where
         debug_assert!(_was_in.is_some());
     }
 
-    /// Finds a peer-substream combination marked as desired where there exists a connection to
-    /// this peer but the desired substream hasn't been opened yet.
-    /// If one is found, allocates a [`DesiredOutNotificationId`] that must be answered using
-    /// [`Peers::open_out_notification`].
+    /// Returns the list of peer-substream combinations marked as desired where there exists a
+    /// non-shutting-down connection to this peer but the desired substream hasn't been opened yet.
     ///
-    /// The allocated [`DesiredOutNotificationId`] remains valid forever until
-    /// [`Peers::open_out_notification`] is called.
-    ///
-    /// > **Note**: It is not possible to *not* open a desired outbound substream after it has
-    /// >           been returned by this function. This function and
-    /// >           [`Peers::open_out_notification`] are an API trick in order for the [`Peers`]
-    /// >           to fetch the content of the handshake to send to the remote.
-    pub fn next_unfulfilled_desired_outbound_substream(
-        &mut self,
-    ) -> Option<(DesiredOutNotificationId, &PeerId, usize)> {
-        let (id, peer_index, notifications_protocol_index) =
-            self.pending_desired_out_notifs.pop_front()?;
-        Some((
-            id,
-            &self.peers[peer_index].peer_id,
-            notifications_protocol_index,
-        ))
+    /// Use [`Peers::open_out_notification`] to actually open a substream.
+    pub fn unfulfilled_desired_outbound_substream(
+        &'_ self,
+    ) -> impl Iterator<Item = (&'_ PeerId, usize)> + '_ {
+        self.peers_notifications_out.iter().filter_map(
+            |((peer_index, notifications_protocol_index), state)| {
+                if !state.desired {
+                    return None;
+                }
+
+                if !matches!(state.open, NotificationsOutOpenState::Closed) {
+                    return None;
+                }
+
+                if !self
+                    .connections_by_peer
+                    .range(
+                        (*peer_index, collection::ConnectionId::min_value())
+                            ..=(*peer_index, collection::ConnectionId::max_value()),
+                    )
+                    .map(|(_, connection_id)| *connection_id)
+                    .any(|connection_id| {
+                        let state = self.inner.connection_state(connection_id);
+                        state.established && !state.shutting_down
+                    })
+                {
+                    return None;
+                }
+
+                Some((
+                    &self.peers[*peer_index].peer_id,
+                    *notifications_protocol_index,
+                ))
+            },
+        )
     }
 
-    /// Continuation of calling [`Peers::next_unfulfilled_desired_outbound_substream`] by
-    /// indicating the handshake to send to the remote.
+    /// Open a new outgoing substream to the given peer. A non-shutting-down connection must exist
+    /// with the current peer.
     ///
     /// Must be passed the current moment in time in order to determine when the operation of
     /// opening the substream times out.
+    ///
+    /// Use [`Peers::unfulfilled_desired_outbound_substream`] in order to determine which
+    /// substreams should be opened. Note, however, that the parameters do not need to match an
+    /// item returned by [`Peers::unfulfilled_desired_outbound_substream`].
     ///
     /// This function might generate a message destined to a connection. Use
     /// [`Peers::pull_message_to_connection`] to process these messages after it has returned.
     ///
     /// # Panic
     ///
-    /// Panics if the [`DesiredOutNotificationId`] is invalid. Note that these ids remain valid
-    /// forever until [`Peers::open_out_notification`] is called.
+    /// Panics if there is no established non-shutting-down connection with the given peer.
     ///
     pub fn open_out_notification(
         &mut self,
-        id: DesiredOutNotificationId,
+        peer_id: &PeerId,
+        notifications_protocol_index: usize,
         now: TNow,
         handshake: Vec<u8>,
     ) {
-        let (peer_index, connection_id, notifications_protocol_index) =
-            match self.desired_out_notifications.remove(id.0) {
-                Some(v) => v,
-                None => {
-                    // The "notification out request" is obsolete.
-                    return;
-                }
-            };
+        let peer_index = self.peer_index_or_insert(peer_id);
+        let connection_id = self.connection_id_for_peer(peer_id).unwrap();
 
         let notif_state = self
             .peers_notifications_out
-            .get_mut(&(peer_index, notifications_protocol_index))
-            .unwrap();
-        debug_assert!(matches!(
-            notif_state.open,
-            NotificationsOutOpenState::ApiHandshakeWait(_)
-        ));
+            .entry((peer_index, notifications_protocol_index))
+            .or_insert(NotificationsOutState {
+                desired: true,
+                open: NotificationsOutOpenState::Closed,
+            });
 
         let substream_id = self.inner.open_out_notifications(
             connection_id,
@@ -1379,11 +1322,9 @@ where
             .map(|state| &state.open)
         {
             None
-            | Some(
-                NotificationsOutOpenState::Opening(_)
-                | NotificationsOutOpenState::Closed
-                | NotificationsOutOpenState::ApiHandshakeWait(_),
-            ) => panic!(),
+            | Some(NotificationsOutOpenState::Opening(_) | NotificationsOutOpenState::Closed) => {
+                panic!()
+            }
             Some(NotificationsOutOpenState::Open(s_id)) => s_id,
         };
 
@@ -1607,53 +1548,6 @@ where
         let _index = self.peer_indices.remove(&peer_id).unwrap();
         debug_assert_eq!(_index, peer_index);
     }
-
-    /// Opens all the outbound notification substreams that have been marked as desired for the
-    /// given peer.
-    ///
-    /// Has no effect if the peer doesn't have any established non-shutting-down connection.
-    fn open_desired_notifications_out(&mut self, peer_index: usize) {
-        let connection_id = self
-            .connections_by_peer
-            .range(
-                (peer_index, collection::ConnectionId::min_value())
-                    ..=(peer_index, collection::ConnectionId::max_value()),
-            )
-            .map(|(_, connection_id)| *connection_id)
-            .filter(|connection_id| {
-                let state = self.inner.connection_state(*connection_id);
-                state.established && !state.shutting_down
-            })
-            .next();
-
-        let connection_id = match connection_id {
-            Some(c) => c,
-            None => return,
-        };
-
-        let notification_protocols_indices = self
-            .peers_notifications_out
-            .range((peer_index, usize::min_value())..=(peer_index, usize::max_value()))
-            .filter(|(_, v)| v.desired)
-            .map(|((_, index), _)| *index)
-            .collect::<Vec<_>>();
-
-        for idx in notification_protocols_indices {
-            let id = DesiredOutNotificationId(self.desired_out_notifications.insert(Some((
-                peer_index,
-                connection_id,
-                idx,
-            ))));
-
-            self.peers_notifications_out
-                .get_mut(&(peer_index, idx))
-                .unwrap()
-                .open = NotificationsOutOpenState::ApiHandshakeWait(id);
-
-            self.pending_desired_out_notifs
-                .push_back((id, peer_index, idx));
-        }
-    }
 }
 
 impl<TConn, TNow> ops::Index<ConnectionId> for Peers<TConn, TNow> {
@@ -1685,10 +1579,6 @@ pub struct ConnectionState {
 /// See [`Event::DesiredInNotification`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DesiredInNotificationId(usize);
-
-/// See [`Peers::next_unfulfilled_desired_outbound_substream`].
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DesiredOutNotificationId(usize);
 
 /// See [`Event::RequestIn`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

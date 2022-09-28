@@ -2058,9 +2058,9 @@ where
         // to open.
         loop {
             // Note: we can't use a `while let` due to borrow checker errors.
-            let (id, _, notifications_protocol_index) =
-                match self.inner.next_unfulfilled_desired_outbound_substream() {
-                    Some(v) => v,
+            let (peer_id, notifications_protocol_index) =
+                match self.inner.unfulfilled_desired_outbound_substream().next() {
+                    Some((peer_id, idx)) => (peer_id.clone(), idx),
                     None => break,
                 };
 
@@ -2091,7 +2091,12 @@ where
                 unreachable!()
             };
 
-            self.inner.open_out_notification(id, now.clone(), handshake);
+            self.inner.open_out_notification(
+                &peer_id,
+                notifications_protocol_index,
+                now.clone(),
+                handshake,
+            );
         }
 
         event_to_return
