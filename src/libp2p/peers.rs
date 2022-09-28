@@ -1301,6 +1301,7 @@ where
     /// # Panic
     ///
     /// Panics if there is no established non-shutting-down connection with the given peer.
+    /// Panics if there is already an outgoing substream with this peer-protocol combination.
     ///
     pub fn open_out_notification(
         &mut self,
@@ -1319,6 +1320,11 @@ where
                 desired: true,
                 open: NotificationsOutOpenState::NotOpen,
             });
+
+        assert!(matches!(
+            notif_state.open,
+            NotificationsOutOpenState::NotOpen | NotificationsOutOpenState::ClosedByRemote
+        ));
 
         let substream_id = self.inner.open_out_notifications(
             connection_id,
