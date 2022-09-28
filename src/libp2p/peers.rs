@@ -1245,6 +1245,7 @@ where
     pub fn unfulfilled_desired_outbound_substream(
         &'_ self,
     ) -> impl Iterator<Item = (&'_ PeerId, usize)> + '_ {
+        // TODO: this is O(n), maybe add a cache
         self.peers_notifications_out.iter().filter_map(
             |((peer_index, notifications_protocol_index), state)| {
                 if !state.desired {
