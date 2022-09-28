@@ -1071,9 +1071,8 @@ where
     /// When a peer is marked as "desired" and there isn't any pending or established connection
     /// towards it, it is returned when calling [`Peers::unfulfilled_desired_peers`].
     ///
-    /// When a combination of network protocol and [`PeerId`] is marked as "desired", the state
-    /// machine will try to maintain open an outbound substream. If the remote refuses the
-    /// substream, it will be returned when calling [`Peers::refused_notifications_out`].
+    /// When a combination of network protocol and [`PeerId`] is marked as "desired", it will
+    /// be returned by [`Peers::unfulfilled_desired_outbound_substream`].
     ///
     /// This function might generate a message destined to a connection. Use
     /// [`Peers::pull_message_to_connection`] to process these messages after it has returned.
@@ -1150,28 +1149,6 @@ where
 
             self.try_clean_up_peer(peer_index);
         }
-    }
-
-    /// Returns the combinations of notification and [`PeerId`] that are marked as "desired", but
-    /// where the remote has refused the request for a notifications substream.
-    ///
-    /// Use [`Peers::set_peer_notifications_out_desired`] with [`DesiredState::DesiredReset`] in
-    /// order to try again.
-    pub fn refused_notifications_out(&mut self) -> impl Iterator<Item = (PeerId, usize)> {
-        // TODO: O(n)
-        let peers = &self.peers;
-        self.peers_notifications_out
-            .iter()
-            .filter_map(|((peer_index, notif_proto_index), value)| {
-                if !value.desired || !matches!(value.open, NotificationsOutOpenState::Closed) {
-                    return None;
-                }
-
-                let peer_id = peers[*peer_index].peer_id.clone();
-                Some((peer_id, *notif_proto_index))
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
     }
 
     /// Responds to an [`Event::DesiredInNotification`] by accepting the request for an inbound
@@ -1758,9 +1735,6 @@ pub enum Event<TConn> {
     /// A previously open outbound substream has been closed by the remote. Can only happen after
     /// a corresponding successful [`Event::NotificationsOutResult`] event has been emitted in the
     /// past.
-    ///
-    /// This combination of [`PeerId`] and notification protocol will now be returned when calling
-    /// [`Peers::refused_notifications_out`].
     NotificationsOutClose {
         /// Peer the substream is no longer open with.
         peer_id: PeerId,
@@ -1824,6 +1798,7 @@ pub enum DesiredState {
     Desired,
     /// Substream is now desired. If the peer has refused this substream in the past, try to open
     /// one again.
+    // TODO: now completely identical to Desired
     DesiredReset,
 }
 
