@@ -15,9 +15,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { PlatformBindings, start as startInstance } from './instance/instance.js';
+import { MalformedJsonRpcError, PlatformBindings, start as startInstance } from './instance/instance.js';
 
-export { CrashError } from './instance/instance.js';
+export { MalformedJsonRpcError, QueueFullError, CrashError } from './instance/instance.js';
 
 /**
  * Thrown in case of a problem when initializing the chain.
@@ -103,9 +103,8 @@ export interface Chain {
    * Be aware that some requests will cause notifications to be sent back using the same callback
    * as the responses.
    *
-   * No response is generated if the request isn't a valid JSON-RPC request or if the request is
-   * unreasonably large (64 MiB at the time of writing of this comment). The request is then
-   * silently discarded.
+   * A {MalformedJsonRpcError} is thrown if the request isn't a valid JSON-RPC request or if the
+   * request is unreasonably large (64 MiB at the time of writing of this comment).
    * If, however, the request is a valid JSON-RPC request but that concerns an unknown method, a
    * error response is properly generated.
    *
@@ -116,11 +115,30 @@ export interface Chain {
    *
    * @param rpc JSON-encoded RPC request.
    *
+   * @throws {MalformedJsonRpcError} If the payload isn't valid JSON-RPC.
+   * @throws {QueueFullError} If the queue of JSON-RPC requests of the chain is full.
    * @throws {AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
-   * @throws {JsonRpcDisabledError} If no JSON-RPC callback was passed in the options of the chain.
+   * @throws {JsonRpcDisabledError} If the JSON-RPC system was disabled in the options of the chain.
    * @throws {CrashError} If the background client has crashed.
    */
   sendJsonRpc(rpc: string): void;
+
+  /**
+   * Waits for a JSON-RPC response or notification to be generated.
+   *
+   * If this function is called multiple times "simultaneously" (generating multiple different
+   * `Promise`s), each `Promise` will return a different JSON-RPC response or notification.
+   *
+   * Each chain contains a buffer of the responses waiting to be sent out. Calling this function
+   * pulls one element from the buffer. If this function is called at a slower rate than responses
+   * are generated, then buffer will eventually become full, at which point calling
+   * {Chain.sendJsonRpc} will throw an exception.
+   *
+   * @throws {AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
+   * @throws {JsonRpcDisabledError} If the JSON-RPC system was disabled in the options of the chain.
+   * @throws {CrashError} If the background client has crashed.
+   */
+  nextJsonRpcResponse(): Promise<string>;
 
   /**
    * Serializes the important information about the state of the chain so that it can be provided
@@ -155,11 +173,6 @@ export interface Chain {
    */
   remove(): void;
 }
-
-/**
- * @param JSON-RPC-formatted response.
- */
-export type JsonRpcCallback = (response: string) => void;
 
 /**
  * @param level How important this message is. 1 = Error, 2 = Warn, 3 = Info, 4 = Debug, 5 = Trace
@@ -327,15 +340,14 @@ export interface AddChainOptions {
   potentialRelayChains?: Chain[];
 
   /**
-   * Callback invoked by smoldot in response to calling {Chain.sendJsonRpc}.
+   * Disables the JSON-RPC system of the chain.
    *
-   * This field is optional. If no callback is provided, the client will save up resources by not
-   * starting the JSON-RPC endpoint, and it is forbidden to call {Chain.sendJsonRpc}.
+   * This option can be used in order to save up some resources.
    *
-   * Will never be called after ̀{Chain.remove} has been called or if a {CrashError} has been
-   * generated.
+   * It will be illegal to call {Chain.sendJsonRpc} and {Chain.nextJsonRpcResponse} on this
+   * chain.
    */
-  jsonRpcCallback?: JsonRpcCallback;
+  disableJsonRpc?: boolean,
 }
 
 // This function is similar to the `start` function found in `index.ts`, except with an extra
@@ -402,19 +414,7 @@ export function start(options: ClientOptions, platformBindings: PlatformBindings
         }
       }
 
-      // We need to tweak the JSON-RPC callback to absorb exceptions that the user might throw.
-      if (options.jsonRpcCallback) {
-        const cb = options.jsonRpcCallback;
-        options.jsonRpcCallback = (response) => {
-          try {
-            cb(response)
-          } catch(error) {
-            console.warn("Uncaught exception in JSON-RPC callback:", error)
-          }
-        };
-      }
-
-      const outcome = await instance.addChain(options.chainSpec, typeof options.databaseContent === 'string' ? options.databaseContent : "", potentialRelayChainsIds, options.jsonRpcCallback);
+      const outcome = await instance.addChain(options.chainSpec, typeof options.databaseContent === 'string' ? options.databaseContent : "", potentialRelayChainsIds, !!options.disableJsonRpc);
 
       if (!outcome.success)
         throw new AddChainError(outcome.error);
@@ -430,19 +430,29 @@ export function start(options: ClientOptions, platformBindings: PlatformBindings
             throw alreadyDestroyedError;
           if (wasDestroyed.destroyed)
             throw new AlreadyDestroyedError();
-          if (!options.jsonRpcCallback)
+          if (options.disableJsonRpc)
             throw new JsonRpcDisabledError();
           if (request.length >= 64 * 1024 * 1024) {
-            console.error("Client.sendJsonRpc ignored a JSON-RPC request because it was too large (" + request.length + " bytes)");
-            return
+            throw new MalformedJsonRpcError();
           };
           instance.request(request, chainId);
+        },
+        nextJsonRpcResponse: () => {
+          if (alreadyDestroyedError)
+            return Promise.reject(alreadyDestroyedError);
+          if (wasDestroyed.destroyed)
+            return Promise.reject(new AlreadyDestroyedError());
+          if (options.disableJsonRpc)
+            return Promise.reject(new JsonRpcDisabledError());
+          return new Promise((resolve, reject) => {
+            instance.nextJsonRpcResponse(chainId, resolve, reject)
+          });
         },
         databaseContent: (maxUtf8BytesSize) => {
           if (alreadyDestroyedError)
             return Promise.reject(alreadyDestroyedError);
           if (wasDestroyed.destroyed)
-            throw new AlreadyDestroyedError();
+            return Promise.reject(new AlreadyDestroyedError);
           return instance.databaseContent(chainId, maxUtf8BytesSize);
         },
         remove: () => {

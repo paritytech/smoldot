@@ -22,76 +22,58 @@ import { start } from "../dist/mjs/index-nodejs.js";
 const westendSpec = fs.readFileSync('./test/westend.json', 'utf8');
 
 test('chainSpec_chainName works', async t => {
-  let promiseResolve;
-  let promiseReject;
-  const promise = new Promise((resolve, reject) => { promiseResolve = resolve; promiseReject = reject; });
-
   const client = start({ logCallback: () => { } });
   await client
-    .addChain({
-      chainSpec: westendSpec,
-      jsonRpcCallback: (resp) => {
-        const parsed = JSON.parse(resp);
-        if (parsed.result == "Westend")
-          promiseResolve();
-        else
-          promiseReject(resp);
-      }
-    })
+    .addChain({ chainSpec: westendSpec })
     .then((chain) => {
-      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainSpec_unstable_chainName","params":[]}', 0, 0);
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainSpec_unstable_chainName","params":[]}');
+      return chain;
     })
-    .then(() => promise)
-    .then(() => t.pass())
+    .then(async (chain) => {
+      const response = await chain.nextJsonRpcResponse();
+      const parsed = JSON.parse(response);
+      if (parsed.result == "Westend")
+        t.pass();
+      else
+        t.fail(response);
+    })
     .then(() => client.terminate());
 });
 
 test('chainSpec_unstable_genesisHash works', async t => {
-  let promiseResolve;
-  let promiseReject;
-  const promise = new Promise((resolve, reject) => { promiseResolve = resolve; promiseReject = reject; });
-
   const client = start({ logCallback: () => { } });
   await client
-    .addChain({
-      chainSpec: westendSpec,
-      jsonRpcCallback: (resp) => {
-        const parsed = JSON.parse(resp);
-        if (parsed.result.toLowerCase() == "0xe143f23803ac50e8f6f8e62695d1ce9e4e1d68aa36c1cd2cfd15340213f3423e")
-          promiseResolve();
-        else
-          promiseReject(resp);
-      }
-    })
+    .addChain({ chainSpec: westendSpec })
     .then((chain) => {
-      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainSpec_unstable_genesisHash","params":[]}', 0, 0);
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainSpec_unstable_genesisHash","params":[]}');
+      return chain;
     })
-    .then(() => promise)
-    .then(() => t.pass())
+    .then(async (chain) => {
+      const response = await chain.nextJsonRpcResponse();
+      const parsed = JSON.parse(response);
+      if (parsed.result.toLowerCase() == "0xe143f23803ac50e8f6f8e62695d1ce9e4e1d68aa36c1cd2cfd15340213f3423e")
+        t.pass();
+      else
+        t.fail(response);
+    })
     .then(() => client.terminate());
 });
 
 test('chainSpec_unstable_properties works', async t => {
-  let promiseResolve;
-  let promiseReject;
-  const promise = new Promise((resolve, reject) => { promiseResolve = resolve; promiseReject = reject; });
-
   const client = start({ logCallback: () => { } });
   await client
-    .addChain({
-      chainSpec: westendSpec,
-      jsonRpcCallback: (resp) => {
-        const parsed = JSON.parse(resp);
-        if (parsed.result.ss58Format == 42 && parsed.result.tokenDecimals == 12 && parsed.result.tokenSymbol == "WND")
-          promiseResolve();
-        else
-          promiseReject(resp);
-      }
-    })
+    .addChain({ chainSpec: westendSpec })
     .then((chain) => {
-      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainSpec_unstable_properties","params":[]}', 0, 0);
+      chain.sendJsonRpc('{"jsonrpc":"2.0","id":1,"method":"chainSpec_unstable_properties","params":[]}');
+      return chain;
     })
-    .then(() => promise)
-    .then(() => t.pass())
+    .then(async (chain) => {
+      const response = await chain.nextJsonRpcResponse();
+      const parsed = JSON.parse(response);
+      if (parsed.result.ss58Format == 42 && parsed.result.tokenDecimals == 12 && parsed.result.tokenSymbol == "WND")
+        t.pass();
+      else
+        t.fail(response);
+    })
     .then(() => client.terminate());
 });
