@@ -86,13 +86,15 @@ extern "C" {
     /// behave like `abort` and prevent any further execution.
     pub fn panic(message_ptr: u32, message_len: u32);
 
-    /// Client is emitting a response to a previous JSON-RPC request sent using [`json_rpc_send`].
-    /// Also used to send subscriptions notifications.
+    /// The queue of JSON-RPC responses of the given chain is no longer empty.
     ///
-    /// The response or notification is a UTF-8 string found in the memory of the WebAssembly
-    /// virtual machine at offset `ptr` and with length `len`. `chain_id` is the chain
-    /// that the request was made to.
-    pub fn json_rpc_respond(ptr: u32, len: u32, chain_id: u32);
+    /// Use [`json_rpc_responses_peek`] in order to obtain information about the responses in the
+    /// queue.
+    ///
+    /// This function might be called even when the queue wasn't empty before, however this
+    /// behavior must not be relied upon. The queue must be emptied by calling
+    /// [`json_rpc_responses_pop`] in order to have the guarantee that this function gets called.
+    pub fn json_rpc_responses_non_empty(chain_id: u32);
 
     /// This function is called by the client is response to calling [`database_content`].
     ///
@@ -401,18 +403,66 @@ pub extern "C" fn chain_error_ptr(chain_id: u32) -> u32 {
 /// A buffer containing a UTF-8 JSON-RPC request or notification must be passed as parameter. The
 /// format of the JSON-RPC requests and notifications is described in
 /// [the standard JSON-RPC 2.0 specification](https://www.jsonrpc.org/specification).
-/// Requests that are not valid JSON-RPC are silently ignored.
 ///
 /// The buffer passed as parameter **must** have been allocated with [`alloc`]. It is freed when
 /// this function is called.
 ///
-/// Responses and notifications are sent back using [`json_rpc_respond`].
+/// Responses and notifications are notified using [`json_rpc_responses_non_empty`], and can
+/// be read with [`json_rpc_responses_peek`].
+///
+/// It is forbidden to call this function on an erroneous chain or a chain that was created with
+/// `json_rpc_running` equal to 0.
+///
+/// This function returns:
+/// - 0 on success.
+/// - 1 if the request couldn't be parsed as a valid JSON-RPC request.
+/// - 2 if the chain is currently overloaded with JSON-RPC requests and refuses to queue another
+/// one.
+///
+#[no_mangle]
+pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) -> u32 {
+    super::json_rpc_send(text_ptr, text_len, chain_id)
+}
+
+/// Obtains information about the first response in the queue of JSON-RPC responses.
+///
+/// This function returns a pointer within the memory of the WebAssembly virtual machine where is
+/// stored a struct of type [`JsonRpcResponseInfo`]. This pointer remains valid until
+/// [`json_rpc_responses_pop`] or [`remove_chain`] is called with the same `chain_id`.
+///
+/// The response or notification is a UTF-8 string found in the memory of the WebAssembly
+/// virtual machine at offset `ptr` and with length `len`, where `ptr` and `len` are found in the
+/// [`JsonRpcResponseInfo`].
+///
+/// If `len` is equal to 0, this indicates that the queue of JSON-RPC responses is empty.
+///
+/// After having read the response or notification, use [`json_rpc_responses_pop`] to remove it
+/// from the queue. You can then call [`json_rpc_responses_peek`] again to read the next response.
+#[no_mangle]
+pub extern "C" fn json_rpc_responses_peek(chain_id: u32) -> u32 {
+    super::json_rpc_responses_peek(chain_id)
+}
+
+/// See [`json_rpc_responses_peek`].
+#[repr(C)]
+pub struct JsonRpcResponseInfo {
+    /// Pointer in memory where the JSON-RPC response can be found.
+    pub ptr: u32,
+    /// Length of the JSON-RPC response in bytes. If 0, indicates that the queue is empty.
+    pub len: u32,
+}
+
+/// Removes the first response from the queue of JSON-RPC responses. This is the response whose
+/// information can be retrieved using [`json_rpc_responses_peek`].
+///
+/// Calling this function invalidates the pointer previously returned by a call to
+/// [`json_rpc_responses_peek`] with the same `chain_id`.
 ///
 /// It is forbidden to call this function on an erroneous chain or a chain that was created with
 /// `json_rpc_running` equal to 0.
 #[no_mangle]
-pub extern "C" fn json_rpc_send(text_ptr: u32, text_len: u32, chain_id: u32) {
-    super::json_rpc_send(text_ptr, text_len, chain_id)
+pub extern "C" fn json_rpc_responses_pop(chain_id: u32) {
+    super::json_rpc_responses_pop(chain_id)
 }
 
 /// Starts generating the content of the database of the chain.

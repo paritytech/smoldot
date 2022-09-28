@@ -38,7 +38,7 @@ export interface Config {
      */
     onWasmPanic: (message: string) => void,
     logCallback: (level: number, target: string, message: string) => void,
-    jsonRpcCallback: (response: string, chainId: number) => void,
+    jsonRpcResponsesNonEmptyCallback: (chainId: number) => void,
     databaseContentCallback: (data: string, chainId: number) => void,
     currentTaskCallback?: (taskName: string | null) => void,
     cpuRateLimit: number,

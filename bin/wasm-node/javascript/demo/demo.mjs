@@ -116,25 +116,40 @@ wsServer.on('connection', function (connection, request) {
 
             const relay = await client.addChain({
                 chainSpec: chainSpecsById[chainCfg.relayChain].chainSpec,
+                disableJsonRpc: true
             });
 
             const para = await client.addChain({
                 chainSpec: chainCfg.chainSpec,
-                jsonRpcCallback: (resp) => {
-                    connection.send(resp);
-                },
                 potentialRelayChains: [relay]
             });
 
+            (async () => {
+                try {
+                    while(true) {
+                        const response = await para.nextJsonRpcResponse();
+                        connection.send(response);
+                    }
+                } catch(_error) {}
+            })()
+
             return { relay, para };
         } else {
+            const relay = await client.addChain({
+                chainSpec: chainCfg.chainSpec,
+            });
+
+            (async () => {
+                try {
+                    while(true) {
+                        const response = await relay.nextJsonRpcResponse();
+                        connection.send(response);
+                    }
+                } catch(_error) {}
+            })()
+
             return {
-                relay: await client.addChain({
-                    chainSpec: chainCfg.chainSpec,
-                    jsonRpcCallback: (resp) => {
-                        connection.send(resp);
-                    },
-                })
+                relay,
             };
         }
     })().catch((error) => {
