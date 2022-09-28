@@ -323,7 +323,7 @@ fn remove_chain(chain_id: u32) {
                 .smoldot
                 .remove_chain(smoldot_chain_id);
         }
-        init::Chain::Erroneous { .. } => {},
+        init::Chain::Erroneous { .. } => {}
     }
 }
 
