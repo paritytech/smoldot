@@ -59,7 +59,7 @@ const httpConn = Deno.serveHttp(await conn.accept());
 while(true) {
     const event = await httpConn.nextRequest();
     if (!event)
-        continue;
+        break;
 
     console.log('(demo) New JSON-RPC client connected.');
 
