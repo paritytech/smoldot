@@ -326,8 +326,6 @@ where
                                     .insert((actual_peer_index, connection_id));
                                 debug_assert!(_inserted);
                                 self.inner[connection_id].peer_index = Some(actual_peer_index);
-
-                                // TODO: report some kind of error on the outer API layers?
                             }
 
                             Some(self.peers[actual_peer_index].peer_id.clone())
