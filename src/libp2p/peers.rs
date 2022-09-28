@@ -63,9 +63,8 @@ use rand::{Rng as _, SeedableRng as _};
 pub use collection::{
     ConfigRequestResponse, ConfigRequestResponseIn, ConnectionId, ConnectionToCoordinator,
     CoordinatorToConnection, InboundError, MultiStreamConnectionTask, MultiStreamHandshakeKind,
-    NotificationProtocolConfig, NotificationsInClosedErr, NotificationsOutErr, ReadWrite,
-    RequestError, ShutdownCause, SingleStreamConnectionTask, SingleStreamHandshakeKind,
-    SubstreamId,
+    NotificationProtocolConfig, NotificationsInClosedErr, ReadWrite, RequestError, ShutdownCause,
+    SingleStreamConnectionTask, SingleStreamHandshakeKind, SubstreamId,
 };
 
 /// Configuration for a [`Peers`].
@@ -603,21 +602,33 @@ where
                         NotificationsOutOpenState::Opening(_)
                     ));
 
-                    if result.is_ok() {
-                        notification_out.open = NotificationsOutOpenState::Open(substream_id);
-                        // TODO: close if `!desired`
-                    } else {
-                        notification_out.open = NotificationsOutOpenState::ClosedByRemote;
-                        self.inner_notification_substreams
-                            .remove(&substream_id)
-                            .unwrap();
-
-                        // Remove entry from map if it has become useless.
-                        if !desired {
-                            self.peers_notifications_out
-                                .remove(&(peer_index, notifications_protocol_index));
+                    let result = match result {
+                        Ok(handshake) if desired => {
+                            notification_out.open = NotificationsOutOpenState::Open(substream_id);
+                            Ok(handshake)
                         }
-                    }
+                        Ok(_) => {
+                            // This substream was no longer desired, in which case we close it
+                            // immediately.
+                            notification_out.open = NotificationsOutOpenState::NotOpen;
+                            self.inner.close_out_notifications(substream_id);
+                            Err(NotificationsOutErr::NotDesired)
+                        }
+                        Err(err) => {
+                            notification_out.open = NotificationsOutOpenState::ClosedByRemote;
+                            self.inner_notification_substreams
+                                .remove(&substream_id)
+                                .unwrap();
+
+                            // Remove entry from map if it has become useless.
+                            if !desired {
+                                self.peers_notifications_out
+                                    .remove(&(peer_index, notifications_protocol_index));
+                            }
+
+                            Err(NotificationsOutErr::Open(err))
+                        }
+                    };
 
                     return Some(Event::NotificationsOutResult {
                         peer_id: self.peers[peer_index].peer_id.clone(),
@@ -1081,6 +1092,10 @@ where
     /// When a combination of network protocol and [`PeerId`] is marked as "desired", it will
     /// be returned by [`Peers::unfulfilled_desired_outbound_substream`].
     ///
+    /// If a substream is marked as "not desired" while it is in the process of being opened, an
+    /// [`Event::NotificationsOutResult`] containing a [`NotificationsOutErr::NotDesired`] will
+    /// later be generated.
+    ///
     /// This function might generate a message destined to a connection. Use
     /// [`Peers::pull_message_to_connection`] to process these messages after it has returned.
     pub fn set_peer_notifications_out_desired(
@@ -1144,8 +1159,10 @@ where
 
             match current_state.open {
                 NotificationsOutOpenState::NotOpen | NotificationsOutOpenState::ClosedByRemote => {}
-                NotificationsOutOpenState::Open(substream_id)
-                | NotificationsOutOpenState::Opening(substream_id) => {
+                NotificationsOutOpenState::Opening(_) => {
+                    // We do nothing. The substream will be closed once it has been opened.
+                }
+                NotificationsOutOpenState::Open(substream_id) => {
                     self.inner.close_out_notifications(substream_id);
                     current_state.open = NotificationsOutOpenState::NotOpen;
                 }
@@ -1868,6 +1885,15 @@ pub enum DesiredState {
     /// Substream is now desired. If the peer has refused this substream in the past, try to open
     /// one again.
     DesiredReset,
+}
+
+#[derive(Debug, derive_more::Display, Clone)]
+pub enum NotificationsOutErr {
+    /// Substream has been closed because it was no longer marked as desired.
+    NotDesired,
+    /// Error while opening the substream.
+    #[display(fmt = "{}", _0)]
+    Open(collection::NotificationsOutErr),
 }
 
 /// Error potentially returned by [`Peers::in_notification_accept`].
