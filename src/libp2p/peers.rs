@@ -1412,18 +1412,6 @@ where
         self.inner.respond_in_request(id.0, response)
     }
 
-    /// Returns `true` if there exists an established connection with the given peer.
-    // TODO: revisit this API as it's a duplicate of established_peer_connections
-    pub fn has_established_connection(&self, peer_id: &PeerId) -> bool {
-        // Connections that are shutting down are still counted, as we report the disconnected
-        // event only at the end of the shutdown.
-        match self.connection_id_for_peer(peer_id) {
-            ConnectionIdForPeer::Connected(_)
-            | ConnectionIdForPeer::ConnectedButShuttingDown(_) => true,
-            ConnectionIdForPeer::NotConnected => false,
-        }
-    }
-
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
     /// with.
     pub fn peers_list(&self) -> impl Iterator<Item = &PeerId> {
