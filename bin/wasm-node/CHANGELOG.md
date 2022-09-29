@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- No longer silently discard justifications when receive a block from the network that was already known locally.
+- No longer silently discard justifications when receive a block from the network that was already known locally. ([#2800](https://github.com/paritytech/smoldot/pull/2800))
 
 ## 0.7.0 - 2022-09-28
 
