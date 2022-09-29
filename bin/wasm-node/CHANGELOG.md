@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Syncing no longer stalls if the gap between the finalized and latest block is more than 100 blocks.
+
 ## 0.7.0 - 2022-09-28
 
 ### Removed
