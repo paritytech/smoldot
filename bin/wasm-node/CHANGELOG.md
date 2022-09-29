@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.7.0 - 2022-09-28
+
+### Removed
+
+- Removed `Chain.databaseContent` function. Use the `chainHead_unstable_finalizedDatabase` JSON-RPC function to obtain the database content instead. ([#2791](https://github.com/paritytech/smoldot/pull/2791))
+
 ### Changed
 
 - `Chain.sendJsonRpc` now throws a `MalformedJsonRpcError` exception if the JSON-RPC request is too large or malformed, or a `QueueFullError` if the queue of JSON-RPC requests of the chain is full. ([#2778](https://github.com/paritytech/smoldot/pull/2778))

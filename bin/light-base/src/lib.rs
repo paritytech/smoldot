@@ -133,7 +133,7 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     pub specification: &'a str,
 
     /// Opaque data containing the database content that was retrieved by calling
-    /// [`Client::database_content`] in the past.
+    /// the `chainHead_unstable_finalizedDatabase` JSON-RPC function in the past.
     ///
     /// Pass an empty string if no database content exists or is known.
     ///
@@ -882,50 +882,6 @@ impl<TPlat: platform::Platform, TChain> Client<TPlat, TChain> {
         };
 
         json_rpc_sender.queue_rpc_request(json_rpc_request)
-    }
-
-    /// Returns opaque data that can later by passing back through
-    /// [`AddChainConfig::database_content`].
-    ///
-    /// Note that the `Future` being returned doesn't borrow `self`. Even if the chain is later
-    /// removed, this `Future` will still return a value.
-    ///
-    /// If the database content can't be obtained because not enough information is known about
-    /// the chain, a dummy value is intentionally returned.
-    ///
-    /// `max_size` can be passed force the output of the function to be smaller than the given
-    /// value.
-    ///
-    /// # Panic
-    ///
-    /// Panics if the [`ChainId`] is invalid.
-    ///
-    pub fn database_content(
-        &self,
-        chain_id: ChainId,
-        max_size: usize,
-    ) -> impl Future<Output = String> {
-        let key = &self.public_api_chains.get(chain_id.0).unwrap().key;
-
-        // Clone the services initialization future.
-        let mut services = match &self.chains_by_key.get(key).unwrap().services {
-            future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
-            future::MaybeDone::Future(d) => future::MaybeDone::Future(d.clone()),
-            future::MaybeDone::Gone => unreachable!(),
-        };
-
-        async move {
-            // Wait for the chain to finish initializing before we can obtain the database.
-            (&mut services).await;
-            let services = Pin::new(&mut services).take_output().unwrap();
-            encode_database(
-                &services.network_service,
-                &services.sync_service,
-                services.block_number_bytes,
-                max_size,
-            )
-            .await
-        }
     }
 }
 

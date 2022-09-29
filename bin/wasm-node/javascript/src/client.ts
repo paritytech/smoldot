@@ -141,22 +141,6 @@ export interface Chain {
   nextJsonRpcResponse(): Promise<string>;
 
   /**
-   * Serializes the important information about the state of the chain so that it can be provided
-   * back in the {AddChainOptions.databaseContent} when the chain is recreated.
-   *
-   * The content of the string is opaque and shouldn't be decoded.
-   *
-   * A parameter can be passed to indicate the maximum length of the returned value (in number
-   * of bytes this string would occupy in the UTF-8 encoding). The higher this limit is the more
-   * information can be included. This parameter is optional, and not passing any value means
-   * "unbounded".
-   *
-   * @throws {AlreadyDestroyedError} If the chain has been removed or the client has been terminated.
-   * @throws {CrashError} If the background client has crashed.
-   */
-  databaseContent(maxUtf8BytesSize?: number): Promise<string>;
-
-  /**
    * Disconnects from the blockchain.
    *
    * The JSON-RPC callback will no longer be called.
@@ -295,7 +279,8 @@ export interface AddChainOptions {
   chainSpec: string;
 
   /**
-   * Content of the database of this chain. Can be obtained with {Client.databaseContent}.
+   * Content of the database of this chain. Can be obtained by using the
+   * `chainHead_unstable_finalizedDatabase` JSON-RPC function.
    *
    * Smoldot reserves the right to change its database format, making previous databases
    * incompatible. For this reason, no error is generated if the content of the database is invalid
@@ -447,13 +432,6 @@ export function start(options: ClientOptions, platformBindings: PlatformBindings
           return new Promise((resolve, reject) => {
             instance.nextJsonRpcResponse(chainId, resolve, reject)
           });
-        },
-        databaseContent: (maxUtf8BytesSize) => {
-          if (alreadyDestroyedError)
-            return Promise.reject(alreadyDestroyedError);
-          if (wasDestroyed.destroyed)
-            return Promise.reject(new AlreadyDestroyedError);
-          return instance.databaseContent(chainId, maxUtf8BytesSize);
         },
         remove: () => {
           if (alreadyDestroyedError)
