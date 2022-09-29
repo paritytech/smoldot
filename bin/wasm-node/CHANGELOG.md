@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- No longer silently discard justifications when receive a block from the network that was already known locally.
+
 ## 0.7.0 - 2022-09-28
 
 ### Removed
