@@ -1404,10 +1404,10 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
 
             // TODO: restore this block of code; it is extremely complicated because it is unclear which source-block combinations we can add and keep without making memory usage explode
             /*self.inner
-                .inner
-                .inner
-                .blocks
-                .remove_sources_known_block(height, &hash);*/
+            .inner
+            .inner
+            .blocks
+            .remove_sources_known_block(height, &hash);*/
             self.inner
                 .inner
                 .inner
@@ -1634,9 +1634,9 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
 
             // TODO: restore this block of code; it is extremely complicated because it is unclear which source-block combinations we can add and keep without making memory usage explode
             /*self.inner
-                .inner
-                .blocks
-                .remove_sources_known_block(height, &hash);*/
+            .inner
+            .blocks
+            .remove_sources_known_block(height, &hash);*/
             self.inner
                 .inner
                 .blocks
