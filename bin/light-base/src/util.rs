@@ -29,8 +29,8 @@
 /// See <https://github.com/rust-lang/futures-rs/blob/7a98cf0bbeb397dcfaf5f020b371ab9e836d33d4/futures-util/src/stream/futures_unordered/mod.rs#L531>
 /// See <https://github.com/rust-lang/futures-rs/issues/2053> for a discussion about a proper
 /// solution.
+// TODO: this is a complete hack ^
 pub async fn yield_twice() {
-    // TODO: this is a complete hack
     let mut num_pending_remain = 2;
     futures::future::poll_fn(move |cx| {
         if num_pending_remain > 0 {
