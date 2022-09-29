@@ -17,7 +17,7 @@ path = "src/main.rs"
 async-std = "1.12.0"
 atty = "0.2.14"
 blake2-rfc = { version = "0.2.18", default-features = false }
-clap = { version = "3.2.22", default-features = false, features = ["color", "derive", "std", "suggestions"] }
+clap = { version = "4.0.4", default-features = false, features = ["color", "derive", "std", "suggestions"] }
 ctrlc = "3.2.2"
 derive_more = "0.99.17"
 directories = "4.0.1"
