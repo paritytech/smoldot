@@ -115,20 +115,26 @@ pub use warp_sync::{Error as FragmentError, WarpSyncFragment};
 /// Problem encountered during a call to [`start_warp_sync()`].
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
-    #[display(fmt = "Missing :code")]
+    /// The chain doesn't include any storage item at `:code`.
+    #[display(fmt = "The chain doesn't include any storage item at `:code`")]
     MissingCode,
+    /// The storage item at `:heappages` is in an incorrect format.
     #[display(fmt = "Invalid heap pages value: {}", _0)]
     InvalidHeapPages(executor::InvalidHeapPagesError),
+    /// Error while fetching the Aura chain information.
     #[display(fmt = "Error during Aura information fetch: {}", _0)]
     AuraParamsFetch(aura_config::FromVmPrototypeError),
+    /// Error while fetching the Babe chain information.
     #[display(fmt = "Error during Babe epoch information fetch: {}", _0)]
     BabeFetchEpoch(babe_fetch_epoch::Error),
-    #[display(fmt = "Error initializing downloaded runtime: {}", _0)]
-    NewRuntime(NewErr),
-    /// Parameters produced by the runtime are incoherent.
-    #[display(fmt = "Parameters produced by the runtime are incoherent: {}", _0)]
+    /// Error while instantiating the downloaded runtime.
+    #[display(fmt = "Error instantiating downloaded runtime: {}", _0)]
+    RuntimeInit(NewErr),
+    /// Aura/Babe information produced by the runtime is invalid.
+    #[display(fmt = "Aura/Babe information produced by the runtime is invalid: {}", _0)]
     InvalidChain(chain_information::ValidityError),
     /// Failed to verify call proof.
+    // TODO: this is a non-fatal error contrary to all the other errors in this enum
     InvalidCallProof(proof_verify::Error),
     /// Warp sync requires fetching the key that follows another one. This isn't implemented in
     /// smoldot.
@@ -254,38 +260,70 @@ impl<TSrc, TRq> ops::IndexMut<SourceId> for InProgressWarpSync<TSrc, TRq> {
 
 /// Warp syncing process now obtaining the chain information.
 pub struct InProgressWarpSync<TSrc, TRq> {
+    /// See [`Phase`].
     phase: Phase,
+    /// Starting point of the warp syncing, as provided to [`start_warp_sync`].
     start_chain_information: ValidChainInformation,
+    /// Number of bytes used to encode the block number in headers.
     block_number_bytes: usize,
+    /// List of requests that have been added using [`InProgressWarpSync::add_source`].
     sources: slab::Slab<Source<TSrc>>,
+    /// List of requests that have been added using [`InProgressWarpSync::add_request`].
     in_progress_requests: slab::Slab<(SourceId, TRq, RequestDetail)>,
 }
 
 enum Phase {
+    /// Downloading warp sync fragments.
     DownloadFragments {
+        /// Current block and chain we warp synced to. If `None`, the warp syncing is still at
+        /// the start.
         previous_verifier_values: Option<(Header, ChainInformationFinality)>,
     },
+    /// Warp sync fragments have been downloaded. Now to verify them.
     PendingVerify {
+        /// Current block and chain we warp synced to. If `None`, the warp syncing is still at
+        /// the start.
         previous_verifier_values: Option<(Header, ChainInformationFinality)>,
+        /// Source the fragments have been obtained from
         downloaded_source: SourceId,
+        /// `true` if the source has indicated that there is no more fragment afterwards, in other
+        /// words that the last fragment corresponds to the current finalized block of the chain.
         final_set_of_fragments: bool,
-        /// Always `Some`.
+        /// Contains the downloaded fragments.
+        /// Always `Some`, but wrapped within an `Option` in order to be extractable temporarily.
         verifier: Option<warp_sync::Verifier>,
     },
+    /// All warp sync fragments have been verified, and we are now at the current finalized block
+    /// of the chain.
     PostVerification {
+        /// Finalized block of the chain we warp synced to.
         header: Header,
+        /// Information about the finality of the chain at the point where we warp synced to.
         chain_information_finality: ChainInformationFinality,
+        /// Source we downloaded the last fragments from. Assuming that the source isn't malicious,
+        /// it is guaranteed to have access to the storage of the finalized block.
         warp_sync_source_id: SourceId,
+        /// Runtime of the finalized block, or `None` if it hasn't been downloaded yet.
         runtime: Option<DownloadedRuntime>,
+        /// Call proof of the `BabeApi_current_epoch` runtime call against the finalized block, or
+        /// `None` if it hasn't been downloaded yet.
         babeapi_current_epoch_response: Option<Vec<Vec<u8>>>,
+        /// Call proof of the `BabeApi_next_epoch` runtime call against the finalized block, or
+        /// `None` if it hasn't been downloaded yet.
         babeapi_next_epoch_response: Option<Vec<Vec<u8>>>,
+        /// Call proof of the `AuraApi_authorities` runtime call against the finalized block, or
+        /// `None` if it hasn't been downloaded yet.
         aura_authorities_response: Option<Vec<Vec<u8>>>,
+        /// Call proof of the `AuraApi_slot_duration` runtime call against the finalized block, or
+        /// `None` if it hasn't been downloaded yet.
         aura_slot_duration_response: Option<Vec<Vec<u8>>>,
     },
 }
 
 struct DownloadedRuntime {
+    /// Storage item at the `:code` key. `None` if there is no entry at that key.
     storage_code: Option<Vec<u8>>,
+    /// Storage item at the `:heappages` key. `None` if there is no entry at that key.
     storage_heap_pages: Option<Vec<u8>>,
 }
 
@@ -1228,7 +1266,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     };
                     return (
                         WarpSync::InProgress(self.inner),
-                        Some(Error::NewRuntime(error)),
+                        Some(Error::RuntimeInit(error)),
                     );
                 }
             };
@@ -1497,7 +1535,7 @@ impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
                     };
                     return (
                         WarpSync::InProgress(self.inner),
-                        Some(Error::NewRuntime(error)),
+                        Some(Error::RuntimeInit(error)),
                     );
                 }
             };
