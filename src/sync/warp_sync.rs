@@ -38,7 +38,7 @@
 //!
 //! # Usage
 //!
-//! Use the [`warp_sync()`] function to start a Grandpa warp syncing state machine.
+//! Use the [`start_warp_sync()`] function to start a Grandpa warp syncing state machine.
 //!
 //! At any given moment, this state machine holds a list of *sources* that it might use to
 //! download the warp sync proof or the runtime code. Sources must be added and removed by the API
@@ -77,7 +77,7 @@ use core::{iter, mem, num::NonZeroU64, ops};
 
 pub use warp_sync::{Error as FragmentError, WarpSyncFragment};
 
-/// Problem encountered during a call to [`warp_sync()`].
+/// Problem encountered during a call to [`start_warp_sync()`].
 #[derive(Debug, derive_more::Display)]
 pub enum Error {
     #[display(fmt = "Missing :code")]
@@ -100,7 +100,7 @@ pub enum Error {
     NextKeyUnimplemented,
 }
 
-/// The configuration for [`warp_sync()`].
+/// The configuration for [`start_warp_sync()`].
 pub struct Config {
     /// The chain information of the starting point of the warp syncing.
     pub start_chain_information: ValidChainInformation,
@@ -119,7 +119,7 @@ pub struct Config {
 /// Initializes the warp sync state machine.
 ///
 /// On error, returns the [`ValidChainInformation`] that was provided in the configuration.
-pub fn warp_sync<TSrc, TRq>(
+pub fn start_warp_sync<TSrc, TRq>(
     config: Config,
 ) -> Result<InProgressWarpSync<TSrc, TRq>, (ValidChainInformation, WarpSyncInitError)> {
     match config.start_chain_information.as_ref().finality {
@@ -153,7 +153,7 @@ pub fn warp_sync<TSrc, TRq>(
     })
 }
 
-/// Error potentially returned by [`warp_sync()`].
+/// Error potentially returned by [`start_warp_sync()`].
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum WarpSyncInitError {
     /// Chain doesn't use the Grandpa finality algorithm.
