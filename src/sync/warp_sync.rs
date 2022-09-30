@@ -44,7 +44,7 @@
 //! for the first time several weeks or months in the past. When a client then warp syncs, it can
 //! be tricked to consider this alternative block N as the finalized one.
 //!
-//! There is no fool-proof defense against this attack. However, consider the extremely high 
+//! There is no fool-proof defense against this attack. However, consider the extremely high
 //! investment and high risk for the malicious validators, and the difficulty of pulling off this
 //! attack, it is extremely unlikely to happen in reality.
 //! The aforementioned punishment system is the only defense against this attack, and in order to
@@ -131,7 +131,10 @@ pub enum Error {
     #[display(fmt = "Error instantiating downloaded runtime: {}", _0)]
     RuntimeInit(NewErr),
     /// Aura/Babe information produced by the runtime is invalid.
-    #[display(fmt = "Aura/Babe information produced by the runtime is invalid: {}", _0)]
+    #[display(
+        fmt = "Aura/Babe information produced by the runtime is invalid: {}",
+        _0
+    )]
     InvalidChain(chain_information::ValidityError),
     /// Failed to verify call proof.
     // TODO: this is a non-fatal error contrary to all the other errors in this enum
@@ -425,11 +428,12 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
     pub fn desired_requests(
         &'_ self,
     ) -> impl Iterator<Item = (SourceId, &'_ TSrc, DesiredRequest)> + '_ {
+        // If we are in the fragments download phase, return a fragments download request.
         let warp_sync_request = if let Phase::DownloadFragments {
             previous_verifier_values,
         } = &self.phase
         {
-            // TODO: it feels like a hack to try again sources that have failed in the past
+            // TODO: it feels like a hack to try again sources that have failed in the past; also, this means that the already_tried mechanism only works once
             let all_sources_already_tried = self.sources.iter().all(|(_, s)| s.already_tried);
 
             let start_block_hash = match previous_verifier_values.as_ref() {
@@ -441,6 +445,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     .hash(self.block_number_bytes),
             };
 
+            // TODO: O(n)
             if !self
                 .in_progress_requests
                 .iter()
@@ -453,6 +458,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     _ => false,
                 })
             {
+                // Combine the request with every single available source.
                 either::Left(self.sources.iter().filter_map(move |(src_id, src)| {
                     // TODO: also filter by source finalized block? so that we don't request from sources below us
                     if all_sources_already_tried || !src.already_tried {
@@ -474,12 +480,15 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             either::Right(iter::empty())
         };
 
+        // If we are in the appropriate phase, and we are not currently downloading the runtime,
+        // return a runtime download request.
         let runtime_parameters_get = if let Phase::PostVerification {
             header,
             warp_sync_source_id,
             ..
         } = &self.phase
         {
+            // TODO: O(n)
             if !self.in_progress_requests.iter().any(|(_, rq)| {
                 rq.0 == *warp_sync_source_id
                     && match rq.2 {
@@ -506,6 +515,8 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             None
         };
 
+        // If we are in the appropriate phase, and the consensus engine is Babe, we are not
+        // currently downloading the current epoch, return a Babe current epoch download request.
         let babe_current_epoch = if let Phase::PostVerification {
             header,
             warp_sync_source_id,
@@ -517,6 +528,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                 self.start_chain_information.as_ref().consensus,
                 ChainInformationConsensusRef::Babe { .. }
             ) {
+                // TODO: O(n)
                 if !self.in_progress_requests.iter().any(|(_, rq)| {
                     rq.0 == *warp_sync_source_id
                         && match rq.2 {
@@ -552,6 +564,8 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             None
         };
 
+        // If we are in the appropriate phase, and the consensus engine is Babe, we are not
+        // currently downloading the next epoch, return a Babe next epoch download request.
         let babe_next_epoch = if let Phase::PostVerification {
             header,
             warp_sync_source_id,
@@ -563,6 +577,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                 self.start_chain_information.as_ref().consensus,
                 ChainInformationConsensusRef::Babe { .. }
             ) {
+                // TODO: O(n)
                 if !self.in_progress_requests.iter().any(|(_, rq)| {
                     rq.0 == *warp_sync_source_id
                         && match rq.2 {
@@ -598,6 +613,9 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             None
         };
 
+        // If we are in the appropriate phase, and the consensus engine is Aura, we are not
+        // currently downloading the list of authorities, return an Aura autorities download
+        // request.
         let aura_authorities = if let Phase::PostVerification {
             header,
             warp_sync_source_id,
@@ -610,6 +628,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                 ChainInformationConsensusRef::Aura { .. }
             ) {
                 if !self.in_progress_requests.iter().any(|(_, rq)| {
+                    // TODO: O(n)
                     rq.0 == *warp_sync_source_id
                         && match rq.2 {
                             RequestDetail::RuntimeCallMerkleProof {
@@ -644,6 +663,9 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             None
         };
 
+        // If we are in the appropriate phase, and the consensus engine is Aura, we are not
+        // currently downloading the Aura slot duration, return an Aura slot duration download
+        // request.
         let aura_slot_duration = if let Phase::PostVerification {
             header,
             warp_sync_source_id,
@@ -656,6 +678,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                 ChainInformationConsensusRef::Aura { .. }
             ) {
                 if !self.in_progress_requests.iter().any(|(_, rq)| {
+                    // TODO: O(n)
                     rq.0 == *warp_sync_source_id
                         && match rq.2 {
                             RequestDetail::RuntimeCallMerkleProof {
@@ -690,6 +713,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
             None
         };
 
+        // Chain all these demanded requests together.
         warp_sync_request
             .chain(runtime_parameters_get.into_iter())
             .chain(babe_current_epoch.into_iter())
@@ -748,6 +772,9 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     ..
                 },
             ) if source_id == *warp_sync_source_id => {
+                // If the source has failed a request, we jump back to downloading fragments
+                // in order to try a different source.
+                self.sources[source_id.0].already_tried = true;
                 self.phase = Phase::DownloadFragments {
                     previous_verifier_values: Some((
                         header.clone(),
@@ -782,6 +809,9 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
         code: Option<impl AsRef<[u8]>>,
         heap_pages: Option<impl AsRef<[u8]>>,
     ) -> TRq {
+        // Remove the request from the list, obtaining its user data.
+        // If the request corresponds to the runtime parameters we're looking for, the function
+        // continues below, otherwise we return early.
         let user_data = match (self.in_progress_requests.remove(id.0), &self.phase) {
             (
                 (_, user_data, RequestDetail::RuntimeParametersGet { block_hash }),
@@ -856,6 +886,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     Some(response.map(|e| e.as_ref().to_vec()).collect());
                 user_data
             }
+
             (
                 (
                     _,
@@ -879,6 +910,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     Some(response.map(|e| e.as_ref().to_vec()).collect());
                 user_data
             }
+
             (
                 (
                     _,
@@ -901,6 +933,7 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                 *aura_authorities_response = Some(response.map(|e| e.as_ref().to_vec()).collect());
                 user_data
             }
+
             (
                 (
                     _,
@@ -924,7 +957,11 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                     Some(response.map(|e| e.as_ref().to_vec()).collect());
                 user_data
             }
+
+            // Uninteresting request.
             ((_, user_data, RequestDetail::RuntimeCallMerkleProof { .. }), _) => user_data,
+
+            // Wrong request type.
             (
                 (_, _, RequestDetail::RuntimeParametersGet { .. })
                 | (_, _, RequestDetail::WarpSyncRequest { .. }),
@@ -965,10 +1002,13 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
                         .finalized_block_header
                         .hash(self.block_number_bytes),
                 };
+
+                // Uninteresting request. We downloaded fragments from the wrong starting point.
                 if desired_block_hash != block_hash {
                     return user_data;
                 }
 
+                // TODO: why this?
                 self.sources[rq_source_id.0].already_tried = true;
 
                 let verifier = match &previous_verifier_values {
@@ -1040,38 +1080,62 @@ impl<TSrc, TRq> InProgressWarpSync<TSrc, TRq> {
 #[derive(Debug, Copy, Clone)]
 struct Source<TSrc> {
     user_data: TSrc,
-    /// `true` if this source has been in a past `WarpSyncRequest`. `false` if the source is
-    /// currently in a `WarpSyncRequest`.
+    /// `true` if this source has been in a past warp sync request and we should try a different
+    /// source.
     already_tried: bool,
 }
 
+/// Information about a request that the warp sync state machine would like to start.
+///
+/// See [`InProgressWarpSync::desired_requests`].
 #[derive(Debug, Clone)]
 pub enum DesiredRequest {
+    /// A warp sync request should be start.
     WarpSyncRequest {
+        /// Starting point of the warp syncing. The first fragment of the response should be the
+        /// of the epoch that the starting point is in.
         block_hash: [u8; 32],
     },
+    /// A storage request of the runtime code and heap pages should be started.
     RuntimeParametersGet {
+        /// Hash of the block to request the parameters against.
         block_hash: [u8; 32],
+        /// State trie root hash found in the header of the block.
         state_trie_root: [u8; 32],
     },
+    /// A call proof should be started.
     RuntimeCallMerkleProof {
+        /// Hash of the header of the block the call should be made against.
         block_hash: [u8; 32],
+        /// Name of the function of the call proof.
         function_name: Cow<'static, str>,
+        /// Parameters of the call.
         parameter_vectored: Cow<'static, [u8]>,
     },
 }
 
+/// Information about a request to add to the state machine.
+///
+/// See [`InProgressWarpSync::add_request`].
 #[derive(Debug, Clone)]
 pub enum RequestDetail {
+    /// See [`DesiredRequest::WarpSyncRequest`].
     WarpSyncRequest {
+        /// See [`DesiredRequest::WarpSyncRequest::block_hash`].
         block_hash: [u8; 32],
     },
+    /// See [`DesiredRequest::RuntimeParametersGet`].
     RuntimeParametersGet {
+        /// See [`DesiredRequest::RuntimeParametersGet::block_hash`].
         block_hash: [u8; 32],
     },
+    /// See [`DesiredRequest::RuntimeCallMerkleProof`].
     RuntimeCallMerkleProof {
+        /// See [`DesiredRequest::RuntimeCallMerkleProof::block_hash`].
         block_hash: [u8; 32],
+        /// See [`DesiredRequest::RuntimeCallMerkleProof::function_name`].
         function_name: Cow<'static, str>,
+        /// See [`DesiredRequest::RuntimeCallMerkleProof::parameter_vectored`].
         parameter_vectored: Cow<'static, [u8]>,
     },
 }
@@ -1080,17 +1144,24 @@ pub enum RequestDetail {
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct RequestId(usize);
 
+/// Return value of [`InProgressWarpSync::process_one`].
 pub enum ProcessOne<TSrc, TRq> {
+    /// Nothing to verify at the moment. The state machine is yielded back.
     Idle(InProgressWarpSync<TSrc, TRq>),
+    /// Ready to verify a warp sync fragment.
     VerifyWarpSyncFragment(VerifyWarpSyncFragment<TSrc, TRq>),
+    /// Ready to verify the parameters of the chain against the finalized block.
     BuildChainInformation(BuildChainInformation<TSrc, TRq>),
 }
 
+/// Ready to verify a warp sync fragment.
 pub struct VerifyWarpSyncFragment<TSrc, TRq> {
     inner: InProgressWarpSync<TSrc, TRq>,
 }
 
 impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
+    /// Returns the source that has sent the fragments that we are about to verify, and its user
+    /// data.
     pub fn proof_sender(&self) -> (SourceId, &TSrc) {
         if let Phase::PendingVerify {
             downloaded_source, ..
@@ -1105,7 +1176,11 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
         }
     }
 
-    // TODO: does this API make sense?
+    /// Verify one warp sync fragment.
+    ///
+    /// Must be passed a randomly-generated value that is used by the verification process. Note
+    /// that the verification is still deterministic.
+    // TODO: does this API make sense? refactor or explain what this error is
     pub fn verify(
         mut self,
         randomness_seed: [u8; 32],
@@ -1186,11 +1261,20 @@ impl<TSrc, TRq> VerifyWarpSyncFragment<TSrc, TRq> {
     }
 }
 
+/// Ready to verify the parameters of the chain against the finalized block.
 pub struct BuildChainInformation<TSrc, TRq> {
     inner: InProgressWarpSync<TSrc, TRq>,
 }
 
 impl<TSrc, TRq> BuildChainInformation<TSrc, TRq> {
+    /// Build the information about the chain.
+    ///
+    /// This function might return a [`WarpSync::Finished`], indicating the end of the warp sync.
+    ///
+    /// Must be passed parameters used for the construction of the runtime: a hint as to whether
+    /// the runtime is trusted and/or will be executed again, and whether unresolved function
+    /// imports are allowed.
+    // TODO: refactor this error or explain what it is
     pub fn build(
         mut self,
         exec_hint: ExecHint,
