@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fix the `finalizedBlockHashes` and `prunedBlockHashes` fields having wrong names in `chainHead_unstable_followEvent` events.
+- Fix the `finalizedBlockHashes` and `prunedBlockHashes` fields having wrong names in `chainHead_unstable_followEvent` events. ([#2812](https://github.com/paritytech/smoldot/pull/2812))
 
 ## 0.7.0 - 2022-09-28
 
