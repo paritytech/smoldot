@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Fix the `finalizedBlockHashes` and `prunedBlockHashes` fields having wrong names in `chainHead_unstable_followEvent` events.
+
 ## 0.7.0 - 2022-09-28
 
 ### Removed
