@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- CPU-heavy operations such as verifying finality proofs or compiling the runtime will now better respect the CPU rate limit. ([#2803](https://github.com/paritytech/smoldot/pull/2803))
+
 ## 0.7.0 - 2022-09-28
 
 ### Removed
