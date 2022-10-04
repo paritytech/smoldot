@@ -4,8 +4,8 @@
 
 ### Fixed
 
-- Remove "type" parameter from `chainHead_unstable_storage` JSON-RPC method, in accordance with the update in the JSON-RPC specification.
-- The `chainHead_unstable_storage` JSON-RPC method now returns an `error` notification if the block's header couldn't be decoded instead of a `disjoint` notification.
+- Remove "type" parameter from `chainHead_unstable_storage` JSON-RPC method, in accordance with the update in the JSON-RPC specification. ([#2818](https://github.com/paritytech/smoldot/pull/2818))
+- The `chainHead_unstable_storage` JSON-RPC method now returns an `error` notification if the block's header couldn't be decoded instead of a `disjoint` notification. ([#2818](https://github.com/paritytech/smoldot/pull/2818))
 
 ## 0.7.0 - 2022-09-28
 
