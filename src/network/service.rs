@@ -1116,7 +1116,13 @@ where
             != 1;
 
         // If the peer is completely unreachable, unassign all of its slots.
-        if !has_any_attempt_left && !self.inner.has_established_connection(expected_peer_id) {
+        if !has_any_attempt_left
+            && self
+                .inner
+                .established_peer_connections(expected_peer_id)
+                .count()
+                == 0
+        {
             let expected_peer_id = expected_peer_id.clone(); // Necessary for borrowck reasons.
 
             for chain_index in 0..self.chains.len() {
@@ -2052,11 +2058,14 @@ where
         // to open.
         loop {
             // Note: we can't use a `while let` due to borrow checker errors.
-            let (id, _, notifications_protocol_index) =
-                match self.inner.next_unfulfilled_desired_outbound_substream() {
-                    Some(v) => v,
-                    None => break,
-                };
+            let (peer_id, notifications_protocol_index) = match self
+                .inner
+                .unfulfilled_desired_outbound_substream(false)
+                .next()
+            {
+                Some((peer_id, idx)) => (peer_id.clone(), idx),
+                None => break,
+            };
 
             let chain_config = &self.chains
                 [notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN]
@@ -2085,7 +2094,12 @@ where
                 unreachable!()
             };
 
-            self.inner.open_out_notification(id, now.clone(), handshake);
+            self.inner.open_out_notification(
+                &peer_id,
+                notifications_protocol_index,
+                now.clone(),
+                handshake,
+            );
         }
 
         event_to_return
@@ -2277,7 +2291,7 @@ where
     /// Returns `true` if there exists an established connection with the given peer.
     // TODO: revisit this API w.r.t. shutdowns
     pub fn has_established_connection(&self, peer_id: &PeerId) -> bool {
-        self.inner.has_established_connection(peer_id)
+        self.inner.established_peer_connections(peer_id).count() != 0
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection
