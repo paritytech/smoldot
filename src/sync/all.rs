@@ -147,7 +147,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     }),
                 }
             } else {
-                match warp_sync::warp_sync(warp_sync::Config {
+                match warp_sync::start_warp_sync(warp_sync::Config {
                     start_chain_information: config.chain_information,
                     block_number_bytes: config.block_number_bytes,
                     sources_capacity: config.sources_capacity,
