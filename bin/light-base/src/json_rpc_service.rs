@@ -1008,7 +1008,6 @@ impl<TPlat: Platform> Background<TPlat> {
                 hash,
                 key,
                 child_key,
-                r#type: ty,
                 network_config,
             } => {
                 self.chain_head_storage(
@@ -1018,7 +1017,6 @@ impl<TPlat: Platform> Background<TPlat> {
                     hash,
                     key,
                     child_key,
-                    ty,
                     network_config,
                 )
                 .await;

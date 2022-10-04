@@ -435,7 +435,6 @@ define_methods! {
         hash: HashHexString,
         key: HexString,
         #[rename = "childKey"] child_key: Option<HexString>,
-        r#type: StorageQueryType,
         #[rename = "networkConfig"] network_config: Option<NetworkConfig>
     ) -> Cow<'a, str>,
     chainHead_unstable_unfollow(
@@ -968,16 +967,6 @@ pub enum DispatchClass {
 pub struct StorageChangeSet {
     pub block: HashHexString,
     pub changes: Vec<(HexString, Option<HexString>)>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum StorageQueryType {
-    #[serde(rename = "value")]
-    Value,
-    #[serde(rename = "hash")]
-    Hash,
-    #[serde(rename = "size")]
-    Size,
 }
 
 #[derive(Debug, Clone)]

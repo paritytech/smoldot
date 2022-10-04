@@ -861,7 +861,6 @@ impl<TPlat: Platform> Background<TPlat> {
         hash: methods::HashHexString,
         key: methods::HexString,
         child_key: Option<methods::HexString>,
-        ty: methods::StorageQueryType,
         network_config: Option<methods::NetworkConfig>,
     ) {
         let network_config = network_config.unwrap_or(methods::NetworkConfig {
@@ -998,24 +997,7 @@ impl<TPlat: Platform> Background<TPlat> {
                                 // and as such the outcome only ever contains one element.
                                 debug_assert_eq!(values.len(), 1);
                                 let value = values.into_iter().next().unwrap();
-
-                                let output = match ty {
-                                    methods::StorageQueryType::Value => {
-                                        value.map(|v| methods::HexString(v).to_string())
-                                    }
-                                    methods::StorageQueryType::Size => {
-                                        value.map(|v| v.len().to_string())
-                                    }
-                                    methods::StorageQueryType::Hash => value.map(|v| {
-                                        methods::HexString(
-                                            blake2_rfc::blake2b::blake2b(32, &[], &v)
-                                                .as_bytes()
-                                                .to_vec(),
-                                        )
-                                        .to_string()
-                                    }),
-                                };
-
+                                let output = value.map(|v| methods::HexString(v).to_string());
                                 methods::ServerToClient::chainHead_unstable_storageEvent {
                                     subscription: (&subscription_id).into(),
                                     result: methods::ChainHeadStorageEvent::Done { value: output },

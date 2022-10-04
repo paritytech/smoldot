@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Remove "type" parameter from `chainHead_unstable_storage` JSON-RPC method, in accordance with the update in the JSON-RPC specification.
+
 ## 0.7.0 - 2022-09-28
 
 ### Removed
