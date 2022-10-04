@@ -16,6 +16,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::nibble;
+use alloc::vec::Vec;
 use core::{cmp, fmt, iter, slice};
 
 /// Encodes the components of a node value into the node value itself.
