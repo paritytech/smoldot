@@ -143,6 +143,15 @@ macro_rules! decode_scale_compact {
 
                     let byte0 = u16::from(bytes[0] >> 2);
                     let byte1 = u16::from(bytes[1]);
+
+                    // Value is invalid if highest byte is 0.
+                    if byte1 == 0 {
+                        return Err(nom::Err::Error(nom::error::make_error(
+                            bytes,
+                            nom::error::ErrorKind::Satisfy,
+                        )))
+                    }
+
                     let value = (byte1 << 6) | byte0;
                     Ok((&bytes[2..], <$num_ty>::from(value)))
                 }
@@ -163,6 +172,14 @@ macro_rules! decode_scale_compact {
                     let byte1 = u32::from(bytes[1]).checked_shl(6).unwrap();
                     let byte2 = u32::from(bytes[2]).checked_shl(14).unwrap();
                     let byte3 = u32::from(bytes[3]).checked_shl(22).unwrap();
+
+                    // Value is invalid if highest byte is 0.
+                    if byte3 == 0 {
+                        return Err(nom::Err::Error(nom::error::make_error(
+                            bytes,
+                            nom::error::ErrorKind::Satisfy,
+                        )))
+                    }
 
                     let value = byte3 | byte2 | byte1 | byte0;
                     let value = match <$num_ty>::try_from(value) {

@@ -98,7 +98,7 @@ pub mod proof_verify;
 pub mod trie_structure;
 
 pub use nibble::{
-    all_nibbles, bytes_to_nibbles, nibbles_to_bytes_extend, BytesToNibbles, Nibble,
+    all_nibbles, bytes_to_nibbles, nibbles_to_bytes_suffix_extend, BytesToNibbles, Nibble,
     NibbleFromU8Error,
 };
 
