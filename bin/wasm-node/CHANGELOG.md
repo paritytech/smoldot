@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.1 - 2022-10-04
+
 ### Fixed
 
 - Syncing no longer stalls if the gap between the finalized and latest block is more than 100 blocks. ([#2801](https://github.com/paritytech/smoldot/pull/2801))
