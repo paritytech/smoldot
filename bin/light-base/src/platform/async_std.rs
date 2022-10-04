@@ -98,35 +98,38 @@ impl Platform for AsyncStdTcpWebSocket {
             // TODO: doesn't support WebSocket secure connections
 
             // Ensure ahead of time that the multiaddress is supported.
-            let (addr, is_websocket) = match (&proto1, &proto2, &proto3) {
+            let (addr, host_if_websocket) = match (&proto1, &proto2, &proto3) {
                 (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), None) => (
                     either::Left(SocketAddr::new(IpAddr::V4((*ip).into()), *port)),
-                    false,
+                    None,
                 ),
                 (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), None) => (
                     either::Left(SocketAddr::new(IpAddr::V6((*ip).into()), *port)),
-                    false,
+                    None,
                 ),
-                (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => (
-                    either::Left(SocketAddr::new(IpAddr::V4((*ip).into()), *port)),
-                    true,
-                ),
-                (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => (
-                    either::Left(SocketAddr::new(IpAddr::V6((*ip).into()), *port)),
-                    true,
-                ),
+                (ProtocolRef::Ip4(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => {
+                    let addr = SocketAddr::new(IpAddr::V4((*ip).into()), *port);
+                    (either::Left(addr), Some(addr.to_string()))
+                }
+                (ProtocolRef::Ip6(ip), ProtocolRef::Tcp(port), Some(ProtocolRef::Ws)) => {
+                    let addr = SocketAddr::new(IpAddr::V6((*ip).into()), *port);
+                    (either::Left(addr), Some(addr.to_string()))
+                }
 
                 // TODO: we don't care about the differences between Dns, Dns4, and Dns6
                 (
                     ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
                     ProtocolRef::Tcp(port),
                     None,
-                ) => (either::Right((addr.to_string(), *port)), false),
+                ) => (either::Right((addr.to_string(), *port)), None),
                 (
                     ProtocolRef::Dns(addr) | ProtocolRef::Dns4(addr) | ProtocolRef::Dns6(addr),
                     ProtocolRef::Tcp(port),
                     Some(ProtocolRef::Ws),
-                ) => (either::Right((addr.to_string(), *port)), true),
+                ) => (
+                    either::Right((addr.to_string(), *port)),
+                    Some(format!("{}:{}", addr, *port)),
+                ),
 
                 _ => {
                     return Err(ConnectError {
@@ -147,16 +150,20 @@ impl Platform for AsyncStdTcpWebSocket {
                 let _ = tcp_socket.set_nodelay(true);
             }
 
-            let mut socket = match (tcp_socket, is_websocket) {
-                (Ok(tcp_socket), true) => future::Either::Right(
-                    websocket::websocket_client_handshake(tcp_socket)
-                        .await
-                        .map_err(|err| ConnectError {
-                            message: format!("Failed to negotiate WebSocket: {}", err),
-                            is_bad_addr: false,
-                        })?,
+            let mut socket = match (tcp_socket, host_if_websocket) {
+                (Ok(tcp_socket), Some(host)) => future::Either::Right(
+                    websocket::websocket_client_handshake(websocket::Config {
+                        tcp_socket,
+                        host: &host,
+                        url: "/",
+                    })
+                    .await
+                    .map_err(|err| ConnectError {
+                        message: format!("Failed to negotiate WebSocket: {}", err),
+                        is_bad_addr: false,
+                    })?,
                 ),
-                (Ok(tcp_socket), false) => future::Either::Left(tcp_socket),
+                (Ok(tcp_socket), None) => future::Either::Left(tcp_socket),
                 (Err(err), _) => {
                     return Err(ConnectError {
                         is_bad_addr: false,
@@ -182,73 +189,89 @@ impl Platform for AsyncStdTcpWebSocket {
             async_std::task::spawn(future::poll_fn(move |cx| {
                 let mut lock = shared.guarded.lock();
 
-                match Pin::new(&mut read_data_tx).poll_ready(cx) {
-                    Poll::Ready(Ok(())) => {
-                        if let Poll::Ready(result) =
-                            Pin::new(&mut socket).poll_read(cx, &mut read_buffer)
-                        {
+                loop {
+                    match Pin::new(&mut read_data_tx).poll_ready(cx) {
+                        Poll::Ready(Ok(())) => {
+                            match Pin::new(&mut socket).poll_read(cx, &mut read_buffer) {
+                                Poll::Pending => break,
+                                Poll::Ready(result) => {
+                                    match result {
+                                        Ok(0) | Err(_) => return Poll::Ready(()), // End the task
+                                        Ok(bytes) => {
+                                            let _ = read_data_tx
+                                                .try_send(read_buffer[..bytes].to_vec());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Poll::Ready(Err(_)) => return Poll::Ready(()), // End the task
+                        Poll::Pending => break,
+                    }
+                }
+
+                loop {
+                    if lock.write_queue.is_empty() {
+                        if let Poll::Ready(Err(_)) = Pin::new(&mut socket).poll_flush(cx) {
+                            // End the task
+                            return Poll::Ready(());
+                        }
+
+                        break;
+                    } else {
+                        let write_queue_slices = lock.write_queue.as_slices();
+                        if let Poll::Ready(result) = Pin::new(&mut socket).poll_write_vectored(
+                            cx,
+                            &[
+                                IoSlice::new(write_queue_slices.0),
+                                IoSlice::new(write_queue_slices.1),
+                            ],
+                        ) {
                             match result {
-                                Ok(0) | Err(_) => return Poll::Ready(()), // End the task
                                 Ok(bytes) => {
-                                    let _ = read_data_tx.try_send(read_buffer[..bytes].to_vec());
+                                    for _ in 0..bytes {
+                                        lock.write_queue.pop_front();
+                                    }
                                 }
+                                Err(_) => return Poll::Ready(()), // End the task
                             }
-                        }
-                    }
-                    Poll::Ready(Err(_)) => return Poll::Ready(()), // End the task
-                    Poll::Pending => {}
-                }
-
-                if lock.write_queue.is_empty() {
-                    if let Poll::Ready(Err(_)) = Pin::new(&mut socket).poll_flush(cx) {
-                        // End the task
-                        return Poll::Ready(());
-                    }
-                } else {
-                    let write_queue_slices = lock.write_queue.as_slices();
-                    if let Poll::Ready(result) = Pin::new(&mut socket).poll_write_vectored(
-                        cx,
-                        &[
-                            IoSlice::new(write_queue_slices.0),
-                            IoSlice::new(write_queue_slices.1),
-                        ],
-                    ) {
-                        match result {
-                            Ok(bytes) => {
-                                for _ in 0..bytes {
-                                    lock.write_queue.pop_front();
-                                }
-                            }
-                            Err(_) => return Poll::Ready(()), // End the task
+                        } else {
+                            break;
                         }
                     }
                 }
 
-                if let Poll::Ready(()) = Pin::new(&mut write_queue_pushed_listener).poll(cx) {
-                    write_queue_pushed_listener = shared.write_queue_pushed.listen();
+                loop {
+                    if let Poll::Ready(()) = Pin::new(&mut write_queue_pushed_listener).poll(cx) {
+                        write_queue_pushed_listener = shared.write_queue_pushed.listen();
+                    } else {
+                        break;
+                    }
                 }
 
                 Poll::Pending
             }));
 
-            Ok(PlatformConnection::SingleStream(Stream {
-                shared: shared_clone,
-                read_data_rx: Arc::new(parking_lot::Mutex::new(read_data_rx.peekable())),
-                read_buffer: Some(Vec::with_capacity(4096)),
-            }))
+            Ok(PlatformConnection::SingleStreamMultistreamSelectNoiseYamux(
+                Stream {
+                    shared: shared_clone,
+                    read_data_rx: Arc::new(parking_lot::Mutex::new(read_data_rx.peekable())),
+                    read_buffer: Some(Vec::with_capacity(4096)),
+                },
+            ))
         })
     }
 
-    fn open_out_substream(_: &mut Self::Connection) {
+    fn open_out_substream(c: &mut Self::Connection) {
         // This function can only be called with so-called "multi-stream" connections. We never
         // open such connection.
-        unreachable!()
+        match *c {}
     }
 
-    fn next_substream(_: &mut Self::Connection) -> Self::NextSubstreamFuture {
+    fn next_substream(c: &mut Self::Connection) -> Self::NextSubstreamFuture {
         // This function can only be called with so-called "multi-stream" connections. We never
         // open such connection.
-        unreachable!()
+        match *c {}
     }
 
     fn wait_more_data(stream: &mut Self::Stream) -> Self::StreamDataFuture {

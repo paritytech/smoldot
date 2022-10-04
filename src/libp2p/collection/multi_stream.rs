@@ -16,13 +16,16 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::{
-    super::{connection::established, read_write::ReadWrite},
+    super::{
+        connection::{established, noise},
+        read_write::ReadWrite,
+    },
     ConfigRequestResponse, ConnectionToCoordinator, ConnectionToCoordinatorInner,
-    CoordinatorToConnection, CoordinatorToConnectionInner, NotificationsOutErr, OverlayNetwork,
-    ShutdownCause, SubstreamId,
+    CoordinatorToConnection, CoordinatorToConnectionInner, MultiStreamHandshakeKind,
+    NotificationsOutErr, OverlayNetwork, PeerId, ShutdownCause, SubstreamId,
 };
 
-use alloc::{string::ToString as _, sync::Arc};
+use alloc::{collections::VecDeque, string::ToString as _, sync::Arc};
 use core::{
     hash::Hash,
     iter,
@@ -35,10 +38,43 @@ pub struct MultiStreamConnectionTask<TNow, TSubId> {
     connection: MultiStreamConnectionTaskInner<TNow, TSubId>,
 }
 enum MultiStreamConnectionTaskInner<TNow, TSubId> {
+    /// Connection is still in its handshake phase.
+    Handshake {
+        /// Substream that has been opened to perform the handshake, if any.
+        opened_substream: Option<TSubId>,
+
+        /// Noise handshake in progress. Always `Some`, except to be temporarily extracted.
+        handshake: Option<noise::HandshakeInProgress>,
+
+        /// Other substreams, besides [`MultiStreamConnectionTaskInner::Handshake::opened_substream`],
+        /// that have been opened. For each substream, contains a boolean indicating whether the
+        /// substream is outbound (`true`) or inbound (`false`).
+        ///
+        /// Due to the asynchronous nature of the protocol, it is not a logic error to open
+        /// additional substreams before the handshake has finished. The remote might think that
+        /// the handshake has finished while the local node hasn't finished processing it yet.
+        ///
+        /// These substreams aren't processed as long as the handshake hasn't finished. It is,
+        /// however, important to remember that substreams have been opened.
+        extra_open_substreams: hashbrown::HashMap<TSubId, bool, fnv::FnvBuildHasher>,
+
+        /// State machine used once the connection has been established. Unused during the
+        /// handshake, but created ahead of time. Always `Some`, except to be temporarily
+        /// extracted.
+        established: Option<established::MultiStream<TNow, TSubId, SubstreamId, ()>>,
+    },
+
     /// Connection has been fully established.
     Established {
         // TODO: user data of request redundant with the substreams mapping below
         established: established::MultiStream<TNow, TSubId, SubstreamId, ()>,
+
+        /// If `Some`, contains the substream that was used for the handshake. This substream
+        /// is meant to be closed as soon as possible.
+        handshake_substream: Option<TSubId>,
+
+        /// If `Some`, then no `HandshakeFinished` message has been sent back yet.
+        handshake_finished_message_to_send: Option<PeerId>,
 
         /// Because outgoing substream ids are assigned by the coordinator, we maintain a mapping
         /// of the "outer ids" to "inner ids".
@@ -49,6 +85,11 @@ enum MultiStreamConnectionTaskInner<TNow, TSubId> {
         // TODO: could be user datas in established?
         outbound_substreams_reverse:
             hashbrown::HashMap<established::SubstreamId, SubstreamId, fnv::FnvBuildHasher>,
+
+        /// After a [`ConnectionToCoordinatorInner::NotificationsInOpenCancel`] is emitted, an
+        /// entry is added to this list. If the coordinator accepts or refuses a substream in this
+        /// list, the acceptance/refusal is dismissed.
+        notifications_in_open_cancel_acknowledgments: VecDeque<established::SubstreamId>,
     },
 
     /// Connection has finished its shutdown. A [`ConnectionToCoordinatorInner::ShutdownFinished`]
@@ -92,13 +133,30 @@ where
     pub(super) fn new(
         randomness_seed: [u8; 32],
         now: TNow,
+        handshake_kind: MultiStreamHandshakeKind,
+        max_inbound_substreams: usize,
+        noise_key: Arc<noise::NoiseKey>,
         notification_protocols: Arc<[OverlayNetwork]>,
         request_response_protocols: Arc<[ConfigRequestResponse]>,
         ping_protocol: Arc<str>,
     ) -> Self {
+        // We only support one kind of handshake at the moment. Make sure (at compile time) that
+        // the value provided as parameter is indeed the one expected.
+        let MultiStreamHandshakeKind::WebRtc { .. } = handshake_kind;
+
         MultiStreamConnectionTask {
-            connection: MultiStreamConnectionTaskInner::Established {
-                established: established::MultiStream::new(established::Config {
+            connection: MultiStreamConnectionTaskInner::Handshake {
+                handshake: Some(noise::HandshakeInProgress::new(noise::Config {
+                    key: &noise_key,
+                    is_initiator: true, // TODO: is_initiator?
+                    prologue: &[], // TODO: this prologue isn't correct, WebRTC requires passing certificate fingerprints
+                })),
+                opened_substream: None,
+                extra_open_substreams: hashbrown::HashMap::with_capacity_and_hasher(
+                    0,
+                    Default::default(),
+                ),
+                established: Some(established::MultiStream::new(established::Config {
                     notifications_protocols: notification_protocols
                         .iter()
                         .map(|net| established::ConfigNotifications {
@@ -108,20 +166,13 @@ where
                         })
                         .collect(),
                     request_protocols: request_response_protocols.to_vec(), // TODO: overhead
+                    max_inbound_substreams,
                     randomness_seed,
                     ping_protocol: ping_protocol.to_string(), // TODO: cloning :-/
                     ping_interval: Duration::from_secs(20),   // TODO: hardcoded
                     ping_timeout: Duration::from_secs(10),    // TODO: hardcoded
                     first_out_ping: now + Duration::from_secs(2), // TODO: hardcoded
-                }),
-                outbound_substreams_map: hashbrown::HashMap::with_capacity_and_hasher(
-                    0,
-                    Default::default(),
-                ), // TODO: capacity?
-                outbound_substreams_reverse: hashbrown::HashMap::with_capacity_and_hasher(
-                    0,
-                    Default::default(),
-                ), // TODO: capacity?
+                })),
             },
         }
     }
@@ -162,12 +213,34 @@ where
         mut self,
     ) -> (Option<Self>, Option<ConnectionToCoordinator>) {
         match &mut self.connection {
+            MultiStreamConnectionTaskInner::Handshake { .. } => (Some(self), None),
             MultiStreamConnectionTaskInner::Established {
                 established,
                 outbound_substreams_map,
                 outbound_substreams_reverse,
+                handshake_finished_message_to_send,
+                notifications_in_open_cancel_acknowledgments,
+                ..
             } => {
+                if let Some(remote_peer_id) = handshake_finished_message_to_send.take() {
+                    return (
+                        Some(self),
+                        Some(ConnectionToCoordinator {
+                            inner: ConnectionToCoordinatorInner::HandshakeFinished(remote_peer_id),
+                        }),
+                    );
+                }
+
                 let event = match established.pull_event() {
+                    Some(established::Event::NewOutboundSubstreamsForbidden) => {
+                        // TODO: handle properly
+                        self.connection = MultiStreamConnectionTaskInner::ShutdownWaitingAck {
+                            start_shutdown_message_to_send: Some(None),
+                            shutdown_finish_message_sent: false,
+                            initiator: ShutdownInitiator::Coordinator,
+                        };
+                        Some(ConnectionToCoordinatorInner::StartShutdown(None))
+                    }
                     Some(established::Event::InboundError(err)) => {
                         Some(ConnectionToCoordinatorInner::InboundError(err))
                     }
@@ -198,6 +271,7 @@ where
                         handshake,
                     }),
                     Some(established::Event::NotificationsInOpenCancel { id, .. }) => {
+                        notifications_in_open_cancel_acknowledgments.push_back(id);
                         Some(ConnectionToCoordinatorInner::NotificationsInOpenCancel { id })
                     }
                     Some(established::Event::NotificationIn { id, notification }) => {
@@ -296,6 +370,7 @@ where
                     established,
                     outbound_substreams_map,
                     outbound_substreams_reverse,
+                    ..
                 },
             ) => {
                 let inner_substream_id =
@@ -317,6 +392,7 @@ where
                     established,
                     outbound_substreams_map,
                     outbound_substreams_reverse,
+                    ..
                 },
             ) => {
                 let inner_substream_id = established.open_notifications_substream(
@@ -339,6 +415,7 @@ where
                     established,
                     outbound_substreams_map,
                     outbound_substreams_reverse,
+                    ..
                 },
             ) => {
                 // It is possible that the remote has closed the outbound notification substream
@@ -389,21 +466,42 @@ where
                     substream_id,
                     handshake,
                 },
-                MultiStreamConnectionTaskInner::Established { established, .. },
+                MultiStreamConnectionTaskInner::Established {
+                    established,
+                    notifications_in_open_cancel_acknowledgments,
+                    ..
+                },
             ) => {
-                // TODO: must verify that the substream is still valid
-                established.accept_in_notifications_substream(substream_id, handshake, ());
+                if let Some(idx) = notifications_in_open_cancel_acknowledgments
+                    .iter()
+                    .position(|s| *s == substream_id)
+                {
+                    notifications_in_open_cancel_acknowledgments.remove(idx);
+                } else {
+                    established.accept_in_notifications_substream(substream_id, handshake, ());
+                }
             }
             (
                 CoordinatorToConnectionInner::RejectInNotifications { substream_id },
-                MultiStreamConnectionTaskInner::Established { established, .. },
+                MultiStreamConnectionTaskInner::Established {
+                    established,
+                    notifications_in_open_cancel_acknowledgments,
+                    ..
+                },
             ) => {
-                // TODO: must verify that the substream is still valid
-                established.reject_in_notifications_substream(substream_id);
+                if let Some(idx) = notifications_in_open_cancel_acknowledgments
+                    .iter()
+                    .position(|s| *s == substream_id)
+                {
+                    notifications_in_open_cancel_acknowledgments.remove(idx);
+                } else {
+                    established.reject_in_notifications_substream(substream_id);
+                }
             }
             (
                 CoordinatorToConnectionInner::StartShutdown { .. },
-                MultiStreamConnectionTaskInner::Established { .. },
+                MultiStreamConnectionTaskInner::Handshake { .. }
+                | MultiStreamConnectionTaskInner::Established { .. },
             ) => {
                 // TODO: implement proper shutdown
                 self.connection = MultiStreamConnectionTaskInner::ShutdownWaitingAck {
@@ -420,7 +518,8 @@ where
                 | CoordinatorToConnectionInner::OpenOutNotifications { .. }
                 | CoordinatorToConnectionInner::CloseOutNotifications { .. }
                 | CoordinatorToConnectionInner::QueueNotification { .. },
-                MultiStreamConnectionTaskInner::ShutdownAcked { .. },
+                MultiStreamConnectionTaskInner::Handshake { .. }
+                | MultiStreamConnectionTaskInner::ShutdownAcked { .. },
             ) => unreachable!(),
             (
                 CoordinatorToConnectionInner::AcceptInNotifications { .. }
@@ -485,38 +584,65 @@ where
     /// currently being opened, then there is no need to open any additional one.
     pub fn desired_outbound_substreams(&self) -> u32 {
         match &self.connection {
+            MultiStreamConnectionTaskInner::Handshake {
+                opened_substream, ..
+            } => {
+                if opened_substream.is_none() {
+                    1
+                } else {
+                    0
+                }
+            }
             MultiStreamConnectionTaskInner::Established { established, .. } => {
                 established.desired_outbound_substreams()
             }
-            _ => 0,
+            MultiStreamConnectionTaskInner::ShutdownAcked { .. }
+            | MultiStreamConnectionTaskInner::ShutdownWaitingAck { .. } => 0,
         }
     }
 
     /// Notifies the state machine that a new substream has been opened.
     ///
-    /// `inbound` indicates whether the substream has been opened by the remote (`true`) or
-    /// locally (`false`).
+    /// `outbound` indicates whether the substream has been opened by the remote (`false`) or
+    /// locally (`true`).
     ///
-    /// If `inbound` is `false`, then the value returned by
+    /// If `outbound` is `true`, then the value returned by
     /// [`MultiStreamConnectionTask::desired_outbound_substreams`] will decrease by one.
     ///
     /// # Panic
     ///
     /// Panics if there already exists a substream with an identical identifier.
     ///
-    pub fn add_substream(&mut self, id: TSubId, inbound: bool) {
+    pub fn add_substream(&mut self, id: TSubId, outbound: bool) {
         match &mut self.connection {
-            MultiStreamConnectionTaskInner::Established { established, .. } => {
-                established.add_substream(id, inbound)
+            MultiStreamConnectionTaskInner::Handshake {
+                opened_substream: ref mut opened_substream @ None,
+                ..
+            } if outbound => {
+                *opened_substream = Some(id);
             }
-            _ => {
+            MultiStreamConnectionTaskInner::Handshake {
+                opened_substream,
+                extra_open_substreams,
+                ..
+            } => {
+                assert!(opened_substream.as_ref().map_or(true, |open| *open != id));
+                // TODO: add a limit to the number allowed?
+                let _was_in = extra_open_substreams.insert(id, outbound);
+                assert!(_was_in.is_none());
+            }
+            MultiStreamConnectionTaskInner::Established { established, .. } => {
+                established.add_substream(id, outbound)
+            }
+            MultiStreamConnectionTaskInner::ShutdownAcked { .. }
+            | MultiStreamConnectionTaskInner::ShutdownWaitingAck { .. } => {
                 // TODO: reset the substream or something?
             }
         }
     }
 
-    /// Returns a list of substreams that the state machine would like to see reset. The user is
-    /// encouraged to call [`MultiStreamConnectionTask::substream_read_write`] with this list of
+    /// Returns a list of substreams that the state machine would like to see processed. The user
+    /// is encouraged to call [`MultiStreamConnectionTask::substream_read_write`] with this list of
     /// substream.
     ///
     /// This value doesn't change automatically over time but only after a call to
@@ -528,12 +654,31 @@ where
     /// > **Note**: An example situation is: a notification is queued, which leads to a message
     /// >           being sent to a connection task, which, once injected, leads to a notifications
     /// >           substream being "ready" because it needs to send more data.
+    // TODO: this function really should be more precise as to what a ready substream means
     pub fn ready_substreams(&self) -> impl Iterator<Item = &TSubId> {
         match &self.connection {
-            MultiStreamConnectionTaskInner::Established { established, .. } => {
-                either::Left(established.ready_substreams())
+            MultiStreamConnectionTaskInner::Handshake {
+                opened_substream: Some(opened_substream),
+                ..
+            } => either::Right(either::Left(iter::once(opened_substream))),
+            MultiStreamConnectionTaskInner::Established {
+                established,
+                handshake_substream,
+                ..
+            } => either::Left(
+                handshake_substream
+                    .as_ref()
+                    .into_iter()
+                    .chain(established.ready_substreams()),
+            ),
+            MultiStreamConnectionTaskInner::Handshake {
+                opened_substream: None,
+                ..
             }
-            _ => either::Right(iter::empty()),
+            | MultiStreamConnectionTaskInner::ShutdownAcked { .. }
+            | MultiStreamConnectionTaskInner::ShutdownWaitingAck { .. } => {
+                either::Right(either::Right(iter::empty()))
+            }
         }
     }
 
@@ -596,10 +741,33 @@ where
     ///
     pub fn reset_substream(&mut self, substream_id: &TSubId) {
         match &mut self.connection {
+            MultiStreamConnectionTaskInner::Established {
+                handshake_substream,
+                ..
+            } if handshake_substream
+                .as_ref()
+                .map_or(false, |s| s == substream_id) =>
+            {
+                *handshake_substream = None;
+            }
             MultiStreamConnectionTaskInner::Established { established, .. } => {
                 established.reset_substream(substream_id)
             }
-            _ => {
+            MultiStreamConnectionTaskInner::Handshake {
+                opened_substream: Some(opened_substream),
+                ..
+            } if opened_substream == substream_id => {
+                // TODO: the handshake has failed, kill the connection?
+            }
+            MultiStreamConnectionTaskInner::Handshake {
+                extra_open_substreams,
+                ..
+            } => {
+                let _was_in = extra_open_substreams.remove(substream_id).is_some();
+                assert!(_was_in);
+            }
+            MultiStreamConnectionTaskInner::ShutdownAcked { .. }
+            | MultiStreamConnectionTaskInner::ShutdownWaitingAck { .. } => {
                 // TODO: panic if substream id invalid?
             }
         }
@@ -622,10 +790,98 @@ where
         read_write: &'_ mut ReadWrite<'_, TNow>,
     ) -> bool {
         match &mut self.connection {
+            MultiStreamConnectionTaskInner::Handshake {
+                handshake,
+                opened_substream,
+                established,
+                extra_open_substreams,
+            } if opened_substream
+                .as_ref()
+                .map_or(false, |s| s == substream_id) =>
+            {
+                // TODO: check the handshake timeout
+                match handshake.take().unwrap().read_write(read_write) {
+                    Ok(noise::NoiseHandshake::InProgress(handshake_update)) => {
+                        *handshake = Some(handshake_update);
+                        false
+                    }
+                    Err(_err) => todo!(), // TODO: /!\
+                    Ok(noise::NoiseHandshake::Success {
+                        cipher: _,
+                        remote_peer_id,
+                    }) => {
+                        // The handshake has succeeded and we will transition into "established"
+                        // mode.
+                        // However the rest of the body of this function still needs to deal with
+                        // the substream used for the handshake.
+                        // We close the writing side. If the reading side is closed, we indicate
+                        // that the substream is dead. If the reading side is still open, we
+                        // indicate that it's not dead and store it in the state machine while
+                        // waiting for it to be closed by the remote.
+                        read_write.close_write();
+                        let handshake_substream_still_open = read_write.incoming_buffer.is_some();
+
+                        let mut established = established.take().unwrap();
+                        for (substream_id, outbound) in extra_open_substreams.drain() {
+                            established.add_substream(substream_id, outbound);
+                        }
+
+                        self.connection = MultiStreamConnectionTaskInner::Established {
+                            established,
+                            handshake_finished_message_to_send: Some(remote_peer_id),
+                            handshake_substream: if handshake_substream_still_open {
+                                Some(opened_substream.take().unwrap())
+                            } else {
+                                None
+                            },
+                            outbound_substreams_map: hashbrown::HashMap::with_capacity_and_hasher(
+                                0,
+                                Default::default(),
+                            ),
+                            outbound_substreams_reverse:
+                                hashbrown::HashMap::with_capacity_and_hasher(0, Default::default()),
+                            notifications_in_open_cancel_acknowledgments: VecDeque::with_capacity(
+                                4,
+                            ),
+                        };
+
+                        !handshake_substream_still_open
+                    }
+                }
+            }
+            MultiStreamConnectionTaskInner::Established {
+                handshake_substream,
+                ..
+            } if handshake_substream
+                .as_ref()
+                .map_or(false, |s| s == substream_id) =>
+            {
+                // Close the writing side. If the reading side is closed, we indicate that the
+                // substream is dead. If the reading side is still open, we indicate that it's not
+                // dead and simply wait for the remote to close it.
+                // TODO: kill the connection if the remote sends more data?
+                read_write.close_write();
+                if read_write.incoming_buffer.is_none() {
+                    *handshake_substream = None;
+                    true
+                } else {
+                    false
+                }
+            }
             MultiStreamConnectionTaskInner::Established { established, .. } => {
                 established.substream_read_write(substream_id, read_write)
             }
-            _ => {
+            MultiStreamConnectionTaskInner::Handshake {
+                extra_open_substreams,
+                ..
+            } => {
+                assert!(extra_open_substreams.contains_key(substream_id));
+                // Don't do anything. Don't read or write. Instead we wait for the handshake to
+                // be finished.
+                false
+            }
+            MultiStreamConnectionTaskInner::ShutdownAcked { .. }
+            | MultiStreamConnectionTaskInner::ShutdownWaitingAck { .. } => {
                 // TODO: panic if substream id invalid?
                 true
             }

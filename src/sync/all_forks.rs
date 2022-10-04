@@ -1129,6 +1129,12 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             return Err((AncestrySearchResponseError::TooOld, self.finish()));
         }
 
+        // Convert the justifications in an "owned" format, because we're likely going to store
+        // them.
+        let justifications = scale_encoded_justifications
+            .map(|(e, j)| (e, j.as_ref().to_owned()))
+            .collect::<Vec<_>>();
+
         // If the block is already part of the local tree of blocks, nothing more to do.
         if self
             .inner
@@ -1139,6 +1145,7 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
                 inner: self,
                 decoded_header: decoded_header.into(),
                 is_verified: true,
+                justifications,
             }));
         }
 
@@ -1171,15 +1178,14 @@ impl<TBl, TRq, TSrc> FinishAncestrySearch<TBl, TRq, TSrc> {
             Ok(AddBlock::UnknownBlock(AddBlockVacant {
                 inner: self,
                 decoded_header: decoded_header.into(),
-                justifications: scale_encoded_justifications
-                    .map(|(e, j)| (e, j.as_ref().to_owned()))
-                    .collect::<Vec<_>>(),
+                justifications,
             }))
         } else {
             Ok(AddBlock::AlreadyPending(AddBlockOccupied {
                 inner: self,
                 decoded_header: decoded_header.into(),
                 is_verified: false,
+                justifications,
             }))
         }
     }
@@ -1231,6 +1237,7 @@ pub struct AddBlockOccupied<TBl, TRq, TSrc> {
     inner: FinishAncestrySearch<TBl, TRq, TSrc>,
     decoded_header: header::Header,
     is_verified: bool,
+    justifications: Vec<([u8; 4], Vec<u8>)>,
 }
 
 impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
@@ -1319,9 +1326,14 @@ impl<TBl, TRq, TSrc> AddBlockOccupied<TBl, TRq, TSrc> {
             mem::replace(&mut block_user_data.user_data, user_data)
         };
 
-        // TODO: what if the pending block already contains a justification and it is not the
-        //       same as here? since justifications aren't immediately verified, it is possible
-        //       for a malicious peer to send us bad justifications
+        if !self.justifications.is_empty() {
+            self.inner.inner.inner.blocks[self.inner.source_id]
+                .unverified_finality_proofs
+                .insert(
+                    self.decoded_header.number,
+                    FinalityProofs::Justifications(self.justifications),
+                );
+        }
 
         // Update the state machine for the next iteration.
         // Note: this can't be reached if `expected_next_height` is 0, because that should have
@@ -1402,11 +1414,12 @@ impl<TBl, TRq, TSrc> AddBlockVacant<TBl, TRq, TSrc> {
                 None => break,
             };
 
-            self.inner
-                .inner
-                .inner
-                .blocks
-                .remove_sources_known_block(height, &hash);
+            // TODO: restore this block of code; it is extremely complicated because it is unclear which source-block combinations we can add and keep without making memory usage explode
+            /*self.inner
+            .inner
+            .inner
+            .blocks
+            .remove_sources_known_block(height, &hash);*/
             self.inner
                 .inner
                 .inner
@@ -1631,10 +1644,11 @@ impl<'a, TBl, TRq, TSrc> AnnouncedBlockUnknown<'a, TBl, TRq, TSrc> {
                 None => break,
             };
 
-            self.inner
-                .inner
-                .blocks
-                .remove_sources_known_block(height, &hash);
+            // TODO: restore this block of code; it is extremely complicated because it is unclear which source-block combinations we can add and keep without making memory usage explode
+            /*self.inner
+            .inner
+            .blocks
+            .remove_sources_known_block(height, &hash);*/
             self.inner
                 .inner
                 .blocks

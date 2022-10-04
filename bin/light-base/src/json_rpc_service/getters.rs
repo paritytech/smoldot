@@ -19,7 +19,7 @@
 
 use super::{Background, Platform};
 
-use alloc::{format, string::ToString as _, sync::Arc, vec::Vec};
+use alloc::{borrow::Cow, format, string::ToString as _, sync::Arc, vec::Vec};
 use core::num::NonZeroUsize;
 use smoldot::{
     header,
@@ -127,7 +127,6 @@ impl<TPlat: Platform> Background<TPlat> {
             .respond(
                 state_machine_request_id,
                 methods::Response::rpc_methods(methods::RpcMethods {
-                    version: 1,
                     methods: methods::MethodCall::method_names()
                         .map(|n| n.into())
                         .collect(),
@@ -246,6 +245,21 @@ impl<TPlat: Platform> Background<TPlat> {
             .respond(
                 state_machine_request_id,
                 methods::Response::system_name((&self.system_name).into())
+                    .to_json_response(request_id),
+            )
+            .await;
+    }
+
+    /// Handles a call to [`methods::MethodCall::system_nodeRoles`].
+    pub(super) async fn system_node_roles(
+        self: &Arc<Self>,
+        request_id: &str,
+        state_machine_request_id: &requests_subscriptions::RequestId,
+    ) {
+        self.requests_subscriptions
+            .respond(
+                state_machine_request_id,
+                methods::Response::system_nodeRoles(Cow::Borrowed(&[methods::NodeRole::Light]))
                     .to_json_response(request_id),
             )
             .await;

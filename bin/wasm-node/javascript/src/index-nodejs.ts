@@ -38,7 +38,8 @@ export {
   Client,
   ClientOptions,
   CrashError,
-  JsonRpcCallback,
+  MalformedJsonRpcError,
+  QueueFullError,
   JsonRpcDisabledError,
   LogCallback
 } from './client.js';
@@ -103,7 +104,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
         const socket = new WebSocket(url);
         socket.binaryType = 'arraybuffer';
         socket.onopen = () => {
-            config.onOpen({ type: 'single-stream' });
+            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux' });
         };
         socket.onclose = (event) => {
             const message = "Error code " + event.code + (!!event.reason ? (": " + event.reason) : "");
@@ -142,7 +143,7 @@ function connect(config: ConnectionConfig, forbidTcp: boolean, forbidWs: boolean
 
         connection.socket.on('connect', () => {
             if (socket.destroyed) return;
-            config.onOpen({ type: 'single-stream' });
+            config.onOpen({ type: 'single-stream', handshake: 'multistream-select-noise-yamux' });
         });
         connection.socket.on('close', (hasError) => {
             if (socket.destroyed) return;

@@ -34,6 +34,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         smoldot::libp2p::collection::Network::new(smoldot::libp2p::collection::Config {
             randomness_seed: [0; 32],
             capacity: 0,
+            max_inbound_substreams: 10,
             notification_protocols: Vec::new(),
             request_response_protocols: Vec::new(),
             // This timeout doesn't matter as we pass dummy time values.
@@ -53,7 +54,12 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         is_initiator
     };
 
-    let (_id, mut task) = collection.insert_single_stream(Duration::new(0, 0), is_initiator, ());
+    let (_id, mut task) = collection.insert_single_stream(
+        Duration::new(0, 0),
+        smoldot::libp2p::collection::SingleStreamHandshakeKind::MultistreamSelectNoiseYamux,
+        is_initiator,
+        (),
+    );
 
     let mut out_buffer = vec![0; 4096];
 

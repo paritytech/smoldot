@@ -44,7 +44,8 @@ pub use crate::libp2p::{
     collection::ReadWrite,
     peers::{
         ConnectionId, ConnectionToCoordinator, CoordinatorToConnection, InRequestId, InboundError,
-        MultiStreamConnectionTask, OutRequestId, SingleStreamConnectionTask,
+        MultiStreamConnectionTask, MultiStreamHandshakeKind, OutRequestId,
+        SingleStreamConnectionTask, SingleStreamHandshakeKind,
     },
 };
 
@@ -379,10 +380,22 @@ where
             })
             .collect::<Vec<_>>();
 
+        // Maximum number that each remote is allowed to open.
+        // Note that this maximum doesn't have to be precise. There only needs to be *a* limit
+        // that is not exaggerately large, and this limit shouldn't be too low as to cause
+        // legitimate substreams to be refused.
+        // According to the protocol, a remote can only open one substream of each protocol at
+        // a time. However, we multiply this value by 2 in order to be generous. We also add 1
+        // to account for the ping protocol.
+        let max_inbound_substreams = chains.len()
+            * (1 + REQUEST_RESPONSE_PROTOCOLS_PER_CHAIN + NOTIFICATIONS_PROTOCOLS_PER_CHAIN)
+            * 2;
+
         ChainNetwork {
             inner: peers::Peers::new(peers::Config {
                 connections_capacity: config.connections_capacity,
                 peers_capacity: config.peers_capacity,
+                max_inbound_substreams,
                 request_response_protocols,
                 noise_key: config.noise_key,
                 randomness_seed: randomness.sample(rand::distributions::Standard),
@@ -470,10 +483,14 @@ where
     pub fn add_single_stream_incoming_connection(
         &mut self,
         when_connected: TNow,
+        handshake_kind: SingleStreamHandshakeKind,
         remote_addr: multiaddr::Multiaddr,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
-        self.inner
-            .add_single_stream_incoming_connection(when_connected, remote_addr)
+        self.inner.add_single_stream_incoming_connection(
+            when_connected,
+            handshake_kind,
+            remote_addr,
+        )
     }
 
     pub fn pull_message_to_connection(
@@ -812,6 +829,16 @@ where
         )
     }
 
+    /// Returns the list of peers for which we have a fully established notifications protocol of
+    /// the given protocol.
+    pub fn opened_transactions_substream(
+        &'_ self,
+        chain_index: usize,
+    ) -> impl Iterator<Item = &'_ PeerId> + '_ {
+        self.inner
+            .opened_out_notifications(chain_index * NOTIFICATIONS_PROTOCOLS_PER_CHAIN + 1)
+    }
+
     ///
     ///
     /// Must be passed the SCALE-encoded transaction.
@@ -991,6 +1018,7 @@ where
     pub fn pending_outcome_ok_single_stream(
         &mut self,
         id: PendingId,
+        handshake_kind: SingleStreamHandshakeKind,
     ) -> (ConnectionId, SingleStreamConnectionTask<TNow>) {
         // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
         // the user cancels the future returned by `add_outgoing_connection`.
@@ -998,6 +1026,7 @@ where
 
         let (connection_id, connection_task) = self.inner.add_single_stream_outgoing_connection(
             when_connected.clone(),
+            handshake_kind,
             expected_peer_id,
             multiaddr.clone(),
         );
@@ -1022,34 +1051,28 @@ where
     ///
     /// See also [`ChainNetwork::pending_outcome_err`].
     ///
-    /// No [`Event::Connected`] will be generated. Calling this function implicitly acts as if
-    /// this event was generated.
-    ///
     /// # Panic
     ///
     /// Panics if the [`PendingId`] is invalid.
     ///
-    // TODO: not generating the Connected event is tricky, as the user needs to do an extra effort to know if there was already a connection to that peer
     pub fn pending_outcome_ok_multi_stream<TSubId>(
         &mut self,
         id: PendingId,
-        now: TNow,
-        peer_id: &PeerId,
+        handshake_kind: MultiStreamHandshakeKind,
     ) -> (ConnectionId, MultiStreamConnectionTask<TNow, TSubId>)
     where
         TSubId: Clone + PartialEq + Eq + Hash,
     {
         // Don't remove the value in `pending_ids` yet, so that the state remains consistent if
         // the user cancels the future returned by `add_outgoing_connection`.
-        let (expected_peer_id, multiaddr, _when_connected) = self.pending_ids.get(id.0).unwrap();
+        let (expected_peer_id, multiaddr, when_connected) = self.pending_ids.get(id.0).unwrap();
 
-        if expected_peer_id != peer_id {
-            todo!() // TODO: return an error or something
-        }
-
-        let (connection_id, connection_task) =
-            self.inner
-                .add_multi_stream_outgoing_connection(now, peer_id, multiaddr.clone());
+        let (connection_id, connection_task) = self.inner.add_multi_stream_outgoing_connection(
+            when_connected.clone(),
+            handshake_kind,
+            expected_peer_id,
+            multiaddr.clone(),
+        );
 
         // Update `self.peers`.
         {
@@ -1059,13 +1082,6 @@ where
             } else {
                 self.num_pending_per_peer.remove(expected_peer_id).unwrap();
             }
-        }
-
-        // Because multi-stream connections are considered as having immediately finished their
-        // handshake, we mark the address as connected.
-        if let Some(KBucketsPeer { addresses, .. }) = self.kbuckets_peers.get_mut(expected_peer_id)
-        {
-            addresses.set_connected(multiaddr);
         }
 
         self.pending_ids.remove(id.0);
@@ -1100,7 +1116,13 @@ where
             != 1;
 
         // If the peer is completely unreachable, unassign all of its slots.
-        if !has_any_attempt_left && !self.inner.has_established_connection(expected_peer_id) {
+        if !has_any_attempt_left
+            && self
+                .inner
+                .established_peer_connections(expected_peer_id)
+                .count()
+                == 0
+        {
             let expected_peer_id = expected_peer_id.clone(); // Necessary for borrowck reasons.
 
             for chain_index in 0..self.chains.len() {
@@ -2036,11 +2058,14 @@ where
         // to open.
         loop {
             // Note: we can't use a `while let` due to borrow checker errors.
-            let (id, _, notifications_protocol_index) =
-                match self.inner.next_unfulfilled_desired_outbound_substream() {
-                    Some(v) => v,
-                    None => break,
-                };
+            let (peer_id, notifications_protocol_index) = match self
+                .inner
+                .unfulfilled_desired_outbound_substream(false)
+                .next()
+            {
+                Some((peer_id, idx)) => (peer_id.clone(), idx),
+                None => break,
+            };
 
             let chain_config = &self.chains
                 [notifications_protocol_index / NOTIFICATIONS_PROTOCOLS_PER_CHAIN]
@@ -2069,7 +2094,12 @@ where
                 unreachable!()
             };
 
-            self.inner.open_out_notification(id, now.clone(), handshake);
+            self.inner.open_out_notification(
+                &peer_id,
+                notifications_protocol_index,
+                now.clone(),
+                handshake,
+            );
         }
 
         event_to_return
@@ -2261,7 +2291,7 @@ where
     /// Returns `true` if there exists an established connection with the given peer.
     // TODO: revisit this API w.r.t. shutdowns
     pub fn has_established_connection(&self, peer_id: &PeerId) -> bool {
-        self.inner.has_established_connection(peer_id)
+        self.inner.established_peer_connections(peer_id).count() != 0
     }
 
     /// Returns an iterator to the list of [`PeerId`]s that we have an established connection

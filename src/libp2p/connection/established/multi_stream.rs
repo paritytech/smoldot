@@ -81,6 +81,9 @@ pub struct MultiStream<TNow, TSubId, TRqUd, TNotifUd> {
     /// unnecessary code being included in the binary and reduces the binary size.
     ping_payload_randomness: rand_chacha::ChaCha20Rng,
 
+    /// See [`Config::max_inbound_substreams`].
+    // TODO: not enforced at the moment
+    _max_inbound_substreams: usize,
     /// See [`Config::request_protocols`].
     request_protocols: Vec<ConfigRequestResponse>,
     /// See [`Config::notifications_protocols`].
@@ -139,6 +142,7 @@ where
             ping_substream: None,
             next_ping: config.first_out_ping,
             ping_payload_randomness: randomness,
+            _max_inbound_substreams: config.max_inbound_substreams,
             request_protocols: config.request_protocols,
             notifications_protocols: config.notifications_protocols,
             ping_protocol: config.ping_protocol,
@@ -174,18 +178,18 @@ where
 
     /// Notifies the state machine that a new substream has been opened.
     ///
-    /// `inbound` indicates whether the substream has been opened by the remote (`true`) or
-    /// locally (`false`).
+    /// `outbound` indicates whether the substream has been opened by the remote (`false`) or
+    /// locally (`true`).
     ///
-    /// If `inbound` is `false`, then the value returned by
+    /// If `outbound` is `true`, then the value returned by
     /// [`MultiStream::desired_outbound_substreams`] will decrease by one.
     ///
     /// # Panic
     ///
     /// Panics if there already exists a substream with an identical identifier.
     ///
-    pub fn add_substream(&mut self, id: TSubId, inbound: bool) {
-        let (substream, out_substream_id) = if inbound {
+    pub fn add_substream(&mut self, id: TSubId, outbound: bool) {
+        let (substream, out_substream_id) = if !outbound {
             let out_substream_id = self.next_out_substream_id;
             self.next_out_substream_id += 1;
 

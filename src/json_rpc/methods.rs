@@ -393,7 +393,7 @@ define_methods! {
     /// Returns, as an opaque string, the name of the client serving these JSON-RPC requests.
     system_name() -> Cow<'a, str>,
     system_networkState() -> (), // TODO:
-    system_nodeRoles() -> (), // TODO:
+    system_nodeRoles() -> Cow<'a, [NodeRole]>,
     system_peers() -> Vec<SystemPeer>,
     system_properties() -> Box<serde_json::value::RawValue>,
     system_removeReservedPeer() -> (), // TODO:
@@ -456,10 +456,12 @@ define_methods! {
     transaction_unstable_submitAndWatch(transaction: HexString) -> Cow<'a, str>,
     transaction_unstable_unwatch(subscription: Cow<'a, str>) -> (),
 
-    // This function is a custom addition in smoldot. As of the writing of this comment, there is
-    // no plan to standardize it. See https://github.com/paritytech/smoldot/issues/2245.
+    // These functions are a custom addition in smoldot. As of the writing of this comment, there
+    // is no plan to standardize them. See <https://github.com/paritytech/smoldot/issues/2245> and
+    // <https://github.com/paritytech/smoldot/issues/2456>.
     network_unstable_subscribeEvents() -> Cow<'a, str>,
     network_unstable_unsubscribeEvents(subscription: Cow<'a, str>) -> (),
+    chainHead_unstable_finalizedDatabase(max_size_bytes: Option<u64>) -> Cow<'a, str>,
 }
 
 define_methods! {
@@ -572,15 +574,18 @@ impl<'a> serde::Deserialize<'a> for AccountId {
             Err(_) => return Err(serde::de::Error::custom("AccountId isn't in base58 format")),
         };
 
-        // TODO: soon might be 36 bytes as well
-        if decoded.len() != 35 {
+        // TODO: retrieve the actual prefix length of the current chain
+        if decoded.len() < 35 {
             return Err(serde::de::Error::custom("unexpected length for AccountId"));
         }
 
         // TODO: finish implementing this properly ; must notably check checksum
         // see https://github.com/paritytech/substrate/blob/74a50abd6cbaad1253daf3585d5cdaa4592e9184/primitives/core/src/crypto.rs#L228
 
-        let account_id = <[u8; 32]>::try_from(&decoded[1..33]).unwrap();
+        // TODO: retrieve and use the actual prefix length of the current chain
+        let account_id =
+            <[u8; 32]>::try_from(&decoded[(decoded.len() - 34)..(decoded.len() - 2)]).unwrap();
+
         Ok(AccountId(account_id))
     }
 }
@@ -884,7 +889,6 @@ pub struct NetworkConfig {
 
 #[derive(Debug, Clone)]
 pub struct RpcMethods {
-    pub version: u64,
     pub methods: Vec<String>,
 }
 
@@ -895,6 +899,17 @@ pub enum MaybeRuntimeSpec<'a> {
     Valid { spec: RuntimeSpec<'a> },
     #[serde(rename = "invalid")]
     Invalid { error: String }, // TODO: String because it's more convenient; improve
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum NodeRole {
+    // Note that "Light" isn't in the Substrate source code and is a custom addition.
+    #[serde(rename = "Light")]
+    Light,
+    #[serde(rename = "Full")]
+    Full,
+    #[serde(rename = "Authority")]
+    Authority,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1038,12 +1053,10 @@ impl serde::Serialize for RpcMethods {
     {
         #[derive(serde::Serialize)]
         struct SerdeRpcMethods<'a> {
-            version: u64,
             methods: &'a [String],
         }
 
         SerdeRpcMethods {
-            version: self.version,
             methods: &self.methods,
         }
         .serialize(serializer)

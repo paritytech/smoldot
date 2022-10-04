@@ -46,7 +46,7 @@ use core::{
     time::Duration,
 };
 
-pub use warp_sync::WarpSyncFragment;
+pub use warp_sync::{FragmentError as WarpSyncFragmentError, WarpSyncFragment};
 
 /// Configuration for the [`AllSync`].
 // TODO: review these fields
@@ -147,7 +147,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     }),
                 }
             } else {
-                match warp_sync::warp_sync(warp_sync::Config {
+                match warp_sync::start_warp_sync(warp_sync::Config {
                     start_chain_information: config.chain_information,
                     block_number_bytes: config.block_number_bytes,
                     sources_capacity: config.sources_capacity,
@@ -2307,10 +2307,7 @@ impl<TRq, TSrc, TBl> WarpSyncFragmentVerify<TRq, TSrc, TBl> {
     pub fn perform(
         self,
         randomness_seed: [u8; 32],
-    ) -> (
-        AllSync<TRq, TSrc, TBl>,
-        Result<(), warp_sync::FragmentError>,
-    ) {
+    ) -> (AllSync<TRq, TSrc, TBl>, Result<(), WarpSyncFragmentError>) {
         let (next_grandpa_warp_sync, error) = self.inner.verify(randomness_seed);
 
         (

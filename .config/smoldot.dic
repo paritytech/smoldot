@@ -1,5 +1,6 @@
 153
 ABI
+ACK
 API
 APIs
 BIP39
@@ -10,6 +11,7 @@ ChaCha20
 Deno
 Deserialize/S
 DoS
+DTLS
 ECDH
 Ed25519
 Endian
@@ -60,6 +62,7 @@ VRF
 Wasi
 Wasm
 WebAssembly
+WebRTC
 WebSocket/M
 Westend
 Yamux
