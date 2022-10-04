@@ -892,7 +892,9 @@ impl<'a> RuntimeCallLock<'a> {
                     | proof_verify::StorageValue::HashKnownValueMissing(_)
             ) {
                 assert_eq!(key.len() % 2, 0);
-                output.push(trie::nibbles_to_bytes_suffix_extend(key.iter().copied()).collect::<Vec<_>>());
+                output.push(
+                    trie::nibbles_to_bytes_suffix_extend(key.iter().copied()).collect::<Vec<_>>(),
+                );
             }
 
             match node_info.children {
