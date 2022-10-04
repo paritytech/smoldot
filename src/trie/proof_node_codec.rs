@@ -402,7 +402,7 @@ mod tests {
         let decoded = super::decode(encoded_bytes).unwrap();
 
         assert_eq!(
-            proof_node_codec::encode(decoded.clone()).fold(Vec::new(), |mut a, b| {
+            super::encode(decoded.clone()).fold(Vec::new(), |mut a, b| {
                 a.extend_from_slice(b.as_ref());
                 a
             }),
@@ -417,7 +417,7 @@ mod tests {
         );
         assert_eq!(
             decoded.storage_value,
-            proof_node_codec::StorageValue::Unhashed(&[][..])
+            super::StorageValue::Unhashed(&[][..])
         );
 
         assert_eq!(decoded.children.iter().filter(|c| c.is_some()).count(), 2);
