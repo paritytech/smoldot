@@ -141,8 +141,9 @@ where
         ping_protocol: Arc<str>,
     ) -> Self {
         // In the WebRTC handshake, the Noise prologue must be set to `"libp2p-webrtc-noise:"`
-        // followed with the multihash-encoded fingerprints of the local and remote certificates
-        // in ascending order.
+        // followed with the multihash-encoded fingerprints of the initiator's certificate
+        // and the receiver's certificate.
+        // TODO: we currently assume that the local node is always the initiator
         // See <https://github.com/libp2p/specs/pull/412>.
         let noise_prologue = {
             let MultiStreamHandshakeKind::WebRtc {
