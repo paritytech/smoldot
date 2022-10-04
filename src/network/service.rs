@@ -697,13 +697,13 @@ where
         now: TNow,
         target: &PeerId,
         chain_index: usize,
-        block_hash: [u8; 32],
+        block_hash: &[u8; 32],
         start_key: &[u8],
         timeout: Duration,
     ) -> OutRequestId {
-        let request_data = protocol::build_state_request(protocol::StateRequestConfig {
+        let request_data = protocol::build_state_request(protocol::StateRequest {
             block_hash,
-            start_key: start_key.to_vec(),
+            start_key,
         })
         .fold(Vec::new(), |mut a, b| {
             a.extend_from_slice(b.as_ref());
@@ -1555,8 +1555,11 @@ where
                             response
                                 .map_err(StateRequestError::Request)
                                 .and_then(|payload| {
-                                    protocol::decode_state_response(&payload)
-                                        .map_err(StateRequestError::Decode)
+                                    if let Err(err) = protocol::decode_state_response(&payload) {
+                                        Err(StateRequestError::Decode(err))
+                                    } else {
+                                        Ok(EncodedStateResponse(payload))
+                                    }
                                 });
 
                         break Some(Event::StateRequestResult {
@@ -2516,7 +2519,7 @@ pub enum Event {
 
     StateRequestResult {
         request_id: OutRequestId,
-        response: Result<Vec<protocol::StateResponseEntry>, StateRequestError>,
+        response: Result<EncodedStateResponse, StateRequestError>,
     },
 
     StorageProofRequestResult {
@@ -2724,6 +2727,26 @@ impl EncodedGrandpaCommitMessage {
 }
 
 impl fmt::Debug for EncodedGrandpaCommitMessage {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.decode(), f)
+    }
+}
+
+/// Undecoded but valid state response.
+#[derive(Clone)]
+pub struct EncodedStateResponse(Vec<u8>);
+
+impl EncodedStateResponse {
+    /// Returns the decoded version of the state response.
+    pub fn decode(&self) -> Vec<protocol::StateResponseEntry> {
+        match protocol::decode_state_response(&self.0) {
+            Ok(r) => r,
+            Err(_) => unreachable!(),
+        }
+    }
+}
+
+impl fmt::Debug for EncodedStateResponse {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.decode(), f)
     }
