@@ -173,8 +173,8 @@ macro_rules! decode_scale_compact {
                     let byte2 = u32::from(bytes[2]).checked_shl(14).unwrap();
                     let byte3 = u32::from(bytes[3]).checked_shl(22).unwrap();
 
-                    // Value is invalid if highest byte is 0.
-                    if byte3 == 0 {
+                    // Value is invalid if value could have been encoded with 2 fewer bytes.
+                    if byte2 == 0 && byte3 == 0 {
                         return Err(nom::Err::Error(nom::error::make_error(
                             bytes,
                             nom::error::ErrorKind::Satisfy,
